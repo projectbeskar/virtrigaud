@@ -864,6 +864,17 @@ func (s *Server) handleClusterNextID(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, strconv.Itoa(id))
 }
 
+// SetNextID makes the next /cluster/nextid answer id, or the first free ID
+// after it: e.g. to give a second request the VMID a first one was given
+// before its VM existed, as two concurrent requests get on PVE. The fake
+// never answers an ID below 200001, so a smaller id answers 200001 (or the
+// first free ID after it). Safe for concurrent use.
+func (s *Server) SetNextID(id int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID = id - 1
+}
+
 // handleStorageContent mimics PVE's /nodes/{node}/storage/{storage}/content: it
 // lists each VM's primary disk volume with a real (thin) size/used/format, so
 // GetDiskInfo can report true values instead of guessing from the config string.

@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 23:17] - Proxmox: a VMID-race refusal while the winner's VM is still being made is "not performed"
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/create_errors.go`: PVE's HTTP 5xx "already exists" answer to a create or clone request (`unable to create VM <vmid>: config file already exists`) comes before PVE writes anything or starts a task, so the request made nothing. When the VM at that VMID was still being made (a temporary config, locked for clone or create, with no name and no owner stamp yet), the answer was always "outcome unknown", which is what the losing request of a VMID race gets while the winner's clone runs. A `VirtualMachine` deleted before its `Create` was sent again was then held (`CreateOutcomeUnknown`) until an operator confirmed nothing was created. `vmidTakenByAnother` now lists the node's active tasks: when a task the provider recorded for another owner as making that VMID runs there, and every other clone or create task of this provider's PVE user there is one the provider recorded for another owner too, the VM is another's and the answer is `CREATE_NOT_PERFORMED` + `VM_OPERATION_FAILED` (retried with a new VMID; logged at Info with the VMID, node and task). A temporary config without such a known maker (qemu-server's create writes its `lock: create` config before it starts its task, so it may be an earlier attempt of this owner; another PVE user's clone), an unrecorded task of this PVE user (an earlier attempt whose answer was lost, a task started before a provider restart, another Provider sharing the token, an expired record, a concurrent request whose answer has not arrived), a task list or config that cannot be read, a VMID that is free again, or a VM finished with this owner's stamp between the two config reads (the second read is cluster-wide) keeps the outcome unknown. The same classifier serves the template create, the create without a template, the imported-disk create and the `Clone` RPC.
+- `internal/providers/proxmox/inflight.go`: `unrecordedMakeTask` (shared with the restart guard, unchanged in behaviour), `ownMakeTasks`, `inflightTracker.taskRecordedFor`, `anyUnrecorded`, `makerRecordedFor` and `vmNodeConfigAnywhere`.
+- `internal/providers/proxmox/pveapi/client.go`: `ListActiveTasks` asks for up to 100000 tasks (`limit`); PVE lists 50 by default, also for `source=active`, so on a busy node one of the provider's own tasks could be left out of the restart guard and of the check above.
+
+### Added
+- `internal/providers/proxmox/pvefake/server.go`: `SetNextID`, to give a second request the VMID a first one was given.
+- `internal/providers/proxmox/vmid_race_test.go`, `internal/providers/proxmox/submit_errors_test.go`: a real VMID race on every create path (the winner's clone or create still running, recorded by the same provider) is not performed and the re-sent request gets a new VMID; a temporary config without a known maker, an unrecorded task of this PVE user, an expired winner record, an unreadable task list, or a VM finished with this owner's stamp between the reads stays unknown.
+- `internal/providers/proxmox/pveapi/active_tasks_test.go`: the active task list request names its `limit`.
+
+### Changed
+- `docs/vm-ownership.md`: the `Create` and `Clone` error classes describe the synchronous "already exists" refusal and when it is definite; the shared-token note covers the race.
+- `docs/upgrading.md`: the v0.4.1 "Other changes" list says that VMID races are "not performed" and that a VM already held for this reason stays held.
+
+### Why
+The v0.4.1-rc2 lab validation (finding B1) saw two concurrent Creates get the same VMID; PVE refused the second synchronously while the first was still cloning, and the provider answered "outcome unknown", which held a deleted `VirtualMachine` with nothing of it on PVE.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 12:33] - virtrigaud-loadgen test: the full-run test always draws a create
 **Author:** @wrkode (William Rizzo)
 
