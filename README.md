@@ -2,9 +2,9 @@
 
 A Kubernetes operator for managing virtual machines across multiple hypervisors.
 
-**Version**: v0.4.0 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
+**Version**: v0.4.1 — [CHANGELOG](CHANGELOG.md) | [Documentation](https://projectbeskar.github.io/virtrigaud)
 
-> **Upgrading from v0.3.11?** v0.4.0 carries a number of security fixes
+> **Upgrading from v0.3.11?** v0.4.0 carried a number of security fixes
 > since that release, several of which are breaking or change default
 > behavior (vSphere/libvirt VM-ownership checks, libvirt default cloud-init no
 > longer provisioning SSH credentials, cross-namespace clone/migration targets
@@ -33,7 +33,7 @@ The manager reconciles Kubernetes custom resources; each hypervisor runs as a se
 - **G6 Circuit Breaker**: One circuit breaker per Provider CR for automatic failure isolation (v0.3.6+)
 - **Secure-by-default gRPC**: mTLS wired end-to-end (TLS 1.3, SNI, certwatcher hot-reload); provider pods fail closed without credentials (#147/#148, v0.3.7)
 - **Libvirt SSH host-key verification**: `known_hosts` enforced by default; TOFU removed (#149, v0.3.7)
-- **Observability**: 11 `virtrigaud_*` Prometheus metric families (1 deprecated in v0.3.6; still exposed in v0.4.0, removal scheduled for a later release)
+- **Observability**: 11 `virtrigaud_*` Prometheus metric families (1 deprecated in v0.3.6; still exposed in v0.4.1, removal scheduled for a later release)
 
 ## Architecture
 
@@ -99,7 +99,7 @@ graph TB
     PXP -->|REST API| PVE
 ```
 
-### Security status (v0.4.0)
+### Security status (v0.4.1)
 
 The following issues were open in v0.3.6 and resolved in v0.3.7; they are closed in this release:
 
@@ -195,17 +195,17 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
    helm repo update
    ```
 
-2. **Install VirtRigaud** (version 0.4.0):
+2. **Install VirtRigaud** (version 0.4.1):
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.4.0 \
+     --version 0.4.1 \
      -n virtrigaud-system --create-namespace
    ```
 
    CRDs are installed automatically via Helm hooks. To disable automatic CRD upgrades:
    ```bash
    helm install virtrigaud virtrigaud/virtrigaud \
-     --version 0.4.0 \
+     --version 0.4.1 \
      -n virtrigaud-system --create-namespace \
      --set crdUpgrade.enabled=false
    ```
@@ -221,14 +221,14 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 4. **Upgrade**:
    ```bash
    helm upgrade virtrigaud virtrigaud/virtrigaud \
-     --version 0.4.0 \
+     --version 0.4.1 \
      -n virtrigaud-system
    ```
 
    If you carry custom values across chart versions, prefer
    `--reset-then-reuse-values` (Helm 3.14+) over `--reuse-values` — see
    [Upgrading from v0.3.11](docs/upgrading.md) for why, and for the breaking
-   changes in v0.4.0.
+   changes in v0.4.0 and v0.4.1.
 
 ### Development Installation
 
@@ -287,7 +287,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: libvirt-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.0"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.1"
        service:
          port: 9443
    ```
@@ -305,7 +305,7 @@ Go 1.26+ is required for source builds.
      credentialSecretRef:
        name: vsphere-creds
      runtime:
-       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
+       image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.1"
        service:
          port: 9443
    ```
@@ -417,7 +417,7 @@ For full migration documentation including provider restart behaviour, see the [
 
 The manager exposes Prometheus metrics at `:8080/metrics` (HTTP by default; flip `--metrics-secure=true` for HTTPS).
 
-11 of 12 `virtrigaud_*` metric families are active. `virtrigaud_queue_depth` was deprecated in v0.3.6 (use `workqueue_depth{name}` instead); it is still exposed in v0.4.0 and removal is scheduled for a later release.
+11 of 12 `virtrigaud_*` metric families are active. `virtrigaud_queue_depth` was deprecated in v0.3.6 (use `workqueue_depth{name}` instead); it is still exposed in v0.4.1 and removal is scheduled for a later release.
 
 For the full metric catalog see [Observability](https://projectbeskar.github.io/virtrigaud/operations/observability/).
 
@@ -434,7 +434,7 @@ kubectl apply -f charts/virtrigaud/crds/
 
 # Or reinstall
 helm uninstall virtrigaud -n virtrigaud-system
-helm install virtrigaud virtrigaud/virtrigaud --version 0.4.0 \
+helm install virtrigaud virtrigaud/virtrigaud --version 0.4.1 \
   -n virtrigaud-system --create-namespace
 ```
 

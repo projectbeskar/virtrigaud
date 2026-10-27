@@ -55,7 +55,7 @@ spec:
   # Remote runtime configuration
   runtime:
     mode: Remote
-    image: ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.0
+    image: ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.1
     replicas: 2
 
     service:
