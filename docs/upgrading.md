@@ -416,7 +416,9 @@ while the `Provider` is healthy and its runtime is rolled out. While a rollout i
 pods never become available), the capabilities of the old pods, which still serve, are kept.
 
 `status.healthy` and the `ProviderAvailable` condition now follow the Deployment: with no ready
-pod, `ProviderAvailable` is `False` (reason `DeploymentNotReady`) and `healthy` is `false`; in
+pod, `ProviderAvailable` is `False` (reason `DeploymentNotReady`) and `healthy` is `false` (the
+field is omitted from the object when `false`, so the `HEALTHY` column of `kubectl get provider`
+is empty); in
 v0.4.0 they stayed `True` once set. A reconcile that fails before it reaches the Deployment (for
 example a TLS-posture refusal) leaves them as last observed. A `VMMigration` waits in validation, and `VMAdoption` waits,
 until the provider is available again, as they did for a `Provider` that had never been ready. A
