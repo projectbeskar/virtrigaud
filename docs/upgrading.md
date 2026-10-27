@@ -568,11 +568,13 @@ No action is required for new calls; an object that a v0.4.0 manager or a v0.4.1
   refusal could be held as `CloneOutcomeUnknown`. The manager now writes the answer again over
   the object as stored, as long as it still waits for that answer: see
   [An answer is not lost to an edit made during the call](provider-call-outcomes.md#an-answer-is-not-lost-to-an-edit-made-during-the-call).
-- **A VM that an earlier manager already holds stays held** (v0.4.0, rc1 or rc2). The lost answer is
-  not in its status. If a
-  `VirtualMachine` is held as `CreateOutcomeUnknown` and the hypervisor has no VM stamped with
-  its UID, annotate it `virtrigaud.io/create-outcome=not-created@<attempt id>` as its message says
+- **An object that an earlier manager already holds stays held** (v0.4.0, rc1 or rc2). The lost
+  answer is not in its status. If a `VirtualMachine` is held as `CreateOutcomeUnknown` and the
+  hypervisor has no VM stamped with its UID, annotate it
+  `virtrigaud.io/create-outcome=not-created@<attempt id>` as its message says
   ([A Create whose outcome is unknown](vm-provider-binding.md#a-create-whose-outcome-is-unknown-createrequested)).
+  For a `VMClone` or a `VMSnapshot`, see
+  [Releasing a held object](provider-call-outcomes.md#releasing-a-held-object).
 - **New `CreateBackoff` messages.** A `Create` the provider did not perform
   (`CREATE_NOT_PERFORMED`) now reads `The provider answered that it did not perform the last Create
   sent for this VM, so that request made nothing, and that it can be retried. It is retried with a
@@ -614,6 +616,13 @@ No action is required for new calls; an object that a v0.4.0 manager or a v0.4.1
   A `VirtualMachine` already held for this
   reason stays held after the roll: check PVE for a VM stamped with its UID, then record its id
   or set the `virtrigaud.io/create-outcome` annotation that its message names, as before.
+- **ImagePrepare from an older manager is still served.** A request without a `VMImage` identity
+  (from a manager older than v0.4.0, ADR-0009) is served in deprecated legacy mode by
+  v0.4.1 as it was by v0.4.0, logged at `WARN` and counted in
+  `virtrigaud_provider_image_prepare_legacy_requests_total`. The log line says "refused from the
+  next release": that is the release after v0.4.1 (see
+  [image preparation](image-preparation.md#deprecated-requests-from-an-older-manager)). Keep an
+  alert on the counter.
 
 ### Upgrading from a v0.4.1 release candidate
 
@@ -690,8 +699,8 @@ change; it changes the manager and the Proxmox provider, so **roll the manager f
 Proxmox providers**. The libvirt and vSphere providers have no code change since rc2. What differs
 for what rc2 already made:
 
-- **A `VirtualMachine`, `VMClone` or `VMSnapshot` that an rc2 manager already holds stays held.**
-  rc2 lost the provider's answer to an edit made during the call (see
+- **A `VirtualMachine`, `VMClone` or `VMSnapshot` that an rc1 or rc2 manager already holds stays held.**
+  rc1 and rc2 lost the provider's answer to an edit made during the call (see
   [A provider's answer is no longer lost to an edit made during the call](#a-providers-answer-is-no-longer-lost-to-an-edit-made-during-the-call)),
   so the answer is not in the object's status and v0.4.1 cannot recover it. Release such an object as
   that section and [Releasing a held object](provider-call-outcomes.md#releasing-a-held-object)
@@ -1888,7 +1897,7 @@ that roll".
   `virtrigaud.io/orphan-on-delete` (#341) after upgrading is inert if you roll the
   manager back — the old manager doesn't read either.
 - **An old manager against a new libvirt provider.** Its prepares carry no identity:
-  for this release they are served in deprecated legacy mode — the bare-name file
+  in v0.4.0 and v0.4.1 they are served in deprecated legacy mode — the bare-name file
   `<pool dir>/<VMImage name>.qcow2`, reused by name, so same-named `VMImage`s of different
   namespaces share one file again — logged at `WARN` and counted in
   `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="libvirt"}`.
@@ -1900,7 +1909,7 @@ that roll".
   Reference-style Proxmox sources keep working. Rolling the Proxmox provider back does
   not bring back a working URL import: the old one never produced a usable template.
 - **An old manager against a new vSphere provider.** Its image prepares carry no
-  identity. For this release they are served in deprecated legacy mode — the pre-ADR
+  identity. In v0.4.0 and v0.4.1 they are served in deprecated legacy mode — the pre-ADR
   bare-name template, reused by name anywhere in the datacenter — so the cross-tenant
   limitation ADR-0009 closes is back while the manager is rolled back. Each such request
   is logged at `WARN` and counted in

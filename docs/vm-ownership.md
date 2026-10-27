@@ -579,7 +579,7 @@ Now a template reference is resolved as follows:
   owns it.
 
 The `ImagePrepare` column describes a request from a manager older than
-ADR-0009 (deprecated legacy mode, this release only), whose target name is the
+ADR-0009 (deprecated legacy mode, served in v0.4.0 and v0.4.1 only), whose target name is the
 `VMImage` name. That name is also the name of the template an OVA import
 creates, so it follows the VM-name rules. A request from a current manager
 carries the `VMImage` identity instead: the template is named after it, looked

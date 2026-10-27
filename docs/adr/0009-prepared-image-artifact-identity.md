@@ -11,6 +11,10 @@ that ships cross-namespace `VMImage` sharing
 `spec.consumerNamespaceSelector`). The slices that must land before that release are
 listed under *Implementation slices*.
 
+*Legacy mode:* D7 serves an identity-less request from an older manager for one release and
+refuses it from the next. v0.4.0 and v0.4.1 both still serve it (the refusal did not ship in the
+patch release); the release after v0.4.1 refuses it.
+
 **Review:** staff-architect, 2026-09-25: *accept with changes*. The changes are applied
 in this revision.
 

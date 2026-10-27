@@ -9,7 +9,7 @@ v0.4.0 to v0.4.1") for the upgrade guide these notes link to, and CHANGELOG.md f
 dated changelog. The v0.4.0 notes are kept in v0.4.0.md. The first pull request of the next
 release archives this file as v0.4.1.md and starts a new next.md, as v0.4.0.md was archived.
 GitHub's limit for a release body is 125,000 characters; this file is below it (about
-93,000 characters), so it is pasted whole.
+94,000 characters), so it is pasted whole.
 -->
 
 This is **v0.4.1**, a patch release of v0.4.0. It changes how a Proxmox VM gets its cloud-init
@@ -157,9 +157,10 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   definition. It is now sent again after 30 seconds, then 1, 2, 4 and 8 minutes, then every
   10 minutes, and nothing is sent to the provider while it waits. The refusals `NotFound`,
   `NotSupported` (gRPC `Unimplemented`) and a typed `Unauthorized` or `QuotaExceeded`, which were
-  sent again every 5 seconds, follow the same backoff and keep reason `ProviderError` (none of
-  the in-tree providers answers a `Create` with `NotFound` or `Unimplemented`, so that pacing is
-  covered by unit tests and has not been run against a hypervisor). An edit of the
+  sent again every 5 seconds, follow the same backoff and keep reason `ProviderError` (the typed
+  ones come only from the manager's own code, so from a remote provider only `NotFound` and
+  `Unimplemented` are paced; none of the in-tree providers answers a `Create` with either, so that
+  pacing is covered by unit tests and has not been run against a hypervisor). An edit of the
   `VirtualMachine`'s spec or of the spec of its `VMClass`, `VMImage` or `Provider` sends the create
   again within seconds and starts the backoff again; a `Secret`, a `VMNetworkAttachment` or a fix
   on the host is picked up at the next re-check, at most 10 minutes later. The message names the
@@ -605,7 +606,7 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   → [Upgrade guide](../upgrading.md#deprecated-the-virtrigaud-provider-runtime-chart)
 - **The `virtrigaud` chart gains one webhook and has no RBAC or values change.** With
   `webhooks.enabled=true` it renders the warning-only `vvmclone-customization.kb.io` entry (failure
-  policy always `Ignore`, timeout 5s); `values.yaml` changes only in comments. `helm upgrade`
+  policy always `Ignore`, timeout 5s; `config/webhook` for kustomize gains it too); `values.yaml` changes only in comments. `helm upgrade`
   re-tags the images and the CRD hook uses the new `kubectl` image.
 
 ## Known limitations
@@ -618,6 +619,12 @@ against the code.
 
 ### New or changed in v0.4.1
 
+- **An `ImagePrepare` from an older manager is still served.** A request without a `VMImage`
+  identity (a manager older than v0.4.0, ADR-0009) is served in deprecated legacy mode, as in
+  v0.4.0, logged at `WARN` ("refused from the next release": the release after v0.4.1 refuses it)
+  and counted in `virtrigaud_provider_image_prepare_legacy_requests_total`. Keep an alert on the
+  counter and do not run an older manager against a Provider shared across tenants
+  (→ [`docs/image-preparation.md`](../image-preparation.md#deprecated-requests-from-an-older-manager)).
 - **A libvirt `ImagePrepare` download is cut off after about 4.5 minutes, whatever
   `spec.prepare.timeout` says (the 30-minute default included).** The manager gives the `ImagePrepare` call 5 minutes, and the download is now cut off
   within that call (before, `curl` kept running on the host after the call had failed). Prepare
@@ -750,8 +757,8 @@ against the code.
   controller's generic status write (`Failed to update VirtualMachine status ... the object has
   been modified`) is not retried in place: when the object is edited while the reconcile runs (a
   label loop, another tool's update), the write fails, the log line is at `ERROR` level, and the
-  next reconcile converges. The lab counted seven such lines during half-second edits of a
-  VM; no state was lost. This is separate from the provider's answers above, which are written
+  next reconcile converges. The lab counted seven such lines during half-second edits of its
+  VMs; no state was lost. This is separate from the provider's answers above, which are written
   again.
 - **A provider image re-pulled under the same tag is noticed within 10 minutes.** The capability
   read follows a change of the provider Deployment; a re-pull that changes nothing in it is caught
@@ -927,9 +934,10 @@ v0.4.1 went through three release candidates, and every one of them was run in t
 hypervisors: a single Proxmox VE 9.2 node (LVM-thin storage; not a PVE cluster), libvirt 10.0
 (QEMU 8.2, Ubuntu 24.04 with OVMF 2024.02) as a single host and as a two-host clustered Provider,
 and a vSphere 8 Provider, with the release binaries of `vcts` and `virtrigaud-loadgen`. The
-guests were Ubuntu 24.04 cloud images (CirrOS for the migrations). Code that changed in a
-candidate was re-run on the candidate that changed it; the results below name that candidate in
-brackets. **v0.4.1 ships the code of rc3**, and the rc3 run found no product bug. An area that no
+guests were Ubuntu 24.04 cloud images (CirrOS for the migrations and some tests). Code that changed in a
+candidate was re-run on the candidate that changed it, except where "Not validated" below says
+otherwise; the results below name that candidate in brackets. vSphere VMs were exercised in the rc3
+smoke only (rc2 rolled a vSphere Provider and made no VM on it). **v0.4.1 ships the code of rc3**, and the rc3 run found no product bug. An area that no
 later candidate touched was not re-run on rc3. The changes were also tested with unit and
 envtest tests and with simulators: the Proxmox seed against a fake PVE API that models
 qemu-server's boot order and a stub node shell (the node script also in a real `sh` and `bash`
@@ -959,15 +967,18 @@ the `kubectl describe` of the object involved and the provider log, never a Secr
 - **Proxmox VMID race and edits during a call (rc3).** `virtrigaud-loadgen` ran three times on
   one node (concurrency 3, at most 3 VMs, all operations, `--cleanup`), one run interrupted with
   a clone and snapshots in flight. Every request PVE refused because another create had taken
-  its VMID, six in all, was answered "not performed" and retried. No VM was held as
+  its VMID (six in all: two in these runs, four in the targeted race below) was answered "not
+  performed" and retried. No VM was held as
   `CreateOutcomeUnknown`, no operator annotation was needed, and every `--cleanup` finished by
   itself. In a targeted race, four VMs created at once while they were edited continuously
-  gave three "not performed" losers that were re-sent and became Ready; a loser deleted during
-  its `CreateBackoff` was gone in under a second, the new `CreateBackoff` texts and the event's
+  gave three "not performed" losers: two were re-sent and became Ready, and the third, deleted
+  during its `CreateBackoff`, was gone in under a second; the new `CreateBackoff` texts and the event's
   `Provider answer:` were seen, and the winner's VM was untouched. A `VMSnapshot` (also with a
   spec edit during the call) became Ready with its snapshot id and single-host `VMClone`s
-  finished, each edited during the provider call; the manager logged that it re-recorded the
-  answer after the conflict, and none was held.
+  finished, each edited during the provider call, and none was held. The manager logged that it
+  re-recorded the answer after the conflict for the `Create` answers and the `SnapshotCreate`; a
+  successful `Clone` or `Create` needs no re-record, so a conflict on its write was not
+  exercised.
 - **Proxmox smoke (rc3).** Create with user-data, hard power off and on, offline resize (the
   guest saw it), snapshot and revert (the revert restored the guest's files), clone of a powered-off
   source and delete all passed, and the provider's active-task query with a high limit
@@ -995,7 +1006,7 @@ the `kubectl describe` of the object involved and the provider log, never a Secr
   object labelled every half second while the call ran, a VM became Ready with no create marker
   left, a `VMSnapshot` became Ready with its snapshot id (also with its spec edited during the
   call; one `snapshot-create-as` only), a `VMClone` finished, and a VM whose definition libvirt
-  refused recorded `ValidationError` and was deleted at once. On a clustered Provider a create
+  refused recorded `ValidationError` (the conflict was re-recorded) and was deleted at once. On a clustered Provider a create
   whose disk was smaller than its image failed on the host: the VM showed the new "could not
   complete this VM's Create" message, the single Warning event carried the provider's answer, it
   was retried on a growing backoff, and its delete finished at once with no disk left behind.
@@ -1003,7 +1014,8 @@ the `kubectl describe` of the object involved and the provider log, never a Secr
   the URL, only `curl` ran and no URL, query or user-info was in the host's process list or any
   log.
 - **Redaction, exports and migrations (rc1, rc2).** Failing and successful NFS and S3 migrations
-  from a single-host and a clustered source, and a failing staged-disk cleanup: a search of the
+  from a single-host and a clustered libvirt source, and a failing staged-disk cleanup on a
+  single-host and a clustered libvirt target: a search of the
   manager log, every provider log, every event and the status of every migration found no
   staging server, export path, `uid`/`gid`, bucket, key or endpoint (the locations remain in your
   own spec and its `last-applied-configuration`). A clustered export that an NFS export or an S3
@@ -1065,9 +1077,14 @@ Each is a [known limitation](#known-limitations):
   `Create` with either, so it is covered by unit tests only.
 - **A revert whose host is lost mid-revert (clustered libvirt).** A stopped `libvirtd` made the
   revert wait and then succeed; the "host lost mid-revert" answer was never produced this way.
-- **Edits during a call on a clustered Provider or on vSphere.** They ran on Proxmox and on a
-  single-host libvirt Provider. The controller code is the same for every provider type, and a
-  clustered `Create` is covered by a unit test, but neither case ran in the lab.
+- **Edits during a call on a clustered Provider or on vSphere,** and a conflict on the status
+  write of a successful `Clone` or `Create`, or of a `Clone` answered "not performed". They ran on
+  Proxmox and on a single-host libvirt Provider, where the conflict was hit for `Create` refusals
+  and `SnapshotCreate`. The controller code is the same for every provider type, and these cases
+  are covered by unit tests, but they did not run in the lab.
+- **The vSphere and Proxmox export and import log redaction.** The lab runs used libvirt sources
+  and targets; the vSphere and Proxmox providers' export and import paths did not run with the
+  redaction (the shared redaction helpers have unit tests).
 - **A Proxmox PVE cluster of more than one node, and the Proxmox owner-stamp paths of v0.4.0** that
   the v0.4.0 notes list as not validated, were not run again.
 

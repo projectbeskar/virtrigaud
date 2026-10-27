@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/vm-ownership.md`: the Proxmox legacy name rule's phase 1 is in neither v0.4.0 nor v0.4.1 (it said "planned for v0.4.1"); the advice and the accepted risk cover both releases.
 - `docs/clustered-provider-inventory.md`, `docs/clustered-restore.md`, `docs/libvirt-clones.md`, `docs/image-preparation.md`: statements about the current behaviour (clustered Providers are experimental, linked clones are refused, Proxmox refuses URL imports, the re-attach is not automated) now name v0.4.1.
 - `docs/README.md`: the description of `docs/release-notes/next.md`.
+- `README.md`: the callout names the v0.4.0 to v0.4.1 breaking items; the features list drops a duplicate, stale VMClone bullet (it advertised linked clones) and restores the cross-provider migration bullet; the CRD table lists all 12 CRDs (Host and HostPool were missing).
+- `docs/adr/0009-*.md`, `docs/adr/0012-proxmox-legacy-unstamped-name-rule.md`, `docs/vm-ownership.md`, `docs/upgrading.md`: the legacy (identity-less) `ImagePrepare` mode is served by v0.4.1 too; ADR-0012 phase 1 is not in v0.4.1.
 
 ### Added
 - `docs/release-notes/next.md`, `docs/provider-call-outcomes.md` (Limitations): a Proxmox `VMClone` whose source is locked (for example while a snapshot of the source runs: `HTTP 500 VM is locked (snapshot)`) is answered "outcome unknown", held as `CloneOutcomeUnknown` and sent again after the manager's backoff (found in the rc3 lab; it completed on the re-send); a generic `VirtualMachine` status write that conflicts with an edit is logged at `ERROR` and converges on the next reconcile.

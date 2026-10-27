@@ -245,7 +245,7 @@ manager restart the wait is read back from the condition that holds the answer t
 
 A provider call can take minutes. If the object is edited meanwhile (a label or an
 annotation, a spec change, another controller's metadata write), the status write that
-records the provider's answer conflicts with the edit. Up to v0.4.1-rc2 that answer was then
+records the provider's answer conflicts with the edit. Up to v0.4.1-rc2 (v0.4.0 included) that answer was then
 lost for a `VirtualMachine`'s `Create`, a single-host `VMClone`'s `Clone` and a `VMSnapshot`'s
 `SnapshotCreate`: the marker stayed although the provider had answered. A `VirtualMachine`
 deleted right after a `Create` the provider answered it did not perform was then held as
@@ -612,7 +612,7 @@ re-drives it at once.
   again.** When PVE refuses a `Clone` at once because the source VM is locked (for example while
   a snapshot of the source runs: `HTTP 500 VM is locked (snapshot)`), nothing was started, but the
   Proxmox provider answers "outcome unknown": it treats only a 400, a 401 or 403 and the VMID-taken
-  refusal as definite, and any other 5xx may have started a task. The `VMClone`
+  refusal as definite, and any other answer may have started a task. The `VMClone`
   stays `Pending` with `Ready=False/CloneOutcomeUnknown` and the manager sends the `Clone` again
   after its backoff (15 seconds, doubling to 5 minutes); it completes on a re-send that finds the
   lock gone. This is not one of the VMID-race forms, which are answered "not performed"
