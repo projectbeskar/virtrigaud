@@ -27,6 +27,14 @@ It matters only for `topology: cluster` Providers.
   missing), whatever the Providers' topology, and because the API server
   prunes the field, every clustered resize-up is held with
   `Reconfiguring=False/PlacementError` instead of being sent unreserved.
+- **The new manager re-checks the admissions it inherits.** Replacing the
+  manager (this upgrade, or any later leader change) hands the new instance
+  pending creates, pending clone targets and resize reservations it did not
+  admit. Each is checked once against its host's committed capacity before
+  anything is sent; one that no longer fits is kept, keeps counting, and
+  waits with `InheritedAdmissionOverCapacity` until the host has room (see
+  [Admissions inherited from an earlier manager](clustered-provider-inventory.md#admissions-inherited-from-an-earlier-manager)
+  for the recovery procedure). Bound VMs are not affected.
 - **Rolling the manager back loses outstanding reservations.** An older
   manager rewrites the whole status without the field, so a resize in flight
   (a reconfigure task, a change pending a restart, or a failed attempt) counts

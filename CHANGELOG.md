@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-27 23:36] - Manager image builds the whole package; inherited-admission recovery does not rely on a provider restart
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `build/Dockerfile.manager`: build `./cmd/manager` instead of the single file `cmd/manager/main.go`, which no longer compiles alone since the client rate-limit flags moved to `cmd/manager/client_rate_limits.go`.
+- `docs/clustered-provider-inventory.md`: the administrator recovery for a held inherited admission no longer offers a provider pod restart as proof that an earlier operation cannot complete; a stopping provider finishes the calls it accepted, and work handed to the host continues without it.
+- `docs/upgrading.md`: the upgrade notes say that the new manager re-checks the pending creates, clone targets and resize reservations it inherits, and link to the recovery procedure.
+
+### Why
+Integration validation of the control-plane scalability work found that the release container build failed (CI builds the package, the Dockerfile built one file), and that the recovery instructions could lead an administrator to release capacity an in-flight operation still uses.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-27 22:03] - Configurable Kubernetes client rate limits for the manager
 **Author:** @wrkode (William Rizzo)
 

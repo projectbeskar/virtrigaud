@@ -1071,11 +1071,21 @@ that a `Create` or `Clone` sent by an earlier manager cannot still complete.
    clear its `pendingHost`, which would place it on another host and leave the
    existing domain unmanaged.
 2. If it does not exist, establish that nothing can still create it before
-   releasing anything: every manager instance that might have sent the
-   operation has exited (its pods are gone, not merely not leading), and the
-   provider for that host has no operation for the VM still running or queued
-   (check its logs, or restart the provider pod so that nothing it accepted
-   earlier can complete).
+   releasing anything:
+   - every manager instance that might have sent the operation has exited
+     (its pods are gone, not merely not leading);
+   - every provider process that might have received it has exited, including
+     one still terminating. **Restarting the provider pod does not cancel an
+     operation**: a stopping provider finishes the calls it already accepted
+     before it exits, and work it already handed to the host (a volume being
+     created or copied, a domain definition libvirtd received) carries on
+     without it;
+   - the host itself shows nothing still running for the VM (check its
+     libvirt jobs and the VM's volume), and the domain is still missing when
+     you look again after that.
+
+   A provider restart, or a quiet provider log, proves none of this on its
+   own.
 3. Only then, release a pending create or clone by clearing
    `status.placement.pendingHost` (the VM is then scheduled again), for example
    `kubectl patch vm <name> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/placement/pendingHost"}]'`,
