@@ -278,7 +278,11 @@ Before it sends a `Clone` to a provider that reports the capability, the
 `VMClone` records `CloneRequested=True`, with a resourceVersion precondition;
 if that write fails, nothing is sent. It is removed once the provider accepts
 the `Clone`, and dropped in the same status write when the answer proves that
-a first attempt made nothing (nothing done, a running source, a refusal).
+a first attempt made nothing (nothing done, a running source, a refusal). If
+the `VMClone` was edited while the `Clone` ran, that write conflicts; since
+v0.4.1 the answer is then written again over the stored `VMClone` while it
+still carries the same `CloneRequested` condition, so the next answer is not
+taken for one to a re-send.
 Like a VirtualMachine's create marker, it tells a re-send from a first
 attempt:
 

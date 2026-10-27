@@ -52,9 +52,11 @@ const providerNotReachedDetail = "the provider could not be reached or did not a
 // VirtualMachine condition: providerNotReachedDetail when the provider was
 // not reached or did not answer (isProviderTransportFailure), otherwise the
 // provider's own answer made safe for status (sanitizeProviderDetail: its
-// categorized message, URL userinfo removed, one line, bounded).
+// categorized message, URL userinfo removed, one line, bounded). An answer
+// that the Create was not performed (CREATE_NOT_PERFORMED, which travels as
+// Unavailable) is the provider's answer, and is shown as one.
 func providerFailureDetail(err error) string {
-	if isProviderTransportFailure(err) {
+	if isProviderTransportFailure(err) && !contracts.IsCreateNotPerformed(err) {
 		return providerNotReachedDetail
 	}
 	return sanitizeProviderDetail(err)

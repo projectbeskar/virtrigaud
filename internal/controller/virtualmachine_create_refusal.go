@@ -162,20 +162,22 @@ func createRefusalPaced(err error) bool {
 		(pe.Type == contracts.ErrorTypeUnauthorized || pe.Type == contracts.ErrorTypeQuotaExceeded)
 }
 
-// paceRefusedCreate records a Create refused with an answer createRefusalPaced
-// selects and returns its requeue: the condition the answer was always
-// recorded on — Provisioning, replacing the create marker, when the outcome is
-// known; Ready only, keeping the marker, when keepMarker (an answer to a
-// re-send, createOutcomeKnown) — with reason ProviderError as before, and a
-// message that now names the next re-check (createRefusalMessage); the Create
-// is sent again on createRefusalBackoff for inputs.
+// paceRefusedCreate records a Create of attempt refused with an answer
+// createRefusalPaced selects and returns its requeue: the condition the answer
+// was always recorded on — Provisioning, replacing the create marker, when the
+// outcome is known; Ready only, keeping the marker, when it is not (an answer
+// to a re-send, createOutcomeKnown) — with reason ProviderError as before, and
+// a message that now names the next re-check (createRefusalMessage), written
+// with writeCreateAnswer; the Create is sent again on createRefusalBackoff for
+// inputs.
 func (r *VirtualMachineReconciler) paceRefusedCreate(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	inputs string,
 	err error,
-	keepMarker bool,
+	attempt createAttempt,
 ) ctrl.Result {
+	keepMarker := !createOutcomeKnown(err, attempt)
 	detail := providerFailureDetail(err)
 	wait, next := r.recordCreateRefusal(vm, inputs, detail)
 	log.FromContext(ctx).Error(err, "Failed to create VM: the provider refused it; re-checking after a backoff",
@@ -191,7 +193,7 @@ func (r *VirtualMachineReconciler) paceRefusedCreate(
 		Message:            createRefusalMessage(createRefusalHeadFailed, wait, next, detail),
 		ObservedGeneration: vm.Generation,
 	})
-	r.updateStatus(ctx, vm)
+	r.writeCreateAnswer(ctx, vm, attempt)
 	return ctrl.Result{RequeueAfter: wait}
 }
 

@@ -300,6 +300,12 @@ type createAttempt struct {
 	// confirmed is set when an operator's createOutcomeAnnotation confirmed
 	// that attempt markerID made no VM.
 	confirmed bool
+	// sentMarkerID is the attempt id of the create marker the single-host
+	// Create was sent under (requestCreate wrote it); "" for a clustered one.
+	sentMarkerID string
+	// sentHost is the pending host a clustered Create was sent to; "" for a
+	// single-host one.
+	sentHost string
 }
 
 // createOutcomeConfirmed reports whether vm's createOutcomeAnnotation
@@ -561,6 +567,18 @@ func (r *VirtualMachineReconciler) resolveCreateMarkerForDelete(
 				return res, false, err
 			}
 		}
+	}
+
+	// The cache may not show the answer to the Create yet (a delete
+	// requested while it ran: writeCreateAnswer recorded it on the stored
+	// object): nothing is held, released or announced for a marker the
+	// stored VirtualMachine no longer carries.
+	if live, gone, lerr := r.readLiveVM(ctx, vm); lerr != nil || gone ||
+		live.Status.ID != "" || markerAttemptID(live) != markerAttemptID(vm) {
+		if lerr != nil {
+			logger.Info("Cannot read the VirtualMachine before holding its delete; re-checking", "error", lerr.Error())
+		}
+		return ctrl.Result{RequeueAfter: deletingPhaseConflictRetry}, false, nil
 	}
 
 	if force {

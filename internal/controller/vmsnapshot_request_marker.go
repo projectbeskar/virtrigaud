@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -151,6 +152,56 @@ func (r *VMSnapshotReconciler) markSnapshotRequested(ctx context.Context, snapsh
 		return retry, false
 	}
 	return ctrl.Result{}, true
+}
+
+// recordSnapshotAnswer makes sure the outcome of a SnapshotCreate that
+// replaced the SnapshotRequested marker (requested, as written before the
+// call) is on record, and reports whether it wrote it. The create path writes
+// snapshot's status under the resourceVersion it read; an edit of the
+// VMSnapshot made while the provider ran the create makes that write fail
+// with a Conflict, and the marker that survived held the VMSnapshot as an
+// unknown outcome for an operator although the provider had answered — even
+// with the snapshot it made. So the VMSnapshot is read live and, while it is
+// the same object, records no snapshot id and still carries that very marker
+// (nothing newer landed), snapshot's status is written over it
+// (retry.RetryOnConflict). Only this controller writes a VMSnapshot's status
+// and a VMSnapshot is never reconciled concurrently, so the stored status is
+// the one this reconcile wrote with the marker, and replacing it loses
+// nothing. Any failure is logged: the marker then stands.
+func (r *VMSnapshotReconciler) recordSnapshotAnswer(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, requested *metav1.Condition) bool {
+	if requested == nil {
+		return false
+	}
+	logger := logging.FromContext(ctx)
+	written := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		written = false
+		live := &infrav1beta1.VMSnapshot{}
+		if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(snapshot), live); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("read VMSnapshot %s/%s: %w", snapshot.Namespace, snapshot.Name, err)
+		}
+		stored := requestMarker(live.Status.Conditions, snapshotConditionRequested)
+		if live.UID != snapshot.UID || live.Status.SnapshotID != "" || stored == nil ||
+			!stored.LastTransitionTime.Equal(&requested.LastTransitionTime) {
+			return nil // recorded already, or something newer is
+		}
+		logger.Info("Recording the SnapshotCreate's outcome on the VMSnapshot as stored (its first write conflicted)")
+		live.Status = *snapshot.Status.DeepCopy()
+		if err := r.Status().Update(ctx, live); err != nil {
+			return err
+		}
+		snapshot.ResourceVersion = live.ResourceVersion
+		written = true
+		return nil
+	})
+	if err != nil {
+		logger.Error(err, "Failed to record the SnapshotCreate's outcome")
+		return false
+	}
+	return written
 }
 
 // resolveSnapshotRequest decides a VMSnapshot in the initial phase that

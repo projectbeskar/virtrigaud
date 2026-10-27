@@ -40,8 +40,13 @@ Reverting`, `attempts` and `attemptTime`. See
   `resourceVersion` the reconcile read. If that write fails for any reason,
   including a conflict with another writer, **nothing is sent**.
 - **Removed with the outcome.** The call's result, or a definite failure from the
-  provider, is written with the marker removed, in the same status write. A
-  definite failure is one that proves the outcome:
+  provider, is written with the marker removed, in the same status write. That
+  write is not lost when the object was edited while the call ran (a label, an
+  annotation, a spec change: the write conflicts): since v0.4.1 the outcome of a
+  `VMSnapshot`'s `SnapshotCreate` is then written again over the object as it is
+  stored, as long as it still carries the same marker and records no snapshot id.
+  See [An answer is not lost to an edit made during the call](#an-answer-is-not-lost-to-an-edit-made-during-the-call).
+  A definite failure is one that proves the outcome:
   - nothing was done: the request never reached the provider, its host was
     unreachable, or it answered that it did not perform the call;
   - the provider refused the call before doing anything: an invalid request, a VM
@@ -232,6 +237,47 @@ reads `Failed to create VM (non-retryable; re-checking in ...): <detail>`. A `Co
 manager restart the wait is read back from the condition that holds the answer to the latest
 `Create`: `Provisioning` when it is False, `Ready` while `Provisioning` is the create marker. See
 [A refused VM create is retried with a backoff](upgrading.md#a-refused-vm-create-is-retried-with-a-backoff).
+
+### An answer is not lost to an edit made during the call
+
+A provider call can take minutes. If the object is edited meanwhile (a label or an
+annotation, a spec change, another controller's metadata write), the status write that
+records the provider's answer conflicts with the edit. Up to v0.4.1-rc2 that answer was then
+lost for a `VirtualMachine`'s `Create`, a single-host `VMClone`'s `Clone` and a `VMSnapshot`'s
+`SnapshotCreate`: the marker stayed although the provider had answered. A `VirtualMachine`
+deleted right after a `Create` the provider answered it did not perform was then held as
+`CreateOutcomeUnknown` for an operator, with nothing on the hypervisor.
+
+Since v0.4.1 the manager reads the object again after such a conflict and writes the answer
+over it as stored, but only while the object still waits for that answer. Anything newer is
+never overwritten; the next reconcile works from it.
+
+| Object and call | Waits for the answer while | What is written again |
+|---|---|---|
+| `VirtualMachine` `Create`, single host (a refusal, "not performed", a failure on the host, an outcome that stays unknown) | no `status.id`, and the `CreateRequested` marker of the attempt the `Create` was sent under | the `Ready` and `Provisioning` conditions as the answer set them |
+| `VirtualMachine` `Create`, clustered | no `status.id`, and the pending host the `Create` was sent to | the `Ready`, `Provisioning` and `Placed` conditions as the answer set them |
+| `VMClone` `Clone`, single host, a first attempt's answer that proves nothing was made | the same `CloneRequested` condition | the `VMClone`'s status as the answer set it |
+| `VMSnapshot` `SnapshotCreate` (the snapshot made, a definite failure, "not performed") | no `status.snapshotID`, and the same `SnapshotRequested` marker | the `VMSnapshot`'s status as the answer set it |
+
+The answer's conditions keep the `observedGeneration` of the spec the call was built from,
+and a `VirtualMachine`'s `status.observedGeneration` keeps its stored value, so a spec change
+made during the call is still seen as not yet acted on. A `VMClone`'s or a `VMSnapshot`'s
+whole status is written again: only its own controller writes it, and an object is never
+reconciled twice at once, so the stored status is the one written with the marker.
+
+Already covered before v0.4.1: a `VirtualMachine`'s created id (`status.id`, a status patch
+without a `resourceVersion` precondition), a `SnapshotRevert`'s answer, the result of a
+`VMMigration`'s `SnapshotCreate`, `ExportDisk` or `ImportDisk` while the migration is still in
+the phase that sent it, a `VMClone`'s accepted clone, and an image prepare's answer on the
+`VMImage`. A clustered `VMClone`'s answer recorded on its target, a clustered `Create` whose
+host was excluded after a name conflict, and the clustered restore and own-domain holds
+(`RestorePending`, `OwnDomainOnAnotherHost`, an imported disk pinned to its host) are not written
+again: the pending host stays, so the next reconcile sends the call again to the same host and
+gets the same answer.
+
+What is still lost: an answer whose write fails for another reason (the API server
+unavailable) or is cut short by a manager restart. The marker then stands, as for a lost
+result.
 
 **`SnapshotRevert`** carries no marker, but the libvirt provider answers it the same way
 from v0.4.1 (single-host and clustered): "not performed" before the revert ran, a terminal
@@ -553,9 +599,12 @@ re-drives it at once.
   is out of the breaker like every `VM_OPERATION_FAILED`. Other calls to the same
   provider (`Describe`, `Power`, ...) still count the failure.
 - **A lost failure write is held.** A known failure whose status write itself is
-  lost (a conflict on the failure write, a restart before it) leaves the marker. The
-  object is then held for an operator, although the provider answered definitely.
-  Confirming the attempt sends the call again.
+  lost leaves the marker: a restart before the write, a write that fails for another
+  reason than a conflict, and - for a `VMMigration` - a conflict on the write that
+  fails the attempt. The object is then held for an operator, although the provider
+  answered definitely. Confirming the attempt sends the call again. A conflict on the
+  write of a `VMSnapshot`'s, a `VirtualMachine`'s or a single-host `VMClone`'s answer no
+  longer loses it (v0.4.1, [above](#an-answer-is-not-lost-to-an-edit-made-during-the-call)).
 - **A deleting migration waits out an unknown export.** If an `ExportRequested`
   marker has no result, the staged object of an `nfs` or `s3` migration is not
   deleted until 35 minutes after the marker. An export still running on the host

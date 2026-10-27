@@ -236,6 +236,9 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	msg := providerFailureDetail(err)
+	// The answer is recorded only while the VM still waits for it on host
+	// (writeCreateAnswer).
+	attempt := createAttempt{sentHost: host}
 
 	// Checked before the plain Conflict: a previous incarnation of this VM
 	// holds it on its pending host (ADR-0007 A6, R2) — excluding the host
@@ -258,7 +261,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 				"(an administrator may clear status.placement.pendingHost to release it): %s", host, blockedRetryMax, msg))
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
 			fmt.Sprintf("Failed to create VM: %s", msg), vm.Generation)
-		r.updateStatus(ctx, vm)
+		r.writeCreateAnswer(ctx, vm, attempt)
 		// Backed off like the other holds (A6.1 fix verification, N2): each
 		// retry may scan every host of the Provider, and a host that is down
 		// stays down for longer than a fixed short cadence.
@@ -278,31 +281,31 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 			host, blockedRetryMax, msg))
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
 			fmt.Sprintf("Failed to create VM: %s", msg), vm.Generation)
-		r.updateStatus(ctx, vm)
+		r.writeCreateAnswer(ctx, vm, attempt)
 		return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}, nil
 	}
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create on host %s is not confirmed: %s", host, msg))
-	if res, handled := r.handleRejectedCreate(ctx, vm, inputs, err, false); handled {
+	if res, handled := r.handleRejectedCreate(ctx, vm, inputs, err, attempt); handled {
 		return res, nil
 	}
 	// A retryable VM_OPERATION_FAILED on the pending host is retried with a
 	// backoff, not every few seconds (holdCreateBackoff).
-	if res, held := r.holdCreateBackoff(ctx, vm, err, createAttempt{}); held {
+	if res, held := r.holdCreateBackoff(ctx, vm, err, attempt); held {
 		return res, nil
 	}
 	// A definite NotFound, NotSupported, Unauthorized or QuotaExceeded
 	// refusal is re-sent on the create-refusal backoff, not every 5 s
 	// (createRefusalPaced).
 	if createRefusalPaced(err) {
-		return r.paceRefusedCreate(ctx, vm, inputs, err, false), nil
+		return r.paceRefusedCreate(ctx, vm, inputs, err, attempt), nil
 	}
 	logger.Error(err, "Failed to create VM", "host", host)
 	reason, requeueAfter := providerFailureOutcome(err)
 	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
 		fmt.Sprintf("Failed to create VM: %s", msg), vm.Generation)
-	r.updateStatus(ctx, vm)
+	r.writeCreateAnswer(ctx, vm, attempt)
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 

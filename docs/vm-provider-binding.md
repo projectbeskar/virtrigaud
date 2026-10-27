@@ -454,7 +454,12 @@ reason **`CreateRequested`** (and the `Provider` it is sent through,
 `resourceVersion`; only once that write is confirmed is the Create sent. Each
 such write is one **attempt**, identified by the condition's
 `lastTransitionTime` (RFC 3339). The Create's outcome — `status.id` and its
-`Provisioning` condition — replaces the marker. The marker is kept when the
+`Provisioning` condition — replaces the marker, also when the
+`VirtualMachine` was edited while the Create ran: the answer is then written
+again over the stored object, as long as it still records no id and carries
+this attempt's marker (v0.4.1; see
+[An answer is not lost to an edit made during the call](provider-call-outcomes.md#an-answer-is-not-lost-to-an-edit-made-during-the-call)).
+The marker is kept when the
 outcome is unknown: a transport failure or deadline, an error the provider did
 not classify as a refusal, a `VM_OPERATION_FAILED`, `HOST_UNAVAILABLE` or
 `VM_DISK_CHECK_FAILED` answer (a provider also sends these for an operation
