@@ -212,7 +212,7 @@ prepared templates by identity (see
 [vSphere: identity-safe prepared templates](#vsphere-identity-safe-prepared-templates)).
 libvirt names, stamps and publishes its prepared images by identity (single-host providers;
 see [libvirt prepared images](#libvirt-prepared-images-sourcelibvirturl)). Proxmox reports
-it because it prepares nothing by name: in v0.4.0 it refuses every URL import with
+it because it prepares nothing by name: in v0.4.1 it refuses every URL import with
 `InvalidSpec`, so such an image gets reason `InvalidSource` rather than a hold (see
 [Proxmox image sources](#proxmox-image-sources)). Until a provider reports it, import-style images (`ovaURL`, a
 libvirt `url`, an `http` source) are held on it with `ProviderLacksArtifactIdentity`;
@@ -306,7 +306,7 @@ changed. See ADR-0005 "Out of scope" for the original PR-6 framing.
 
 ## Proxmox image sources
 
-**Proxmox URL image import is not supported in v0.4.0.** Use a template that already
+**Proxmox URL image import is not supported in v0.4.1.** Use a template that already
 exists on Proxmox VE and reference it by VMID:
 
 ```yaml
@@ -522,13 +522,13 @@ the provider log only, so a `VMImage`'s status tells nothing about what an arbit
 serves.
 
 **Requests from an older manager (deprecated).** A manager older than ADR-0009 sends a bare
-target name and no identity. In v0.4.0 only, the provider serves it the pre-ADR way
+target name and no identity. In v0.4.0 and v0.4.1 only, the provider serves it the pre-ADR way
 (a template named after the `VMImage`, reused by name anywhere in the datacenter, no
 stamp), logs `deprecated: image prepare without identity from an older manager; upgrade
 the manager; refused from the next release` at `WARN`, and increments
 `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="vsphere"}`, which
 the vSphere provider serves at `/metrics` on its health port. Alert on that counter. The
-release after v0.4.0 refuses such requests. Legacy templates and identity
+release after v0.4.1 refuses such requests. Legacy templates and identity
 templates never share a name, so neither mode can touch the other's templates.
 
 **Legacy templates are left alone.** Templates prepared before this change (named after
@@ -826,18 +826,18 @@ and query removed.
 ### Deprecated: requests from an older manager
 
 A manager older than ADR-0009 sends a bare `target_name` and no identity. For **v0.4.0
-only**, the libvirt provider serves such a request the pre-ADR way — the artifact is
+and v0.4.1 only**, the libvirt provider serves such a request the pre-ADR way — the artifact is
 `<pool dir>/<VMImage name>.qcow2`, an existing file of that name is reused by name, no stamp
 is written or echoed — but with the fixes above (retryable probe, private staging, read-only
 image published with `ln`, never chowned). It can never reach an ADR-0009 artifact (the names
 are disjoint). In legacy mode, two `VMImage`s with the **same name in different namespaces**
 prepared through one Provider (or through Providers that share the pool directory) **share
 one file**, `<pool dir>/<VMImage name>.qcow2`: whichever is prepared first is what both get.
-This is the pre-ADR defect, and it is why legacy mode exists for one release only. Every such request logs
+This is the pre-ADR defect, and it is why legacy mode is temporary. Every such request logs
 `WARN deprecated: image prepare without identity from an older manager; upgrade the manager; refused from the next release`
 and increments `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="libvirt"}`.
 Alert when that counter is non-zero, and do not run an older manager against a Provider
-shared across tenants. The release after v0.4.0 refuses these requests with `FailedPrecondition`.
+shared across tenants. The release after v0.4.1 refuses these requests with `FailedPrecondition`.
 
 Bare-name files prepared by earlier releases are never deleted, renamed, re-stamped or
 adopted; after the upgrade, the first create for each image prepares a new artifact and the

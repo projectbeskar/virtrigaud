@@ -13,7 +13,7 @@ Each file is a set of manifests with comments on what the controllers and provid
 
 Creating VMs from a vSphere template, and cloning an existing VM:
 - **VMs from a template image**: several `VirtualMachine`s whose `imageRef` names the same vSphere template; each is created by cloning that template.
-- **`VMClone`**: clones an existing `VirtualMachine` (`source.vmRef`) into a new one on the same provider. `FullClone` is the default; `LinkedClone` needs a provider that reports linked-clone support (vSphere does; libvirt refuses it in v0.4.0, see [../../docs/libvirt-clones.md](../../docs/libvirt-clones.md)).
+- **`VMClone`**: clones an existing `VirtualMachine` (`source.vmRef`) into a new one on the same provider. `FullClone` is the default; `LinkedClone` needs a provider that reports linked-clone support (vSphere does; libvirt refuses it in v0.4.1, see [../../docs/libvirt-clones.md](../../docs/libvirt-clones.md)).
 - A `VMClone` from a template or a `VMImage` is declared in the schema but not implemented; see [../vmclone-basic.yaml](../vmclone-basic.yaml) for the supported scope.
 
 ### vSphere Task Tracking
@@ -62,7 +62,7 @@ Demonstrates changing a VM's CPU, memory and disks with `kubectl patch`. Whether
 1. **VirtRigaud Installed**:
    ```bash
    helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
-   helm install virtrigaud virtrigaud/virtrigaud --version 0.4.0 \
+   helm install virtrigaud virtrigaud/virtrigaud --version 0.4.1 \
      -n virtrigaud-system --create-namespace
    ```
 
@@ -197,5 +197,5 @@ Have an advanced example to share? Contributions welcome!
 
 ---
 
-**Note**: These examples target VirtRigaud v0.4.0.
+**Note**: These examples target VirtRigaud v0.4.1.
 

@@ -8,7 +8,7 @@
 # (spec.topology: cluster, see provider-libvirt-clustered.yaml). The Host
 # controller asks the provider about each Host and writes the answer to
 # Host.status; the scheduler places a VM on one Host of the pool from that
-# inventory. Clustered libvirt is experimental in v0.4.0; read
+# inventory. Clustered libvirt is experimental in v0.4.1; read
 # docs/clustered-provider-inventory.md before using it.
 #
 # Placement labels on each Host (spec.labels) are consumed as HARD scheduling
@@ -76,7 +76,7 @@ spec:
   networks:
     - name: br-vlan100
   # Default migration policy for VMs in this pool. The API records it, but no
-  # controller acts on it in v0.4.0: VirtRigaud does not live-migrate a VM
+  # controller acts on it in v0.4.1: VirtRigaud does not live-migrate a VM
   # between the hosts of a pool.
   migration:
     defaultLive: true

@@ -245,7 +245,7 @@ manager restart the wait is read back from the condition that holds the answer t
 
 A provider call can take minutes. If the object is edited meanwhile (a label or an
 annotation, a spec change, another controller's metadata write), the status write that
-records the provider's answer conflicts with the edit. Up to v0.4.1-rc2 that answer was then
+records the provider's answer conflicts with the edit. Up to v0.4.1-rc2 (v0.4.0 included) that answer was then
 lost for a `VirtualMachine`'s `Create`, a single-host `VMClone`'s `Clone` and a `VMSnapshot`'s
 `SnapshotCreate`: the marker stayed although the provider had answered. A `VirtualMachine`
 deleted right after a `Create` the provider answered it did not perform was then held as
@@ -608,6 +608,21 @@ re-drives it at once.
   answered definitely. Confirming the attempt sends the call again. A conflict on the
   write of a `VMSnapshot`'s, a `VirtualMachine`'s or a single-host `VMClone`'s answer no
   longer loses it (v0.4.1, [above](#an-answer-is-not-lost-to-an-edit-made-during-the-call)).
+- **A Proxmox clone refused because its source is locked is held as unknown until it is sent
+  again.** When PVE refuses a `Clone` at once because the source VM is locked (for example while
+  a snapshot of the source runs: `HTTP 500 VM is locked (snapshot)`), nothing was started, but the
+  Proxmox provider answers "outcome unknown": it treats only a 400, a 401 or 403 and the VMID-taken
+  refusal as definite, and any other answer may have started a task. The `VMClone`
+  stays `Pending` with `Ready=False/CloneOutcomeUnknown` and the manager sends the `Clone` again
+  after its backoff (15 seconds, doubling to 5 minutes); it completes on a re-send that finds the
+  lock gone. This is not one of the VMID-race forms, which are answered "not performed"
+  ([`Create` and `Clone` error classes](vm-ownership.md#create-and-clone-error-classes)).
+- **A generic status write that conflicts with an edit is logged at `ERROR`.** The
+  `VirtualMachine` controller's own status write (`Failed to update VirtualMachine status`) is
+  not retried in place: if the object was edited during the reconcile, it fails with "the object
+  has been modified", the log line is at `ERROR` level, and the next reconcile converges. A
+  provider's answer is not affected (see
+  [above](#an-answer-is-not-lost-to-an-edit-made-during-the-call)).
 - **A deleting migration waits out an unknown export.** If an `ExportRequested`
   marker has no result, the staged object of an `nfs` or `s3` migration is not
   deleted until 35 minutes after the marker. An export still running on the host

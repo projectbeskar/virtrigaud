@@ -189,7 +189,7 @@ spec:
     placementRef:
       name: production-policy
   options:
-    type: FullClone  # libvirt refuses LinkedClone in v0.4.0 (docs/libvirt-clones.md)
+    type: FullClone  # libvirt refuses LinkedClone in v0.4.1 (docs/libvirt-clones.md)
     powerOn: true
   # Every clone boots as a new cloud-init instance (new SSH host keys) with the
   # hostname below (docs/vm-ownership.md#a-clones-host-identity). libvirt also

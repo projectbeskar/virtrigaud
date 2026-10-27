@@ -5,7 +5,7 @@
 **Accepted (2026-10-17, decided by William Rizzo).** The decision is Options A
 and B, as proposed in PR #397. The maintainer's answers to the review questions
 are recorded in [Decisions on the open questions](#decisions-on-the-open-questions).
-Nothing in this record is implemented yet. Phase 1 targets v0.4.1, not v0.4.0.
+Nothing in this record is implemented yet. Phase 1 was planned for v0.4.1; it is not in v0.4.0 or in v0.4.1.
 
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 

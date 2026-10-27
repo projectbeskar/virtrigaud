@@ -116,19 +116,19 @@ release that may need ten or more candidates should use `-rc.N` (`-rc.2`,
    notes), set the versions and commit the two `go.mod` files:
 
    ```bash
-   make set-module-versions VERSION=v0.4.1-rc1
+   make set-module-versions VERSION=v0.4.1
    ```
 
    Do this for every release candidate and for the final release.
 2. Before pushing the tag, on the commit to be tagged:
 
    ```bash
-   make check-module-versions VERSION=v0.4.1-rc1
+   make check-module-versions VERSION=v0.4.1
    ```
 
-3. Push the release tag as usual (`git tag v0.4.1-rc1 && git push origin v0.4.1-rc1`).
+3. Push the release tag as usual (`git tag v0.4.1 && git push origin v0.4.1`).
    To re-run a release by hand (`workflow_dispatch`), start the workflow from
-   the tag ("Use workflow from: v0.4.1-rc1"), not from a branch: the run
+   the tag ("Use workflow from: v0.4.1"), not from a branch: the run
    refuses to build a commit other than the tag's.
 
 The release workflow (`.github/workflows/release.yml`) then:
@@ -187,7 +187,7 @@ tags.
 
 ## Verifying a release
 
-After the release workflow finished for `<tag>` (for example `v0.4.1-rc1`):
+After the release workflow finished for `<tag>` (for example `v0.4.1`):
 
 1. The three tags exist and point at the same commit:
 

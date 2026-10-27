@@ -11,7 +11,7 @@
 #     pre-checked against the provider's reported capabilities; a provider
 #     that does not support linked clones will set Phase=Failed
 #     (reason LinkedCloneUnsupported). The libvirt provider refuses
-#     LinkedClone in v0.4.0 (docs/libvirt-clones.md): use FullClone.
+#     LinkedClone in v0.4.1 (docs/libvirt-clones.md): use FullClone.
 #
 # The controller produces a VirtualMachine CR named spec.target.name, seeds
 # its Status.ID with the provider's cloned VM ID, and labels it

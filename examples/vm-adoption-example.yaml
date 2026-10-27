@@ -31,7 +31,7 @@ spec:
     name: vsphere-prod-credentials
     namespace: default
   runtime:
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.1"
     service:
       port: 9443
       # A Provider with no tls block is not deployed (TLSConfigured=False, reason
@@ -64,7 +64,7 @@ spec:
     name: vsphere-prod-credentials
     namespace: default
   runtime:
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.1"
     service:
       port: 9443
       # Secret with tls.crt, tls.key and ca.crt (see the TLS note on the first Provider).
@@ -123,7 +123,7 @@ spec:
     name: libvirt-prod-credentials
     namespace: default
   runtime:
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.1"
     service:
       port: 9443
       # Secret with tls.crt, tls.key and ca.crt (see the TLS note on the first Provider).
@@ -148,7 +148,7 @@ spec:
     name: proxmox-prod-credentials
     namespace: default
   runtime:
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.4.0"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.4.1"
     service:
       port: 9443
       # Secret with tls.crt, tls.key and ca.crt (see the TLS note on the first Provider).
