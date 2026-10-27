@@ -259,7 +259,9 @@ func (a clonePlacementAdmission) cloneClassJSON() (string, error) {
 // assume lock; otherwise it has recorded why on the target VM and the clone
 // and returns the requeue. A target that already records host as its pending
 // host holds the capacity durably (an earlier attempt admitted it): it is
-// admitted again without a check.
+// admitted again without a check when this manager instance recorded or
+// revalidated exactly that admission, and revalidated first otherwise
+// (ADR-0007 A5, inherited admission revalidation).
 func (r *VMCloneReconciler) admitClusteredClone(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
@@ -290,6 +292,9 @@ func (r *VMCloneReconciler) admitClusteredClone(
 				logger.Info("The clone's VMClass changed after the clone was admitted; the clone is made at its admitted size",
 					"admittedCPU", recorded.size.CPU, "admittedMemoryMiB", recorded.size.MemoryMiB,
 					"classCPU", adm.size.CPU, "classMemoryMiB", adm.size.MemoryMiB)
+			}
+			if res, held, err := r.holdInheritedClone(ctx, clone, target, provider, recorded, host); held {
+				return clonePlacementAdmission{}, res, false, err
 			}
 			return recorded, ctrl.Result{}, true, nil
 		}
@@ -486,4 +491,33 @@ func (c *clonedSize) recordOn(vm *infrav1beta1.VirtualMachine) {
 		ceiling := c.ceiling
 		vm.Status.Placement.MemoryCeilingMiB = &ceiling
 	}
+}
+
+// holdInheritedClone checks a clone target's recorded admission on host
+// before the Clone RPC: held is true, with the requeue, when an earlier
+// manager instance recorded it and it no longer fits (it is then recorded on
+// the target and the clone, and nothing is sent).
+func (r *VMCloneReconciler) holdInheritedClone(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	target *infrav1beta1.VirtualMachine,
+	provider *infrav1beta1.Provider,
+	recorded clonePlacementAdmission,
+	host string,
+) (ctrl.Result, bool, error) {
+	adm := pendingAdmissionOf(target, providerKeyOf(provider), assume.AdmissionClone, string(clone.UID))
+	want := recorded.footprint(target, host)
+	verdict, checkErr, err := checkInheritedAdmission(ctx, r.Client, r.placementAssumptions(), provider, target, adm,
+		scheduler.ResourceRequest{}, want)
+	switch {
+	case err != nil:
+		return ctrl.Result{}, true, err
+	case verdict == inheritedBusy:
+		return ctrl.Result{RequeueAfter: placementLockBusyRetry()}, true, nil
+	case verdict == inheritedHeld:
+		msg := inheritedHoldMessage("the clone", want, checkErr)
+		return r.refuseClonePlacement(ctx, clone, target, k8s.ReasonInheritedAdmissionOverCapacity, msg,
+			r.unschedulable.next(vmSchedulingUID(target), time.Now())), true, nil
+	}
+	return ctrl.Result{}, false, nil
 }

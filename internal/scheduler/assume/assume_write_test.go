@@ -202,3 +202,27 @@ func TestNarrow_LowersOnlyItsOwnPick(t *testing.T) {
 	a, _, _ = c.Lookup("vm")
 	assert.Equal(t, scheduler.ResourceRequest{CPU: 4, MemoryMiB: 16384}, a.Resources, "lowered per resource, never raised")
 }
+
+func TestEstablished_OnlyExactlyTheAdmission(t *testing.T) {
+	c := New(time.Minute, newClock().now)
+	adm := Admission{Kind: AdmissionCreate, Provider: "ns/p", Host: "h1",
+		Resources: scheduler.ResourceRequest{CPU: 2, MemoryMiB: 4096}, MemoryCeilingMiB: -1}
+	assert.False(t, c.Established("vm", adm), "nothing established yet: inherited")
+	c.Establish("vm", adm)
+	assert.True(t, c.Established("vm", adm))
+	for _, change := range []func(*Admission){
+		func(a *Admission) { a.Host = "h2" },
+		func(a *Admission) { a.Resources.CPU = 4 },
+		func(a *Admission) { a.MemoryCeilingMiB = 16384 },
+		func(a *Admission) { a.Provider = "ns/q" },
+		func(a *Admission) { a.Ref = "clone-uid" },
+		func(a *Admission) { a.Kind = AdmissionResize },
+	} {
+		other := adm
+		change(&other)
+		assert.False(t, c.Established("vm", other), "%+v is another admission", other)
+	}
+	assert.False(t, c.Established("other-vm", adm), "per VM")
+	c.Disestablish("vm")
+	assert.False(t, c.Established("vm", adm))
+}

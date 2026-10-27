@@ -140,6 +140,9 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	}
 	assumptions.WriteStored(uid, p.assumeToken)
 	r.placementWrites.Delete(uid)
+	// Recorded by this manager instance: its Create needs no revalidation
+	// while the VM records exactly this admission.
+	assumptions.Establish(uid, pendingAdmissionOf(vm, providerKeyOf(providerCR), assume.AdmissionCreate, ""))
 	return ctrl.Result{}, true, nil
 }
 

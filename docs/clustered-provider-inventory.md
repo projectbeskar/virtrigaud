@@ -1033,6 +1033,61 @@ After a restart, a VM whose reservation covers its requested size has its
 provider's `Reconfigure` is synchronous and sets the domain to the requested
 size, so a repeat of a call that already ran changes nothing.
 
+#### Admissions inherited from an earlier manager
+
+A pending create, a pending clone target and a resize reservation are durable
+admissions: whoever reconciles the VM next acts on them (`Create`, `Clone`,
+`Reconfigure`). A manager instance acts at once only on an admission it
+recorded or checked itself, matched exactly (VM, Provider, host, recorded
+size and memory ceiling, and for a clone the clone it belongs to). Any other
+one — after a restart, a leader change, or a write the previous leader sent
+just before losing its lease that landed after the new leader had already
+placed other VMs — is first checked again under the Provider's lock, against
+the same committed capacity as every other decision, the VM's own record not
+counted twice. A bound VM is never checked this way: describing, powering,
+deleting and recovering it are unaffected, however full its host is, and a
+re-attach (a VM whose own domain already runs on the host) is not checked
+either.
+
+If an inherited admission no longer fits, nothing is sent to the provider, the
+record is **kept** and still counts against the host, and the VM gets
+`Placed=False` (a create or clone) or `Reconfiguring=False` (a resize) with
+reason `InheritedAdmissionOverCapacity`. The message names only the VM's own
+size: no host and no capacity figure (the host is in `status.placement`, the
+arithmetic in the manager log). It is re-checked with the placement backoff (up to 2 min), and
+proceeds by itself once the host has room — for example after another VM is
+deleted, moved, or shrunk, or the pool's overcommit ratio is raised.
+
+Administrator recovery, when it does not clear by itself (for example two
+inherited admissions that each need the room the other holds). The record must
+stay until you have **positive proof** that no earlier operation can still
+execute against it: a domain missing from the host right now does not prove
+that a `Create` or `Clone` sent by an earlier manager cannot still complete.
+
+1. Check whether the VM's domain already exists on the recorded host
+   (`virsh list --all` there, domain `<namespace>.<name>`). If it exists, the
+   capacity is really in use: free room on that host (move or delete another
+   VM, or raise the pool's overcommit ratio) so the VM can be bound. **Do not**
+   clear its `pendingHost`, which would place it on another host and leave the
+   existing domain unmanaged.
+2. If it does not exist, establish that nothing can still create it before
+   releasing anything: every manager instance that might have sent the
+   operation has exited (its pods are gone, not merely not leading), and the
+   provider for that host has no operation for the VM still running or queued
+   (check its logs, or restart the provider pod so that nothing it accepted
+   earlier can complete).
+3. Only then, release a pending create or clone by clearing
+   `status.placement.pendingHost` (the VM is then scheduled again), for example
+   `kubectl patch vm <name> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/placement/pendingHost"}]'`,
+   and check the old host once more afterwards. A held resize is withdrawn by
+   setting the VM's size back in its spec; its reservation is released only
+   once the provider confirms the size, never by hand.
+4. If the outcome stays uncertain, keep the record: it only over-reserves.
+   Investigate, or isolate the execution path (cordon the host, stop the
+   provider for it) until the outcome is known.
+
+VirtRigaud never clears an inherited admission by itself.
+
 **Shrinking a running VM waits for it to be powered off.** A shrink is never
 refused, but on a clustered Provider it is applied only while the VM is off. A
 running guest can take back memory that was removed live (the balloon), and a

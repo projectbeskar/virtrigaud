@@ -183,6 +183,39 @@ type Cache struct {
 	// onStale is called, once per assumption, when its TTL has passed while
 	// its write is unresolved (SetStaleHook).
 	onStale func(provider string, a Assumption, age time.Duration)
+	// established holds, per VM UID and admission kind, the durable
+	// admissions this process admitted or revalidated itself (Establish).
+	established map[string]map[AdmissionKind]Admission
+}
+
+// AdmissionKind is the kind of a durable capacity admission.
+type AdmissionKind string
+
+// The durable capacity admissions a VM can hold.
+const (
+	// AdmissionCreate is a scheduled create's pendingHost with its size.
+	AdmissionCreate AdmissionKind = "create"
+	// AdmissionClone is a clustered clone target's pendingHost with its size.
+	AdmissionClone AdmissionKind = "clone"
+	// AdmissionResize is a resize reservation.
+	AdmissionResize AdmissionKind = "resize"
+)
+
+// Admission identifies one durable capacity admission exactly as it is
+// recorded on its VM: what it is for, where, at what size, and the operation
+// it belongs to. Two admissions are the same only if every field is.
+type Admission struct {
+	Kind     AdmissionKind
+	Provider string
+	Host     string
+	// Resources is the recorded size (a pending size, or a reservation).
+	Resources scheduler.ResourceRequest
+	// MemoryCeilingMiB is the recorded memory ceiling, -1 when none is
+	// recorded.
+	MemoryCeilingMiB int64
+	// Ref names the operation the admission belongs to beyond the VM (a
+	// clone's UID), "" when none.
+	Ref string
 }
 
 // SetStaleHook installs fn, called once for each assumption whose TTL passed
@@ -201,11 +234,46 @@ func New(ttl time.Duration, now func() time.Time) *Cache {
 		now = time.Now
 	}
 	return &Cache{
-		ttl:     ttl,
-		now:     now,
-		entries: map[string]*entry{},
-		locks:   map[string]chan struct{}{},
+		ttl:         ttl,
+		now:         now,
+		entries:     map[string]*entry{},
+		locks:       map[string]chan struct{}{},
+		established: map[string]map[AdmissionKind]Admission{},
 	}
+}
+
+// Establish records that this process admitted adm for the VM uid, or
+// revalidated it against its own accounting: the operation adm authorizes
+// may be executed without checking it again, for as long as the VM records
+// exactly adm (Established). A durable admission this process did not
+// establish — one a previous manager instance recorded, possibly with a write
+// that landed after this one started leading — is checked first.
+func (c *Cache) Establish(uid string, adm Admission) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.established[uid]
+	if m == nil {
+		m = map[AdmissionKind]Admission{}
+		c.established[uid] = m
+	}
+	m[adm.Kind] = adm
+}
+
+// Established reports whether this process established exactly adm for the
+// VM uid. Any difference (another host, size, ceiling, Provider or operation)
+// is a different admission.
+func (c *Cache) Established(uid string, adm Admission) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	got, ok := c.established[uid][adm.Kind]
+	return ok && got == adm
+}
+
+// Disestablish drops every admission established for the VM uid.
+func (c *Cache) Disestablish(uid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.established, uid)
 }
 
 // semaphore returns provider's lock, creating it on first use.

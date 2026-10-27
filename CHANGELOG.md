@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-27 00:47] - Revalidate admissions inherited from an earlier manager leader (C1)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/placement_inherited_admission.go`: a pending create, a pending clone target or a resize reservation that this manager instance did not record or revalidate itself is checked again under the Provider's lock (same snapshot and assumptions, the VM's own records excluded) before `Create`, `Clone` or `Reconfigure`; one that no longer fits is held with `InheritedAdmissionOverCapacity`, its record kept and counted.
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_resize_gate.go`, `vmclone_capacity.go`: the create (including a migration target's), resize and clone paths revalidate inherited admissions; bound VMs' lifecycle and re-attaches are not checked.
+- `internal/controller/virtualmachine_clustered.go`, `vmclone_clustered.go`, `virtualmachine_resize_gate.go`: admissions this instance records are established for it.
+
+### Added
+- `internal/scheduler/assume/assume.go`: process-local admission identity (`Admission`, `Establish`, `Established`, `Disestablish`): VM, kind, Provider, host, recorded size and ceiling, operation.
+- `internal/k8s/conditions.go`: `ReasonInheritedAdmissionOverCapacity`.
+- `internal/controller/placement_handover_test.go`: two-leader create, resize and clone handovers with a delayed admission write, the visible-first control, changed admissions, bound-VM lifecycle on an over-committed host.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: A5 *inherited admission revalidation* amendment, including that it is not provider-side fencing.
+- `docs/clustered-provider-inventory.md`: inherited admissions, the hold, and administrator recovery.
+- `internal/controller/virtualmachine_clustered_test.go`, `vmclone_capacity_test.go`: same-instance retries establish their admission first.
+
+### Why
+A pendingHost or resize reservation write the previous leader sent before losing its lease could land after the new leader had given the capacity to another VM, and the new leader then executed it without a check, overbooking the host.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 22:46] - Durable resize reservations for clustered VMs (G3)
 **Author:** @wrkode (William Rizzo)
 

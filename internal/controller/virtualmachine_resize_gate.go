@@ -120,8 +120,29 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 	// What the VM already holds durably: its applied footprint and any resize
 	// reservation, which is never lowered while an earlier resize is
 	// unresolved. Nothing beyond it needs admitting: the Reconfigure goes on
-	// under the reservation already recorded (after a restart too).
-	heldFP := withResizeReservation(currentFP, vm)
+	// under the reservation already recorded (after a restart too) — once
+	// this manager instance has established it: one recorded by an earlier
+	// instance is revalidated first (ADR-0007 A5, inherited admission
+	// revalidation), so a late write of a deposed leader never authorizes a
+	// Reconfigure by itself.
+	heldFP := currentFP
+	if adm, ok := resizeAdmissionOf(vm, providerKeyOf(providerCR)); ok {
+		reservedFP := maxFootprint(currentFP, adm.Resources)
+		if scheduler.Grows(currentFP, desiredFP) && scheduler.Grows(currentFP, reservedFP) {
+			verdict, checkErr, err := checkInheritedAdmission(ctx, r.Client, r.placementAssumptions(), providerCR, vm, adm,
+				currentFP, reservedFP)
+			switch {
+			case err != nil:
+				return ctrl.Result{}, false, err
+			case verdict == inheritedBusy:
+				return ctrl.Result{RequeueAfter: placementLockBusyRetry()}, false, nil
+			case verdict == inheritedHeld:
+				msg := inheritedHoldMessage("the VM's resize", reservedFP, checkErr)
+				return r.refuseResize(ctx, vm, k8s.ReasonInheritedAdmissionOverCapacity, msg, r.unschedulable.next(uid, r.now())), false, nil
+			}
+		}
+		heldFP = reservedFP
+	}
 	if !scheduler.Grows(heldFP, desiredFP) {
 		r.unschedulable.reset(uid)
 		return ctrl.Result{}, true, nil
@@ -175,7 +196,15 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 		r.unschedulable.reset(uid)
 		logger.Info("Admitted a clustered resize-up against its host's free capacity",
 			"host", hostID, "cpu", desired.CPU, "memoryMiB", desired.MemoryMiB)
-		return r.recordResizeReservation(ctx, vm, admission)
+		res, admitted, err := r.recordResizeReservation(ctx, vm, admission)
+		if admitted {
+			// Recorded by this manager instance: its Reconfigure needs no
+			// revalidation while the VM records exactly this reservation.
+			if adm, ok := resizeAdmissionOf(vm, providerKeyOf(providerCR)); ok {
+				r.placementAssumptions().Establish(uid, adm)
+			}
+		}
+		return res, admitted, err
 	case stderrors.As(checkErr, &tooBig):
 		retryAfter := r.unschedulable.next(uid, r.now())
 		// No committed, capacity or free figure (review M3); the arithmetic is

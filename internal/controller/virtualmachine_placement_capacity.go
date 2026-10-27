@@ -222,6 +222,7 @@ func (r *VirtualMachineReconciler) forgetPlacement(vm *infravirtrigaudiov1beta1.
 	uid := vmSchedulingUID(vm)
 	if c := r.placements.Load(); c != nil {
 		c.Forget(uid)
+		c.Disestablish(uid)
 	}
 	r.placementWrites.Delete(uid)
 	r.unschedulable.reset(uid)

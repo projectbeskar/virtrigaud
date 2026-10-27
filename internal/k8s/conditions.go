@@ -157,6 +157,13 @@ const (
 	// its current size and the resize is retried with a backoff; a shrink is
 	// never refused.
 	ReasonInsufficientHostCapacity = "InsufficientHostCapacity"
+	// ReasonInheritedAdmissionOverCapacity is Placed=False (a pending create
+	// or clone) or Reconfiguring=False (a resize) on a VM of a clustered
+	// Provider whose capacity admission was recorded by an earlier manager
+	// instance and no longer fits its host (ADR-0007 A5, inherited admission
+	// revalidation): the provider operation is not sent, the record is kept
+	// and keeps counting, and it is re-checked with a backoff.
+	ReasonInheritedAdmissionOverCapacity = "InheritedAdmissionOverCapacity"
 	// ReasonOrphanOnDeleteNotAllowed is Ready=False on a VirtualMachine being
 	// deleted with virtrigaud.io/orphan-on-delete=true whose clustered
 	// Provider is in another namespace and has not allowed consumers to

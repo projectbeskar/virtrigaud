@@ -1427,6 +1427,72 @@ follows; A2's `pendingHost` is its prerequisite.
 > without the field rewrites status without it and so drops outstanding
 > reservations; the CRD must be installed before the manager.
 >
+> *(Amended 2026-10-27, inherited admission revalidation (C1).)* Leader
+> election does not fence writes: a request the old leader sent before losing
+> its lease can still be stored after the new leader has taken over and given
+> the same capacity to another VM, and a check against one VM's
+> resourceVersion cannot see that. The old leader never acts on such a write
+> (its contexts are cancelled before the new leader can acquire the lease, so
+> it learns no success); the danger is the new leader executing the durable
+> record it finds — before this amendment a pending create was re-sent, a
+> pending clone re-admitted and a covering reservation reconfigured without a
+> capacity check.
+>
+> - **Rule.** A durable admission — a pending create's or clone target's
+>   `pendingHost` with its `pendingResources`, or a `resizeReservation` — is
+>   executed (`Create`, `Clone`, `Reconfigure`) without a check only if this
+>   manager instance recorded it or has revalidated it. Any other is
+>   revalidated first, under the Provider's lock, with the same snapshot and
+>   assumptions as every decision, the VM's own records excluded:
+>   `scheduler.CheckResize` from zero (create, clone) or from the applied
+>   footprint (resize, so only the growth is checked).
+> - **Identity.** Process-local (`assume.Cache.Establish`): VM UID, kind
+>   (create, clone, resize), Provider, host, recorded size, recorded memory
+>   ceiling, and for a clone the clone's UID. Any difference is another
+>   admission and is checked again; no API field records it. A process never
+>   regains leadership (controller-runtime exits on losing it), so a later
+>   instance always starts with none established.
+> - **Hold.** One that no longer fits is not executed. The record is kept
+>   and keeps counting, the VM gets `InheritedAdmissionOverCapacity`
+>   (`Placed=False` for a create or clone, `Reconfiguring=False` for a
+>   resize; its own size only, no host or capacity figure, as every placement
+>   message) and is re-checked with the placement
+>   backoff. Nothing is cleared or re-scheduled automatically; mutually
+>   blocking holds are resolved by an administrator (documented in
+>   `clustered-provider-inventory.md`).
+> - **Not checked:** bound VMs' ordinary lifecycle (Describe, Power, Delete,
+>   recovery), re-attaches (the domain already runs on the host), shrinks.
+> - **No new execution window.** The check needs no assumption: the record it
+>   validates was read from the informer cache, so every later decision
+>   already counts it.
+>
+> **Three distinct mechanisms.** They must not be confused:
+>
+> 1. **Inherited admission revalidation (this amendment).** It decides whether
+>    *this* instance may *execute* a durable admission it did not establish.
+>    It prevents the execution of an inherited admission that no longer fits.
+>    It does not fence the previous leader, and it does not establish that the
+>    inherited operation was never executed.
+> 2. **Existing VM execution recovery (A2, the G1/G2/G3 amendments above).**
+>    It decides what happened to an operation that may already have run: the
+>    owner-checked `Create` retry on the same `pendingHost`, ambiguous-write
+>    resolution, `Describe` raising the recorded size, the reservation kept
+>    until the provider confirms the applied size, and the idempotent
+>    synchronous `Reconfigure`. Revalidation adds a capacity condition in front
+>    of these; it replaces none of them, and a revalidation that passes still
+>    goes through them.
+> 3. **Provider-side fencing (not implemented).** Only this would stop a
+>    previous leader itself: a paused (not merely slow) leader can still act on
+>    a success it receives on resuming, before it notices it lost the lease,
+>    and send `Create`, `Clone` or `Reconfigure`. Closing that needs an epoch
+>    the providers check; no provider protocol change is made here.
+>
+> An inherited pending create whose `Create` the old leader did send, and that
+> no longer fits, is held unbound although its domain may run on the host (it
+> is counted throughout). Releasing a held admission is an administrator's
+> decision and requires positive proof that no earlier operation can still
+> execute (`clustered-provider-inventory.md`); VirtRigaud never clears one.
+>
 > **Resizes are admitted too** (a decision of this review round). A
 > `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
 > checked, under the same lock, against the free capacity of the VM's host,

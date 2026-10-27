@@ -1815,6 +1815,12 @@ func (r *VirtualMachineReconciler) createVMOn(
 		if waitingForImport {
 			return r.holdForImport(ctx, vm, k8s.ReasonWaitingForImport, waitingForImportMessage), nil
 		}
+		// An admission an earlier manager instance recorded is revalidated
+		// before its Create is sent (ADR-0007 A5): a deposed leader's late
+		// pendingHost write never authorizes one by itself.
+		if res, held, err := r.holdInheritedCreate(ctx, vm, providerCR, vmClass); held {
+			return res, err
+		}
 	} else {
 		// A single-host Create is sent only once its marker is recorded.
 		res, ok := r.requestCreate(ctx, vm, providerCR, attempt)

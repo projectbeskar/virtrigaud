@@ -34,6 +34,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 	utilk8s "github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
 
@@ -517,6 +518,9 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 		return ctrl.Result{}, false, fmt.Errorf("record pending host %s for clone target %s/%s: %w", host, target.Namespace, target.Name, err)
 	}
 	assumptions.WriteStored(uid, adm.assumeToken)
+	// Recorded by this manager instance: its Clone needs no revalidation
+	// while the target records exactly this admission.
+	assumptions.Establish(uid, pendingAdmissionOf(target, providerKeyOf(provider), assume.AdmissionClone, string(clone.UID)))
 	return ctrl.Result{}, true, nil
 }
 
