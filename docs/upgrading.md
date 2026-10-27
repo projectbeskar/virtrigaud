@@ -585,7 +585,7 @@ No action is required for new calls; a VM an rc2 manager already holds needs the
   `CreateBackoff` `Warning` event now ends with `Provider answer: <the provider's answer>`
   (sanitized, as in the `VMClone` events), as the `CreateRefused` event does. An alert that matches the old text must be updated.
 - **A `Create` the provider did not perform for a reason not tied to the VM** (`CREATE_NOT_PERFORMED`
-  alone, for example no free Proxmox VMID) shows the provider's answer in `Provisioning`
+  alone, for example a VMID that could not be allocated from `/cluster/nextid`) shows the provider's answer in `Provisioning`
   (`Failed to create VM: <answer>`) instead of "the provider could not be reached or did not answer
   in time".
 
@@ -691,13 +691,15 @@ for what rc2 already made:
   describe, after you check the hypervisor: a `VirtualMachine` held as `CreateOutcomeUnknown`
   with no VM stamped with its UID there takes the `virtrigaud.io/create-outcome=not-created@<attempt id>`
   annotation its message names. This includes a Proxmox `VirtualMachine` held after a VMID race
-  (both forms).
+  (a refusal rc2 answered "outcome unknown", or a "not performed" answer rc2 lost to a write
+  conflict).
 - **The `CreateBackoff` message has new texts.** An alert, a script or a test that matches the rc2
   text (`... it could not verify that no other VM uses its disk, or the operation failed on its
   host ...`) needs the new one, which the same section quotes.
 - **A Proxmox VMID race the provider can show is another request's is retried, not held,** also
   when PVE refuses the loser's request outright (the second form in
   [Other changes](#other-changes)).
+
 ### Verifying the upgrade
 
 - Proxmox, a VM with user-data created after the upgrade: `qm config <vmid>` shows a CD-ROM
