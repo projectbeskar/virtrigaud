@@ -38,7 +38,8 @@ providers**, and:
 
 If you are upgrading from v0.3.11 or from a v0.4.0 release candidate, do the steps of the
 sections below it as well, in the order the rest of this guide gives. If you run a v0.4.1
-release candidate, read [If you run v0.4.1-rc1](#if-you-run-v041-rc1).
+release candidate, read [If you run v0.4.1-rc1](#if-you-run-v041-rc1) or
+[If you run v0.4.1-rc2](#if-you-run-v041-rc2).
 
 The upgrade needs these actions, each described below: **before you roll the Proxmox provider**,
 SSH credentials for every Provider whose VMs carry user-data
@@ -675,6 +676,28 @@ for what rc1 already made:
 - **`virtrigaud-loadgen` configurations are accepted as before**, but `vmCount` (default 10) now
   caps the run; see [Command-line tools](#command-line-tools).
 
+### If you run v0.4.1-rc2
+
+The roll order is the same (CRDs, manager, providers). rc3 has no CRD, chart, `values.yaml` or gRPC
+change; it changes the manager and the Proxmox provider, so **roll the manager first, then the
+Proxmox providers**. The libvirt and vSphere providers have no code change since rc2. What differs
+for what rc2 already made:
+
+- **A `VirtualMachine`, `VMClone` or `VMSnapshot` that an rc2 manager already holds stays held.**
+  rc2 lost the provider's answer to an edit made during the call (see
+  [A provider's answer is no longer lost to an edit made during the call](#a-providers-answer-is-no-longer-lost-to-an-edit-made-during-the-call)),
+  so the answer is not in the object's status and rc3 cannot recover it. Release such an object as
+  that section and [Releasing a held object](provider-call-outcomes.md#releasing-a-held-object)
+  describe, after you check the hypervisor: a `VirtualMachine` held as `CreateOutcomeUnknown`
+  with no VM stamped with its UID there takes the `virtrigaud.io/create-outcome=not-created@<attempt id>`
+  annotation its message names. This includes a Proxmox `VirtualMachine` held after a VMID race
+  (both forms).
+- **The `CreateBackoff` message has new texts.** An alert, a script or a test that matches the rc2
+  text (`... it could not verify that no other VM uses its disk, or the operation failed on its
+  host ...`) needs the new one, which the same section quotes.
+- **A Proxmox VMID race the provider can show is another request's is retried, not held,** also
+  when PVE refuses the loser's request outright (the second form in
+  [Other changes](#other-changes)).
 ### Verifying the upgrade
 
 - Proxmox, a VM with user-data created after the upgrade: `qm config <vmid>` shows a CD-ROM
@@ -688,6 +711,10 @@ for what rc1 already made:
   shows `<os firmware='efi'>` with a `<loader secure='yes' ...>` path that libvirt filled in, and
   in the guest `mokutil --sb-state` prints `SecureBoot enabled`.
 - A `VMClone` with `LinkedClone` for a Proxmox Provider fails with `LinkedCloneUnsupported`.
+- A `VirtualMachine` whose first `Create` the provider answered it did not perform, and that is
+  deleted while it waits in `CreateBackoff`, is deleted without a `CreateOutcomeUnknown` hold, and
+  its `Ready` condition message starts with `The provider answered that it did not perform the last Create sent
+  for this VM` (or `The provider could not complete this VM's Create` for another failure).
 - After each provider roll, once `kubectl -n <namespace> rollout status
   deployment/virtrigaud-provider-<namespace>-<provider name>` reports the rollout complete,
   `kubectl -n <namespace> get provider <provider name> -o jsonpath='{.status.reportedCapabilities}'`
