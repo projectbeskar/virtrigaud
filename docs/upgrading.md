@@ -38,8 +38,7 @@ providers**, and:
 
 If you are upgrading from v0.3.11 or from a v0.4.0 release candidate, do the steps of the
 sections below it as well, in the order the rest of this guide gives. If you run a v0.4.1
-release candidate, read [If you run v0.4.1-rc1](#if-you-run-v041-rc1) or
-[If you run v0.4.1-rc2](#if-you-run-v041-rc2).
+release candidate, read [Upgrading from a v0.4.1 release candidate](#upgrading-from-a-v041-release-candidate).
 
 The upgrade needs these actions, each described below: **before you roll the Proxmox provider**,
 SSH credentials for every Provider whose VMs carry user-data
@@ -221,7 +220,7 @@ the VM's whole life; keep long-lived secrets out of it.
   A `VMClone` and a template `Create` without user-data keep the template's or source's order.
   Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example `scsi0`). VMs
   made by v0.4.1-rc1 can have the seed's slot at the end of their order: see
-  [If you run v0.4.1-rc1](#if-you-run-v041-rc1).
+  [If you run rc1](#if-you-run-rc1).
   → [Boot order](proxmox-cloud-init-storage.md#boot-order)
 - **A cloud-init drive left on `local` by v0.4.0** can be moved with
   `qm set <vmid> --ide2 <storage>:cloudinit` on the node.
@@ -370,7 +369,7 @@ tags. `go install github.com/projectbeskar/virtrigaud/cmd/<tool>@vX.Y.Z` does no
 `go.mod` has `replace` directives, which `go install <package>@<version>` refuses): download the
 CLI binaries from the GitHub release. See [`docs/go-modules.md`](go-modules.md).
 
-**The SDK's request log changed (rc2).** `sdk/provider/middleware` logs `gRPC request completed`
+**The SDK's request log changed.** `sdk/provider/middleware` logs `gRPC request completed`
 and `gRPC stream completed` with a `code` attribute (the gRPC code the caller receives) and an
 `error` attribute that is the status message the caller receives as a string (or nil), where it
 logged the handler's `error` value, whose text can carry a cause the provider keeps off the wire
@@ -556,7 +555,7 @@ No action is required; this changes how often a refused create is sent again.
 
 ### A provider's answer is no longer lost to an edit made during the call
 
-No action is required for new calls; a VM an rc2 manager already holds needs the action below.
+No action is required for new calls; an object that a v0.4.0 manager or a v0.4.1 release candidate already holds needs the action below.
 
 - **What changed.** A `VirtualMachine` `Create`, a single-host `VMClone` `Clone` or a
   `VMSnapshot` `SnapshotCreate` can take minutes. If the object was edited meanwhile (a label, an
@@ -569,7 +568,8 @@ No action is required for new calls; a VM an rc2 manager already holds needs the
   refusal could be held as `CloneOutcomeUnknown`. The manager now writes the answer again over
   the object as stored, as long as it still waits for that answer: see
   [An answer is not lost to an edit made during the call](provider-call-outcomes.md#an-answer-is-not-lost-to-an-edit-made-during-the-call).
-- **A VM an rc2 manager already holds stays held.** The lost answer is not in its status. If a
+- **A VM that an earlier manager already holds stays held** (v0.4.0, rc1 or rc2). The lost answer is
+  not in its status. If a
   `VirtualMachine` is held as `CreateOutcomeUnknown` and the hypervisor has no VM stamped with
   its UID, annotate it `virtrigaud.io/create-outcome=not-created@<attempt id>` as its message says
   ([A Create whose outcome is unknown](vm-provider-binding.md#a-create-whose-outcome-is-unknown-createrequested)).
@@ -594,7 +594,7 @@ No action is required for new calls; a VM an rc2 manager already holds needs the
 - **API and proto comments.** The descriptions in the CRDs and `provider.proto` are corrected
   (fields that nothing acts on say so; the two `insecureSkipVerify` switches are described as
   separate). No field, number, RPC or option changed.
-- **`providers/catalog.yaml`** now lists `v0.4.0` tags and `skip` (not run) for every conformance
+- **`providers/catalog.yaml`** now lists `v0.4.1` tags and `skip` (not run) for every conformance
   profile, instead of 0.1.x tags and passes nobody had run. It still lists the `clone` profile for
   Proxmox, which no longer advertises linked clones.
 - **CI** checks proto compatibility with `buf breaking` on pull requests.
@@ -611,16 +611,23 @@ No action is required for new calls; a VM an rc2 manager already holds needs the
   or when the other VM is being made from the PVE GUI); the `Create` is then sent again and gets a
   new VMID
   ([`Create` and `Clone` error classes](vm-ownership.md#create-and-clone-error-classes)).
-  v0.4.1-rc2 answered only the first form this way. A `VirtualMachine` already held for this
+  A `VirtualMachine` already held for this
   reason stays held after the roll: check PVE for a VM stamped with its UID, then record its id
   or set the `virtrigaud.io/create-outcome` annotation that its message names, as before.
 
-### If you run v0.4.1-rc1
+### Upgrading from a v0.4.1 release candidate
 
-The roll order is the same (CRDs, manager, providers; the rc2 CRDs differ from rc1's only in
-`description` texts). rc2 changes the manager, the libvirt, Proxmox and vSphere providers and the
-SDK's log; **roll the manager first, then every provider**, because a v0.4.1-rc1 provider does
-not carry the fixes below. The sections of this guide that are new since rc1, and worth a read even if rc1 runs well:
+v0.4.1 ships the code of v0.4.1-rc3: from rc3 there is no code, CRD, RBAC or gRPC contract
+difference, so a `helm upgrade` to the new chart version only re-tags the images. A section
+applies if you are on that candidate or an earlier one: do every section that applies to you,
+oldest first. The roll order is the usual one (CRDs, manager, providers).
+
+#### If you run rc1
+
+v0.4.1's CRDs differ from rc1's only in `description` texts. Later candidates changed the
+manager, the libvirt, Proxmox and vSphere providers and the SDK's log; **roll the manager first,
+then every provider**, because a v0.4.1-rc1 provider does not carry the fixes below. The sections
+of this guide that rc1 did not have, and worth a read even if rc1 runs well:
 [Provider status after a provider roll](#provider-status-after-a-provider-roll),
 [libvirt: firmware, secure boot and platform features](#libvirt-firmware-secure-boot-and-platform-features),
 [A refused VM create is retried with a backoff](#a-refused-vm-create-is-retried-with-a-backoff)
@@ -631,7 +638,7 @@ not carry the fixes below. The sections of this guide that are new since rc1, an
 for what rc1 already made:
 
 - **Proxmox VMs rc1 made keep their boot order.** The fix runs when a seed is attached, so only
-  a VM made by rc2 (or a request that rc2 re-sends for a VM rc1 left interrupted) gets it; no
+  a VM made by v0.4.1 (or a request that v0.4.1 re-sends for a VM rc1 left interrupted) gets it; no
   existing VM is touched. A VM with user-data that rc1 made can end with the seed's slot in its
   boot order (`order=scsi0;ide2`, `order=net0;ide2`). It is harmless: the seed is an ISO with no
   boot record, so the guest boots its disk (or tries the network first, then the seed, which does
@@ -643,14 +650,14 @@ for what rc1 already made:
   keep reporting `degraded done` (exit 2) until the VM is re-made; it configures nothing and is
   otherwise harmless.
 - **Seed lock files rc1 left stay on the node.** `/run/virtrigaud/seed-stage/.lock-<vmid>` of a VM
-  that no longer exists is an empty file on a tmpfs: remove it, or reboot the node. rc2 removes the
+  that no longer exists is an empty file on a tmpfs: remove it, or reboot the node. v0.4.1 removes the
   file when it deletes a VM that has a seed, not those of VMs that were already gone.
 - **libvirt domains rc1 made keep their definitions**, which are not redefined (a domain of a
   VMClass with `firmware: UEFI` is still BIOS, as it was under rc1). A VM of such a VMClass that you
   re-create gets UEFI, so do the check in
   [libvirt: firmware, secure boot and platform features](#libvirt-firmware-secure-boot-and-platform-features)
   first. A secure boot VM that rc1 could not define was retried every 30 seconds and keeps its
-  create marker; the next re-send (to an rc2 provider, or one the backoff sends) can define it. Its
+  create marker; the next re-send (to a v0.4.1 provider, or one the backoff sends) can define it. Its
   delete can be held as `CreateOutcomeUnknown` for up to 10 minutes, or until you set the
   annotation its message names. A disk copy an rc1 attempt left on the pool
   (`<domain>-disk.qcow2`) is overwritten by the VM's next attempt when no domain uses it (and
@@ -666,19 +673,19 @@ for what rc1 already made:
   `supportsLinkedClones: true` after rc1's roll shows the running provider's answer once the new
   manager has read it.
 - **Logs, and the status, conditions and events of `VMMigration`s, written by rc1 keep the staging
-  locations rc2 redacts** (the clustered export's S3 bucket and key, the staged-disk cleanup's
+  locations v0.4.1 redacts** (the clustered export's S3 bucket and key, the staged-disk cleanup's
   `nfs://` URL, the vSphere and Proxmox export and import lines and errors, the manager's
   `Starting disk export` and `Starting disk import` lines, and the provider answer an rc1
   `VMMigration` failure quotes): treat them as sensitive, as the
   [R28 note](#staging-locations-are-no-longer-logged-r28) says for v0.4.0's.
 - **A clustered libvirt `VMMigration` that rc1 held as `ExportOutcomeUnknown`** is re-sent after
-  35 minutes as before; the new answers apply to exports started by an rc2 provider.
+  35 minutes as before; the new answers apply to exports started by a v0.4.1 provider.
 - **`virtrigaud-loadgen` configurations are accepted as before**, but `vmCount` (default 10) now
   caps the run; see [Command-line tools](#command-line-tools).
 
-### If you run v0.4.1-rc2
+#### If you run rc2
 
-The roll order is the same (CRDs, manager, providers). rc3 has no CRD, chart, `values.yaml` or gRPC
+Since rc2, v0.4.1 has no CRD, chart, `values.yaml` or gRPC
 change; it changes the manager and the Proxmox provider, so **roll the manager first, then the
 Proxmox providers**. The libvirt and vSphere providers have no code change since rc2. What differs
 for what rc2 already made:
@@ -686,7 +693,7 @@ for what rc2 already made:
 - **A `VirtualMachine`, `VMClone` or `VMSnapshot` that an rc2 manager already holds stays held.**
   rc2 lost the provider's answer to an edit made during the call (see
   [A provider's answer is no longer lost to an edit made during the call](#a-providers-answer-is-no-longer-lost-to-an-edit-made-during-the-call)),
-  so the answer is not in the object's status and rc3 cannot recover it. Release such an object as
+  so the answer is not in the object's status and v0.4.1 cannot recover it. Release such an object as
   that section and [Releasing a held object](provider-call-outcomes.md#releasing-a-held-object)
   describe, after you check the hypervisor: a `VirtualMachine` held as `CreateOutcomeUnknown`
   with no VM stamped with its UID there takes the `virtrigaud.io/create-outcome=not-created@<attempt id>`
@@ -699,6 +706,10 @@ for what rc2 already made:
 - **A Proxmox VMID race the provider can show is another request's is retried, not held,** also
   when PVE refuses the loser's request outright (the second form in
   [Other changes](#other-changes)).
+
+#### If you run rc3
+
+Nothing is needed beyond the image re-tag.
 
 ### Verifying the upgrade
 
