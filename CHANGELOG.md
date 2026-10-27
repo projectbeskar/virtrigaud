@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-27 09:46] - v0.4.1 GA release notes, version references and module versions
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo requires name `v0.4.1` (`make set-module-versions VERSION=v0.4.1`; the `replace` directives still resolve them from the working tree). `docs/go-modules.md` uses `v0.4.1` in its release and verification examples; its rc1 mention (release candidates are tagged too) stays as history.
+- `docs/release-notes/next.md`: the notes become the v0.4.1 GA notes. The release candidate framing is gone and the rc2 and rc3 sections are folded into the main lists (as v0.4.0.md did); "Validation" is one section for the three candidates (what was validated on real hypervisors, the findings and what fixed them, what was not validated: the Proxmox imported-disk `Create`, `qm migrate` of a seeded VM on a multi-node cluster, a single-host libvirt create from a URL, the pacing of `NotFound` and `NotSupported` answers, edits during a call on a clustered Provider and on vSphere); the rc3 results are added; the upgrade section points to "Upgrading from a v0.4.1 release candidate"; the changelog link is `v0.4.0...v0.4.1`.
+- `docs/upgrading.md`: "If you run v0.4.1-rc1" and "If you run v0.4.1-rc2" are one "Upgrading from a v0.4.1 release candidate" section (rc1, rc2 and rc3: v0.4.1 ships rc3's code); the held-object action of "A provider's answer is no longer lost to an edit" now also names objects a v0.4.0 manager holds; the catalog tags read `v0.4.1`.
+- `README.md`, `charts/virtrigaud/README.md`, `ca-certs/README.md`, `examples/**` (provider image tags, install and upgrade commands, the examples' version statements), `providers/catalog.yaml`, `charts/virtrigaud-provider-runtime/values.yaml` and `charts/virtrigaud-provider-runtime/examples/*.yaml`: the current release is v0.4.1 (helm chart `0.4.1`, provider image tags `v0.4.1`). References to v0.4.0 as history (the v0.4.0 notes, ADRs, the upgrade guide's v0.3.11 sections, "since v0.4.0" statements) are unchanged.
+- `docs/image-preparation.md`: the identity-less `ImagePrepare` request from an older manager is served in v0.4.0 and v0.4.1 and refused by the release after v0.4.1 (the code still serves it: `internal/imageartifact/request.go`); "legacy mode exists for one release only" becomes "is temporary".
+- `docs/vm-ownership.md`: the Proxmox legacy name rule's phase 1 is in neither v0.4.0 nor v0.4.1 (it said "planned for v0.4.1"); the advice and the accepted risk cover both releases.
+- `docs/clustered-provider-inventory.md`, `docs/clustered-restore.md`, `docs/libvirt-clones.md`, `docs/image-preparation.md`: statements about the current behaviour (clustered Providers are experimental, linked clones are refused, Proxmox refuses URL imports, the re-attach is not automated) now name v0.4.1.
+- `docs/README.md`: the description of `docs/release-notes/next.md`.
+
+### Added
+- `docs/release-notes/next.md`, `docs/provider-call-outcomes.md` (Limitations): a Proxmox `VMClone` whose source is locked (for example while a snapshot of the source runs: `HTTP 500 VM is locked (snapshot)`) is answered "outcome unknown", held as `CloneOutcomeUnknown` and sent again after the manager's backoff (found in the rc3 lab; it completed on the re-send); a generic `VirtualMachine` status write that conflicts with an edit is logged at `ERROR` and converges on the next reconcile.
+
+### Why
+v0.4.1 ships the code of v0.4.1-rc3, which passed its lab validation (the rc2 failures B1 and B2 are fixed, and no product bug was found). The GA notes must read as the move from v0.4.0 to v0.4.1, say what was and was not validated on real hypervisors across the three candidates, and every place that tells a user which release to install or pin must name v0.4.1.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+The `go.mod` change points the in-repo requires at the v0.4.1 tags that the release workflow creates. The provider-runtime chart (deprecated) and the examples now default to the `v0.4.1` provider images.
+
 ## [2026-10-27 01:06] - Release notes for v0.4.1-rc3; rc2 lab validation results; rc2 upgrade notes; docs corrections; module versions at v0.4.1-rc3
 **Author:** @wrkode (William Rizzo)
 
