@@ -441,6 +441,11 @@ out of its order:
 | `Create` from a migration's imported disk, with user-data | `order=scsi0` |
 | `VMClone` that gets a seed (a seeded source, or inline user-data) | the source's order, without the seed's slot |
 
+The `Create` without a template row is not reachable from a `VirtualMachine`: a `VMImage`
+whose Proxmox source names no existing template is refused at `ImagePrepare`
+(`ImagePrepare requires a Proxmox image source that references an existing template`), so
+only a direct gRPC caller sends such a `Create`. It was checked that way in the v0.4.1-rc2 lab.
+
 A slot the order already named before the seed took it (for example a
 template's `ide2`, once its install ISO, now its cloud-init drive) is taken
 out too. A device the config does not have is left out of the new order (PVE
