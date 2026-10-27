@@ -203,8 +203,9 @@ the VM's whole life; keep long-lived secrets out of it.
   the user-data applied. Its first boot is a new cloud-init instance: new SSH host keys, and
   per-instance modules run again with the distribution's defaults where the user-data is empty
   (on most cloud images `disable_root: true`, `ssh_pwauth` back to the image default, and the
-  default user created; the source's users may be left without their sudo rule). Give the
-  `VMClone` inline user-data that sets what the clone must keep (users, keys, sudo rules).
+  default user created, with passwordless sudo, a locked password and no keys; what the
+  source's first boot wrote to its disk, such as its users' sudo rules, stays). Give the
+  `VMClone` inline user-data that sets what the clone must have (users, keys, sudo rules).
   A clone of a VM without a seed and without inline user-data is unchanged.
   → [Lifecycle](proxmox-cloud-init-storage.md#lifecycle)
 - **Linked clones.** A `VMClone` with `spec.options.type: LinkedClone` for a Proxmox Provider is
@@ -505,6 +506,12 @@ No action is required; this changes how often a refused create is sent again.
   in the manager's own code (so from a remote provider only `NotFound` and `Unimplemented` are
   paced): from a remote provider, `PermissionDenied` keeps `CreateRefused`,
   and `Unauthenticated` and `ResourceExhausted` are untyped and still retried every 5 seconds.
+  None of the in-tree providers answers a `Create` with `NotFound` or `Unimplemented` today
+  (libvirt maps only `Conflict`, `InvalidSpec` and host-unavailable answers; a missing Proxmox
+  template is `InvalidSpec`; a missing vSphere template is an untyped error), so the pacing of
+  these two answers is for providers that send them, such as one built on the SDK. Unit tests
+  cover it; it has not been run against a hypervisor. The `NotFound` that vSphere and Proxmox
+  answer to an `ImagePrepare` (a missing template) is paced as well.
 - **What retries at once.** A change to the `VirtualMachine`'s spec, or to the spec of its
   `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
   was refused), sends the create again within seconds and starts the backoff again from

@@ -233,7 +233,10 @@ reads `Failed to create VM (non-retryable; re-checking in ...): <detail>`. A `Co
 `PermissionDenied` keeps the `CreateRefused` backoff (15 seconds doubling to 5 minutes), and a
 "not performed" answer and every failure whose outcome is unknown keep their cadence. (A typed
 `Unauthorized` or `QuotaExceeded` comes only from the manager's own code; a remote provider's
-`Unauthenticated` or `ResourceExhausted` is untyped and keeps the 5-second cadence.) After a
+`Unauthenticated` or `ResourceExhausted` is untyped and keeps the 5-second cadence. None of
+the in-tree providers answers a `Create` with `NotFound` or `Unimplemented` today, so the
+pacing of those two is for providers that send them; unit tests cover it, and it has not been
+run against a hypervisor.) After a
 manager restart the wait is read back from the condition that holds the answer to the latest
 `Create`: `Provisioning` when it is False, `Ready` while `Provisioning` is the create marker. See
 [A refused VM create is retried with a backoff](upgrading.md#a-refused-vm-create-is-retried-with-a-backoff).
