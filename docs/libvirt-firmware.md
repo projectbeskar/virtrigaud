@@ -81,6 +81,10 @@ selects an OVMF build that does not implement Secure Boot.
   (`virsh domcapabilities --machine q35`). When the answer lists no `efi` firmware, or no
   Secure Boot capable loader for a secure-boot VM, the create is refused (`InvalidSpec`)
   without copying anything. A host that cannot answer is not refused here; the define decides.
+  The check looks for a Secure Boot capable loader, not for one whose variable store has keys
+  enrolled: on a host that has the former but lacks the descriptor of the latter, the image is
+  copied, the define is refused (`ValidationError`), and the copy is removed, on every attempt
+  (see [Refusals](#when-libvirt-refuses-the-definition)).
 
 ### Secure Boot trust model
 

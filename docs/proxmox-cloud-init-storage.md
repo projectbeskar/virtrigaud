@@ -245,14 +245,20 @@ broken SSH session.
   **with the distribution's defaults** where the user-data is empty. On most
   cloud images that means `disable_root: true` (root's `authorized_keys` is
   rewritten to refuse logins), `ssh_pwauth` back to the image default, and the
-  distribution's default user created. Do not rely on what the source's
-  user-data set up carrying over to the clone: the clone's cloud-init applies
-  only the clone's user-data. In testing, a clone made without inline
-  user-data ended up with a sudo rule (`/etc/sudoers.d/90-cloud-init-users`)
-  for the distribution's default user only, and the users the source's
-  user-data had made had **no sudo rule**. A source that relied on its own
-  settings for these should give the VMClone inline user-data that sets them
-  again (users, their keys and sudo rules), for example:
+  distribution's default user created. Do not rely on the source's
+  user-data being applied again: the clone's cloud-init applies only the
+  clone's user-data. What the source's first boot wrote to its disk
+  stays in the clone. In the v0.4.1-rc2 lab, a clone without inline user-data
+  of a fully booted Ubuntu 24.04 source (cloud-init 26.1) kept the rules of
+  the source's users: `/etc/sudoers.d/90-cloud-init-users` still listed the
+  source user's `NOPASSWD:ALL` rule, and that user still had passwordless sudo.
+  cloud-init had appended a rule for the distribution's default user, which
+  it created in the clone with **passwordless sudo**, a locked password and no
+  SSH keys. A clone of a source that had not finished its first boot was not
+  tested. So a clone ends with the source's users **and** a default user
+  that has sudo. Give the VMClone inline user-data that sets the users, keys
+  and sudo rules the clone must have (the source's own settings are not
+  re-applied), for example:
 
   ```yaml
   spec:
@@ -434,6 +440,11 @@ out of its order:
 | `Create` without a template, with user-data | PVE's default for the new VM without the seed: `order=net0` for a VM without a disk |
 | `Create` from a migration's imported disk, with user-data | `order=scsi0` |
 | `VMClone` that gets a seed (a seeded source, or inline user-data) | the source's order, without the seed's slot |
+
+The `Create` without a template row is not reachable from a `VirtualMachine`: a `VMImage`
+whose Proxmox source names no existing template is refused at `ImagePrepare`
+(`ImagePrepare requires a Proxmox image source that references an existing template`), so
+only a direct gRPC caller sends such a `Create`. It was checked that way in the v0.4.1-rc2 lab.
 
 A slot the order already named before the seed took it (for example a
 template's `ide2`, once its install ISO, now its cloud-init drive) is taken

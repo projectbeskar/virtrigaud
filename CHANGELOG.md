@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-27 01:06] - Release notes for v0.4.1-rc3; rc2 lab validation results; rc2 upgrade notes; docs corrections; module versions at v0.4.1-rc3
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo requires name `v0.4.1-rc3` (`make set-module-versions VERSION=v0.4.1-rc3`; the `replace` directives still resolve them from the working tree). The remaining mentions of `v0.4.1-rc2` in `docs/provider-call-outcomes.md`, `docs/upgrading.md` and the comments of the tests and code that pin an rc2 lab finding are history, and stay.
+- `docs/release-notes/next.md`: the cumulative v0.4.1 notes now cover rc3: the intro, `Behaviour changes` for a provider's answer that is not lost to an edit made during the call (#464) and the new `CreateBackoff` texts, the Proxmox VMID-race refusal that is "not performed" while the winner's VM is still being made (#463), the controller highlight, new Known limitations (the single-host `VMClone` target resize that is ignored, a `VMMigration`'s failed attempt whose write conflicts, the Proxmox VMID race forms that stay unknown, the Proxmox `VMSnapshot` lock timeout, the minor items the rc2 run left), the rc2 lab validation results (what was exercised per area and the result) with a findings table, the list of what the rc3 lab validation re-checks, and the full-changelog link `v0.4.0...v0.4.1-rc3`. The rc1 validation tables are shortened; no fact was dropped. A `Create` answered `NotFound` is no longer listed as a lab check: no in-tree provider answers a `Create` that way, so its pacing is covered by unit tests only.
+- `docs/upgrading.md`: a new "If you run v0.4.1-rc2" section (objects an rc2 manager already holds stay held, the new `CreateBackoff` texts), a verification step for the `CreateBackoff` message, and the `NotFound` / `Unimplemented` pacing note; `status.healthy` is omitted when `false`.
+- `docs/provider-call-outcomes.md`: the pacing of a `Create` answered `NotFound` or `Unimplemented` is for providers that send them; no in-tree provider does.
+- `docs/libvirt-firmware.md`: the check before a UEFI create looks for a Secure Boot capable loader, not for enrolled keys; a host with only the former copies the image on each attempt before libvirt refuses the define.
+
+### Fixed
+- `docs/proxmox-cloud-init-storage.md`: the VMClone lifecycle text said that, in testing, a clone had a sudo rule for the default user only and its source's users had none. On a clone of a fully booted Ubuntu 24.04 source (cloud-init 26.1) the source users' rules in `/etc/sudoers.d/90-cloud-init-users` stay, and cloud-init appends a rule for the default user, which it creates with passwordless sudo, a locked password and no keys (v0.4.1-rc2 lab, D1). The advice (give the clone user-data that sets users and sudo) is kept. `docs/upgrading.md` and `docs/release-notes/next.md` carry the same correction. The create-without-template boot order row is marked as reachable only by a direct gRPC caller.
+
+### Why
+v0.4.1-rc3 carries the fixes for the rc2 lab validation (#463, #464). Its notes must say what the rc2 run exercised and found, which claims are lab-validated and which are not, what changes for the people who run rc2, and what is still a known limitation.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+The `go.mod` change points the in-repo requires at the rc3 tags that the release workflow creates.
+
 ## [2026-10-26 23:21] - A provider's answer is no longer lost to a status-write conflict; CreateBackoff says what is known
 **Author:** @wrkode (William Rizzo)
 

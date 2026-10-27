@@ -38,7 +38,8 @@ providers**, and:
 
 If you are upgrading from v0.3.11 or from a v0.4.0 release candidate, do the steps of the
 sections below it as well, in the order the rest of this guide gives. If you run a v0.4.1
-release candidate, read [If you run v0.4.1-rc1](#if-you-run-v041-rc1).
+release candidate, read [If you run v0.4.1-rc1](#if-you-run-v041-rc1) or
+[If you run v0.4.1-rc2](#if-you-run-v041-rc2).
 
 The upgrade needs these actions, each described below: **before you roll the Proxmox provider**,
 SSH credentials for every Provider whose VMs carry user-data
@@ -203,8 +204,9 @@ the VM's whole life; keep long-lived secrets out of it.
   the user-data applied. Its first boot is a new cloud-init instance: new SSH host keys, and
   per-instance modules run again with the distribution's defaults where the user-data is empty
   (on most cloud images `disable_root: true`, `ssh_pwauth` back to the image default, and the
-  default user created; the source's users may be left without their sudo rule). Give the
-  `VMClone` inline user-data that sets what the clone must keep (users, keys, sudo rules).
+  default user created, with passwordless sudo, a locked password and no keys; what the
+  source's first boot wrote to its disk, such as its users' sudo rules, stays). Give the
+  `VMClone` inline user-data that sets what the clone must have (users, keys, sudo rules).
   A clone of a VM without a seed and without inline user-data is unchanged.
   → [Lifecycle](proxmox-cloud-init-storage.md#lifecycle)
 - **Linked clones.** A `VMClone` with `spec.options.type: LinkedClone` for a Proxmox Provider is
@@ -415,7 +417,9 @@ while the `Provider` is healthy and its runtime is rolled out. While a rollout i
 pods never become available), the capabilities of the old pods, which still serve, are kept.
 
 `status.healthy` and the `ProviderAvailable` condition now follow the Deployment: with no ready
-pod, `ProviderAvailable` is `False` (reason `DeploymentNotReady`) and `healthy` is `false`; in
+pod, `ProviderAvailable` is `False` (reason `DeploymentNotReady`) and `healthy` is `false` (the
+field is omitted from the object when `false`, so the `HEALTHY` column of `kubectl get provider`
+is empty); in
 v0.4.0 they stayed `True` once set. A reconcile that fails before it reaches the Deployment (for
 example a TLS-posture refusal) leaves them as last observed. A `VMMigration` waits in validation, and `VMAdoption` waits,
 until the provider is available again, as they did for a `Provider` that had never been ready. A
@@ -505,6 +509,12 @@ No action is required; this changes how often a refused create is sent again.
   in the manager's own code (so from a remote provider only `NotFound` and `Unimplemented` are
   paced): from a remote provider, `PermissionDenied` keeps `CreateRefused`,
   and `Unauthenticated` and `ResourceExhausted` are untyped and still retried every 5 seconds.
+  None of the in-tree providers answers a `Create` with `NotFound` or `Unimplemented` today
+  (libvirt maps only `Conflict`, `InvalidSpec` and host-unavailable answers; a missing Proxmox
+  template is `InvalidSpec`; a missing vSphere template is an untyped error), so the pacing of
+  these two answers is for providers that send them, such as one built on the SDK. Unit tests
+  cover it; it has not been run against a hypervisor. The `NotFound` that vSphere and Proxmox
+  answer to an `ImagePrepare` (a missing template) is paced as well.
 - **What retries at once.** A change to the `VirtualMachine`'s spec, or to the spec of its
   `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
   was refused), sends the create again within seconds and starts the backoff again from
@@ -575,7 +585,7 @@ No action is required for new calls; a VM an rc2 manager already holds needs the
   `CreateBackoff` `Warning` event now ends with `Provider answer: <the provider's answer>`
   (sanitized, as in the `VMClone` events), as the `CreateRefused` event does. An alert that matches the old text must be updated.
 - **A `Create` the provider did not perform for a reason not tied to the VM** (`CREATE_NOT_PERFORMED`
-  alone, for example no free Proxmox VMID) shows the provider's answer in `Provisioning`
+  alone, for example a VMID that could not be allocated from `/cluster/nextid`) shows the provider's answer in `Provisioning`
   (`Failed to create VM: <answer>`) instead of "the provider could not be reached or did not answer
   in time".
 
@@ -666,6 +676,30 @@ for what rc1 already made:
 - **`virtrigaud-loadgen` configurations are accepted as before**, but `vmCount` (default 10) now
   caps the run; see [Command-line tools](#command-line-tools).
 
+### If you run v0.4.1-rc2
+
+The roll order is the same (CRDs, manager, providers). rc3 has no CRD, chart, `values.yaml` or gRPC
+change; it changes the manager and the Proxmox provider, so **roll the manager first, then the
+Proxmox providers**. The libvirt and vSphere providers have no code change since rc2. What differs
+for what rc2 already made:
+
+- **A `VirtualMachine`, `VMClone` or `VMSnapshot` that an rc2 manager already holds stays held.**
+  rc2 lost the provider's answer to an edit made during the call (see
+  [A provider's answer is no longer lost to an edit made during the call](#a-providers-answer-is-no-longer-lost-to-an-edit-made-during-the-call)),
+  so the answer is not in the object's status and rc3 cannot recover it. Release such an object as
+  that section and [Releasing a held object](provider-call-outcomes.md#releasing-a-held-object)
+  describe, after you check the hypervisor: a `VirtualMachine` held as `CreateOutcomeUnknown`
+  with no VM stamped with its UID there takes the `virtrigaud.io/create-outcome=not-created@<attempt id>`
+  annotation its message names. This includes a Proxmox `VirtualMachine` held after a VMID race
+  (a refusal rc2 answered "outcome unknown", or a "not performed" answer rc2 lost to a write
+  conflict).
+- **The `CreateBackoff` message has new texts.** An alert, a script or a test that matches the rc2
+  text (`... it could not verify that no other VM uses its disk, or the operation failed on its
+  host ...`) needs the new one, which the same section quotes.
+- **A Proxmox VMID race the provider can show is another request's is retried, not held,** also
+  when PVE refuses the loser's request outright (the second form in
+  [Other changes](#other-changes)).
+
 ### Verifying the upgrade
 
 - Proxmox, a VM with user-data created after the upgrade: `qm config <vmid>` shows a CD-ROM
@@ -679,6 +713,10 @@ for what rc1 already made:
   shows `<os firmware='efi'>` with a `<loader secure='yes' ...>` path that libvirt filled in, and
   in the guest `mokutil --sb-state` prints `SecureBoot enabled`.
 - A `VMClone` with `LinkedClone` for a Proxmox Provider fails with `LinkedCloneUnsupported`.
+- A `VirtualMachine` whose first `Create` the provider answered it did not perform, and that is
+  deleted while it waits in `CreateBackoff`, is deleted without a `CreateOutcomeUnknown` hold, and
+  its `Ready` condition message starts with `The provider answered that it did not perform the last Create sent
+  for this VM` (or `The provider could not complete this VM's Create` for another failure).
 - After each provider roll, once `kubectl -n <namespace> rollout status
   deployment/virtrigaud-provider-<namespace>-<provider name>` reports the rollout complete,
   `kubectl -n <namespace> get provider <provider name> -o jsonpath='{.status.reportedCapabilities}'`
