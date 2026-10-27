@@ -929,16 +929,16 @@ v0.4.1-rc1 and the release binaries of `vcts` and `virtrigaud-loadgen`.
 
 | Area | What was exercised | Result |
 |---|---|---|
-| Proxmox user-data | A VM from a template with users, `write_files`, `runcmd`, packages and a static IP; delete; a VM without user-data; a Provider without SSH credentials | Passed: every key applied in the guest, the seed equal to the spec byte for byte, no user-data in any log, no volume left by a delete, no SSH login for a VM without user-data, and the credential-less Provider refused before anything was created. |
+| Proxmox user-data | A template VM with users, `write_files`, `runcmd`, packages and a static IP; delete; a VM without user-data; a Provider without SSH credentials | Passed: every key applied, the seed equal to the spec byte for byte, no user-data in any log, no volume left by a delete, no SSH login for a VM without user-data, the credential-less Provider refused before anything was created. |
 | Proxmox clones | A clone with and without inline user-data; `LinkedClone` | Passed (own instance-id, host keys and hostname, the class's memory, the source untouched; `LinkedCloneUnsupported` before any provider call). Findings below. |
 | Proxmox boot order | Four template shapes | The boot disk stayed first and the guests booted, but the seed's slot was in every VM's order (fixed in rc2). |
 | Proxmox seed blocks `qm migrate` | | Not run: the lab was a single node. |
-| libvirt snapshots (single-host and clustered) | An existing overlay file (V12), also one the SSH user could not see; a revert and a create made "not performed" by an unreadable disk image; a memory snapshot of a UEFI VM | Passed: one request, `Failed` with the documented message, the file untouched; the revert and the create were retried at 1, 2 and 4 minutes, never `Failed`, and succeeded once the permission was fixed; the memory snapshot was refused for good. The UEFI domain was built by hand (the provider could not make one; fixed in rc2). |
+| libvirt snapshots (single-host and clustered) | An existing overlay file (V12), also one the SSH user could not see; a revert and a create made "not performed" by an unreadable disk image; a memory snapshot of a UEFI VM | Passed: one request, `Failed` with the documented message, the file untouched; the revert and the create were retried at 1, 2 and 4 minutes and succeeded once the permission was fixed; the memory snapshot was refused for good. The UEFI domain was built by hand (fixed in rc2). |
 | libvirt revert with a stopped libvirtd (clustered) | The VM's own host stopped, then another host | Partial: the revert waited and then succeeded; the answer for a host lost mid-revert was never produced this way. |
-| libvirt create-from-URL | A clustered Provider with user-info and a query string in the URL | Passed: only `curl` ran, and no URL, query or user-info was in the host's process list or any log. The single-host case was not run (that Provider imports images, so the URL went through `ImagePrepare`). |
+| libvirt create-from-URL | A clustered Provider with user-info and a query string in the URL | Passed: only `curl` ran, and no URL, query or user-info was in the host's process list or any log. Not run on the single-host Provider (it imports images, so the URL went through `ImagePrepare`). |
 | libvirt pool refresh (R37); `VMClone` secrets | A single-host VM delete; the admission warning, the event and a search of every log and status | Passed (one warning and one event naming the fields, no value anywhere). |
 | R28 log redaction | Failing NFS and S3 migrations from a single-host and a clustered source | Single-host passed. The clustered Provider, the manager's start lines and the staged-disk cleanup showed staging locations (fixed in rc2). |
-| `vcts`; `virtrigaud-loadgen` | `vcts run` of the five built-in tests on three Providers, an interrupt; a dry run, runs with every operation, `--observe`, `--cleanup` and an interrupt | Passed: 5 of 5 on each, nothing left behind, the interrupted run exited 1 and cleaned up; `virtrigaud-loadgen` passed, with the findings below. |
+| `vcts`; `virtrigaud-loadgen` | `vcts run` of the five built-in tests on three Providers, an interrupt; a dry run, every operation, `--observe`, `--cleanup` and an interrupt | Passed: 5 of 5 on each, nothing left behind, the interrupted run exited 1 and cleaned up; `virtrigaud-loadgen` passed, with the findings below. |
 
 Bugs found in rc1, and the pull request that fixed each in rc2:
 
@@ -1027,8 +1027,9 @@ hypervisors. The run will re-check the rc2 failures and the rc3 changes:
 
 - Proxmox: B1 and B2 again under `virtrigaud-loadgen` (concurrency 3, `vmCount: 3`, a high create
   weight and a delete weight of 1 on a single node), including an interrupted run with `--cleanup`: no
-  `VirtualMachine` is held as `CreateOutcomeUnknown`, no `clone template request failed` answer
-  stays unknown, and every loadgen cleanup completes without an annotation.
+  `VirtualMachine` is held as `CreateOutcomeUnknown`, the loser of a race with a known winner is
+  answered "not performed" instead of "the PVE clone template request failed; a VM may have been
+  created", and every loadgen cleanup completes without an annotation.
 - A VMID race with several `VirtualMachine`s created at once, the losers deleted while they wait
   in `CreateBackoff`: the deletes finish at once and the winner's VM is untouched. The new
   `CreateBackoff` texts and the event's `Provider answer:`.
