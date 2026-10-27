@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-27 22:03] - Configurable Kubernetes client rate limits for the manager
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `cmd/manager/client_rate_limits.go`: `--client-qps` and `--client-burst` (defaults 20 and 40, the previously hard-coded values), refused at startup unless positive (and, for the QPS, finite).
+- `charts/virtrigaud/values.yaml`, `templates/manager-deployment.yaml`, `templates/_helpers.tpl`: `manager.clientQPS` / `manager.clientBurst` (defaults 20 / 40) render the flags; zero, negative or non-numeric values fail the render; empty values omit the flags.
+- `cmd/manager/client_rate_limits_test.go`: defaults, explicit values, invalid values, propagation to the per-resource REST clients, refusal at startup.
+- `hack/verify-client-rate-limits-render.sh`, `Makefile` (`verify-client-rate-limits-render`), `.github/workflows/ci.yml`: render checks for defaults, custom, invalid and empty values and `--reuse-values` from v0.3.11.
+
+### Changed
+- `cmd/manager/main.go`: the REST config takes the configured limits instead of fixed 20 / 40 (still no shared rate limiter: each REST client keeps its own token bucket) and logs the effective values once at startup.
+- `charts/virtrigaud/README.md`, `docs/upgrading.md`: what the limits control, what raising them costs, the Spike 1B measurement, an example and upgrade/rollback notes.
+
+### Why
+In the Spike 1B benchmark (10,000 VMs, 1,000 Hosts, manager 500m CPU) VM creation was paced by the manager's fixed client-side limit: at QPS 100 create-to-Ready p50 fell from 20.52 s to 7.86 s with no API-server throttling or errors. Operators need to tune the limit to their workload and control plane without a custom build.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (the chart now passes the flags; same values by default)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-27 01:43] - C′: allocation-efficient scheduler snapshots
 **Author:** @wrkode (William Rizzo)
 

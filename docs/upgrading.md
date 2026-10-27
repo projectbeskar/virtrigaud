@@ -34,6 +34,26 @@ It matters only for `topology: cluster` Providers.
   `status.placement.resizeReservation`, or check those hosts' committed gauges
   afterwards.
 
+## Upgrading from v0.4.0: configurable client rate limits
+
+The manager's client-side Kubernetes API rate limits, until now fixed at 20
+requests per second with a burst of 40, are set by `--client-qps` and
+`--client-burst` (chart: `manager.clientQPS`, `manager.clientBurst`). **Nothing
+changes unless you set them**: the defaults are 20 and 40.
+
+- **Helm:** the chart now passes `--client-qps=20 --client-burst=40` by
+  default, so the manager Deployment changes (one rollout of the manager pod)
+  with the same limits. `helm upgrade --reuse-values` from an older values
+  file renders without the flags, and the manager's defaults (the same values)
+  apply.
+- **Kustomize:** `config/manager` passes neither flag; the defaults apply.
+- **Rolling back:** an older manager does not know the flags and does not
+  start with them. Roll back the chart with the manager, or remove the flags
+  first.
+
+See [Kubernetes API client rate limits](../charts/virtrigaud/README.md#kubernetes-api-client-rate-limits)
+for what they control and what raising them costs.
+
 ## Breaking changes
 
 | Change | Who is affected | Action required |

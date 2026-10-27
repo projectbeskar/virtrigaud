@@ -197,6 +197,7 @@ func main() {
 			"such as 500Gi (use binary units: 500G is about 465.7Gi), or empty (the default) for no ceiling beyond the "+
 			"CRD's bounds. A Provider's "+infrav1beta1.ProviderMaxDiskSizeAnnotation+" annotation can only lower it. "+
 			"Disks already larger are kept and never shrunk; only new disks and growth beyond it are refused.")
+	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
 	}
@@ -216,6 +217,14 @@ func main() {
 	}
 	if maxDiskSizeLimit != nil {
 		setupLog.Info("Disk-size ceiling set", "max-disk-size", maxDiskSizeLimit.String())
+	}
+
+	// The client rate limits, checked before the manager connects to the
+	// cluster: an invalid value stops it rather than running with a limit
+	// client-go would replace (zero) or drop (negative).
+	if err := clientLimits.validate(); err != nil {
+		setupLog.Error(err, "invalid Kubernetes API client rate limits")
+		os.Exit(1)
 	}
 
 	// Emit a virtrigaud_build_info{version,git_sha,go_version,component} sample
@@ -328,12 +337,14 @@ func main() {
 		})
 	}
 
-	// Configure client with rate limiting to prevent API server overload
-	// These settings prevent reconciliation storms from overwhelming etcd/API server
-	// Conservative settings for cluster stability
+	// Client-side rate limiting keeps reconciliation storms from overwhelming
+	// the API server and etcd. --client-qps / --client-burst (defaults 20 /
+	// 40) set it; every REST client built from this config gets its own
+	// token bucket.
 	restConfig := ctrl.GetConfigOrDie()
-	restConfig.QPS = 20   // Max 20 queries per second to API server
-	restConfig.Burst = 40 // Allow bursts up to 40 requests
+	clientLimits.apply(restConfig)
+	setupLog.Info("Kubernetes API client rate limits set (client-side, per REST client; not API-server limits)",
+		"client-qps", restConfig.QPS, "client-burst", restConfig.Burst)
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
