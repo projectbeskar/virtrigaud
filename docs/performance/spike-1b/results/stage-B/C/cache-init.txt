@@ -1,0 +1,1 @@
+config C pod virtrigaud-manager-6b756775f4-wvrr4

@@ -148,7 +148,7 @@ func newLaggingClient(t *testing.T, s *runtime.Scheme, objs ...client.Object) *l
 			copies = append(copies, c)
 		}
 		return fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
-			WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+			WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 			WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).Build()
 	}
 	return &laggingClient{Client: build(), scheme: s, reader: build()}
@@ -184,7 +184,7 @@ func (c *laggingClient) catchUp(t *testing.T) {
 		objs = append(objs, items...)
 	}
 	fresh := fake.NewClientBuilder().WithScheme(c.scheme).WithObjects(objs...).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).Build()
 	c.mu.Lock()
 	c.reader = fresh
@@ -775,7 +775,7 @@ func TestClusteredCapacity_AmbiguousPendingHostWriteKeepsTheAssumption(t *testin
 			s := coverageTestScheme(t)
 			objs := append(capBase(), capHost("host-alpha", 4), capVM("vm"))
 			fc := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-				WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+				WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 				WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
 				WithInterceptorFuncs(interceptor.Funcs{
 					SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {

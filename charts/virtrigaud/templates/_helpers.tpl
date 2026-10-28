@@ -311,6 +311,41 @@ or "0.5Gi"), which the manager refuses too. Takes the root context.
 {{- end }}
 
 {{/*
+Validates a client rate-limit setting (manager.clientQPS or
+manager.clientBurst, the manager's --client-qps / --client-burst) and returns
+it as a string: "" (unset or empty, as in an older values file under
+--reuse-values, so the manager's defaults apply) or a positive number (a
+positive whole number when "whole" is true). Anything else, zero or a
+negative value fails the render: the manager would refuse to start with it.
+Takes a dict with "value", "name" (the values key, for the error message) and
+"whole".
+*/}}
+{{- define "virtrigaud.clientRateLimitValue" -}}
+{{- $v := "" -}}
+{{- if kindIs "bool" .value -}}
+{{- fail (printf "%s: invalid client rate limit %v; use a positive number, or leave it empty for the manager's default" .name .value) -}}
+{{- else if or (kindIs "float64" .value) (kindIs "int" .value) (kindIs "int64" .value) -}}
+{{- if and .whole (ne (float64 .value) (floor (float64 .value))) -}}
+{{- fail (printf "%s: invalid client rate limit %v; it must be a positive whole number" .name .value) -}}
+{{- end -}}
+{{- if .whole -}}
+{{- $v = printf "%d" (int64 .value) -}}
+{{- else -}}
+{{- $v = toString .value -}}
+{{- end -}}
+{{- else if not (kindIs "invalid" .value) -}}
+{{- $v = toString .value -}}
+{{- end -}}
+{{- if ne $v "" -}}
+{{- $pattern := ternary "^[0-9]+$" "^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$" .whole -}}
+{{- if or (not (regexMatch $pattern $v)) (le (float64 $v) 0.0) -}}
+{{- fail (printf "%s: invalid client rate limit %q; it must be a positive %s, or empty for the manager's default" .name $v (ternary "whole number" "number" .whole)) -}}
+{{- end -}}
+{{- end -}}
+{{- $v -}}
+{{- end }}
+
+{{/*
 Validates a /tmp sizeLimit setting and returns it as a string: "" (unset, as in
 an older values file under --reuse-values), "none", or a positive resource
 quantity such as 20Gi. Anything else fails the render, so a typo never reaches

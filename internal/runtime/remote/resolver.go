@@ -74,13 +74,32 @@ const circuitBreakerName = "rpc"
 // Resolver resolves Provider objects to remote provider implementations
 type Resolver struct {
 	client       client.Client
-	clients      map[string]*grpcClient.Client
+	clients      map[string]*cachedClient
 	clientsMutex sync.RWMutex
+	// providerLocks holds one *sync.Mutex per Provider (cache key). It
+	// serialises every (re)validation, dial, eviction and store for that
+	// Provider, so N reconciles arriving at once send one Validate and dial
+	// one connection, and two configurations of one Provider can never
+	// interleave their evict/store (no overwritten-but-open client, no
+	// eviction of a client another resolution just installed).
+	providerLocks sync.Map
 	// cbRegistry is the CircuitBreaker registry shared by all gRPC
 	// clients this resolver creates. May be nil — in which case clients
 	// are constructed without circuit-breaker protection (intended for
 	// tests that don't exercise the breaker path).
 	cbRegistry *resilience.Registry
+}
+
+// cachedClient is a validated gRPC client and the configuration identity it
+// was validated for (validationKey).
+type cachedClient struct {
+	client *grpcClient.Client
+	key    string
+	// uid and generation are the Provider object the client was validated
+	// for; a resolution holding an older generation of the same Provider
+	// never replaces it (newerCached).
+	uid        types.UID
+	generation int64
 }
 
 // NewResolver creates a new remote provider resolver.
@@ -95,7 +114,7 @@ type Resolver struct {
 func NewResolver(k8sClient client.Client, cbRegistry *resilience.Registry) *Resolver {
 	return &Resolver{
 		client:     k8sClient,
-		clients:    make(map[string]*grpcClient.Client),
+		clients:    make(map[string]*cachedClient),
 		cbRegistry: cbRegistry,
 	}
 }
@@ -148,26 +167,61 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 		return nil, err
 	}
 
-	// Create cache key
 	cacheKey := fmt.Sprintf("%s/%s", provider.Namespace, provider.Name)
+	key := r.validationKey(ctx, provider)
 
-	r.clientsMutex.RLock()
-	existingClient, exists := r.clients[cacheKey]
-	r.clientsMutex.RUnlock()
+	// A client validated for this exact configuration, whose connection and
+	// breaker are healthy, is reused as it is: Validate checks the provider's
+	// configuration and backend once per connection, not once per call.
+	if cached := r.cachedFor(cacheKey, key); cached != nil && r.healthy(provider, cached) {
+		return cached, nil
+	}
 
-	if exists {
-		// Validate that the client is still usable
-		if err := existingClient.Validate(ctx); err != nil {
-			// Client is no longer valid, remove it and create a new one
-			r.clientsMutex.Lock()
-			delete(r.clients, cacheKey)
-			existingClient.Close() //nolint:errcheck // Client cleanup not critical
-			r.clientsMutex.Unlock()
-		} else {
-			// Client is still valid, reuse it
-			return existingClient, nil
+	unlock := r.lockProvider(cacheKey)
+	defer unlock()
+	return r.revalidateOrConnect(ctx, provider, cacheKey, key)
+}
+
+// lockProvider takes cacheKey's Provider lock and returns its release.
+func (r *Resolver) lockProvider(cacheKey string) (unlock func()) {
+	m, _ := r.providerLocks.LoadOrStore(cacheKey, &sync.Mutex{})
+	mu, _ := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// revalidateOrConnect runs with the Provider's lock held (lockProvider) when
+// there is no reusable client: a cached client for the same configuration is
+// validated again (its connection or breaker reported trouble) and kept if it
+// passes; a cached client validated for a newer generation of the same
+// Provider is used instead of being replaced by this caller's older view;
+// otherwise the cached client, if any, is closed and a new one is dialed,
+// validated and cached. A failed validation returns an error and caches
+// nothing (fail closed).
+func (r *Resolver) revalidateOrConnect(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, cacheKey, key string) (*grpcClient.Client, error) {
+	// A resolution that completed while this one waited for the lock may
+	// have installed a client for a newer spec than the Provider object this
+	// caller holds (an informer read from before the update). Never roll it
+	// back: use it, or fail if it no longer validates.
+	if newer := r.newerCached(cacheKey, provider); newer != nil {
+		if r.healthy(provider, newer) {
+			return newer, nil
+		}
+		if err := newer.Validate(ctx); err != nil {
+			return nil, fmt.Errorf("remote provider validation failed: %w", err)
+		}
+		return newer, nil
+	}
+	// Another caller may have finished while this one waited.
+	if cached := r.cachedFor(cacheKey, key); cached != nil {
+		if r.healthy(provider, cached) {
+			return cached, nil
+		}
+		if err := cached.Validate(ctx); err == nil {
+			return cached, nil
 		}
 	}
+	r.evict(cacheKey)
 
 	// Create new gRPC client
 	tlsConfig, err := r.buildTLSConfig(ctx, provider)
@@ -197,12 +251,88 @@ func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrig
 		return nil, fmt.Errorf("remote provider validation failed: %w", err)
 	}
 
-	// Cache the client
+	// Cache the client with the configuration it was validated for. An
+	// empty key (the TLS Secret could not be read) is never reused.
 	r.clientsMutex.Lock()
-	r.clients[cacheKey] = client
+	r.clients[cacheKey] = &cachedClient{client: client, key: key, uid: provider.UID, generation: provider.Generation}
 	r.clientsMutex.Unlock()
 
 	return client, nil
+}
+
+// validationKey identifies the configuration a client is validated for: the
+// Provider object (UID, so a re-created Provider is a new one), its spec
+// (generation: endpoint, type, credentials reference, TLS block…), the
+// runtime endpoint the manager dials (status, not covered by generation), and
+// with TLS on, the TLS Secret's resourceVersion (rotated material needs a new
+// connection). Any change makes the cached client unusable and forces a new,
+// validated one. It returns "" when the TLS Secret cannot be read; "" matches
+// no cached client, so the dial path reports the error.
+func (r *Resolver) validationKey(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) string {
+	key := fmt.Sprintf("%s|%d|%s|%s", provider.UID, provider.Generation, provider.Spec.Type, provider.Status.Runtime.Endpoint)
+	rt := provider.Spec.Runtime
+	if rt == nil || rt.Service == nil || rt.Service.TLS == nil || !rt.Service.TLS.Enabled {
+		return key
+	}
+	ref := rt.Service.TLS.SecretRef
+	if ref == nil || ref.Name == "" {
+		return ""
+	}
+	secret := &corev1.Secret{}
+	if err := r.client.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: ref.Name}, secret); err != nil {
+		return ""
+	}
+	return key + "|" + secret.ResourceVersion
+}
+
+// cachedFor returns the cached client of cacheKey if it was validated for key.
+func (r *Resolver) cachedFor(cacheKey, key string) *grpcClient.Client {
+	if key == "" {
+		return nil
+	}
+	r.clientsMutex.RLock()
+	defer r.clientsMutex.RUnlock()
+	if c, ok := r.clients[cacheKey]; ok && c.key == key {
+		return c.client
+	}
+	return nil
+}
+
+// newerCached returns the cached client of cacheKey when it was validated
+// for a newer generation of the same Provider object than provider.
+func (r *Resolver) newerCached(cacheKey string, provider *infravirtrigaudiov1beta1.Provider) *grpcClient.Client {
+	r.clientsMutex.RLock()
+	defer r.clientsMutex.RUnlock()
+	if c, ok := r.clients[cacheKey]; ok && c.uid == provider.UID && c.generation > provider.Generation {
+		return c.client
+	}
+	return nil
+}
+
+// healthy reports whether a cached client may be reused without validating
+// it again: its connection is usable and the Provider's circuit breaker is
+// closed. A breaker that has opened (repeated failures) or is probing
+// (half-open) sends the caller through validation, as every call did before.
+func (r *Resolver) healthy(provider *infravirtrigaudiov1beta1.Provider, c *grpcClient.Client) bool {
+	if !c.ConnectionUsable() {
+		return false
+	}
+	if r.cbRegistry != nil {
+		if cb, ok := r.cbRegistry.Get(circuitBreakerName, string(provider.Spec.Type), provider.Name); ok && cb.GetState() != resilience.StateClosed {
+			return false
+		}
+	}
+	return true
+}
+
+// evict closes and forgets the cached client of cacheKey, if any.
+func (r *Resolver) evict(cacheKey string) {
+	r.clientsMutex.Lock()
+	defer r.clientsMutex.Unlock()
+	if c, ok := r.clients[cacheKey]; ok {
+		c.client.Close() //nolint:errcheck // Client cleanup not critical
+		delete(r.clients, cacheKey)
+	}
 }
 
 // buildTLSConfig builds TLS configuration for the gRPC client from the
@@ -348,8 +478,8 @@ func (r *Resolver) CleanupClient(provider *infravirtrigaudiov1beta1.Provider) {
 	r.clientsMutex.Lock()
 	defer r.clientsMutex.Unlock()
 
-	if client, exists := r.clients[cacheKey]; exists {
-		client.Close() //nolint:errcheck // Client cleanup not critical
+	if c, exists := r.clients[cacheKey]; exists {
+		c.client.Close() //nolint:errcheck // Client cleanup not critical
 		delete(r.clients, cacheKey)
 	}
 	if r.cbRegistry != nil {
@@ -362,8 +492,8 @@ func (r *Resolver) CleanupAllClients() {
 	r.clientsMutex.Lock()
 	defer r.clientsMutex.Unlock()
 
-	for key, client := range r.clients {
-		client.Close() //nolint:errcheck // Client cleanup not critical
+	for key, c := range r.clients {
+		c.client.Close() //nolint:errcheck // Client cleanup not critical
 		delete(r.clients, key)
 	}
 }

@@ -5,7 +5,8 @@ This guide covers upgrading a VirtRigaud installation from **v0.3.11** (2026-06-
 **breaking** or change operator-visible behavior. Read the "Breaking changes" table
 below before you upgrade, then follow "Required upgrade order". If you are on a v0.4.0
 release candidate, see [Upgrading from a v0.4.0 release candidate](#upgrading-from-a-v040-release-candidate).
-For v0.4.1, see [Upgrading from v0.4.0 to v0.4.1](#upgrading-from-v040-to-v041).
+For v0.4.1, see [Upgrading from v0.4.0 to v0.4.1](#upgrading-from-v040-to-v041); for the release after v0.4.1, see
+[Upgrading from v0.4.1 to the next release](#upgrading-from-v041-to-the-next-release).
 
 Each change below links to the in-tree page that documents it in full — this guide
 is the index and the sequencing, not a duplicate of that detail.
@@ -15,6 +16,97 @@ is the index and the sequencing, not a duplicate of that detail.
 > naming) and **#336** (chart NetworkPolicy key) — both describe a broken
 > intermediate state that only matters if you deployed a `main` build from inside
 > that window.
+
+## Upgrading from v0.4.1 to the next release
+
+This section covers the release after v0.4.1 (control-plane scalability and
+admission safety; see the [next-release notes](release-notes/next.md)). The
+roll order is unchanged: **CRDs, then the manager, then the providers**. No
+provider image change is required; the gRPC contract is unchanged.
+
+### CRDs first: `status.placement.resizeReservation`
+
+The `VirtualMachine` CRD gains one additive, optional status field,
+`status.placement.resizeReservation` (ADR-0007, *durable resize
+reservation*; see
+[`clustered-provider-inventory.md`](clustered-provider-inventory.md#durable-resize-reservation)).
+It is used only for `topology: cluster` Providers: an admitted resize-up is
+recorded there before `Reconfigure` is sent, and released only once the
+provider has confirmed the applied size.
+
+- **Install the new CRDs before the new manager.** The `virtrigaud` chart's
+  pre-upgrade CRD hook does this. With an older CRD the manager fails
+  readiness (it reports `status.placement.resizeReservation` missing),
+  whatever the Providers' topology, and because the API server prunes the
+  field, every clustered resize-up is held with
+  `Reconfiguring=False/PlacementError` instead of being sent unreserved.
+- Existing `VirtualMachine` objects need no migration: a VM without the field
+  is counted exactly as before.
+
+### Manager replacement: inherited admissions are re-checked
+
+Replacing the manager (this upgrade, a rolling restart, or any later leader
+change) hands the new instance pending creates, pending clone targets and
+resize reservations it did not admit itself. Each is checked once against its
+host's committed capacity before anything is sent to the provider. One that
+no longer fits is **not executed**: its record is kept and keeps counting, and
+the VM waits with `InheritedAdmissionOverCapacity` (`Placed=False` for a
+create or clone, `Reconfiguring=False` for a resize) until the host has room.
+Bound VMs (describe, power, delete) are not affected. Releasing a held
+admission is an administrator decision; see
+[Admissions inherited from an earlier manager](clustered-provider-inventory.md#admissions-inherited-from-an-earlier-manager).
+
+**Limitation: there is no provider-side fencing.** Leader election does not
+stop a previous manager that is paused (not merely slow) from acting on an
+answer it receives when it resumes, before it notices it lost its lease. The
+re-check above stops the *new* manager from executing an admission that no
+longer fits; it does not stop the old one. Restarting a provider pod does not
+cancel an operation it already accepted either. Make sure the old manager pod
+is gone (not merely not leading) before you act on a held admission.
+
+### Configurable Kubernetes client rate limits
+
+The manager's client-side Kubernetes API rate limits, fixed at 20 requests per
+second with a burst of 40 in v0.4.1, are set by `--client-qps` and
+`--client-burst` (chart: `manager.clientQPS`, `manager.clientBurst`).
+**Nothing changes unless you set them**: the defaults are 20 and 40. They are
+client-side limits applied to each of the manager's REST clients, not API
+server limits.
+
+- **Helm:** the chart now passes `--client-qps=20 --client-burst=40` by
+  default, so the manager Deployment changes (one rollout of the manager pod)
+  with the same limits. `helm upgrade --reuse-values` from an older values
+  file renders without the flags, and the manager's defaults (the same values)
+  apply.
+- **Kustomize:** `config/manager` passes neither flag; the defaults apply.
+
+See [Kubernetes API client rate limits](../charts/virtrigaud/README.md#kubernetes-api-client-rate-limits)
+for what they control and what raising them costs.
+
+### Rolling back to v0.4.1
+
+**A `helm rollback` can succeed and still be unsafe.** Check the conditions
+below first; Helm does not.
+
+- **Do not roll back while any clustered VM has an outstanding resize
+  reservation.** A v0.4.1 manager rewrites the whole status without
+  `status.placement.resizeReservation`, so a resize in flight (a reconfigure
+  task, a change pending a restart, or a failed or uncertain attempt) is
+  counted only at its recorded size again and its host can be overbooked.
+  This rollback is unsupported. List the VMs that still hold one:
+  `kubectl get virtualmachines -A -o jsonpath='{range .items[?(@.status.placement.resizeReservation)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`
+  and roll back only when it prints nothing (let those resizes finish, or
+  set the VMs' size back in their spec and wait until the reservation is
+  released).
+- **Roll back the manager and the chart together** (`helm rollback`). A
+  v0.4.1 manager image with this release's chart does not start: it rejects
+  the unknown `--client-qps` and `--client-burst` flags. If you roll back the
+  image alone, remove those flags first.
+- **The newer CRD stays installed**, because the chart's CRD hook runs on
+  install and upgrade, not on rollback. That is supported: a v0.4.1 manager
+  works with it.
+- After a rollback, a v0.4.1 manager does not re-check inherited admissions
+  (that check is new in this release).
 
 ## Upgrading from v0.4.0 to v0.4.1
 
@@ -1027,7 +1119,8 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
      and on every readiness probe. If the `VirtualMachine` CRD is missing
      `status.boundProvider` or the `spec.providerRef` immutability rule (#341), or
      (for clustered Providers, ADR-0007) the pending-size rule,
-     `status.placement.pendingResources` or `status.placement.memoryCeilingMiB`, or
+     `status.placement.pendingResources`, `status.placement.memoryCeilingMiB` or
+     `status.placement.resizeReservation`, or
      the `Suspended`/`Unknown` values of `status.powerState`, if the `Provider` CRD
      lacks `status.reportedCapabilities.supportsHonestReconfigure`, if
      the other three lack `spec.consumerNamespaceSelector`, or if the `VMImage` CRD

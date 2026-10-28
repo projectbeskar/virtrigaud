@@ -5,6 +5,45 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-27 23:36] - Manager image builds the whole package; inherited-admission recovery does not rely on a provider restart
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `build/Dockerfile.manager`: build `./cmd/manager` instead of the single file `cmd/manager/main.go`, which no longer compiles alone since the client rate-limit flags moved to `cmd/manager/client_rate_limits.go`.
+- `docs/clustered-provider-inventory.md`: the administrator recovery for a held inherited admission no longer offers a provider pod restart as proof that an earlier operation cannot complete; a stopping provider finishes the calls it accepted, and work handed to the host continues without it.
+- `docs/upgrading.md`: the upgrade notes say that the new manager re-checks the pending creates, clone targets and resize reservations it inherits, and link to the recovery procedure.
+
+### Why
+Integration validation of the control-plane scalability work found that the release container build failed (CI builds the package, the Dockerfile built one file), and that the recovery instructions could lead an administrator to release capacity an in-flight operation still uses.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-10-27 22:03] - Configurable Kubernetes client rate limits for the manager
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `cmd/manager/client_rate_limits.go`: `--client-qps` and `--client-burst` (defaults 20 and 40, the previously hard-coded values), refused at startup unless positive (and, for the QPS, finite).
+- `charts/virtrigaud/values.yaml`, `templates/manager-deployment.yaml`, `templates/_helpers.tpl`: `manager.clientQPS` / `manager.clientBurst` (defaults 20 / 40) render the flags; zero, negative or non-numeric values fail the render; empty values omit the flags.
+- `cmd/manager/client_rate_limits_test.go`: defaults, explicit values, invalid values, propagation to the per-resource REST clients, refusal at startup.
+- `hack/verify-client-rate-limits-render.sh`, `Makefile` (`verify-client-rate-limits-render`), `.github/workflows/ci.yml`: render checks for defaults, custom, invalid and empty values and `--reuse-values` from v0.3.11.
+
+### Changed
+- `cmd/manager/main.go`: the REST config takes the configured limits instead of fixed 20 / 40 (still no shared rate limiter: each REST client keeps its own token bucket) and logs the effective values once at startup.
+- `charts/virtrigaud/README.md`, `docs/upgrading.md`: what the limits control, what raising them costs, the Spike 1B measurement, an example and upgrade/rollback notes.
+
+### Why
+In the Spike 1B benchmark (10,000 VMs, 1,000 Hosts, manager 500m CPU) VM creation was paced by the manager's fixed client-side limit: at QPS 100 create-to-Ready p50 fell from 20.52 s to 7.86 s with no API-server throttling or errors. Operators need to tune the limit to their workload and control plane without a custom build.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (the chart now passes the flags; same values by default)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-27 09:46] - v0.4.1 GA release notes, version references and module versions
 **Author:** @wrkode (William Rizzo)
 
@@ -34,6 +73,31 @@ v0.4.1 ships the code of v0.4.1-rc3, which passed its lab validation (the rc2 fa
 
 The `go.mod` change points the in-repo requires at the v0.4.1 tags that the release workflow creates. The provider-runtime chart (deprecated) and the examples now default to the `v0.4.1` provider images.
 
+## [2026-10-27 01:43] - C′: allocation-efficient scheduler snapshots
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/virtualmachine_placement_capacity.go`: the committed-placement snapshot walks the Provider's VMs once and sums them per host; a VM is listed individually only when an assumption of it must be merged or a VM-affinity policy must match its labels; assumptions settle from the same snapshot (recorded only for assumed UIDs and the scheduled VM); hosts read without allocating.
+- `internal/controller/placement_index.go`: placement scans read the VirtualMachine informer's placement-provider index directly (`indexedReader`), without the list controller-runtime builds (`apimeta.SetList`), falling back to the List when the cache does not expose the indexer, and confirming an empty direct read through the List (a missing index is an error, never zero committed capacity).
+- `internal/scheduler`: `Request.Committed` / `ResizeRequest.Committed` (per-host sums added to `PlacedVMs`), `HostCommitted`, `NeedsPlacedVMLabels`; summed VMs in the affinity scope are refused when a policy matches labels.
+- `internal/scheduler/assume/assume.go`: `UIDs` and `Observation.Unknown`.
+- `internal/controller/virtualmachine_controller.go`, `vmclone_controller.go`, `vmclone_capacity.go`, `virtualmachine_resize_gate.go`, `placement_inherited_admission.go`: the VM, clone, resize and C1 paths use the snapshot through the direct index.
+
+### Added
+- `internal/controller/placement_reference_test.go`, `placement_snapshot_equivalence_test.go`: the previous accounting as an oracle, and equivalence of per-host sums, decisions, no-fits, resize/clone/C1 verdicts and settlement on every schedbench variant.
+- `internal/controller/placement_index_envtest_test.go`: the direct index read matches a List through a real manager cache.
+- `internal/controller/placement_index_fallback_test.go`: missing index, renamed index key, no indexer, and a bytes-per-VM guard against a regression to the List path.
+- `docs/performance/c-prime-snapshot-accounting.md`, `docs/performance/c-prime/results/summary.txt`: design, controller-runtime dependency, before/after.
+
+### Why
+The O(V) committed-placement scan under the Provider's lock copied every VirtualMachine struct and built several V-sized structures per decision (Spike 1A: 77–83 % of a decision, about half the CPU in GC). At 10,000 VMs a decision now takes 7.9 ms instead of 18.4 ms and allocates 435 KB instead of 16.9 MB; lock hold p50 fell from 20.4 ms to 7.7 ms, with identical decisions.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-27 01:06] - Release notes for v0.4.1-rc3; rc2 lab validation results; rc2 upgrade notes; docs corrections; module versions at v0.4.1-rc3
 **Author:** @wrkode (William Rizzo)
 
@@ -57,6 +121,33 @@ v0.4.1-rc3 carries the fixes for the rc2 lab validation (#463, #464). Its notes 
 - [x] Documentation only
 
 The `go.mod` change points the in-repo requires at the rc3 tags that the release workflow creates.
+
+## [2026-10-27 00:47] - Revalidate admissions inherited from an earlier manager leader (C1)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/placement_inherited_admission.go`: a pending create, a pending clone target or a resize reservation that this manager instance did not record or revalidate itself is checked again under the Provider's lock (same snapshot and assumptions, the VM's own records excluded) before `Create`, `Clone` or `Reconfigure`; one that no longer fits is held with `InheritedAdmissionOverCapacity`, its record kept and counted.
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_resize_gate.go`, `vmclone_capacity.go`: the create (including a migration target's), resize and clone paths revalidate inherited admissions; bound VMs' lifecycle and re-attaches are not checked.
+- `internal/controller/virtualmachine_clustered.go`, `vmclone_clustered.go`, `virtualmachine_resize_gate.go`: admissions this instance records are established for it.
+
+### Added
+- `internal/scheduler/assume/assume.go`: process-local admission identity (`Admission`, `Establish`, `Established`, `Disestablish`): VM, kind, Provider, host, recorded size and ceiling, operation.
+- `internal/k8s/conditions.go`: `ReasonInheritedAdmissionOverCapacity`.
+- `internal/controller/placement_handover_test.go`: two-leader create, resize and clone handovers with a delayed admission write, the visible-first control, changed admissions, bound-VM lifecycle on an over-committed host.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: A5 *inherited admission revalidation* amendment, including that it is not provider-side fencing.
+- `docs/clustered-provider-inventory.md`: inherited admissions, the hold, and administrator recovery.
+- `internal/controller/virtualmachine_clustered_test.go`, `vmclone_capacity_test.go`: same-instance retries establish their admission first.
+
+### Why
+A pendingHost or resize reservation write the previous leader sent before losing its lease could land after the new leader had given the capacity to another VM, and the new leader then executed it without a check, overbooking the host.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
 
 ## [2026-10-26 23:21] - A provider's answer is no longer lost to a status-write conflict; CreateBackoff says what is known
 **Author:** @wrkode (William Rizzo)
@@ -107,6 +198,80 @@ The v0.4.1-rc2 lab validation (finding B1) saw two concurrent Creates get the sa
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-26 22:46] - Durable resize reservations for clustered VMs (G3)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `status.placement.resizeReservation` (`PlacementResources`, optional): the footprint a clustered resize-up was admitted at; regenerated deepcopy and `config/crd/bases` (chart CRDs via `make gen-helm-crds`).
+- `internal/scheduler/assume/assume.go`: `Narrow` lowers a pick's resources once the applied size is recorded.
+- `internal/controller/vmcrdfeatures.go`: readiness requires `status.placement.resizeReservation` in the installed CRD.
+- `internal/controller/virtualmachine_resize_reservation_test.go`, `resize_reservation_envtest_test.go`: write-ahead order, restart before and after the provider call, async task with failed checks and restart, failed and restart-pending results, ambiguous/rejected/pruned writes, mixed grow/shrink with memory ceiling, spec changes while unresolved, persistence through the real CRD schema.
+
+### Fixed
+- `internal/controller/virtualmachine_resize_gate.go`: an admitted clustered resize-up is assumed with a token, written to `resizeReservation` with a checked status write, and sent to the provider only when the API server's answer carries the reservation (fails closed on an older CRD); the reservation is never lowered while set and is released only once the outcome is established (`settleResizeReservation`).
+- `internal/controller/virtualmachine_placement_capacity.go`: `admittedFootprint` counts a VM at the larger of its recorded footprint and its reservation, for scheduling, admission and the committed-capacity gauges alike.
+- `internal/controller/virtualmachine_controller.go`: `writeStatus` returns the status write's error; the steady-state pass settles the reservation.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: A5 *durable resize reservation* amendment (field, write-ahead, accounting, settlement, recovery, limits).
+- `docs/clustered-provider-inventory.md`, `docs/reconfigure-results.md`, `docs/vm-provider-binding.md`, `docs/upgrading.md`: the reservation, its lifecycle, CRD-first upgrade and rollback caveat.
+
+### Why
+A clustered resize-up was reserved only in memory and recorded after the provider applied it, so a manager restart, a leader change, a delayed task or an expired assumption could leave the larger size counted nowhere and let another VM overbook the host (G3).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (CRD before manager)
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-10-26 18:53] - Placement reservations end on evidence, never on a timer alone
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/scheduler/assume/assume.go`: an assumption records what is known of the checked write that records its pick (not sent, in flight, stored) and a token per pick. Once a write was sent it ends only when the informer snapshot shows the record, the write is rejected outright with no earlier write of the pick still able to land, or the controller resolves it from an authoritative read; past its TTL it keeps counting and is reported as stale. An unresolved pick is never replaced by a pick of another host. A VM missing from the snapshot settles an assumption only once a snapshot has shown that VM.
+- `internal/controller/virtualmachine_clustered.go`: `recordPendingHost` records the write's outcome on its assumption; `resolveUnsettledPlacement` runs before a VM whose cached copy shows no pendingHost is placed again: a stored write waits for the cache, an ambiguous one is resolved from the API server (landed; may still land, so the same write is sent again with the same precondition; can no longer land, so it is released). No Create is sent until the pending host is confirmed, and no second placement is made.
+- `internal/controller/virtualmachine_placement_capacity.go`: scheduling refuses a VM with an unresolved pick (`errPlacementUnresolved`); assumptions are settled through `committedSnapshot.observe`; stale assumptions are logged and counted (`virtrigaud_errors_total{reason="placement-assumption-stale",component="manager"}`).
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_clustered_restore.go`, `virtualmachine_resize_gate.go`, `vmclone_capacity.go`, `vmclone_clustered.go`: the pendingHost writes of a scheduled create, a re-attach, an own-domain move and a clustered clone are sent only while their assumption is still the pick, and record their outcome the same way; a clone target created in the same pass is no longer released as "gone" before the informer cache shows it.
+
+### Added
+- `internal/scheduler/assume/assume_write_test.go`, `internal/controller/virtualmachine_placement_assumption_safety_test.go`: TTL with a lagging cache (G1); an ambiguous write that landed, did not land, or was superseded (G2); unobserved VMs; token isolation; an expired pick dropped by another decision is never written.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: A5 *assumption lifetime* amendment: write states, pick tokens, settlement on positive evidence, ambiguous-write recovery from an authoritative read, TTL only for picks never written; resize durability (G3) and leader transition recorded as unresolved.
+
+### Why
+The design review of the placement ledger found that the existing protocol could lose a reservation: an assumption expired after two minutes even if its pendingHost write had landed and the informer had not shown it (G1), and a pendingHost write that timed out after landing could be followed by a second placement of the same VM that replaced, then released, the reservation of the first host (G2). A clone target created moments earlier could also be released as missing. Each allowed a competing VM to overbook a host.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-10-26 13:12] - F7: describe a newly created VM at once instead of after a fixed 5 s
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: the VirtualMachine update filter now passes the status write that first records a VM's provider id (`createRecorded`: a successful Create, or the id the clone and adoption controllers set), so the VM's first Describe, which sets its power state, IPs and Ready, runs at once. The 5 s requeue after a successful clustered Create stays as the fallback for a failed status write (`createdDescribeFallback`). Steady-state polling, error retries, the create marker, pendingHost and unknown-outcome handling are unchanged.
+
+### Added
+- `internal/controller/virtualmachine_create_readiness_test.go`: the filter passes only a first id; a recorded create is described at once and never created again; not-ready-yet, failed Describe and uncertain Create keep their existing requeues and wake nothing.
+- `docs/performance/f7-post-create-readiness.md`: root cause, change and measured effect, with the redundant fallback Describe recorded as a possible follow-up.
+- `docs/performance/spike-1b/results/stage-F7/`: the burst results (without per-snapshot metrics) and which manager image each run used, including the corrected first attempt whose Helm upgrade never switched the image.
+
+### Changed (tests)
+- `internal/controller/virtualmachine_clustered_a61_delete_test.go`: the status-only example in `TestVMUpdateNeedsReconcile` changes `status.phase` instead of `status.id`, which now passes the filter.
+
+### Why
+A Create answers only the VM's id, and the status write recording it was filtered out as status-only, so every new VM waited a fixed 5 s before the Describe that makes it Ready (Spike 1B F7). At 10,000 VMs and 1,000 hosts a 10-VM burst now reaches Ready at p50 1.3 s instead of 6.3 s; a 100-VM burst's median is unchanged at 20.5 s (its VMs queue behind serialized placement decisions) and its p99 falls from 24.1–24.7 s to 22.9 s.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 12:33] - virtrigaud-loadgen test: the full-run test always draws a create
 **Author:** @wrkode (William Rizzo)
 
@@ -121,6 +286,50 @@ The flake failed main CI after the v0.4.1-rc2 notes merged (a docs-only change).
 - [ ] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
+
+## [2026-10-26 11:28] - F5: per-host index for Host committed capacity and the in-use check
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/placement_host_index.go`: new `virtrigaud.io/placement-host` VirtualMachine field index, one value per host the VM holds a placement on (`placementHosts`: bound host and pending host, once each), qualified by its placement Provider (`<namespace>/<provider>|<host>`); a VM whose VirtualMachine finalizer is gone while it is deleted has none.
+- `internal/controller/virtualmachine_placement_capacity.go`: `committedOnHost` (the Host committed-capacity gauges) reads that host's VMs through the index instead of every VM of the Provider; the per-VM accounting (`placementProviderKey`, `placementHosts`, `sizeForAccounting`) is unchanged.
+- `internal/controller/host_controller.go`: `vmsUsingHost` (the Host in-use finalizer) reads through the index; the Host controller registers it.
+
+### Added
+- `internal/controller/placement_host_index_test.go`: indexed vs Provider-wide results for pending, bound, dual and same-host placements, recorded, pending, legacy (VMClass), hot-add and ungranted sizing, deletion with and without the finalizer, a re-bound VM, two Providers with identical Host names, and after resizes, promotion, release, re-scheduling and deletion.
+- `internal/controller/accounting_bench_test.go`: old and new per-heartbeat read benchmarks.
+
+### Why
+Spike 1B (F5): every Host heartbeat scanned every VM of its Provider to publish two gauges, about 35% of the manager's CPU at 100,000 VMs. Per heartbeat at 1,000 hosts / 100,000 VMs the read falls from 116 ms to 46 µs (benchmark, one Provider).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-10-26 11:28] - F4: count a Provider's VMs through an index and ignore Host status writes
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/provider_vm_index.go`: new `virtrigaud.io/spec-provider` VirtualMachine field index (the Provider `spec.providerRef` names, an empty namespace being the VM's own) and `hostInventoryChanged`, the Provider controller's Host watch filter.
+- `internal/controller/provider_controller.go`: `countConnectedVMs` (`Provider.status.connectedVMs`) counts through the index — the same `spec.providerRef` semantics, bound or not — instead of listing and deep-copying every VirtualMachine in the cluster. A Host event enqueues its Provider only on create, delete, or a change of the Host's spec (compared directly, not only through generation), labels, annotations, UID or deletion timestamp: the Provider reconcile reads no Host status, so the Host controller's status writes (heartbeat, capacity, health, conditions) no longer re-run it. Those heartbeats were the only thing re-running a healthy clustered Provider, so a clustered Provider now requeues itself every 60 s (`clusteredProviderResync`, the Host heartbeat interval): a fixed Host credential Secret is still rendered on the next periodic reconcile (nominally within a minute) and `connectedVMs` stays current, at one reconcile per Provider per minute instead of one per Host heartbeat. Single-topology Providers are unchanged.
+
+### Added
+- `internal/controller/provider_vm_index_test.go`: the indexed count equals the previous cluster-wide count (own-namespace and cross-namespace references, bound, unbound, deleting, re-pointed VMs), the Host watch filter's enqueue table, and the clustered Provider resync.
+- `internal/controller/provider_resync_envtest_test.go`: against a real apiserver, an unchanged clustered Provider reconcile does not roll the provider Deployment or rewrite the host-inventory Secret, Service or ServiceAccount; a shorter requeue keeps priority over the resync.
+- `docs/clustered-provider-inventory.md`: when the host-inventory Secret is re-rendered; that a credential Secret change alone is picked up on the next periodic reconcile (nominally 60 s, eventually consistent, not an end-to-end deadline), with how to start one at once; and that Host status-only changes do not reconcile the Provider.
+
+### Why
+Spike 1B (F4): every Host heartbeat re-ran its Provider's reconcile, which deep-copied every VirtualMachine in the cluster to count one Provider's: about 36% of the manager's CPU at 100,000 VMs. The count now reads only the Provider's VMs without deep copies (245 ms -> 77 ms per call at 100,000 VMs on one Provider, benchmark) and runs at the Provider's own cadence instead of on every heartbeat.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+A clustered Provider is reconciled at least every 60 s and on Provider, Host spec, HostPool and VM-use events, no longer on every Host heartbeat.
 
 ## [2026-10-26 11:25] - Release notes for v0.4.1-rc2; rc1 upgrade notes; module versions at v0.4.1-rc2
 **Author:** @wrkode (William Rizzo)
@@ -142,6 +351,52 @@ v0.4.1-rc2 carries the fixes for the rc1 lab validation (#454 to #459). Its note
 - [x] Documentation only
 
 The `go.mod` change points the in-repo requires at the rc2 tags that the release workflow creates.
+
+## [2026-10-26 08:47] - Validate a provider connection once, not on every reconcile
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/runtime/remote/resolver.go`: `GetProvider` reuses a cached provider client without a `Validate` RPC while it is still valid for the same configuration (Provider UID, spec generation, type, runtime endpoint and, with TLS, the TLS Secret's resourceVersion), its gRPC connection is usable and the Provider's circuit breaker is closed. A configuration change, a closed or failing connection, or an open or half-open breaker validates again; a new client is always validated, a failed validation is never cached, and resolutions of one Provider are serialised per Provider: concurrent callers share one dial and one `Validate`, a caller holding an older generation of the Provider never replaces (or closes) a client validated for a newer one, and a replaced client is always closed.
+- `internal/transport/grpc/client.go`: `ConnectionUsable` reports whether the client's connection is closed or failing to connect (no RPC).
+- `internal/controller/virtualmachine_controller.go`: comment updated to the resolver's validation behaviour.
+
+### Added
+- `internal/runtime/remote/resolver_validation_test.go`: reuse without re-validation, one validation for concurrent first use, re-validation on spec / endpoint / UID change and TLS Secret rotation, fail-closed validation and recovery, open-breaker re-validation, closed-connection replacement, a stale generation never replacing a newer validated client, and concurrent old/new configurations converging on the newest with every replaced client closed.
+
+### Why
+Spike 1B (F3) measured one `Validate` RPC per VM reconcile on top of each `Describe`, doubling provider RPCs; on libvirt a `Validate` is a real call to the host (#288). The cache was keyed only by Provider name, so this per-call `Validate` was also the only thing that noticed a changed endpoint, TLS Secret or a re-created Provider; those changes are now detected directly.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+Behaviour change: a provider whose backend fails while its gRPC connection stays healthy is no longer refused at `GetProvider` on the next reconcile; its calls fail instead, and once its circuit breaker opens, resolution validates again and refuses it as before.
+
+## [2026-10-26 08:13] - Fix VirtualMachine steady-state polling and skip unchanged status writes
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`: `getRequeueInterval` reads the provider's power state through `observedPowerState` (the canonical `On`/`Off`/`Suspended`/`Unknown` providers report). It compared vSphere's `poweredOn`/`poweredOff`, which no provider returns, so every running VM was polled every 10 s instead of every 2 minutes (powered off: 5 minutes). A running VM without an address, an unknown or empty state, and anything unrecognised still poll every 10 s.
+- `internal/controller/virtualmachine_controller.go`: `updateStatus` skips the status write when it would store nothing: the cached VirtualMachine is at the same resourceVersion the reconcile holds and its status is semantically equal. Any cache miss, version difference or change writes as before; checked writes (`pendingHost`, create markers, records) are not affected.
+
+### Changed
+- `internal/controller/virtualmachine_controller_test.go`, `internal/controller/virtualmachine_status_ips_test.go`: polling tests use the canonical power states and cover empty, unknown and the old vSphere strings.
+
+### Added
+- `internal/controller/virtualmachine_status_write_test.go`: an unchanged status makes no API write; IP, condition, `pendingHost` and `observedGeneration` changes are written; a stale copy still attempts its write and its conflict is not applied.
+
+### Why
+Spike 1B (`docs/performance/spike-1b-control-plane-baseline.md`, F1/F2) measured both: the 10 s poll plus an unconditional status PUT per reconcile saturated the manager's default 20 QPS client budget at 1,000 VMs, delaying creates by minutes and starving new VMs at 10,000.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+Behaviour change: a running VM's `status` (power state, IPs, Ready) is refreshed every 2 minutes and a powered-off VM's every 5 minutes, as documented; spec changes still reconcile immediately.
 
 ## [2026-10-26 06:27] - Every definite create refusal is paced; no panic for a Provider without status.runtime
 **Author:** @wrkode (William Rizzo)
@@ -167,6 +422,27 @@ A refusal that cannot change until something is edited was re-sent every 5 secon
 - [x] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
+
+## [2026-10-26 03:30] - Spike 1B: end-to-end control-plane scalability baseline (harness and report)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `test/spike1b/fakeprovider/`: test-only clustered provider served by the real provider SDK server; simulated per-host agents with owner identity, `target_host_id` routing, bounded per-host concurrency, configurable latency and fault injection, and an execution-state endpoint for auditing. Not a supported provider.
+- `test/spike1b/driver/`: load driver (setup, seeding, bursts, churn, Host heartbeat sampling) and the invariant auditor that compares placement status with the fake agents' executions.
+- `test/spike1b/workload/`: the deterministic workload model shared by the driver and the fake provider.
+- `hack/bench/spike1b/`: kind configuration, manager configurations A-D, the experiment-only manager instrumentation patch (applied to an exported copy at image build time, never to the tree), image build, stage / extras / follow-up / cache-initialisation runners, metrics collector, analysis and table scripts.
+- `docs/performance/spike-1b-control-plane-baseline.md`, `docs/performance/spike-1b/results/`: the report, lifecycle summaries and per-VM timelines, per-window analyses, audits, profiles and tables. The raw Prometheus snapshots (`results/**/metrics/`) are kept out of the repository.
+
+### Why
+Spike 1A measured the scheduler alone. This spike ran the real manager against a real API server to find which limit a manager hits first: client QPS from 1,000 VMs (a 10 s poll defect), then CPU and memory from full scans per event at 10,000-100,000 VMs, with the scheduler a minor contributor.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Test tooling and documentation only; no production code changed.
 
 ## [2026-10-26 03:00] - A refused VM create is retried with a backoff, and at once when its VMClass, VMImage, Provider or spec changes
 **Author:** @wrkode (William Rizzo)
@@ -395,6 +671,29 @@ VirtRigaud is deployed in regulated environments. Secrets must not cross the man
 - [x] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
+
+## [2026-10-25 15:10] - Spike 1A: scheduler performance and contention baseline (benchmarks and report)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/scheduler/schedbench/`: deterministic, test-only fixtures (Hosts, HostPool, VMClasses, placed VirtualMachines) and the scenario matrix for the scheduler benchmarks; no binary imports it.
+- `internal/scheduler/schedule_bench_test.go`, `internal/scheduler/export_bench_test.go`: `Schedule` and its index / filter / score phases benchmarked through a test-only seam.
+- `internal/controller/placement_bench_test.go`, `placement_bench_seam_test.go`: the real `scheduleUnderLock` / `committedPlacementsFrom` / assume-cache path benchmarked over client-go's informer store, plus a contention harness (1-16 workers, 1-8 Providers).
+- `internal/controller/placement_bench_correctness_test.go`: the harness never overbooks a host, keeps Provider partitions isolated, makes no decision without the lock, and reads what the fake client reads.
+- `internal/controller/placement_bench_envtest_test.go` (build tag `schedbench_envtest`): seam fidelity against a real informer cache.
+- `hack/bench/spike1a.sh`: runs the benchmarks, profiles and summaries.
+- `docs/performance/spike-1a-scheduler-baseline.md`, `docs/performance/spike-1a/results/`: the report and its benchmark output, benchstat summaries and profiles.
+
+### Why
+Before choosing a scheduling architecture for a large clustered Cloud Hypervisor provider, the existing scheduler needed a measured baseline: a placement decision costs O(VMs) (about 236 ms at 100,000 VMs) and is dominated by rebuilding committed placements, not by filtering or scoring.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Tests and benchmarks only; no production code changed. The correctness tests run in `make test` (about 12 s with `-race`).
 
 ## [2026-10-25 14:13] - Proxmox: full cloud-init user-data through a NoCloud seed (R35); no linked clones; clone memory sizing
 **Author:** @wrkode (William Rizzo)

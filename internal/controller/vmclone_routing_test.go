@@ -107,7 +107,7 @@ func newClusteredCloneReconciler(t *testing.T, cp *clonerProvider, objs ...clien
 		WithScheme(s).
 		WithObjects(objs...).
 		WithStatusSubresource(&infrav1beta1.VMClone{}, &infrav1beta1.VirtualMachine{}, &infrav1beta1.Host{}).
-		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetUID() == "" {

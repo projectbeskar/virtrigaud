@@ -149,7 +149,7 @@ func TestReconcile_Metrics_MissingDepsIsRequeueOutcome(t *testing.T) {
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
 		WithObjects(vm).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
 		Build()
 	r := &VirtualMachineReconciler{Client: cli, Scheme: sch}

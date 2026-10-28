@@ -142,6 +142,19 @@ manager:
   # is set.
   maxDiskSize: ""
 
+  # Client-side rate limits of the manager's Kubernetes API requests (the
+  # manager's --client-qps and --client-burst). They are enforced by the
+  # manager on its own requests, separately for each REST client it builds
+  # (one per API resource type); they are not API-server limits. clientQPS is
+  # requests per second (a positive number), clientBurst the requests a client
+  # may send at once before clientQPS applies (a positive whole number).
+  # Raising clientQPS can speed up VM creation when the manager waits on it,
+  # but uses more manager CPU (raise resources.limits.cpu with it) and puts
+  # more load on the API server and etcd; see the chart README. Empty omits
+  # the flag (the manager's defaults, 20 and 40, apply).
+  clientQPS: 20
+  clientBurst: 40
+
 # Provider configuration
 #
 # These are OPTIONAL chart-templated standalone provider Deployments. They are

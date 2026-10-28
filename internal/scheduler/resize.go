@@ -44,6 +44,8 @@ type ResizeRequest struct {
 	Current, Desired ResourceRequest
 	// PlacedVMs is what is committed on the Provider's hosts, as for Request.
 	PlacedVMs []PlacedVM
+	// Committed is committed capacity summed per host, as for Request.
+	Committed map[string]HostCommitted
 }
 
 // ResizeDoesNotFitError reports a resize-up that exceeds the free capacity of
@@ -99,7 +101,7 @@ func CheckResize(req ResizeRequest) error {
 	if !Grows(req.Current, req.Desired) {
 		return nil
 	}
-	ec, err := newEvalContext(Request{Pool: req.Pool, PlacedVMs: req.PlacedVMs, VMUID: req.VMUID, Resources: req.Desired})
+	ec, err := newEvalContext(Request{Pool: req.Pool, PlacedVMs: req.PlacedVMs, Committed: req.Committed, VMUID: req.VMUID, Resources: req.Desired})
 	if err != nil {
 		return err
 	}

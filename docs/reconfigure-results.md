@@ -174,6 +174,21 @@ the domain's actual memory maximum (`DescribeResponse.max_memory_mib`):
   pending a restart, a reconfigure task is in flight, or the last Reconfigure
   failed.
 
+## Clustered resize reservation
+
+On a clustered Provider an admitted resize-up is written to
+`status.placement.resizeReservation` before the `Reconfigure` is sent, and the
+VM counts at it until the outcome is established (see
+[`clustered-provider-inventory.md`](clustered-provider-inventory.md#durable-resize-reservation)).
+Per outcome above:
+
+- **Applied**: `status.currentResources` records the new size; the reservation
+  is released at the next reconcile whose `Describe` reports the VM's vCPUs
+  and memory maximum.
+- **RestartRequired**, **Failed**, a reconfigure task in flight, or a result
+  without the honest marker: the reservation stays, whatever the backoff or a
+  restart of the manager, until a later `Reconfigure` is applied and confirmed.
+
 ## Providers without the honest result
 
 A provider reports the contract with

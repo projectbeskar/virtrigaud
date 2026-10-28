@@ -1,0 +1,12 @@
+=== RUN   TestSchedBenchSeamMatchesFakeClient
+--- PASS: TestSchedBenchSeamMatchesFakeClient (0.19s)
+=== RUN   TestSchedBenchContentionNeverOverbooks
+=== RUN   TestSchedBenchContentionNeverOverbooks/lag0s
+=== RUN   TestSchedBenchContentionNeverOverbooks/lag2ms
+--- PASS: TestSchedBenchContentionNeverOverbooks (11.06s)
+=== RUN   TestSchedBenchPartitionsIsolated
+--- PASS: TestSchedBenchPartitionsIsolated (0.22s)
+=== RUN   TestSchedBenchLockBusyMakesNoDecision
+--- PASS: TestSchedBenchLockBusyMakesNoDecision (0.03s)
+PASS
+ok  	github.com/projectbeskar/virtrigaud/internal/controller	12.645s

@@ -186,6 +186,10 @@ type clonePlacementAdmission struct {
 	// not counted against the host) and is read from the clone's VMClass on
 	// every attempt.
 	cpuHotAdd bool
+	// assumeToken is the token of the assumption reserving the clone on its
+	// host when it was admitted in this pass; 0 when it was admitted by an
+	// earlier attempt (recorded) and no pendingHost write follows.
+	assumeToken uint64
 }
 
 // admissionFor is the admission of shape: its size, and the balloon ceiling
@@ -255,7 +259,9 @@ func (a clonePlacementAdmission) cloneClassJSON() (string, error) {
 // assume lock; otherwise it has recorded why on the target VM and the clone
 // and returns the requeue. A target that already records host as its pending
 // host holds the capacity durably (an earlier attempt admitted it): it is
-// admitted again without a check.
+// admitted again without a check when this manager instance recorded or
+// revalidated exactly that admission, and revalidated first otherwise
+// (ADR-0007 A5, inherited admission revalidation).
 func (r *VMCloneReconciler) admitClusteredClone(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
@@ -286,6 +292,9 @@ func (r *VMCloneReconciler) admitClusteredClone(
 				logger.Info("The clone's VMClass changed after the clone was admitted; the clone is made at its admitted size",
 					"admittedCPU", recorded.size.CPU, "admittedMemoryMiB", recorded.size.MemoryMiB,
 					"classCPU", adm.size.CPU, "classMemoryMiB", adm.size.MemoryMiB)
+			}
+			if res, held, err := r.holdInheritedClone(ctx, clone, target, provider, recorded, host); held {
+				return clonePlacementAdmission{}, res, false, err
 			}
 			return recorded, ctrl.Result{}, true, nil
 		}
@@ -328,7 +337,16 @@ func (r *VMCloneReconciler) admitClusteredClone(
 
 	var tooBig *scheduler.ResizeDoesNotFitError
 	switch {
+	case stderrors.Is(checkErr, errPlacementUnresolved):
+		logger.Info("An earlier placement of the clone target is not resolved yet; requeueing", "host", host)
+		return clonePlacementAdmission{}, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, false, nil
 	case checkErr == nil:
+		// The pick's assumption, revalidated after the lock was released.
+		token, ok := assumptions.TokenFor(uid, host)
+		if !ok {
+			return clonePlacementAdmission{}, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, false, nil
+		}
+		adm.assumeToken = token
 		r.unschedulable.reset(uid)
 		logger.Info("Admitted the clone against its source host's free capacity", "host", host,
 			"cpu", want.CPU, "memoryMiB", want.MemoryMiB)
@@ -376,19 +394,26 @@ func (r *VMCloneReconciler) checkCloneFitUnderLock(
 	defer unlock()
 	lockCtx, cancel := lockBoundContext(ctx)
 	defer cancel()
-	placed, err := placedWithAssumptionsFrom(lockCtx, r.Client, assumptions, providerKey, provider, target)
+	view, selfPresent, err := placedWithAssumptionsFrom(lockCtx, r.placementReader(), assumptions, providerKey, provider, target, false)
 	if err != nil {
 		return nil, true, err
 	}
 	uid := vmSchedulingUID(target)
 	checkErr = scheduler.CheckResize(scheduler.ResizeRequest{
-		Host: *h, Pool: pool, VMUID: uid, Desired: want, PlacedVMs: placed,
+		Host: *h, Pool: pool, VMUID: uid, Desired: want, PlacedVMs: view.placed, Committed: view.byHost,
 	})
 	if checkErr == nil {
-		assumptions.Assume(providerKey, assume.Assumption{
+		// A target created in this pass may not be in the snapshot yet
+		// (selfPresent false): its absence then does not settle the
+		// assumption (assume.Cache.Observe). An earlier pick of the same
+		// host whose pendingHost write is unresolved is continued, not
+		// replaced.
+		if _, ok := assumptions.Assume(providerKey, assume.Assumption{
 			UID: uid, Namespace: target.Namespace, Name: target.Name, HostID: host,
-			Labels: target.Labels, Resources: want,
-		})
+			Labels: target.Labels, Resources: want, Observed: selfPresent,
+		}); !ok {
+			checkErr = errPlacementUnresolved
+		}
 	}
 	return checkErr, true, nil
 }
@@ -466,4 +491,33 @@ func (c *clonedSize) recordOn(vm *infrav1beta1.VirtualMachine) {
 		ceiling := c.ceiling
 		vm.Status.Placement.MemoryCeilingMiB = &ceiling
 	}
+}
+
+// holdInheritedClone checks a clone target's recorded admission on host
+// before the Clone RPC: held is true, with the requeue, when an earlier
+// manager instance recorded it and it no longer fits (it is then recorded on
+// the target and the clone, and nothing is sent).
+func (r *VMCloneReconciler) holdInheritedClone(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	target *infrav1beta1.VirtualMachine,
+	provider *infrav1beta1.Provider,
+	recorded clonePlacementAdmission,
+	host string,
+) (ctrl.Result, bool, error) {
+	adm := pendingAdmissionOf(target, providerKeyOf(provider), assume.AdmissionClone, string(clone.UID))
+	want := recorded.footprint(target, host)
+	verdict, checkErr, err := checkInheritedAdmission(ctx, r.placementReader(), r.placementAssumptions(), provider, target, adm,
+		scheduler.ResourceRequest{}, want)
+	switch {
+	case err != nil:
+		return ctrl.Result{}, true, err
+	case verdict == inheritedBusy:
+		return ctrl.Result{RequeueAfter: placementLockBusyRetry()}, true, nil
+	case verdict == inheritedHeld:
+		msg := inheritedHoldMessage("the clone", want, checkErr)
+		return r.refuseClonePlacement(ctx, clone, target, k8s.ReasonInheritedAdmissionOverCapacity, msg,
+			r.unschedulable.next(vmSchedulingUID(target), time.Now())), true, nil
+	}
+	return ctrl.Result{}, false, nil
 }

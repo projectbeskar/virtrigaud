@@ -1,0 +1,73 @@
+b100x1792981912: 100 creates submitted in 164ms
+  t=   5s created=100 reconciled=100 pending=100 bound=100 ready=0 gone=0
+  t=  10s created=100 reconciled=100 pending=100 bound=100 ready=100 gone=0
+  t=   5s created=100 reconciled=100 pending=100 bound=100 ready=100 gone=100
+{
+  "run": "b100x1792981912",
+  "submitted": 100,
+  "reached": {
+    "bound": 100,
+    "created": 100,
+    "deletereq": 100,
+    "gone": 100,
+    "pending": 100,
+    "ready": 100,
+    "reconciled": 100
+  },
+  "latencyMs": {
+    "bound": {
+      "max": 2653,
+      "p50": 1480,
+      "p90": 2429,
+      "p99": 2653
+    },
+    "created": {
+      "max": 139,
+      "p50": 124,
+      "p90": 133,
+      "p99": 139
+    },
+    "deletereq": {
+      "max": 10219,
+      "p50": 10183,
+      "p90": 10207,
+      "p99": 10219
+    },
+    "gone": {
+      "max": 1254,
+      "p50": 643,
+      "p90": 1141,
+      "p99": 1254
+    },
+    "pending": {
+      "max": 2462,
+      "p50": 1264,
+      "p90": 2204,
+      "p99": 2462
+    },
+    "ready": {
+      "max": 7671,
+      "p50": 6498,
+      "p90": 7449,
+      "p99": 7671
+    },
+    "reconciled": {
+      "max": 525,
+      "p50": 266,
+      "p90": 502,
+      "p99": 525
+    }
+  },
+  "throughputPerSec": {
+    "bound": 35.87466349996133,
+    "created": 610.6929601416339,
+    "deletereq": 9.770493095706701,
+    "gone": 8.704621680258727,
+    "pending": 38.54168674407512,
+    "ready": 12.812337957557224,
+    "reconciled": 152.09921110306718
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 15.237666843
+}

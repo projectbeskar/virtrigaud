@@ -164,6 +164,13 @@ func TestMissingVMCRDFeatures(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{crdFeatureMemoryCeiling}, missing)
 
+	// A CRD without status.placement.resizeReservation (G3).
+	crd = generatedVMCRD(t)
+	unstructured.RemoveNestedField(v1beta1Schema(t, crd), "properties", "status", "properties", "placement", "properties", "resizeReservation")
+	missing, err = missingVMCRDFeatures(crd)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureResizeReservation}, missing)
+
 	// A CRD whose status.powerState predates Suspended/Unknown (review R1).
 	crd = generatedVMCRD(t)
 	require.NoError(t, unstructured.SetNestedSlice(v1beta1Schema(t, crd), []any{"On", "Off", "OffGraceful"},

@@ -597,6 +597,15 @@ jobs:
           # and that --reuse-values from v0.3.11 (fetched above) still renders.
           ./hack/verify-max-disk-size-render.sh
 
+      - name: Validate manager client rate-limit render
+        run: |
+          # Asserts manager.clientQPS / manager.clientBurst default to
+          # --client-qps=20 / --client-burst=40, that custom values reach the
+          # manager and change nothing else, that invalid values fail the
+          # render, that empty values omit the flags, and that --reuse-values
+          # from v0.3.11 (fetched above) still renders.
+          ./hack/verify-client-rate-limits-render.sh
+
       - name: Validate reserved-keys admission policy render
         run: |
           # Asserts the ValidatingAdmissionPolicy reserving the manager-owned

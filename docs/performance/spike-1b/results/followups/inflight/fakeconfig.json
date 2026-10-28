@@ -1,0 +1,2 @@
+{"latency":{"capabilities":{"mean":"1ms","jitter":"0s"},"create":{"mean":"200ms","jitter":"100ms"},"delete":{"mean":"100ms","jitter":"50ms"},"describe":{"mean":"5ms","jitter":"3ms"},"hostinfo":{"mean":"20ms","jitter":"10ms"},"listhosts":{"mean":"20ms","jitter":"0s"},"listvms":{"mean":"20ms","jitter":"0s"},"power":{"mean":"50ms","jitter":"20ms"},"taskstatus":{"mean":"1ms","jitter":"0s"},"validate":{"mean":"1ms","jitter":"0s"}},"hostConcurrency":8,"hostCPU":180,"hostMemMiB":425984,"unreachableHosts":[],"createFailBefore":0,"createLostReply":0,"reportIPs":true}
+

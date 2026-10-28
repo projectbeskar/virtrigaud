@@ -1,0 +1,42 @@
+goos: linux
+goarch: amd64
+pkg: github.com/projectbeskar/virtrigaud/internal/controller
+cpu: Intel(R) Core(TM) i9-10900X CPU @ 3.70GHz
+                                   │ docs/performance/spike-1a/results/controller-cpu1.txt │
+                                   │                        sec/op                         │
+PlacementDecision/h10_v1k/base                                                1.280m ± ∞ ¹
+PlacementDecision/h100_v1k/base                                               1.324m ± ∞ ¹
+PlacementDecision/h100_v10k/base                                              25.11m ± ∞ ¹
+PlacementDecision/h100_v100k/base                                             360.5m ± ∞ ¹
+PlacementDecision/h500_v10k/base                                              25.84m ± ∞ ¹
+PlacementDecision/h500_v100k/base                                             369.8m ± ∞ ¹
+PlacementDecision/h1000_v10k/base                                             26.68m ± ∞ ¹
+PlacementDecision/h1000_v100k/base                                            354.0m ± ∞ ¹
+geomean                                                                       32.93m
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                   │ docs/performance/spike-1a/results/controller-cpu1.txt │
+                                   │                         B/op                          │
+PlacementDecision/h10_v1k/base                                               1.573Mi ± ∞ ¹
+PlacementDecision/h100_v1k/base                                              1.575Mi ± ∞ ¹
+PlacementDecision/h100_v10k/base                                             16.16Mi ± ∞ ¹
+PlacementDecision/h100_v100k/base                                            158.5Mi ± ∞ ¹
+PlacementDecision/h500_v10k/base                                             16.19Mi ± ∞ ¹
+PlacementDecision/h500_v100k/base                                            158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v10k/base                                            16.24Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/base                                           158.4Mi ± ∞ ¹
+geomean                                                                      21.27Mi
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                   │ docs/performance/spike-1a/results/controller-cpu1.txt │
+                                   │                       allocs/op                       │
+PlacementDecision/h10_v1k/base                                                1.184k ± ∞ ¹
+PlacementDecision/h100_v1k/base                                               1.262k ± ∞ ¹
+PlacementDecision/h100_v10k/base                                              10.89k ± ∞ ¹
+PlacementDecision/h100_v100k/base                                             102.6k ± ∞ ¹
+PlacementDecision/h500_v10k/base                                              11.32k ± ∞ ¹
+PlacementDecision/h500_v100k/base                                             104.0k ± ∞ ¹
+PlacementDecision/h1000_v10k/base                                             11.83k ± ∞ ¹
+PlacementDecision/h1000_v100k/base                                            104.8k ± ∞ ¹
+geomean                                                                       14.90k
+¹ need >= 6 samples for confidence interval at level 0.95

@@ -1286,12 +1286,212 @@ follows; A2's `pendingHost` is its prerequisite.
 >   host (the A2 amendment), or the VM is deleted. The controller forgets it.
 >   After an ambiguous failure (a timeout, a 5xx, a broken connection) the
 >   write may have landed, so the assumption stays until the record shows up
->   or the TTL passes.
+>   ~~or the TTL passes~~ or the write is resolved (*assumption lifetime*
+>   amendment below).
 > - its TTL passes: for a create, twice the one-minute bound of the
 >   `pendingHost` write; for an admitted resize, the 5-minute deadline of the
 >   `Reconfigure` call plus the 30 s bound of the status write that records
 >   it, so it cannot lapse while the call it admitted still runs. The TTL is
->   only a safety net for a reconcile that died in between.
+>   only a safety net for a reconcile that died in between. *(Amended
+>   2026-10-26: a create's TTL ends only a pick whose write was never sent;
+>   see below.)*
+>
+> *(Amended 2026-10-26, assumption lifetime.)* Two defects broke the rules
+> above under informer lag. **G1:** an expired assumption was dropped even
+> when its `pendingHost` write had landed and the cache did not show it yet,
+> so the host could be given away twice. **G2:** a retry after an ambiguous
+> write could pick another host and replace the assumption, leaving the host
+> the first write recorded counted nowhere. **G4:** a clone target created and
+> admitted in the same pass was not in the informer cache yet, and
+> "absent from the snapshot" was read as "deleted". The lock, the cache and
+> every rule above are otherwise unchanged.
+>
+> - **Write state.** Each create, clone or re-attach assumption carries one of
+>   `WriteNotSent` (picked; no `pendingHost` write sent), `WriteInFlight` (sent,
+>   outcome unknown or ambiguous) and `WriteStored` (the API server stored it).
+>   A resize assumption sends no placement write and stays `WriteNotSent`.
+> - **Identity.** Each pick gets a token. A write is sent only after
+>   `BeginWrite(uid, token)` succeeds, under the cache's mutex, for the
+>   assumption that is still that pick; every outcome (stored, ambiguous,
+>   rejected) and every release is applied to that token only, so a stale
+>   reconcile cannot end a newer pick. While a VM's write is unresolved, a
+>   pick of the same host and Provider continues it (same token, larger size)
+>   and a pick of another host or Provider is refused: the VM is not placed
+>   again.
+> - **Settlement needs positive evidence**: the snapshot shows the record on
+>   the assumed host; the snapshot no longer has a VM that a snapshot taken
+>   since the pick did show (a VM not yet seen, such as a fresh clone target,
+>   is not taken as gone); the API server refused every write of the pick
+>   outright; the authoritative resolution below; or a deliberate release
+>   (deletion, host exclusion, a re-attach whose cached record names the host).
+> - **TTL.** Passing the TTL drops only a `WriteNotSent` pick: it cannot land,
+>   because once dropped its token no longer passes `BeginWrite`. A pick whose
+>   write was sent may hold its host durably, so it is kept and reported once
+>   (log and `virtrigaud_errors_total{reason="placement-assumption-stale"}`).
+>   That over-reserves, which is safe; dropping it could overbook.
+> - **Ambiguous `pendingHost` writes.** The pick and the write's
+>   resourceVersion precondition are kept, and no `Create` is sent. Before the
+>   VM is placed again, it is read from the API server (`APIReader`), outside
+>   the Provider's lock: if the stored VM names the assumed host, the write
+>   landed and the VM waits for the cache; if its resourceVersion **equals** a
+>   precondition of the pick, the same write is sent again with the same
+>   precondition (at most one lands); otherwise no write of the pick can land
+>   or still holds the host, and the assumption is released. resourceVersions
+>   are compared for equality only, and only against an authoritative read,
+>   never ordered and never against the lagging cache. A rejection of a later
+>   write does not release a pick whose earlier write was ambiguous or stored.
+> - **Cost.** The authoritative read happens only on this recovery path (and
+>   when another controller released a stored `pendingHost`, such as a
+>   migration's target, Addendum B). An ordinary successful decision makes no
+>   additional API call.
+>
+> **Not resolved by this amendment:**
+>
+> - **Resize durability (G3).** A resize assumption is in-memory and
+>   TTL-bound (5 min 30 s from admission; refreshed by each re-admission and by
+>   each successful poll of a running reconfigure task), and nothing durable
+>   records the admitted size before `Reconfigure` is called. The size applied
+>   on the host can therefore be counted nowhere: after a manager restart or
+>   leader change between the call and the `status.currentResources` write,
+>   or while an asynchronous task runs; and without a restart when the
+>   recording status write fails and the next attempt waits on the
+>   reconfigure backoff (up to 5 min) past the TTL, or a task's status polls
+>   keep failing (the error path does not refresh the TTL) for longer than it.
+>   A follow-up must record the admitted size durably before the call (as a
+>   create does with `pendingResources`), or count a VM with an unrecorded
+>   reconfigure at the larger of its current and desired sizes. *(Resolved
+>   by the durable resize reservation amendment below.)*
+> - **Leader transition.** The paragraph below holds for writes the old
+>   leader saw complete. A `pendingHost` write the old leader sent but whose
+>   answer it never saw can still be stored after the new leader's informer
+>   has synced; until the new leader's cache shows it, the host can be
+>   overbooked. Bounding this (for example, admitting no clustered placement
+>   for the write timeout after acquiring the lease) is not implemented.
+>   Write records and assumptions remain in-process and are lost on restart.
+>
+> *(Amended 2026-10-26, durable resize reservation (G3).)* An admitted
+> resize-up is now recorded durably before its `Reconfigure` is sent, with the
+> assumption protocol above; no second accounting mechanism is added.
+>
+> - **Field.** `status.placement.resizeReservation` (`PlacementResources`,
+>   additive and optional): the footprint the resize was admitted at, memory
+>   including the memory ceiling. `pendingResources`, `memoryCeilingMiB` and
+>   `currentResources` keep their meaning.
+> - **Write-ahead.** Under the Provider's lock the controller reserves, per
+>   resource, the maximum of the VM's held footprint (its recorded size with
+>   ceiling, and any reservation still set) and its requested footprint, and
+>   assumes it (`Resize`, with a token; an earlier unresolved admission of the
+>   VM is continued at the larger of both). After the lock it sends the
+>   reservation as a resourceVersion-checked status update (`BeginWrite`
+>   first). The `Reconfigure` is sent only when the write was stored **and**
+>   the API server's answer carries the reservation: a CRD older than the
+>   field prunes it, and the resize then fails closed
+>   (`Reconfiguring=False/PlacementError`, no provider call). A rejected write
+>   releases the admission; an ambiguous one keeps it counting and sends
+>   nothing, and the next admission re-sends the write (it only raises the
+>   field, so a duplicate is harmless) until the cache shows the reservation.
+> - **Accounting.** `admittedFootprint` — used alike by scheduling, resize and
+>   clone admission and the committed-capacity gauges — counts a VM at the
+>   per-resource maximum of its recorded footprint and its reservation; a
+>   resize assumption settles once the snapshot's record covers it.
+> - **Settlement.** A request within the reservation is sent under it without
+>   a new admission; the reservation is never lowered while set. It is cleared
+>   only in a reconcile where the VM needs no reconfigure, none is due or
+>   waiting on its backoff, no task is outstanding, no change is pending a
+>   restart, the last `Reconfigure` neither failed nor lacked the honest
+>   marker, and `Describe` reported the VM's vCPUs and memory maximum (which
+>   raise the recorded CPU and ceiling first), in one checked status write
+>   with that record. Only once that write is stored is the VM's resize
+>   assumption narrowed to the recorded footprint. Failed, partial,
+>   restart-pending and asynchronous outcomes keep the reservation.
+> - **Recovery.** After a restart or leader change the reservation still
+>   counts. A VM whose reservation covers its request has its `Reconfigure`
+>   sent again under it. That relies on the clustered `Reconfigure` being
+>   idempotent for a given target size: the libvirt provider's is synchronous
+>   and declarative (it sets the domain to the requested size); re-sending is
+>   accepted for it only. **Requirement for future asynchronous clustered
+>   providers (Cloud Hypervisor included):** a crash after a task started but
+>   before `reconfigureTaskRef` was stored leaves only the reservation behind,
+>   so such a provider must give each Reconfigure a recoverable operation
+>   identity (the manager can find the operation already running or finished
+>   for a VM and target) and accept a repeated request idempotently — answer
+>   with that existing operation instead of starting another. Converging on the
+>   same final configuration is not enough if a repeat can start an
+>   independent operation. This is not implemented; no such provider exists
+>   yet, and one must meet it before it is admitted for clustered resizes.
+>
+> **Still not resolved:** the leader-transition window for writes the old
+> leader never saw answered (above) is unchanged — a reservation write it sent
+> can land late, which only over-reserves, but its in-flight `pendingHost`
+> writes keep the exposure described above. A manager rolled back to a version
+> without the field rewrites status without it and so drops outstanding
+> reservations; the CRD must be installed before the manager.
+>
+> *(Amended 2026-10-27, inherited admission revalidation (C1).)* Leader
+> election does not fence writes: a request the old leader sent before losing
+> its lease can still be stored after the new leader has taken over and given
+> the same capacity to another VM, and a check against one VM's
+> resourceVersion cannot see that. The old leader never acts on such a write
+> (its contexts are cancelled before the new leader can acquire the lease, so
+> it learns no success); the danger is the new leader executing the durable
+> record it finds — before this amendment a pending create was re-sent, a
+> pending clone re-admitted and a covering reservation reconfigured without a
+> capacity check.
+>
+> - **Rule.** A durable admission — a pending create's or clone target's
+>   `pendingHost` with its `pendingResources`, or a `resizeReservation` — is
+>   executed (`Create`, `Clone`, `Reconfigure`) without a check only if this
+>   manager instance recorded it or has revalidated it. Any other is
+>   revalidated first, under the Provider's lock, with the same snapshot and
+>   assumptions as every decision, the VM's own records excluded:
+>   `scheduler.CheckResize` from zero (create, clone) or from the applied
+>   footprint (resize, so only the growth is checked).
+> - **Identity.** Process-local (`assume.Cache.Establish`): VM UID, kind
+>   (create, clone, resize), Provider, host, recorded size, recorded memory
+>   ceiling, and for a clone the clone's UID. Any difference is another
+>   admission and is checked again; no API field records it. A process never
+>   regains leadership (controller-runtime exits on losing it), so a later
+>   instance always starts with none established.
+> - **Hold.** One that no longer fits is not executed. The record is kept
+>   and keeps counting, the VM gets `InheritedAdmissionOverCapacity`
+>   (`Placed=False` for a create or clone, `Reconfiguring=False` for a
+>   resize; its own size only, no host or capacity figure, as every placement
+>   message) and is re-checked with the placement
+>   backoff. Nothing is cleared or re-scheduled automatically; mutually
+>   blocking holds are resolved by an administrator (documented in
+>   `clustered-provider-inventory.md`).
+> - **Not checked:** bound VMs' ordinary lifecycle (Describe, Power, Delete,
+>   recovery), re-attaches (the domain already runs on the host), shrinks.
+> - **No new execution window.** The check needs no assumption: the record it
+>   validates was read from the informer cache, so every later decision
+>   already counts it.
+>
+> **Three distinct mechanisms.** They must not be confused:
+>
+> 1. **Inherited admission revalidation (this amendment).** It decides whether
+>    *this* instance may *execute* a durable admission it did not establish.
+>    It prevents the execution of an inherited admission that no longer fits.
+>    It does not fence the previous leader, and it does not establish that the
+>    inherited operation was never executed.
+> 2. **Existing VM execution recovery (A2, the G1/G2/G3 amendments above).**
+>    It decides what happened to an operation that may already have run: the
+>    owner-checked `Create` retry on the same `pendingHost`, ambiguous-write
+>    resolution, `Describe` raising the recorded size, the reservation kept
+>    until the provider confirms the applied size, and the idempotent
+>    synchronous `Reconfigure`. Revalidation adds a capacity condition in front
+>    of these; it replaces none of them, and a revalidation that passes still
+>    goes through them.
+> 3. **Provider-side fencing (not implemented).** Only this would stop a
+>    previous leader itself: a paused (not merely slow) leader can still act on
+>    a success it receives on resuming, before it notices it lost the lease,
+>    and send `Create`, `Clone` or `Reconfigure`. Closing that needs an epoch
+>    the providers check; no provider protocol change is made here.
+>
+> An inherited pending create whose `Create` the old leader did send, and that
+> no longer fits, is held unbound although its domain may run on the host (it
+> is counted throughout). Releasing a held admission is an administrator's
+> decision and requires positive proof that no earlier operation can still
+> execute (`clustered-provider-inventory.md`); VirtRigaud never clears one.
 >
 > **Resizes are admitted too** (a decision of this review round). A
 > `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
@@ -1304,7 +1504,9 @@ follows; A2's `pendingHost` is its prerequisite.
 > same backoff. A host that is not registered, or whose HostPool is missing or
 > belongs to another Provider, fails closed. An admitted resize is assumed at
 > its new size until `status.currentResources` records it (the
-> assumption is kept alive while a reconfigure task runs), and the scheduler
+> assumption is kept alive while a reconfigure task runs; since the durable
+> resize reservation amendment above, recorded first in
+> `status.placement.resizeReservation`), and the scheduler
 > counts each VM once per host at the larger of its listed sizes, so a
 > concurrent create or resize sees it before it is applied.
 >

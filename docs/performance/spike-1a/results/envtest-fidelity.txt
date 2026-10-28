@@ -1,0 +1,12 @@
+BenchmarkEnvtestScan/v10000/real-cache-20         	      10	  16710245 ns/op	        13.12 real-cache-heap-MiB	13900542 B/op	   11106 allocs/op
+BenchmarkEnvtestScan/v10000/real-cache-20         	      10	  19142725 ns/op	        13.12 real-cache-heap-MiB	13900550 B/op	   11106 allocs/op
+BenchmarkEnvtestScan/v10000/real-cache-20         	      10	  19006997 ns/op	        13.12 real-cache-heap-MiB	13900572 B/op	   11106 allocs/op
+BenchmarkEnvtestScan/v10000/seam-20               	      10	  17392036 ns/op	        13.12 real-cache-heap-MiB	13895776 B/op	   10981 allocs/op
+BenchmarkEnvtestScan/v10000/seam-20               	      10	  18357331 ns/op	        13.12 real-cache-heap-MiB	13895764 B/op	   10981 allocs/op
+BenchmarkEnvtestScan/v10000/seam-20               	      10	  20197680 ns/op	        13.12 real-cache-heap-MiB	13895766 B/op	   10981 allocs/op
+BenchmarkEnvtestScan/v100000/real-cache-20         	      10	 191941116 ns/op	       131.8 real-cache-heap-MiB	139892340 B/op	  102143 allocs/op
+BenchmarkEnvtestScan/v100000/real-cache-20         	      10	 181005222 ns/op	       131.8 real-cache-heap-MiB	139892340 B/op	  102143 allocs/op
+BenchmarkEnvtestScan/v100000/real-cache-20         	      10	 182985262 ns/op	       131.8 real-cache-heap-MiB	139892344 B/op	  102143 allocs/op
+BenchmarkEnvtestScan/v100000/seam-20               	      10	 184661832 ns/op	       131.8 real-cache-heap-MiB	139885268 B/op	  101946 allocs/op
+BenchmarkEnvtestScan/v100000/seam-20               	      10	 185802377 ns/op	       131.8 real-cache-heap-MiB	139885270 B/op	  101946 allocs/op
+BenchmarkEnvtestScan/v100000/seam-20               	      10	 187078988 ns/op	       131.8 real-cache-heap-MiB	139885268 B/op	  101946 allocs/op

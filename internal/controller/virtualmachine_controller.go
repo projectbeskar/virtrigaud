@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -74,6 +76,10 @@ const (
 	errReasonProviderDelete   = "provider-delete"
 	errReasonImagePrepare     = "image-prepare"
 	errReasonPlacement        = "placement"
+	// errReasonPlacementAssumptionStale counts placement assumptions whose TTL
+	// passed while their pendingHost write was unresolved: they keep counting,
+	// and the informer cache lagging that long is worth investigating.
+	errReasonPlacementAssumptionStale = "placement-assumption-stale"
 	// errReasonProviderCreateRejected counts provider Create calls refused with
 	// a NON-retryable error (Conflict / InvalidSpec) — notably a libvirt domain
 	// name already taken by a domain this VirtualMachine does not own. A rising
@@ -137,6 +143,10 @@ type clusterPlacement struct {
 	// memoryCeilingMiB is the balloon ceiling the Create provisions (0: none),
 	// recorded as status.placement.memoryCeilingMiB.
 	memoryCeilingMiB int64
+	// assumeToken is the token of the assumption that reserves this placement
+	// (assume.Cache); the pendingHost write is sent only while it is still the
+	// VM's assumption.
+	assumeToken uint64
 }
 
 // Clustered-VM lifecycle cadences (ADR-0007 Addendum A). Each is deliberately
@@ -201,6 +211,12 @@ const eventReasonDeleteBlocked = k8s.ReasonDeleteBlocked
 // providerErrorRetryInterval is the requeue cadence after a provider Create /
 // image-prepare failure that may be transient (host unreachable, task error).
 const providerErrorRetryInterval = 5 * time.Second
+
+// createdDescribeFallback is the requeue after a successful clustered Create.
+// The status write recording its id normally starts the first Describe at
+// once (createRecorded); this requeue covers that write failing, so the VM is
+// still re-checked at the historical cadence.
+const createdDescribeFallback = 5 * time.Second
 
 // providerFailureOutcome classifies a provider Create / image-prepare error into
 // the VM condition reason and requeue cadence: a non-retryable InvalidSpec
@@ -294,6 +310,14 @@ type VirtualMachineReconciler struct {
 	// never has one. In-process state is correct: only the elected leader
 	// runs this reconciler.
 	placements atomic.Pointer[assume.Cache]
+	// placementWrites holds, per VM UID, the placement of a pendingHost write
+	// that failed ambiguously, so it can be sent again unchanged (with the same
+	// precondition) instead of placing the VM anew
+	// (resolveUnsettledPlacement). In-process state, like placements.
+	placementWrites sync.Map
+	// placementIndex is the VirtualMachine informer's indexer, read directly
+	// by placement scans (placementReader); nil reads them through Client.
+	placementIndex toolscache.Indexer
 	// unschedulable paces the re-scheduling of clustered VMs no host can take.
 	unschedulable unschedulableBackoff
 	// reconfigureRetry paces re-sending a failed Reconfigure, per VM: from
@@ -587,9 +611,10 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Provider instance obtained successfully", "provider", provider.Name)
 
-	// Provider liveness is already verified by getProviderInstance →
-	// Resolver.GetProvider (it validates the cached/new client before returning).
-	// Re-validating here doubled the real virsh-over-ssh Validate calls on every
+	// Provider validation is the Resolver's job: GetProvider validates each new
+	// connection, and validates again whenever the Provider's configuration
+	// changes, its connection fails or its circuit breaker opens; a healthy
+	// cached client is reused without a Validate RPC. Re-validating here doubled the real virsh-over-ssh Validate calls on every
 	// reconcile, which — under 10-way concurrency post-adoption — became a fork
 	// storm on the libvirt host (#288). The image-prepare / create RPCs below are
 	// themselves the liveness test: a dead provider fails them and the reconcile
@@ -655,8 +680,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 		if !done {
 			logger.Info("Reconfigure task still in progress", "taskRef", vm.Status.ReconfigureTaskRef)
-			// An admitted clustered resize stays assumed until the task ends
-			// and status.currentResources records the new size.
+			// An admitted clustered resize stays reserved
+			// (status.placement.resizeReservation) until the task ends and
+			// its outcome is established; its assumption is refreshed too.
 			if c := r.placements.Load(); c != nil {
 				c.Touch(vmSchedulingUID(vm))
 			}
@@ -993,6 +1019,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// the limit again (lowered, or the limit raised): nothing would be
 	// withheld any more (clearDiskSizeWithinLimitWhenFits).
 	clearDiskSizeWithinLimitWhenFits(vm, r.MaxDiskSize, provider, vmClass)
+	// A clustered resize whose outcome the provider has now established
+	// releases its durable reservation (settleResizeReservation); not while
+	// a reconfigure is due or waiting on its backoff.
+	if ref.Routed() && !needsRC && !recheckDue && recheckIn == 0 {
+		r.settleResizeReservation(ctx, vm, vmClass, desc)
+	}
 
 	r.updateStatus(ctx, vm)
 
@@ -1758,6 +1790,11 @@ func (r *VirtualMachineReconciler) createVMOn(
 	if clustered {
 		host := pendingHost(vm)
 		if host == "" {
+			// An earlier pick whose pendingHost write the cache does not show
+			// yet is resolved first; the VM is never placed twice (G2).
+			if res, held, rerr := r.resolveUnsettledPlacement(ctx, vm, providerCR); held {
+				return res, rerr
+			}
 			// ADR-0007 A6, R1: the restore marker names this VM's own UID
 			// before its first pendingHost write, so a backup or an exported
 			// manifest of it carries the UID it entered placement under.
@@ -1820,6 +1857,12 @@ func (r *VirtualMachineReconciler) createVMOn(
 		// to host and recorded it (ADR-0007 Addendum B, B1).
 		if waitingForImport {
 			return r.holdForImport(ctx, vm, k8s.ReasonWaitingForImport, waitingForImportMessage), nil
+		}
+		// An admission an earlier manager instance recorded is revalidated
+		// before its Create is sent (ADR-0007 A5): a deposed leader's late
+		// pendingHost write never authorizes one by itself.
+		if res, held, err := r.holdInheritedCreate(ctx, vm, providerCR, vmClass); held {
+			return res, err
 		}
 	} else {
 		// A single-host Create is sent only once its marker is recorded.
@@ -1949,7 +1992,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 		return r.recordCreatedVM(ctx, vm)
 	}
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: createdDescribeFallback}, nil
 }
 
 // handleRejectedCreate handles a provider Create that failed with a
@@ -2209,6 +2252,10 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		logger.V(1).Info("Provider's placement lock is busy; requeueing", "provider", providerKey)
 		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
 	}
+	if stderrors.Is(err, errPlacementUnresolved) {
+		logger.Info("An earlier placement of this VM is not resolved yet; not placing it again", "provider", providerKey)
+		return nil, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, nil
+	}
 	var infraErr *placementInfraError
 	if stderrors.As(err, &infraErr) {
 		return nil, ctrl.Result{}, infraErr.err
@@ -2266,11 +2313,18 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
 
+	// The pick's assumption, revalidated after the lock was released: its
+	// pendingHost write is sent only while it is still this VM's assumption.
+	token, ok := r.placementAssumptions().TokenFor(vmSchedulingUID(vm), result.HostID)
+	if !ok {
+		logger.Info("The placement assumption was settled or replaced before its pendingHost write; requeueing without writing it", "host", result.HostID)
+		return nil, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, nil
+	}
 	r.unschedulable.reset(vmSchedulingUID(vm))
 	logger.Info("Scheduled VM onto clustered host",
 		"vm", vm.Name, "pool", pool.Name, "host", result.HostID, "reason", result.Reason)
 	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason,
-		resources: effective, memoryCeilingMiB: ceiling}, ctrl.Result{}, nil
+		resources: effective, memoryCeilingMiB: ceiling, assumeToken: token}, ctrl.Result{}, nil
 }
 
 // requiredNetworksForScheduling derives the ADR-0007 D6 network-visibility
@@ -3044,13 +3098,43 @@ func overrideImageWithPreparedLocation(
 // it carries (derivePhase), so the phase is the same whichever path wrote it,
 // and Ready never True while a requested snapshot revert is pending, in flight
 // or failed (applySnapshotRevertReadiness).
+//
+// The write is skipped when it would change nothing (statusUnchanged): a
+// steady-state reconcile of a healthy VM recomputes the same status every
+// poll.
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	if err := r.writeStatus(ctx, vm); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
+	}
+}
+
+// writeStatus is updateStatus returning the write's error, for a caller that
+// acts only once the status is stored.
+func (r *VirtualMachineReconciler) writeStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) error {
 	boundSnapshotRevertMessage(vm)
 	applySnapshotRevertReadiness(vm)
 	applyDerivedPhase(vm)
-	if err := r.Status().Update(ctx, vm); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
+	if r.statusUnchanged(ctx, vm) {
+		return nil
 	}
+	return r.Status().Update(ctx, vm)
+}
+
+// statusUnchanged reports whether writing vm's status would be a no-op: the
+// cached object is at the very resourceVersion vm carries and its status is
+// semantically equal to vm's. At that version the API server holds exactly
+// the cached status, so the Update would store nothing. Any doubt — a cache
+// miss or read error, a cache that is behind or ahead of vm — answers false
+// and the write is made as before (including its conflict on a stale vm).
+func (r *VirtualMachineReconciler) statusUnchanged(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	if vm.ResourceVersion == "" {
+		return false
+	}
+	current := &infravirtrigaudiov1beta1.VirtualMachine{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(vm), current); err != nil {
+		return false
+	}
+	return current.ResourceVersion == vm.ResourceVersion && equality.Semantic.DeepEqual(current.Status, vm.Status)
 }
 
 // needsReconfigure reports whether vm needs a Reconfigure call: whether its
@@ -3234,6 +3318,11 @@ func (r *VirtualMachineReconciler) updateCurrentResources(vm *infravirtrigaudiov
 	vm.Status.CurrentResources.MemoryMiB = &memoryMiB
 }
 
+// getRequeueInterval is how long a provisioned VM waits before its next
+// poll, by the power state its provider reports. Providers report the
+// canonical contracts power states (On, Off, Suspended, Unknown), read here
+// through observedPowerState like everywhere else; anything it does not
+// recognise polls fast.
 func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) time.Duration {
 	// Polling intervals for various states
 	const (
@@ -3243,20 +3332,18 @@ func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1bet
 		slowPoll     = 5 * time.Minute  // For stable powered-off VMs
 	)
 
-	// Check if VM has no IP addresses yet (waiting for DHCP/network or VMware Tools)
-	if desc.PowerState == "poweredOn" && len(desc.IPs) == 0 {
-		return waitingForIP // Poll less frequently while waiting for IP
-	}
-
-	// Check VM power state for different polling frequencies
-	switch desc.PowerState {
-	case "poweredOn":
+	switch observedPowerState(desc.PowerState) {
+	case infravirtrigaudiov1beta1.ObservedPowerStateOn:
+		if len(desc.IPs) == 0 {
+			// Running but no address yet (DHCP, guest agent): keep polling fast.
+			return waitingForIP
+		}
 		// VM is running and has IP - normal monitoring frequency
 		return normalPoll
-	case "poweredOff":
+	case infravirtrigaudiov1beta1.ObservedPowerStateOff:
 		// VM is off - slower polling
 		return slowPoll
-	case "suspended":
+	case infravirtrigaudiov1beta1.ObservedPowerStateSuspended:
 		// VM is suspended - normal polling
 		return normalPoll
 	default:
@@ -3358,6 +3445,10 @@ func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachin
 		if awaitingMigrationImport(newVM) && pendingHost(oldVM) != "" && pendingHost(newVM) == "" {
 			return true
 		}
+		// A create just recorded is described at once (createRecorded).
+		if createRecorded(oldVM, newVM) {
+			return true
+		}
 		// An operator resolving a create held for an unknown outcome.
 		return oldVM.Annotations[createOutcomeAnnotation] != newVM.Annotations[createOutcomeAnnotation]
 	}
@@ -3365,6 +3456,18 @@ func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachin
 		return true // the deletion was just requested
 	}
 	return !maps.Equal(oldVM.Annotations, newVM.Annotations) || !slices.Equal(oldVM.Finalizers, newVM.Finalizers)
+}
+
+// createRecorded reports whether an update records a VM's provider id for the
+// first time: the status write that ends a successful Create (clustered or
+// single-host), or the id the clone and adoption controllers set. A Create
+// answers only the id (and a task), so the VM's power state, IPs and Ready
+// come from the Describe of the next reconcile; reconciling this update starts
+// it at once instead of after createdDescribeFallback. The event is delivered
+// once the cache holds the id, so that reconcile describes the VM and never
+// takes the create path again; it writes no new id, so it starts no loop.
+func createRecorded(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return oldVM.Status.ID == "" && newVM.Status.ID != ""
 }
 
 // SetupWithManager sets up the controller with the Manager. Besides its own
@@ -3384,6 +3487,7 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexCreateRefusals(mgr); err != nil {
 		return err
 	}
+	r.placementIndex = placementVMIndexer(mgr)
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.VirtualMachine{})
 	b = r.withCreateRefusalWatches(b)

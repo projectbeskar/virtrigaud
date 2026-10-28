@@ -1,0 +1,6 @@
+== burst_100 (31 s)
+  reconciles/s {"host": 0.32, "provider": 0.32, "virtualmachine": 15.55}
+  api total/s 28.1 writes/s 24.7 ratelimit wait mean/p99 2.23546551724138e-06 / 9.911392405063291e-05
+  rpcs/s {"Validate": 10.32, "GetCapabilities": 3.55, "Create": 3.23, "Delete": 3.23, "Describe": 3.23, "ListVMs": 3.23, "GetHostInfo": 0.32}
+  cpu cores 0.06011054838709678 throttled 0.0 ws 26 MiB  queue depth max 27.0
+  etcd VM updates/s 22.580645161290324 vs manager status PUT/s 9.67741935483871

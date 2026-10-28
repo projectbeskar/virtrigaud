@@ -1,0 +1,12 @@
+== warmup (232 s)
+  reconciles/s {}
+  api total/s 0.0 writes/s 0.0 ratelimit wait mean/p99 None / None
+  rpcs/s {}
+  cpu cores 0.0 throttled None ws 391 MiB  queue depth max 0
+  etcd VM updates/s 0.0 vs manager status PUT/s 0.0
+== steady (171 s)
+  reconciles/s {}
+  api total/s 0.0 writes/s 0.0 ratelimit wait mean/p99 None / None
+  rpcs/s {}
+  cpu cores 0.0 throttled None ws 0 MiB  queue depth max 0
+  etcd VM updates/s 0.0 vs manager status PUT/s 0.0

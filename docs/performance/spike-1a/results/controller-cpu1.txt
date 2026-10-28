@@ -1,0 +1,46 @@
+goos: linux
+goarch: amd64
+pkg: github.com/projectbeskar/virtrigaud/internal/controller
+cpu: Intel(R) Core(TM) i9-10900X CPU @ 3.70GHz
+BenchmarkPlacementDecision/h10_v1k/base         	     954	   1256170 ns/op	 1649554 B/op	    1184 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base         	     979	   1276833 ns/op	 1649554 B/op	    1184 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base         	     894	   1280302 ns/op	 1649555 B/op	    1184 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base         	     858	   1285820 ns/op	 1649555 B/op	    1184 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base         	     896	   1336302 ns/op	 1649554 B/op	    1184 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base        	     884	   1260807 ns/op	 1651558 B/op	    1262 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base        	     892	   1376542 ns/op	 1651559 B/op	    1262 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base        	     922	   1304491 ns/op	 1651558 B/op	    1262 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base        	     912	   1323918 ns/op	 1651559 B/op	    1262 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base        	     848	   1357975 ns/op	 1651558 B/op	    1262 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base       	      57	  25111416 ns/op	16941496 B/op	   10889 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base       	      55	  25008269 ns/op	16941500 B/op	   10889 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base       	      72	  24494158 ns/op	16941509 B/op	   10889 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base       	      48	  25813734 ns/op	16941499 B/op	   10889 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base       	      61	  25749635 ns/op	16941496 B/op	   10889 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base      	       4	 364452895 ns/op	166186176 B/op	  102637 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base      	       4	 361851386 ns/op	166186288 B/op	  102638 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base      	       4	 351635273 ns/op	166186176 B/op	  102637 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base      	       4	 360475771 ns/op	166186288 B/op	  102638 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base      	       4	 354296192 ns/op	166186176 B/op	  102637 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base       	      55	  25185718 ns/op	16979121 B/op	   11316 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base       	      50	  25836371 ns/op	16979130 B/op	   11316 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base       	      54	  25129096 ns/op	16979130 B/op	   11316 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base       	      64	  26186203 ns/op	16979138 B/op	   11316 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base       	      40	  26334205 ns/op	16979119 B/op	   11316 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base      	       4	 360025538 ns/op	166119072 B/op	  103974 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base      	       4	 369994767 ns/op	166119072 B/op	  103974 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base      	       4	 369776552 ns/op	166119072 B/op	  103974 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base      	       4	 364312361 ns/op	166119072 B/op	  103974 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base      	       4	 386189834 ns/op	166119072 B/op	  103974 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base      	      69	  27089547 ns/op	17024469 B/op	   11826 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base      	      49	  26679710 ns/op	17024461 B/op	   11826 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base      	      44	  26551341 ns/op	17024469 B/op	   11826 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base      	      40	  27195820 ns/op	17024475 B/op	   11826 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base      	      52	  26023438 ns/op	17024459 B/op	   11826 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base     	       3	 336440009 ns/op	166100125 B/op	  104810 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base     	       4	 371789479 ns/op	166100144 B/op	  104811 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base     	       3	 359868421 ns/op	166100125 B/op	  104810 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base     	       3	 353975933 ns/op	166100125 B/op	  104810 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base     	       3	 333831416 ns/op	166100125 B/op	  104810 allocs/op
+PASS
+ok  	github.com/projectbeskar/virtrigaud/internal/controller	94.691s

@@ -213,8 +213,9 @@ func TestHandleDeletion_SingleHost_DiskCheckFailedUnchanged(t *testing.T) {
 func TestVMUpdateNeedsReconcile(t *testing.T) {
 	old := clusterVM("web", clusteredNS, "prov-cluster")
 	old.Generation = 3
+	old.Status.ID = "x"
 	statusOnly := old.DeepCopy()
-	statusOnly.Status.ID = "x"
+	statusOnly.Status.Phase = infrav1beta1.VirtualMachinePhaseRunning
 	assert.False(t, vmUpdateNeedsReconcile(old, statusOnly))
 	specChange := old.DeepCopy()
 	specChange.Generation = 4

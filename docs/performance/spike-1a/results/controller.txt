@@ -1,0 +1,306 @@
+goos: linux
+goarch: amd64
+pkg: github.com/projectbeskar/virtrigaud/internal/controller
+cpu: Intel(R) Core(TM) i9-10900X CPU @ 3.70GHz
+BenchmarkPlacementScan/h10_v1k/base-20         	     727	   1745794 ns/op	         4.584 store-heap-MiB	 1283411 B/op	    1123 allocs/op
+BenchmarkPlacementScan/h10_v1k/base-20         	     769	   1496879 ns/op	         4.597 store-heap-MiB	 1283396 B/op	    1123 allocs/op
+BenchmarkPlacementScan/h10_v1k/base-20         	     760	   1541692 ns/op	         4.597 store-heap-MiB	 1283396 B/op	    1123 allocs/op
+BenchmarkPlacementScan/h10_v1k/base-20         	     724	   1431512 ns/op	         4.598 store-heap-MiB	 1283396 B/op	    1123 allocs/op
+BenchmarkPlacementScan/h10_v1k/base-20         	     853	   1568854 ns/op	         4.598 store-heap-MiB	 1283403 B/op	    1123 allocs/op
+BenchmarkPlacementScan/h100_v1k/base-20        	     733	   1567535 ns/op	         4.752 store-heap-MiB	 1275589 B/op	    1099 allocs/op
+BenchmarkPlacementScan/h100_v1k/base-20        	     722	   1618849 ns/op	         4.754 store-heap-MiB	 1275588 B/op	    1099 allocs/op
+BenchmarkPlacementScan/h100_v1k/base-20        	    1136	   1434068 ns/op	         4.755 store-heap-MiB	 1275588 B/op	    1099 allocs/op
+BenchmarkPlacementScan/h100_v1k/base-20        	     801	   1413729 ns/op	         4.755 store-heap-MiB	 1275588 B/op	    1099 allocs/op
+BenchmarkPlacementScan/h100_v1k/base-20        	     822	   1375127 ns/op	         4.756 store-heap-MiB	 1275588 B/op	    1099 allocs/op
+BenchmarkPlacementScan/h100_v10k/base-20       	      72	  17304627 ns/op	        18.16 store-heap-MiB	13864536 B/op	   10487 allocs/op
+BenchmarkPlacementScan/h100_v10k/base-20       	      63	  17309726 ns/op	        18.16 store-heap-MiB	13864536 B/op	   10487 allocs/op
+BenchmarkPlacementScan/h100_v10k/base-20       	      62	  17435721 ns/op	        18.16 store-heap-MiB	13864625 B/op	   10487 allocs/op
+BenchmarkPlacementScan/h100_v10k/base-20       	      68	  17617318 ns/op	        18.17 store-heap-MiB	13864537 B/op	   10487 allocs/op
+BenchmarkPlacementScan/h100_v10k/base-20       	      67	  17772327 ns/op	        18.17 store-heap-MiB	13864536 B/op	   10487 allocs/op
+BenchmarkPlacementScan/h100_v100k/base-20      	       6	 191729341 ns/op	       154.6 store-heap-MiB	139840664 B/op	  101176 allocs/op
+BenchmarkPlacementScan/h100_v100k/base-20      	       6	 192624410 ns/op	       154.6 store-heap-MiB	139840664 B/op	  101176 allocs/op
+BenchmarkPlacementScan/h100_v100k/base-20      	       6	 198546324 ns/op	       154.6 store-heap-MiB	139865637 B/op	  101176 allocs/op
+BenchmarkPlacementScan/h100_v100k/base-20      	       6	 189445167 ns/op	       154.6 store-heap-MiB	139840664 B/op	  101176 allocs/op
+BenchmarkPlacementScan/h100_v100k/base-20      	       6	 213143252 ns/op	       154.6 store-heap-MiB	139840664 B/op	  101176 allocs/op
+BenchmarkPlacementScan/h500_v10k/base-20       	      78	  17549494 ns/op	        18.87 store-heap-MiB	13867464 B/op	   10496 allocs/op
+BenchmarkPlacementScan/h500_v10k/base-20       	      60	  17713651 ns/op	        18.87 store-heap-MiB	13867464 B/op	   10496 allocs/op
+BenchmarkPlacementScan/h500_v10k/base-20       	      66	  18215898 ns/op	        18.87 store-heap-MiB	13867464 B/op	   10496 allocs/op
+BenchmarkPlacementScan/h500_v10k/base-20       	      68	  18350557 ns/op	        18.87 store-heap-MiB	13867464 B/op	   10496 allocs/op
+BenchmarkPlacementScan/h500_v10k/base-20       	      70	  16813412 ns/op	        18.87 store-heap-MiB	13867467 B/op	   10496 allocs/op
+BenchmarkPlacementScan/h500_v100k/base-20      	       6	 189266962 ns/op	       156.0 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h500_v100k/base-20      	       6	 201487401 ns/op	       156.0 store-heap-MiB	139836762 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h500_v100k/base-20      	       6	 188383935 ns/op	       156.0 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h500_v100k/base-20      	       6	 205713837 ns/op	       156.0 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h500_v100k/base-20      	       6	 202518210 ns/op	       156.0 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h1000_v10k/base-20      	      88	  17140494 ns/op	        19.80 store-heap-MiB	13857705 B/op	   10466 allocs/op
+BenchmarkPlacementScan/h1000_v10k/base-20      	      60	  18281357 ns/op	        19.80 store-heap-MiB	13857704 B/op	   10466 allocs/op
+BenchmarkPlacementScan/h1000_v10k/base-20      	      68	  17601405 ns/op	        19.80 store-heap-MiB	13857705 B/op	   10466 allocs/op
+BenchmarkPlacementScan/h1000_v10k/base-20      	      68	  17711558 ns/op	        19.80 store-heap-MiB	13857705 B/op	   10466 allocs/op
+BenchmarkPlacementScan/h1000_v10k/base-20      	      69	  17348881 ns/op	        19.80 store-heap-MiB	13857704 B/op	   10466 allocs/op
+BenchmarkPlacementScan/h1000_v100k/base-20     	       6	 186580676 ns/op	       157.3 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h1000_v100k/base-20     	       6	 194919723 ns/op	       157.3 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h1000_v100k/base-20     	       6	 191204691 ns/op	       157.3 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h1000_v100k/base-20     	       6	 203611726 ns/op	       157.3 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementScan/h1000_v100k/base-20     	       6	 190365576 ns/op	       157.3 store-heap-MiB	139836760 B/op	  101164 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base-20     	     685	   1938619 ns/op	 1650459 B/op	    1186 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base-20     	     580	   1908050 ns/op	 1650443 B/op	    1186 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base-20     	     658	   1866901 ns/op	 1650453 B/op	    1186 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base-20     	     658	   1983293 ns/op	 1650461 B/op	    1186 allocs/op
+BenchmarkPlacementDecision/h10_v1k/base-20     	     740	   1900605 ns/op	 1650465 B/op	    1186 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base-20    	     734	   2014646 ns/op	 1652443 B/op	    1264 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base-20    	     537	   2132946 ns/op	 1652443 B/op	    1264 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base-20    	     524	   2194924 ns/op	 1652442 B/op	    1264 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base-20    	     537	   2282636 ns/op	 1652449 B/op	    1264 allocs/op
+BenchmarkPlacementDecision/h100_v1k/base-20    	     512	   2295846 ns/op	 1652454 B/op	    1264 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base-20   	      64	  21130803 ns/op	16943458 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base-20   	      78	  21190794 ns/op	16943489 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base-20   	      55	  21387968 ns/op	16943521 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base-20   	      55	  21056100 ns/op	16943485 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/base-20   	      55	  21190807 ns/op	16943469 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base-20  	       5	 236768693 ns/op	166208758 B/op	  102642 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base-20  	       5	 228937353 ns/op	166189256 B/op	  102643 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base-20  	       4	 287846454 ns/op	166188610 B/op	  102642 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base-20  	       5	 255496091 ns/op	166188177 B/op	  102642 allocs/op
+BenchmarkPlacementDecision/h100_v100k/base-20  	       5	 239036567 ns/op	166189166 B/op	  102642 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base-20   	      57	  21185867 ns/op	16981166 B/op	   11320 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base-20   	      49	  21490162 ns/op	16981228 B/op	   11320 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base-20   	      55	  20905504 ns/op	16981150 B/op	   11319 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base-20   	      64	  20661673 ns/op	16981155 B/op	   11319 allocs/op
+BenchmarkPlacementDecision/h500_v10k/base-20   	      49	  21584030 ns/op	16981195 B/op	   11320 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base-20  	       5	 234958004 ns/op	166122062 B/op	  103979 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base-20  	       5	 238345183 ns/op	166150852 B/op	  103978 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base-20  	       5	 227489375 ns/op	166121520 B/op	  103978 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base-20  	       5	 245711678 ns/op	166120984 B/op	  103978 allocs/op
+BenchmarkPlacementDecision/h500_v100k/base-20  	       5	 231220792 ns/op	166120888 B/op	  103977 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base-20  	      63	  21571177 ns/op	17026147 B/op	   11828 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base-20  	      52	  19543402 ns/op	17025942 B/op	   11828 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base-20  	      48	  21237339 ns/op	17026055 B/op	   11828 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base-20  	      57	  21019126 ns/op	17025967 B/op	   11828 allocs/op
+BenchmarkPlacementDecision/h1000_v10k/base-20  	      58	  20426806 ns/op	17025917 B/op	   11828 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base-20 	       5	 239706057 ns/op	166101960 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base-20 	       5	 236114662 ns/op	166101963 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base-20 	       5	 223909908 ns/op	166122729 B/op	  104816 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base-20 	       4	 250421958 ns/op	166102434 B/op	  104815 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/base-20 	       5	 223965625 ns/op	166103224 B/op	  104817 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-low-20         	      52	  21293270 ns/op	16943539 B/op	   10893 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-low-20         	      60	  20557074 ns/op	16943498 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-low-20         	      57	  20738651 ns/op	16943469 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-low-20         	      51	  21620334 ns/op	16943504 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-low-20         	      48	  22393080 ns/op	16943530 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-high-20        	      49	  20875995 ns/op	16943462 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-high-20        	      56	  21423012 ns/op	16943505 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-high-20        	      57	  20770178 ns/op	16943461 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-high-20        	      67	  21477338 ns/op	16943499 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/util-high-20        	      55	  20974327 ns/op	16943513 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/hetero-20           	      49	  21929822 ns/op	16946231 B/op	   10886 allocs/op
+BenchmarkPlacementDecision/h100_v10k/hetero-20           	      56	  21139557 ns/op	16946301 B/op	   10886 allocs/op
+BenchmarkPlacementDecision/h100_v10k/hetero-20           	      49	  21527804 ns/op	16946277 B/op	   10886 allocs/op
+BenchmarkPlacementDecision/h100_v10k/hetero-20           	      54	  21778487 ns/op	16946335 B/op	   10886 allocs/op
+BenchmarkPlacementDecision/h100_v10k/hetero-20           	      46	  21939240 ns/op	16946272 B/op	   10886 allocs/op
+BenchmarkPlacementDecision/h100_v10k/binpack-20          	      55	  21212514 ns/op	16943539 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/binpack-20          	      66	  21146197 ns/op	16943497 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/binpack-20          	      56	  21286840 ns/op	16943522 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/binpack-20          	      60	  20378892 ns/op	16943535 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/binpack-20          	      55	  20419649 ns/op	16943487 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-small-20        	      57	  20389863 ns/op	16943499 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-small-20        	      58	  21085214 ns/op	16943525 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-small-20        	      54	  20859848 ns/op	16943520 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-small-20        	      56	  20474003 ns/op	16943520 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-small-20        	      52	  21389812 ns/op	16943512 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-large-20        	      55	  21611197 ns/op	16943444 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-large-20        	      56	  21742651 ns/op	16943504 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-large-20        	      56	  20320934 ns/op	16943530 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-large-20        	      55	  22121359 ns/op	16943527 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/req-large-20        	      66	  21638803 ns/op	16943498 B/op	   10892 allocs/op
+BenchmarkPlacementDecision/h100_v10k/unschedulable-20    	      50	  20237655 ns/op	16956243 B/op	   11390 allocs/op
+BenchmarkPlacementDecision/h100_v10k/unschedulable-20    	      57	  21409505 ns/op	16956196 B/op	   11390 allocs/op
+BenchmarkPlacementDecision/h100_v10k/unschedulable-20    	      74	  21102307 ns/op	16956163 B/op	   11389 allocs/op
+BenchmarkPlacementDecision/h100_v10k/unschedulable-20    	      56	  20931576 ns/op	16956209 B/op	   11389 allocs/op
+BenchmarkPlacementDecision/h100_v10k/unschedulable-20    	      57	  21816367 ns/op	16956108 B/op	   11389 allocs/op
+BenchmarkPlacementDecision/h100_v10k/constrained-20      	      58	  20843223 ns/op	16939736 B/op	   10813 allocs/op
+BenchmarkPlacementDecision/h100_v10k/constrained-20      	      62	  20240118 ns/op	16939723 B/op	   10813 allocs/op
+BenchmarkPlacementDecision/h100_v10k/constrained-20      	      56	  20138184 ns/op	16939721 B/op	   10813 allocs/op
+BenchmarkPlacementDecision/h100_v10k/constrained-20      	      48	  22236554 ns/op	16939698 B/op	   10812 allocs/op
+BenchmarkPlacementDecision/h100_v10k/constrained-20      	      72	  21659804 ns/op	16939793 B/op	   10813 allocs/op
+BenchmarkPlacementDecision/h100_v10k/affinity-20         	      38	  38743708 ns/op	22592705 B/op	   98240 allocs/op
+BenchmarkPlacementDecision/h100_v10k/affinity-20         	      44	  36132192 ns/op	22594026 B/op	   98547 allocs/op
+BenchmarkPlacementDecision/h100_v10k/affinity-20         	      30	  34816124 ns/op	22602924 B/op	   98350 allocs/op
+BenchmarkPlacementDecision/h100_v10k/affinity-20         	      31	  35484377 ns/op	22582452 B/op	   97811 allocs/op
+BenchmarkPlacementDecision/h100_v10k/affinity-20         	      27	  42783318 ns/op	22551108 B/op	   97704 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-low-20       	       5	 234623297 ns/op	166101873 B/op	  104813 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-low-20       	       5	 251357876 ns/op	166101960 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-low-20       	       5	 227652799 ns/op	166101963 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-low-20       	       5	 224086331 ns/op	166101873 B/op	  104813 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-low-20       	       5	 234206412 ns/op	166101963 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-high-20      	       5	 224717488 ns/op	166101873 B/op	  104813 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-high-20      	       4	 254351592 ns/op	166103224 B/op	  104817 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-high-20      	       5	 243661482 ns/op	166101963 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-high-20      	       5	 225933053 ns/op	166101963 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/util-high-20      	       5	 239657969 ns/op	166101960 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/hetero-20         	       5	 237752933 ns/op	166119995 B/op	  104687 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/hetero-20         	       5	 236948669 ns/op	166120624 B/op	  104688 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/hetero-20         	       5	 229768421 ns/op	166119995 B/op	  104687 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/hetero-20         	       5	 240243526 ns/op	166120534 B/op	  104687 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/hetero-20         	       4	 258811605 ns/op	166120466 B/op	  104688 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/binpack-20        	       5	 250613113 ns/op	166101870 B/op	  104813 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/binpack-20        	       5	 236056460 ns/op	166101960 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/binpack-20        	       5	 235943884 ns/op	166103134 B/op	  104816 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/binpack-20        	       5	 232171942 ns/op	166102592 B/op	  104815 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/binpack-20        	       5	 226550169 ns/op	166103224 B/op	  104817 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-small-20      	       5	 245064479 ns/op	166101960 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-small-20      	       5	 236799510 ns/op	166102592 B/op	  104815 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-small-20      	       5	 254160229 ns/op	166102684 B/op	  104816 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-small-20      	       5	 231160140 ns/op	166103224 B/op	  104817 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-small-20      	       5	 220261168 ns/op	166103224 B/op	  104817 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-large-20      	       5	 228233692 ns/op	166103224 B/op	  104817 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-large-20      	       5	 235525810 ns/op	166101963 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-large-20      	       5	 237435971 ns/op	166101870 B/op	  104813 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-large-20      	       4	 259212047 ns/op	166102322 B/op	  104814 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/req-large-20      	       4	 252619928 ns/op	166102434 B/op	  104815 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/unschedulable-20  	       5	 237444337 ns/op	166230662 B/op	  109809 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/unschedulable-20  	       5	 230308942 ns/op	166230662 B/op	  109809 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/unschedulable-20  	       5	 236281247 ns/op	166230662 B/op	  109809 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/unschedulable-20  	       4	 258924025 ns/op	166231118 B/op	  109810 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/unschedulable-20  	       5	 233604130 ns/op	166230598 B/op	  109808 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/constrained-20    	       5	 239244282 ns/op	166062246 B/op	  103986 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/constrained-20    	       4	 252424957 ns/op	166062898 B/op	  103989 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/constrained-20    	       5	 242448197 ns/op	166063067 B/op	  103989 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/constrained-20    	       5	 262666523 ns/op	166063067 B/op	  103989 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/constrained-20    	       5	 250574771 ns/op	166063465 B/op	  103988 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/affinity-20       	       3	 366499534 ns/op	223588362 B/op	  988963 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/affinity-20       	       3	 365475850 ns/op	223425405 B/op	  984735 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/affinity-20       	       3	 364883189 ns/op	223367458 B/op	  983232 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/affinity-20       	       3	 352656913 ns/op	223535786 B/op	  987599 allocs/op
+BenchmarkPlacementDecision/h1000_v100k/affinity-20       	       3	 351187451 ns/op	223642776 B/op	  990375 allocs/op
+BenchmarkPlacementBreakdown/h10_v1k/base-20              	     678	   2063106 ns/op	        79.54 scan-%	   1640575 scan-ns/op	    422033 schedule-ns/op	 1649584 B/op	    1177 allocs/op
+BenchmarkPlacementBreakdown/h10_v1k/base-20              	     541	   2375759 ns/op	        79.76 scan-%	   1894553 scan-ns/op	    480723 schedule-ns/op	 1649584 B/op	    1177 allocs/op
+BenchmarkPlacementBreakdown/h10_v1k/base-20              	     501	   2278201 ns/op	        79.46 scan-%	   1809898 scan-ns/op	    467835 schedule-ns/op	 1649565 B/op	    1176 allocs/op
+BenchmarkPlacementBreakdown/h10_v1k/base-20              	     560	   2066054 ns/op	        79.43 scan-%	   1640710 scan-ns/op	    424939 schedule-ns/op	 1649585 B/op	    1177 allocs/op
+BenchmarkPlacementBreakdown/h10_v1k/base-20              	     535	   1875685 ns/op	        79.81 scan-%	   1496690 scan-ns/op	    378608 schedule-ns/op	 1649581 B/op	    1177 allocs/op
+BenchmarkPlacementBreakdown/h100_v1k/base-20             	     536	   2059778 ns/op	        77.64 scan-%	   1598845 scan-ns/op	    460526 schedule-ns/op	 1651578 B/op	    1255 allocs/op
+BenchmarkPlacementBreakdown/h100_v1k/base-20             	     698	   2145491 ns/op	        77.15 scan-%	   1654924 scan-ns/op	    490039 schedule-ns/op	 1651591 B/op	    1255 allocs/op
+BenchmarkPlacementBreakdown/h100_v1k/base-20             	     560	   2032221 ns/op	        78.77 scan-%	   1600503 scan-ns/op	    431330 schedule-ns/op	 1651596 B/op	    1255 allocs/op
+BenchmarkPlacementBreakdown/h100_v1k/base-20             	     544	   2350770 ns/op	        77.03 scan-%	   1810471 scan-ns/op	    539731 schedule-ns/op	 1651576 B/op	    1255 allocs/op
+BenchmarkPlacementBreakdown/h100_v1k/base-20             	     420	   2535729 ns/op	        76.74 scan-%	   1945625 scan-ns/op	    589586 schedule-ns/op	 1651598 B/op	    1255 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/base-20            	      55	  23055424 ns/op	        79.39 scan-%	  18303351 scan-ns/op	   4751086 schedule-ns/op	16942634 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/base-20            	      54	  20957878 ns/op	        79.41 scan-%	  16640895 scan-ns/op	   4316029 schedule-ns/op	16942606 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/base-20            	      58	  20910473 ns/op	        81.58 scan-%	  17058648 scan-ns/op	   3850884 schedule-ns/op	16942567 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/base-20            	      48	  21423037 ns/op	        80.89 scan-%	  17327828 scan-ns/op	   4094167 schedule-ns/op	16942591 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/base-20            	      54	  21416581 ns/op	        80.72 scan-%	  17286433 scan-ns/op	   4129164 schedule-ns/op	16942575 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v100k/base-20           	       5	 243972428 ns/op	        82.28 scan-%	 200736925 scan-ns/op	  43233210 schedule-ns/op	166187131 B/op	  102631 allocs/op
+BenchmarkPlacementBreakdown/h100_v100k/base-20           	       5	 239294056 ns/op	        76.12 scan-%	 182155728 scan-ns/op	  57135802 schedule-ns/op	166187760 B/op	  102632 allocs/op
+BenchmarkPlacementBreakdown/h100_v100k/base-20           	       5	 259771209 ns/op	        82.16 scan-%	 213428906 scan-ns/op	  46340283 schedule-ns/op	166187134 B/op	  102631 allocs/op
+BenchmarkPlacementBreakdown/h100_v100k/base-20           	       5	 241197202 ns/op	        77.85 scan-%	 187772121 scan-ns/op	  53422522 schedule-ns/op	166187670 B/op	  102631 allocs/op
+BenchmarkPlacementBreakdown/h100_v100k/base-20           	       5	 242833446 ns/op	        78.80 scan-%	 191356078 scan-ns/op	  51475413 schedule-ns/op	166187852 B/op	  102633 allocs/op
+BenchmarkPlacementBreakdown/h500_v10k/base-20            	      56	  20960995 ns/op	        79.75 scan-%	  16714964 scan-ns/op	   4245025 schedule-ns/op	16980307 B/op	   11310 allocs/op
+BenchmarkPlacementBreakdown/h500_v10k/base-20            	      54	  20020485 ns/op	        80.52 scan-%	  16118997 scan-ns/op	   3900357 schedule-ns/op	16980282 B/op	   11310 allocs/op
+BenchmarkPlacementBreakdown/h500_v10k/base-20            	      61	  20785158 ns/op	        79.84 scan-%	  16593780 scan-ns/op	   4190383 schedule-ns/op	16980230 B/op	   11310 allocs/op
+BenchmarkPlacementBreakdown/h500_v10k/base-20            	      49	  21124971 ns/op	        79.60 scan-%	  16814800 scan-ns/op	   4309117 schedule-ns/op	16980250 B/op	   11310 allocs/op
+BenchmarkPlacementBreakdown/h500_v10k/base-20            	      54	  21715906 ns/op	        83.02 scan-%	  18026775 scan-ns/op	   3688110 schedule-ns/op	16980306 B/op	   11311 allocs/op
+BenchmarkPlacementBreakdown/h500_v100k/base-20           	       5	 247687914 ns/op	        71.33 scan-%	 176670381 scan-ns/op	  71014653 schedule-ns/op	166121288 B/op	  103971 allocs/op
+BenchmarkPlacementBreakdown/h500_v100k/base-20           	       5	 257224751 ns/op	        80.13 scan-%	 206124023 scan-ns/op	  51098276 schedule-ns/op	166120659 B/op	  103969 allocs/op
+BenchmarkPlacementBreakdown/h500_v100k/base-20           	       5	 241203265 ns/op	        80.53 scan-%	 194239755 scan-ns/op	  46961269 schedule-ns/op	166119937 B/op	  103967 allocs/op
+BenchmarkPlacementBreakdown/h500_v100k/base-20           	       5	 247730997 ns/op	        80.93 scan-%	 200474955 scan-ns/op	  47253367 schedule-ns/op	166120027 B/op	  103968 allocs/op
+BenchmarkPlacementBreakdown/h500_v100k/base-20           	       4	 256674040 ns/op	        69.94 scan-%	 179509151 scan-ns/op	  77162636 schedule-ns/op	166121176 B/op	  103969 allocs/op
+BenchmarkPlacementBreakdown/h1000_v10k/base-20           	      51	  21695362 ns/op	        82.52 scan-%	  17902606 scan-ns/op	   3791819 schedule-ns/op	17025321 B/op	   11820 allocs/op
+BenchmarkPlacementBreakdown/h1000_v10k/base-20           	      64	  21754564 ns/op	        83.01 scan-%	  18057393 scan-ns/op	   3695891 schedule-ns/op	17025069 B/op	   11819 allocs/op
+BenchmarkPlacementBreakdown/h1000_v10k/base-20           	      72	  20652521 ns/op	        83.74 scan-%	  17294417 scan-ns/op	   3357086 schedule-ns/op	17025074 B/op	   11819 allocs/op
+BenchmarkPlacementBreakdown/h1000_v10k/base-20           	      52	  21815674 ns/op	        83.48 scan-%	  18210232 scan-ns/op	   3604418 schedule-ns/op	17025080 B/op	   11819 allocs/op
+BenchmarkPlacementBreakdown/h1000_v10k/base-20           	      78	  21196093 ns/op	        83.66 scan-%	  17731549 scan-ns/op	   3463662 schedule-ns/op	17025088 B/op	   11819 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/base-20          	       5	 245530593 ns/op	        77.10 scan-%	 189313042 scan-ns/op	  56215270 schedule-ns/op	166131603 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/base-20          	       5	 242373373 ns/op	        74.75 scan-%	 181174630 scan-ns/op	  61197260 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/base-20          	       5	 241442447 ns/op	        74.03 scan-%	 178747241 scan-ns/op	  62693107 schedule-ns/op	166101731 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/base-20          	       5	 239609511 ns/op	        78.05 scan-%	 187013177 scan-ns/op	  52594045 schedule-ns/op	166101638 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/base-20          	       5	 241179360 ns/op	        79.75 scan-%	 192331942 scan-ns/op	  48845147 schedule-ns/op	166101099 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-low-20        	      51	  22033681 ns/op	        80.43 scan-%	  17719760 scan-ns/op	   4312821 schedule-ns/op	16942636 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-low-20        	      50	  23219742 ns/op	        79.42 scan-%	  18439697 scan-ns/op	   4779035 schedule-ns/op	16942603 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-low-20        	      50	  21621164 ns/op	        79.23 scan-%	  17130214 scan-ns/op	   4489827 schedule-ns/op	16942557 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-low-20        	      76	  20927849 ns/op	        79.66 scan-%	  16669594 scan-ns/op	   4257332 schedule-ns/op	16942580 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-low-20        	      55	  21174797 ns/op	        79.24 scan-%	  16777651 scan-ns/op	   4396154 schedule-ns/op	16942643 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-high-20       	      58	  22099263 ns/op	        80.54 scan-%	  17797236 scan-ns/op	   4301079 schedule-ns/op	16942565 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-high-20       	      73	  20925841 ns/op	        80.06 scan-%	  16752363 scan-ns/op	   4172476 schedule-ns/op	16942599 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-high-20       	      82	  21254760 ns/op	        80.08 scan-%	  17020465 scan-ns/op	   4233319 schedule-ns/op	16942643 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-high-20       	      54	  20487287 ns/op	        79.73 scan-%	  16334390 scan-ns/op	   4151837 schedule-ns/op	16942616 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/util-high-20       	      82	  20334388 ns/op	        80.36 scan-%	  16340052 scan-ns/op	   3993366 schedule-ns/op	16942608 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/hetero-20          	      49	  20690840 ns/op	        80.49 scan-%	  16652454 scan-ns/op	   4037094 schedule-ns/op	16945373 B/op	   10877 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/hetero-20          	      50	  22152647 ns/op	        81.31 scan-%	  18011255 scan-ns/op	   4140345 schedule-ns/op	16945416 B/op	   10877 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/hetero-20          	      70	  20467414 ns/op	        81.89 scan-%	  16760376 scan-ns/op	   3706073 schedule-ns/op	16945397 B/op	   10877 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/hetero-20          	      56	  20099591 ns/op	        82.12 scan-%	  16504865 scan-ns/op	   3593709 schedule-ns/op	16945425 B/op	   10877 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/hetero-20          	      61	  20559654 ns/op	        79.26 scan-%	  16294676 scan-ns/op	   4264007 schedule-ns/op	16945388 B/op	   10877 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/binpack-20         	      54	  20903298 ns/op	        79.46 scan-%	  16608538 scan-ns/op	   4293858 schedule-ns/op	16942598 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/binpack-20         	      82	  21501580 ns/op	        81.49 scan-%	  17520654 scan-ns/op	   3980011 schedule-ns/op	16942585 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/binpack-20         	      51	  20472428 ns/op	        79.60 scan-%	  16295660 scan-ns/op	   4175619 schedule-ns/op	16942597 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/binpack-20         	      50	  21442623 ns/op	        80.17 scan-%	  17189972 scan-ns/op	   4251682 schedule-ns/op	16942604 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/binpack-20         	      64	  21193338 ns/op	        81.60 scan-%	  17293470 scan-ns/op	   3898910 schedule-ns/op	16942583 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-small-20       	      55	  22282350 ns/op	        80.54 scan-%	  17945026 scan-ns/op	   4336145 schedule-ns/op	16942561 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-small-20       	      56	  21923114 ns/op	        79.19 scan-%	  17359531 scan-ns/op	   4562473 schedule-ns/op	16942682 B/op	   10884 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-small-20       	      62	  20776511 ns/op	        79.43 scan-%	  16502567 scan-ns/op	   4272983 schedule-ns/op	16942562 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-small-20       	      72	  22699847 ns/op	        79.41 scan-%	  18025469 scan-ns/op	   4673427 schedule-ns/op	16942630 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-small-20       	      51	  21452556 ns/op	        78.63 scan-%	  16867584 scan-ns/op	   4583915 schedule-ns/op	16942615 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-large-20       	      50	  21501350 ns/op	        80.06 scan-%	  17213138 scan-ns/op	   4287254 schedule-ns/op	16942603 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-large-20       	      60	  22679154 ns/op	        79.06 scan-%	  17929309 scan-ns/op	   4748802 schedule-ns/op	16942536 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-large-20       	      49	  20456386 ns/op	        79.60 scan-%	  16283372 scan-ns/op	   4171961 schedule-ns/op	16942563 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-large-20       	      50	  21592924 ns/op	        79.35 scan-%	  17134012 scan-ns/op	   4457789 schedule-ns/op	16942583 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/req-large-20       	      52	  20701017 ns/op	        80.37 scan-%	  16636102 scan-ns/op	   4063908 schedule-ns/op	16942603 B/op	   10883 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/unschedulable-20   	      61	  20765524 ns/op	        79.80 scan-%	  16570143 scan-ns/op	   4194280 schedule-ns/op	16955941 B/op	   11385 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/unschedulable-20   	      58	  21724836 ns/op	        78.86 scan-%	  17130328 scan-ns/op	   4593445 schedule-ns/op	16955917 B/op	   11385 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/unschedulable-20   	      49	  21307371 ns/op	        79.18 scan-%	  16869451 scan-ns/op	   4436781 schedule-ns/op	16955877 B/op	   11385 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/unschedulable-20   	      49	  21408010 ns/op	        79.40 scan-%	  16996431 scan-ns/op	   4410400 schedule-ns/op	16955936 B/op	   11385 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/unschedulable-20   	      54	  20479646 ns/op	        79.84 scan-%	  16350030 scan-ns/op	   4128549 schedule-ns/op	16955896 B/op	   11384 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/constrained-20     	      70	  21552919 ns/op	        80.81 scan-%	  17415590 scan-ns/op	   4136349 schedule-ns/op	16938921 B/op	   10804 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/constrained-20     	      49	  22800829 ns/op	        78.78 scan-%	  17961215 scan-ns/op	   4838551 schedule-ns/op	16938856 B/op	   10804 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/constrained-20     	      58	  21367380 ns/op	        79.35 scan-%	  16954871 scan-ns/op	   4411532 schedule-ns/op	16938800 B/op	   10803 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/constrained-20     	      49	  22911431 ns/op	        80.61 scan-%	  18468022 scan-ns/op	   4442422 schedule-ns/op	16938912 B/op	   10804 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/constrained-20     	      69	  22034349 ns/op	        80.83 scan-%	  17809451 scan-ns/op	   4223964 schedule-ns/op	16938856 B/op	   10804 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/affinity-20        	      37	  36925464 ns/op	        38.43 scan-%	  14190965 scan-ns/op	  22733476 schedule-ns/op	22584636 B/op	   98156 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/affinity-20        	      31	  37674558 ns/op	        39.02 scan-%	  14699705 scan-ns/op	  22973744 schedule-ns/op	22612809 B/op	   98457 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/affinity-20        	      31	  38068386 ns/op	        40.56 scan-%	  15438511 scan-ns/op	  22628730 schedule-ns/op	22595223 B/op	   98156 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/affinity-20        	      30	  34599177 ns/op	        39.97 scan-%	  13827361 scan-ns/op	  20770827 schedule-ns/op	22607236 B/op	   98634 allocs/op
+BenchmarkPlacementBreakdown/h100_v10k/affinity-20        	      32	  39534733 ns/op	        39.26 scan-%	  15519246 scan-ns/op	  24013838 schedule-ns/op	22600832 B/op	   98265 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-low-20      	       5	 245870477 ns/op	        80.08 scan-%	 196882158 scan-ns/op	  48986231 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-low-20      	       5	 244856228 ns/op	        74.22 scan-%	 181720783 scan-ns/op	  63133285 schedule-ns/op	166101731 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-low-20      	       5	 249235540 ns/op	        77.78 scan-%	 193853720 scan-ns/op	  55378874 schedule-ns/op	166101099 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-low-20      	       5	 242333524 ns/op	        78.50 scan-%	 190229288 scan-ns/op	  52102319 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-low-20      	       5	 234960889 ns/op	        74.81 scan-%	 175783174 scan-ns/op	  59175677 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-high-20     	       5	 250318234 ns/op	        79.80 scan-%	 199743360 scan-ns/op	  50572774 schedule-ns/op	166101099 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-high-20     	       5	 250032355 ns/op	        81.23 scan-%	 203104302 scan-ns/op	  46925386 schedule-ns/op	166101192 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-high-20     	       4	 250160033 ns/op	        73.06 scan-%	 182772237 scan-ns/op	  67384350 schedule-ns/op	166101570 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-high-20     	       4	 257535712 ns/op	        81.09 scan-%	 208837101 scan-ns/op	  48695964 schedule-ns/op	166101570 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/util-high-20     	       5	 236877964 ns/op	        78.79 scan-%	 186629024 scan-ns/op	  50246706 schedule-ns/op	166101099 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/hetero-20        	       5	 237058668 ns/op	        77.57 scan-%	 183883171 scan-ns/op	  53173340 schedule-ns/op	166119760 B/op	  104679 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/hetero-20        	       5	 235611576 ns/op	        76.84 scan-%	 181034507 scan-ns/op	  54574879 schedule-ns/op	166119760 B/op	  104679 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/hetero-20        	       5	 238813405 ns/op	        78.14 scan-%	 186597308 scan-ns/op	  52213961 schedule-ns/op	166149635 B/op	  104679 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/hetero-20        	       5	 237322725 ns/op	        78.16 scan-%	 185489026 scan-ns/op	  51831344 schedule-ns/op	166119670 B/op	  104678 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/hetero-20        	       5	 243284802 ns/op	        79.67 scan-%	 193819367 scan-ns/op	  49462525 schedule-ns/op	166119220 B/op	  104679 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/binpack-20       	       5	 254083703 ns/op	        82.03 scan-%	 208412825 scan-ns/op	  45669097 schedule-ns/op	166101099 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/binpack-20       	       5	 252268785 ns/op	        79.56 scan-%	 200709590 scan-ns/op	  51556916 schedule-ns/op	166101731 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/binpack-20       	       5	 234568028 ns/op	        76.09 scan-%	 178489948 scan-ns/op	  56076099 schedule-ns/op	166101638 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/binpack-20       	       5	 239620483 ns/op	        75.10 scan-%	 179943504 scan-ns/op	  59675042 schedule-ns/op	166102360 B/op	  104808 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/binpack-20       	       4	 259724681 ns/op	        73.93 scan-%	 192004367 scan-ns/op	  67718035 schedule-ns/op	166102360 B/op	  104808 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-small-20     	       4	 271667252 ns/op	        79.29 scan-%	 215397573 scan-ns/op	  56266666 schedule-ns/op	166101570 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-small-20     	       5	 247560049 ns/op	        77.75 scan-%	 192478454 scan-ns/op	  55080266 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-small-20     	       5	 239789554 ns/op	        75.25 scan-%	 180430475 scan-ns/op	  59356728 schedule-ns/op	166131692 B/op	  104807 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-small-20     	       4	 260642851 ns/op	        77.96 scan-%	 203193422 scan-ns/op	  57447332 schedule-ns/op	166101686 B/op	  104807 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-small-20     	       4	 257583885 ns/op	        73.35 scan-%	 188946944 scan-ns/op	  68633857 schedule-ns/op	166102248 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-large-20     	       5	 241727210 ns/op	        77.39 scan-%	 187077402 scan-ns/op	  54648262 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-large-20     	       4	 259257873 ns/op	        77.44 scan-%	 200778336 scan-ns/op	  58476765 schedule-ns/op	166101458 B/op	  104805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-large-20     	       5	 261157618 ns/op	        79.38 scan-%	 207311327 scan-ns/op	  53844358 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-large-20     	       5	 246095042 ns/op	        79.94 scan-%	 196717597 scan-ns/op	  49375037 schedule-ns/op	166101728 B/op	  104806 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/req-large-20     	       5	 250591486 ns/op	        71.04 scan-%	 178027512 scan-ns/op	  72560933 schedule-ns/op	166102360 B/op	  104808 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/unschedulable-20 	       5	 242302988 ns/op	        69.92 scan-%	 169405798 scan-ns/op	  72894615 schedule-ns/op	166231584 B/op	  109807 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/unschedulable-20 	       4	 255468403 ns/op	        79.68 scan-%	 203545084 scan-ns/op	  51919234 schedule-ns/op	166230826 B/op	  109805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/unschedulable-20 	       5	 242779589 ns/op	        81.38 scan-%	 197578794 scan-ns/op	  45198536 schedule-ns/op	166260297 B/op	  109805 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/unschedulable-20 	       5	 235216444 ns/op	        75.12 scan-%	 176696151 scan-ns/op	  58517739 schedule-ns/op	166231584 B/op	  109807 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/unschedulable-20 	       5	 237297153 ns/op	        81.01 scan-%	 192227580 scan-ns/op	  45067421 schedule-ns/op	166230310 B/op	  109803 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/constrained-20   	       4	 263102820 ns/op	        82.94 scan-%	 218204558 scan-ns/op	  44895355 schedule-ns/op	166061858 B/op	  103978 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/constrained-20   	       5	 233801957 ns/op	        74.52 scan-%	 174228338 scan-ns/op	  59571467 schedule-ns/op	166062344 B/op	  103981 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/constrained-20   	       5	 231280198 ns/op	        80.13 scan-%	 185321014 scan-ns/op	  45956984 schedule-ns/op	166061523 B/op	  103978 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/constrained-20   	       5	 235353643 ns/op	        77.37 scan-%	 182102836 scan-ns/op	  53248618 schedule-ns/op	166062062 B/op	  103979 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/constrained-20   	       4	 251283885 ns/op	        72.15 scan-%	 181293312 scan-ns/op	  69988056 schedule-ns/op	166062884 B/op	  103982 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/affinity-20      	       3	 366085890 ns/op	        51.28 scan-%	 187734369 scan-ns/op	 178349251 schedule-ns/op	223538880 B/op	  987693 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/affinity-20      	       3	 355955901 ns/op	        54.12 scan-%	 192628267 scan-ns/op	 163325021 schedule-ns/op	223291122 B/op	  981265 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/affinity-20      	       3	 373626090 ns/op	        52.82 scan-%	 197340248 scan-ns/op	 176283173 schedule-ns/op	223439522 B/op	  985115 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/affinity-20      	       3	 363974576 ns/op	        53.82 scan-%	 195877682 scan-ns/op	 168094781 schedule-ns/op	223383696 B/op	  983667 allocs/op
+BenchmarkPlacementBreakdown/h1000_v100k/affinity-20      	       3	 370853028 ns/op	        51.06 scan-%	 189354983 scan-ns/op	 181495086 schedule-ns/op	223340306 B/op	  982541 allocs/op
+PASS
+ok  	github.com/projectbeskar/virtrigaud/internal/controller	666.564s

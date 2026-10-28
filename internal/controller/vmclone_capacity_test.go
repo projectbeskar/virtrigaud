@@ -33,6 +33,7 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
 
 // These tests pin the capacity check of a CLUSTERED clone (vmclone_capacity.go):
@@ -157,8 +158,10 @@ func TestVMClone_Clustered_HotAddCloneCountsAtItsCeiling(t *testing.T) {
 }
 
 // TestVMClone_Clustered_AdmittedPendingCloneIsNotReChecked: a target whose
-// pending host is already recorded holds its capacity durably (an earlier
-// attempt admitted it); a retry is sent even if the host has filled since.
+// pending host this manager instance recorded holds its capacity durably (an
+// earlier attempt admitted it); a retry is sent even if the host has filled
+// since. One an earlier instance recorded is revalidated first
+// (placement_handover_test.go).
 func TestVMClone_Clustered_AdmittedPendingCloneIsNotReChecked(t *testing.T) {
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-c-target"}}
 	target := &infrav1beta1.VirtualMachine{
@@ -170,6 +173,8 @@ func TestVMClone_Clustered_AdmittedPendingCloneIsNotReChecked(t *testing.T) {
 			PendingResources: &infrav1beta1.PlacementResources{CPU: 4, MemoryMiB: 8192}}},
 	}
 	r, clone := clusteredCloneFixture(t, sizedSource(), cp, smallCloneHost(6), target)
+	r.placementAssumptions().Establish(vmSchedulingUID(target),
+		pendingAdmissionOf(target, "default/prov-c", assume.AdmissionClone, string(clone.UID)))
 	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
 	assert.Equal(t, 1, cp.cloneCnt, "the retry of an admitted clone is sent")
 }
@@ -265,7 +270,7 @@ func newCloneLaggingClient(t *testing.T, s *runtime.Scheme, objs ...client.Objec
 			copies = append(copies, c)
 		}
 		return fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
-			WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+			WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 			WithStatusSubresource(&infrav1beta1.VirtualMachine{}, &infrav1beta1.VMClone{}).Build()
 	}
 	return &laggingClient{Client: build(), scheme: s, reader: build()}
@@ -293,7 +298,7 @@ func catchUpWithClones(t *testing.T, c *laggingClient) {
 		objs = append(objs, &clones.Items[i])
 	}
 	fresh := fake.NewClientBuilder().WithScheme(c.scheme).WithObjects(objs...).
-		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infrav1beta1.VirtualMachine{}, &infrav1beta1.VMClone{}).Build()
 	c.mu.Lock()
 	c.reader = fresh

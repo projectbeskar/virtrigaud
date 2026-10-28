@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -26,11 +27,13 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
@@ -47,17 +50,20 @@ const (
 	// pendingHostWriteTimeout bounds the checked status update that records
 	// status.placement.pendingHost before Create (A2).
 	pendingHostWriteTimeout = time.Minute
-	// placementAssumeTTL is how long an assumption lives at most: twice the
-	// bound of the pendingHost write it covers, so it outlasts that write and
-	// the informer catching up with it. It is a safety net only; on every
-	// normal path the assumption ends earlier (the record appears in the
-	// cache, or the write fails and the assumption is forgotten).
+	// placementAssumeTTL is how long an assumption lives at most while no
+	// pendingHost write was sent for it (a reconcile that stopped between
+	// choosing and writing): nothing can land, so it is dropped. Once its write
+	// was sent it ends only on evidence — the record in the cache, a definitive
+	// rejection, or an authoritative read (assume.Cache) — and passing this TTL
+	// only reports it as stale (reportStalePlacement). Twice the bound of the
+	// pendingHost write.
 	placementAssumeTTL = 2 * pendingHostWriteTimeout
-	// resizeAssumeTTL is how long an admitted resize's assumption lives at
-	// most (review N4): the Reconfigure call it covers may run for its full
-	// deadline, and the status write recording the new size comes after it.
-	// Like placementAssumeTTL it is a safety net; the assumption normally ends
-	// when status.currentResources records the new size.
+	// resizeAssumeTTL is how long an admitted resize's assumption lives
+	// before its reservation write is sent (review N4). Once that write was
+	// sent the assumption ends only on evidence, like a create's
+	// (placementAssumeTTL): the informer cache showing the durable
+	// status.placement.resizeReservation (or a record covering it), a
+	// definitive rejection, or the release of the reservation.
 	resizeAssumeTTL = contracts.ReconfigureCallTimeout + placementStatusWriteTimeout
 	// placementUnschedulableMaxRetryInterval caps the backoff of a VM that no
 	// host can take. It starts at placementUnschedulableRetryInterval and
@@ -80,7 +86,16 @@ const (
 	// path (made after the assume lock is released), so a slow API server
 	// cannot hold a worker indefinitely.
 	placementStatusWriteTimeout = 30 * time.Second
+	// placementWriteRecheckInterval is the requeue of a VM whose earlier
+	// pendingHost write is not yet reflected in the informer cache: it is not
+	// placed again until that write is resolved (resolveUnsettledPlacement).
+	placementWriteRecheckInterval = 2 * time.Second
 )
+
+// errPlacementUnresolved reports that the VM still has a placement whose
+// checked pendingHost write is not resolved: it is not scheduled again (and
+// its reservation not replaced) until that write is resolved.
+var errPlacementUnresolved = stderrors.New("an earlier placement of this VM is not resolved yet")
 
 // placementLockBusyRetry is the jittered requeue of a reconcile that could not
 // get its Provider's assume lock within placementLockWait.
@@ -152,21 +167,30 @@ func (r *VirtualMachineReconciler) scheduleAndAssume(
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	req *scheduler.Request,
 ) (scheduler.Result, error) {
-	if err := r.placementRequest(ctx, assumptions, providerKey, provider, vm, req); err != nil {
+	selfPresent, err := r.placementRequest(ctx, assumptions, providerKey, provider, vm, req)
+	if err != nil {
 		return scheduler.Result{}, &placementInfraError{err: err}
+	}
+	// A VM whose earlier pick has a write that is not resolved is not placed
+	// again: that write may have recorded its host durably.
+	if assumptions.Unresolved(req.VMUID) {
+		return scheduler.Result{}, errPlacementUnresolved
 	}
 	result, err := scheduler.Schedule(*req)
 	if err != nil {
 		return result, err
 	}
-	assumptions.Assume(providerKey, assume.Assumption{
+	if _, ok := assumptions.Assume(providerKey, assume.Assumption{
 		UID:       vmSchedulingUID(vm),
 		Namespace: vm.Namespace,
 		Name:      vm.Name,
 		HostID:    result.HostID,
 		Labels:    vm.Labels, // Assume keeps its own copy
 		Resources: req.Resources,
-	})
+		Observed:  selfPresent,
+	}); !ok {
+		return scheduler.Result{}, errPlacementUnresolved
+	}
 	return result, nil
 }
 
@@ -176,8 +200,20 @@ func (r *VirtualMachineReconciler) placementAssumptions() *assume.Cache {
 	if c := r.placements.Load(); c != nil {
 		return c
 	}
-	r.placements.CompareAndSwap(nil, assume.New(placementAssumeTTL, r.now))
+	c := assume.New(placementAssumeTTL, r.now)
+	c.SetStaleHook(reportStalePlacement)
+	r.placements.CompareAndSwap(nil, c)
 	return r.placements.Load()
+}
+
+// reportStalePlacement is the assume cache's stale hook: an assumption whose
+// TTL passed while its pendingHost write is unresolved keeps counting (its
+// write may have landed), and is logged and counted for investigation: the
+// informer cache is not showing a write long after it was sent.
+func reportStalePlacement(provider string, a assume.Assumption, age time.Duration) {
+	ctrl.Log.WithName("placement").Info("A placement assumption outlived its TTL with its pendingHost write unresolved; it keeps counting",
+		"provider", provider, "vm", a.Namespace+"/"+a.Name, "uid", a.UID, "host", a.HostID, "age", age.String())
+	metrics.RecordError(errReasonPlacementAssumptionStale, metrics.ComponentManager)
 }
 
 // forgetPlacement drops vm's assumption and backoff record, if any. It never
@@ -186,7 +222,9 @@ func (r *VirtualMachineReconciler) forgetPlacement(vm *infravirtrigaudiov1beta1.
 	uid := vmSchedulingUID(vm)
 	if c := r.placements.Load(); c != nil {
 		c.Forget(uid)
+		c.Disestablish(uid)
 	}
+	r.placementWrites.Delete(uid)
 	r.unschedulable.reset(uid)
 }
 
@@ -213,17 +251,28 @@ func holdsPlacement(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 // binding and its pending host, the same host listed once. It is empty for a
 // VM that no longer holds a placement (holdsPlacement).
 func placementHosts(vm *infravirtrigaudiov1beta1.VirtualMachine) []string {
-	if !holdsPlacement(vm) {
+	hosts, n := placementHostPair(vm)
+	if n == 0 {
 		return nil
 	}
-	var hosts []string
+	return slices.Clone(hosts[:n])
+}
+
+// placementHostPair is placementHosts without an allocation: the hosts in
+// hosts[:n], the bound host first.
+func placementHostPair(vm *infravirtrigaudiov1beta1.VirtualMachine) (hosts [2]string, n int) {
+	if !holdsPlacement(vm) {
+		return hosts, 0
+	}
 	if h := boundHost(vm); h != "" {
-		hosts = append(hosts, h)
+		hosts[n] = h
+		n++
 	}
-	if h := pendingHost(vm); h != "" && !slices.Contains(hosts, h) {
-		hosts = append(hosts, h)
+	if h := pendingHost(vm); h != "" && (n == 0 || hosts[0] != h) {
+		hosts[n] = h
+		n++
 	}
-	return hosts
+	return hosts, n
 }
 
 // The smallest footprint any VM is counted at: the minimums spec.resources
@@ -300,7 +349,10 @@ func pendingCreate(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 //   - otherwise, for a VM whose create is pending, pendingFootprint — frozen
 //     by the CRD while it is pending;
 //   - otherwise (a bound VM with nothing recorded, e.g. bound before
-//     currentResources existed), its VMClass size.
+//     currentResources existed), its VMClass size;
+//   - and, per resource, at least status.placement.resizeReservation while
+//     it is set: a clustered resize admitted at that footprint may already be
+//     applied on the host before its size is recorded (resizeReservationOf).
 //
 // spec.resources and spec.classRef of a created VM are ignored: its owner can
 // change them at any time, and a clustered resize-up is admitted against
@@ -321,7 +373,31 @@ func admittedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infra
 			base.MemoryMiB = *cur.MemoryMiB
 		}
 	}
-	return withMemoryCeiling(withMinimum(base), memoryCeilingOf(vm, class))
+	return withResizeReservation(withMemoryCeiling(withMinimum(base), memoryCeilingOf(vm, class)), vm)
+}
+
+// resizeReservationOf returns vm's durable resize reservation
+// (status.placement.resizeReservation), ok == false when none is set.
+func resizeReservationOf(vm *infravirtrigaudiov1beta1.VirtualMachine) (scheduler.ResourceRequest, bool) {
+	pl := vm.Status.Placement
+	if pl == nil || pl.ResizeReservation == nil {
+		return scheduler.ResourceRequest{}, false
+	}
+	return scheduler.ResourceRequest{CPU: pl.ResizeReservation.CPU, MemoryMiB: pl.ResizeReservation.MemoryMiB}, true
+}
+
+// withResizeReservation raises r, per resource, to vm's durable resize
+// reservation, if any.
+func withResizeReservation(r scheduler.ResourceRequest, vm *infravirtrigaudiov1beta1.VirtualMachine) scheduler.ResourceRequest {
+	if res, ok := resizeReservationOf(vm); ok {
+		return maxFootprint(r, res)
+	}
+	return r
+}
+
+// maxFootprint is the per-resource maximum of a and b.
+func maxFootprint(a, b scheduler.ResourceRequest) scheduler.ResourceRequest {
+	return scheduler.ResourceRequest{CPU: max(a.CPU, b.CPU), MemoryMiB: max(a.MemoryMiB, b.MemoryMiB)}
 }
 
 // memoryHotAdd reports whether class enables memory hot-add.
@@ -376,15 +452,26 @@ func withMemoryCeiling(r scheduler.ResourceRequest, ceiling int64) scheduler.Res
 }
 
 // committedSnapshot is what one informer snapshot says about a clustered
-// Provider's VirtualMachines.
+// Provider's VirtualMachines (the scheduled one excluded from what counts).
+// Each VM is either listed (placed) or summed per host (byHost), never both:
+// it is listed when an assumption of it may have to be merged with its record
+// (assumed) or when its labels must be matched (detail, in the affinity
+// scope), and summed otherwise. Scheduling UIDs are Kubernetes UIDs, unique
+// per object, and placementHosts names each host once, so summing needs no
+// de-duplication.
 type committedSnapshot struct {
-	// placed are the VMs holding resources on the Provider's hosts, one entry
-	// per (VM, host), the scheduled VM excluded.
+	// placed are the listed VMs, one entry per (VM, host).
 	placed []scheduler.PlacedVM
-	// recorded maps the scheduling UID of every VirtualMachine of the Provider
-	// (the scheduled one included) to what its durable record says; it settles
-	// assumptions (settled).
+	// byHost is what the summed VMs commit, per host
+	// (scheduler.Request.Committed).
+	byHost map[string]scheduler.HostCommitted
+	// recorded maps the scheduling UID of each VM of the Provider that had an
+	// assumption when the snapshot was taken (assumed), and of the scheduled
+	// VM, to what its durable record says; it settles assumptions (settled).
 	recorded map[string]recordedVM
+	// assumed are the UIDs looked up for recorded; an assumption of any other
+	// UID is left as it is (observe).
+	assumed map[string]struct{}
 }
 
 // recordedVM is what a VM's durable record says, as far as assumptions care.
@@ -416,37 +503,62 @@ func (s committedSnapshot) settled(a assume.Assumption) bool {
 	return slices.Contains(rec.hosts, a.HostID)
 }
 
-// committedPlacementsFrom lists, through reader (the informer cache), every
+// observe is settled as an assume.Observation: whether this snapshot has the
+// assumption's VM, and whether its record supersedes the assumption. A VM the
+// snapshot does not have settles the assumption only when an earlier snapshot
+// showed it (assume.Cache.Observe): a VM created a moment ago may not be in
+// the cache yet.
+func (s committedSnapshot) observe(a assume.Assumption) assume.Observation {
+	if _, looked := s.assumed[a.UID]; !looked {
+		// Not looked up (an assumption made after the snapshot, which the
+		// Provider's lock rules out): keep it, record nothing about it.
+		return assume.Observation{Unknown: true}
+	}
+	if _, present := s.recorded[a.UID]; !present {
+		return assume.Observation{}
+	}
+	return assume.Observation{Present: true, Settled: s.settled(a)}
+}
+
+// committedPlacementsFrom walks, through reader (the informer cache), every
 // VirtualMachine, in every namespace, whose placement belongs to provider
-// (placementProviderKey) and returns the resources each holds on the hosts its
-// record names: a bound VM on its host, a VM with a create in flight on its
-// pending host. A VM being deleted still counts until its finalizer is gone,
-// because its domain and disks are still on the host. VMs in another namespace
-// than self count toward capacity only: they are outside self's affinity scope
-// (CapacityOnly), and nothing about them but their resources reaches the
-// scheduler's no-fit message. The VirtualMachine controller schedules and
-// admits resizes with it, and the VMClone controller admits clustered clones.
+// (placementProviderKey) and accounts the resources each holds on the hosts
+// its record names: a bound VM on its host, a VM with a create in flight on
+// its pending host. A VM being deleted still counts until its finalizer is
+// gone, because its domain and disks are still on the host. VMs in another
+// namespace than self count toward capacity only: they are outside self's
+// affinity scope (CapacityOnly), and nothing about them but their resources
+// reaches the scheduler's no-fit message. The VirtualMachine controller
+// schedules and admits resizes with it, and the VMClone controller admits
+// clustered clones.
 //
 // Each VM counts at its admittedFootprint. Its VMClass is read (from the
 // cache) only when that needs it, and only when the VM's namespace may use it
-// (the consumer grant, as everywhere else).
+// (the consumer grant, as everywhere else). assumed are the UIDs of the
+// Provider's assumptions (assume.Cache.UIDs, read under its lock): those VMs
+// are listed and recorded, so their assumptions merge with and settle on their
+// records; detail lists every VM in self's affinity scope too (the policy
+// matches VM labels, scheduler.NeedsPlacedVMLabels). Everything else is summed
+// per host. The objects read are the cache's own: they are only read, and
+// nothing of them but strings and label maps outlives the call in the result.
 func committedPlacementsFrom(
 	ctx context.Context,
 	reader client.Reader,
 	provider types.NamespacedName,
 	self *infravirtrigaudiov1beta1.VirtualMachine,
+	assumed map[string]struct{},
+	detail bool,
 ) (committedSnapshot, error) {
 	// Only this Provider's VMs, through the field index; read-only (shared
 	// with the cache).
-	vms, err := listProviderVMs(ctx, reader, provider)
+	vms, err := providerVMsFrom(ctx, reader, provider)
 	if err != nil {
 		return committedSnapshot{}, err
 	}
-	snap := committedSnapshot{recorded: map[string]recordedVM{}}
+	snap := committedSnapshot{recorded: map[string]recordedVM{}, assumed: assumed}
 	selfUID := vmSchedulingUID(self)
 	classes := classMemo{}
-	for i := range vms {
-		other := &vms[i]
+	for _, other := range vms {
 		// The key is re-checked (defense in depth: a VM counts against a
 		// Provider only when its key is that Provider). A VM being deleted
 		// whose finalizer is gone holds nothing any more; leaving it out of
@@ -455,27 +567,44 @@ func committedPlacementsFrom(
 			continue
 		}
 		uid := vmSchedulingUID(other)
-		hosts := placementHosts(other)
-		if len(hosts) == 0 || uid == selfUID {
-			snap.recorded[uid] = recordedVM{hosts: hosts}
+		_, isAssumed := assumed[uid]
+		hosts, n := placementHostPair(other)
+		if n == 0 || uid == selfUID {
+			if isAssumed || uid == selfUID {
+				snap.recorded[uid] = recordedVM{hosts: placementHosts(other)}
+			}
 			continue
 		}
 		res, err := sizeForAccounting(ctx, reader, other, classes)
 		if err != nil {
 			return committedSnapshot{}, err
 		}
-		// The size it counts at settles an admitted resize of it once
-		// status.currentResources records the new size.
-		snap.recorded[uid] = recordedVM{hosts: hosts, size: res, hasSize: hasRecordedSize(other)}
-		for _, h := range hosts {
-			snap.placed = append(snap.placed, scheduler.PlacedVM{
-				Name:         other.Name,
-				UID:          uid,
-				HostID:       h,
-				Labels:       other.Labels,
-				Resources:    res,
-				CapacityOnly: other.Namespace != self.Namespace,
-			})
+		scoped := other.Namespace == self.Namespace
+		if isAssumed {
+			// The size it counts at settles an admitted resize of it once
+			// status.currentResources records the new size, or once its
+			// durable resize reservation (counted in res) covers it.
+			_, reserved := resizeReservationOf(other)
+			snap.recorded[uid] = recordedVM{hosts: placementHosts(other), size: res, hasSize: hasRecordedSize(other) || reserved}
+		}
+		if isAssumed || (detail && scoped) {
+			for _, h := range hosts[:n] {
+				snap.placed = append(snap.placed, scheduler.PlacedVM{
+					Name:         other.Name,
+					UID:          uid,
+					HostID:       h,
+					Labels:       other.Labels,
+					Resources:    res,
+					CapacityOnly: !scoped,
+				})
+			}
+			continue
+		}
+		if snap.byHost == nil {
+			snap.byHost = map[string]scheduler.HostCommitted{}
+		}
+		for _, h := range hosts[:n] {
+			snap.byHost[h] = snap.byHost[h].Add(res, scoped)
 		}
 	}
 	return snap, nil
@@ -544,14 +673,15 @@ func classForSizing(
 
 // committedOnHost sums the footprint of every VirtualMachine whose placement
 // belongs to provider and names host (bound or pending; being deleted
-// included) — the same accounting the scheduler uses, for one host.
+// included) — the same accounting the scheduler uses, for one host. It reads
+// only that host's VMs, through placementHostIndex.
 func committedOnHost(
 	ctx context.Context,
 	reader client.Reader,
 	provider types.NamespacedName,
 	host string,
 ) (cpu, memMiB int64, err error) {
-	vms, err := listProviderVMs(ctx, reader, provider)
+	vms, err := listHostPlacementVMs(ctx, reader, provider, host)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -585,33 +715,47 @@ func (r *VirtualMachineReconciler) placementRequest(
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	req *scheduler.Request,
-) error {
-	placed, err := r.placedWithAssumptions(ctx, cache, providerKey, provider, vm)
+) (selfPresent bool, err error) {
+	view, selfPresent, err := placedWithAssumptionsFrom(ctx, r.placementReader(), cache, providerKey, provider, vm,
+		scheduler.NeedsPlacedVMLabels(req.Policy))
 	if err != nil {
-		return err
+		return false, err
 	}
-	req.PlacedVMs = placed
+	req.PlacedVMs = view.placed
+	req.Committed = view.byHost
 	req.VMUID = vmSchedulingUID(vm)
-	return nil
+	return selfPresent, nil
 }
 
-// placedWithAssumptions returns what is committed on provider's hosts, as seen
-// from vm: the placements in the informer snapshot plus the live assumptions
-// (create and resize), after settling those the snapshot supersedes
-// (committedSnapshot.settled). Call it with provider's assume lock held.
+// placedWithAssumptions is placedWithAssumptionsFrom through the reconciler's
+// placement reader, for a check that matches no VM labels.
 func (r *VirtualMachineReconciler) placedWithAssumptions(
 	ctx context.Context,
 	cache *assume.Cache,
 	providerKey string,
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-) ([]scheduler.PlacedVM, error) {
-	return placedWithAssumptionsFrom(ctx, r.Client, cache, providerKey, provider, vm)
+) (view committedView, selfPresent bool, err error) {
+	return placedWithAssumptionsFrom(ctx, r.placementReader(), cache, providerKey, provider, vm, false)
 }
 
-// placedWithAssumptionsFrom is placedWithAssumptions read through reader
-// (the informer cache); the VMClone controller admits a clustered clone with
-// it, under the same lock and against the same assumptions.
+// committedView is what is committed on a Provider's hosts, as seen from one
+// VM: listed entries (scheduler.Request.PlacedVMs) and per-host sums
+// (scheduler.Request.Committed).
+type committedView struct {
+	placed []scheduler.PlacedVM
+	byHost map[string]scheduler.HostCommitted
+}
+
+// placedWithAssumptionsFrom returns what is committed on provider's hosts, as
+// seen from vm: the placements in one informer snapshot plus the live
+// assumptions (create and resize), after settling those the same snapshot
+// supersedes (committedSnapshot.observe). detail lists every VM in vm's
+// affinity scope (scheduler.NeedsPlacedVMLabels). selfPresent reports that the
+// snapshot has vm. Call it with provider's assume lock held: the VirtualMachine
+// controller schedules and admits resizes with it, the VMClone controller
+// admits clustered clones, and inherited admissions are revalidated with it,
+// all under the same lock and against the same assumptions.
 func placedWithAssumptionsFrom(
 	ctx context.Context,
 	reader client.Reader,
@@ -619,14 +763,16 @@ func placedWithAssumptionsFrom(
 	providerKey string,
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-) ([]scheduler.PlacedVM, error) {
-	snap, err := committedPlacementsFrom(ctx, reader, provider, vm)
+	detail bool,
+) (view committedView, selfPresent bool, err error) {
+	snap, err := committedPlacementsFrom(ctx, reader, provider, vm, cache.UIDs(providerKey), detail)
 	if err != nil {
-		return nil, err
+		return committedView{}, false, err
 	}
-	placed := snap.placed
-	for _, a := range cache.List(providerKey, snap.settled) {
-		placed = append(placed, scheduler.PlacedVM{
+	_, selfPresent = snap.recorded[vmSchedulingUID(vm)]
+	view = committedView{placed: snap.placed, byHost: snap.byHost}
+	for _, a := range cache.Observe(providerKey, snap.observe) {
+		view.placed = append(view.placed, scheduler.PlacedVM{
 			Name:         a.Name,
 			UID:          a.UID,
 			HostID:       a.HostID,
@@ -635,7 +781,7 @@ func placedWithAssumptionsFrom(
 			CapacityOnly: a.Namespace != vm.Namespace,
 		})
 	}
-	return placed, nil
+	return view, selfPresent, nil
 }
 
 // hasRecordedSize reports whether vm's status.currentResources records both

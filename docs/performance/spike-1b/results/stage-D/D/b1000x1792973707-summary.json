@@ -1,0 +1,48 @@
+{
+  "run": "b1000x1792973707",
+  "submitted": 1000,
+  "reached": {
+    "bound": 0,
+    "created": 1000,
+    "deletereq": 1000,
+    "gone": 989,
+    "pending": 0,
+    "ready": 0,
+    "reconciled": 12
+  },
+  "latencyMs": {
+    "created": {
+      "max": 26,
+      "p50": 10,
+      "p90": 15,
+      "p99": 26
+    },
+    "deletereq": {
+      "max": 720277,
+      "p50": 720257,
+      "p90": 720264,
+      "p99": 720275
+    },
+    "gone": {
+      "max": 41163,
+      "p50": 2,
+      "p90": 4,
+      "p99": 9
+    },
+    "reconciled": {
+      "max": 428314,
+      "p50": 426494,
+      "p90": 428119,
+      "p99": 428314
+    }
+  },
+  "throughputPerSec": {
+    "created": 4207.742544189481,
+    "deletereq": 1.3879637423311428,
+    "gone": 1.2985312024786715,
+    "reconciled": 0.028008960244565905
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 1440.480435062
+}

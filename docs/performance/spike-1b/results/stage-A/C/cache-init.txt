@@ -1,0 +1,8 @@
+config C pod virtrigaud-manager-b5ddd845-ngk4b
+started 2026-10-25T19:13:21Z
+2026-10-25T19:13:51Z	INFO	Starting EventSource	{"controller": "virtualmachine", "controllerGroup": "infra.virtrigaud.io", "controllerKind": "VirtualMachine", "source": "kind source: *v1beta1.VMImage"}
+2026-10-25T19:13:51Z	INFO	Starting EventSource	{"controller": "virtualmachine", "controllerGroup": "infra.virtrigaud.io", "controllerKind": "VirtualMachine", "source": "kind source: *v1beta1.VirtualMachine"}
+2026-10-25T19:13:51Z	INFO	Starting EventSource	{"controller": "virtualmachine", "controllerGroup": "infra.virtrigaud.io", "controllerKind": "VirtualMachine", "source": "kind source: *v1.Namespace"}
+2026-10-25T19:13:51Z	INFO	Starting EventSource	{"controller": "virtualmachine", "controllerGroup": "infra.virtrigaud.io", "controllerKind": "VirtualMachine", "source": "kind source: *v1beta1.Provider"}
+2026-10-25T19:13:51Z	INFO	Starting EventSource	{"controller": "virtualmachine", "controllerGroup": "infra.virtrigaud.io", "controllerKind": "VirtualMachine", "source": "kind source: *v1beta1.VMClass"}
+2026-10-25T19:13:51Z	INFO	Starting EventSource	{"controller": "host", "controllerGroup": "infra.virtrigaud.io", "controllerKind": "Host", "source": "kind source: *v1beta1.Host"}

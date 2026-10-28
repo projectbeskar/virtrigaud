@@ -165,6 +165,8 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | `manager.providerTmpSizeLimitMax` | Ceiling on every provider pod's `/tmp` `sizeLimit` (`--provider-tmp-size-limit-max`; a quantity, empty = no ceiling). A `Provider` annotation above it, or `none`, is clamped to it with a `TmpSizeLimitClamped` Warning event; the defaults are capped at it too | `""` |
 | `manager.providerTmpSizeLimit` | `sizeLimit` of the `/tmp` emptyDir of every provider pod run for a `Provider` CR (`--provider-tmp-size-limit`; a quantity or `none`). Empty keeps the per-type defaults: vSphere `512Gi`, others `1Gi` | `""` |
 | `manager.maxDiskSize` | Administrator's ceiling on every disk VirtRigaud creates or grows (`--max-disk-size`; a whole number of bytes from `1Gi` to `64Pi`, use binary units such as `500Gi`; empty = no ceiling beyond the CRD's 64Ti per disk). See [Disk-size limit](#disk-size-limit) | `""` |
+| `manager.clientQPS` | Client-side rate limit of the manager's Kubernetes API requests, in requests per second, for each REST client it builds (`--client-qps`; a positive number; empty = the manager's default, 20). Not an API-server limit. See [Kubernetes API client rate limits](#kubernetes-api-client-rate-limits) | `20` |
+| `manager.clientBurst` | Requests each of those REST clients may send at once before `manager.clientQPS` applies (`--client-burst`; a positive whole number; empty = the manager's default, 40) | `40` |
 
 #### `/tmp` size limits
 
@@ -306,6 +308,73 @@ The limit is per disk, not a total per VM or per namespace (a VM can have up to
 20 additional disks): bound totals with the hypervisor's own storage quotas, or
 an object-count `ResourceQuota` on `virtualmachines.infra.virtrigaud.io`. Sizes are compared exactly: `500G` is
 about `465.7Gi`, so prefer binary units.
+
+#### Kubernetes API client rate limits
+
+The manager limits its own requests to the Kubernetes API with a client-side
+token bucket: `manager.clientQPS` (the manager's `--client-qps`) is the
+sustained rate in requests per second, and `manager.clientBurst`
+(`--client-burst`) the number of requests that may go out at once before that
+rate applies. The defaults, 20 and 40, are the values the manager has always
+used.
+
+- **Per REST client, not per manager.** controller-runtime builds one REST
+  client per API resource type, and each has its own bucket with these
+  limits: `VirtualMachine` writes do not share a budget with `Host` status
+  updates.
+- **Client-side only.** These are not API-server limits. The API server's own
+  protection (API Priority and Fairness) applies separately, whatever these
+  values are.
+- **Startup configuration.** A change takes effect when the manager restarts.
+  A zero, negative or non-numeric value fails the chart render, and the
+  manager refuses to start with it.
+
+**When raising it helps.** During a burst of VM creations each new VM needs
+several `VirtualMachine` writes before it is `Ready` (on a clustered Provider,
+five were measured: the finalizer, the placement annotation, and three status
+updates). When those
+writes queue behind the client's rate limit, creation is paced by it rather
+than by the scheduler or the providers.
+
+**What it costs.** A higher limit lets the manager do more work at once: more
+manager CPU (watch for CPU throttling at its limit; raise
+`manager.resources.limits.cpu` with it), more load on the API server and etcd,
+and more optimistic-concurrency conflicts, which the manager retries. Once the
+client limit no longer binds, the next limit shows: in the measurement below,
+the per-Provider placement step, slowed by CPU throttling. Adjust these values
+to your workload (how many VMs are created at once) and to what your control
+plane can absorb, and watch the API server's request latency and the manager's
+CPU after changing them.
+
+**Measured effect.** A disposable kind cluster with a fake provider
+(Spike 1B): one clustered Provider, 1,000 Hosts, 10,000 existing VMs, manager
+limits 500m CPU / 512Mi, a burst of 100 VM creations, one run per setting:
+
+| | `clientQPS: 20`, `clientBurst: 40` | `clientQPS: 100`, `clientBurst: 40` |
+|---|---|---|
+| Create to `Ready`, p50 / p99 | 20.52 s / 23.00 s | 7.86 s / 8.18 s |
+| Creation throughput | 4.3 VMs/s | 12.2 VMs/s |
+| Client rate-limit wait, mean | 190 ms | 3.4 ms |
+| Manager CPU during the burst (throttled periods) | 0.19 cores (15%) | 0.34 cores (36%) |
+| Placement lock wait, p50 | ~0 | 177 ms |
+| API server 429s, flow-control rejections, 5xx | none | none |
+| Conflicts (HTTP 409), retried | none | 6 |
+
+Five times the QPS gave 2.8 times the throughput, not five. These numbers come
+from one benchmark environment; they are not a recommendation for production
+clusters.
+
+Example (validated only in that disposable benchmark environment, not across
+production Kubernetes distributions):
+
+```yaml
+manager:
+  clientQPS: 100
+  clientBurst: 40
+```
+
+With kustomize (`config/manager`), add `--client-qps` and `--client-burst` to
+the manager container's args; without them the defaults apply.
 
 ### Provider Configuration
 

@@ -1,0 +1,63 @@
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+Creating cluster "virtrigaud-spike1b" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-virtrigaud-spike1b"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-virtrigaud-spike1b
+
+Have a nice day! 👋
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:5c459dc54ce654e915886fe121e4334ac62c3adb9e9f3bf359868b94d5b3657e" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:5c459dc54ce654e915886fe121e4334ac62c3adb9e9f3bf359868b94d5b3657e" not yet present on node "virtrigaud-spike1b-worker", loading...
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+W1026 02:24:18.355543 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.355595 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.375490 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.375552 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.436022 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.436087 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.491608 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.491687 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.535733 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.535861 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.567497 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.567567 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.599799 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.599848 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.636288 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.636357 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.673183 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.673237 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.715645 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.715709 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.753890 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.753959 1401953 warnings.go:70] unrecognized format "int64"
+W1026 02:24:18.779071 1401953 warnings.go:70] unrecognized format "int32"
+W1026 02:24:18.779133 1401953 warnings.go:70] unrecognized format "int64"
+cluster up, manager on config A
+config D active
+burst 100 done: "ready": 100
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+followups done

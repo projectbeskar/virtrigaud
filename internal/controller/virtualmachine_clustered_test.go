@@ -32,6 +32,7 @@ import (
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
 
 // These tests pin the VirtualMachine controller's side of ADR-0007 Addendum A
@@ -62,10 +63,15 @@ type routingProvider struct {
 	reconfigureResult   contracts.ReconfigureResult
 	reconfigureUnmarked bool
 	reconfigureErr      error
+	// onReconfigure, when set, runs as Reconfigure is called.
+	onReconfigure func()
 }
 
 func (p *routingProvider) Reconfigure(_ context.Context, vm contracts.VMRef, _ contracts.CreateRequest) (contracts.ReconfigureResult, error) {
 	p.reconfigureRefs = append(p.reconfigureRefs, vm)
+	if p.onReconfigure != nil {
+		p.onReconfigure()
+	}
 	res := p.reconfigureResult
 	// A current provider marks every answer honest; reconfigureUnmarked plays
 	// an older provider image (review L1).
@@ -284,6 +290,10 @@ func TestCreateVM_Clustered_RetryReusesPendingHost(t *testing.T) {
 		smallVMClass(clusteredNS), minimalVMImage(clusteredNS)) // no HostPool, no Host
 
 	live := getVM(t, r, "vm-retry")
+	// A retry by the manager instance that recorded the pending host (an
+	// inherited one is revalidated first: placement_handover_test.go).
+	r.placementAssumptions().Establish(vmSchedulingUID(live),
+		pendingAdmissionOf(live, providerKeyOf(providerCR), assume.AdmissionCreate, ""))
 	_, err := r.createVM(ctx, live, prov, providerCR, smallVMClass(clusteredNS), minimalVMImage(clusteredNS), nil)
 	require.NoError(t, err)
 	require.Len(t, prov.createReqs, 1)
