@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-28 13:07] - ADR-0007: fail-closed capacity accounting and resize settlement
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: dated A5 amendment (2026-10-28). An unresolvable VMClass no longer falls back to the minimum footprint: recorded resources are used, else new capacity admissions on the Provider fail closed while bound-VM lifecycle continues. A resize reservation is released only on `Reconfiguring=False/ReconcileSuccess` plus the existing no-task and `Describe` conditions. The superseded sentences are marked, not rewritten.
+
+### Why
+The ADR still described the minimum-footprint fallback and the failure-reason deny-list that the integration replaced; the design record must match the code.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-28 03:13] - Next-release notes and the v0.4.1 to next upgrade guide
 **Author:** @wrkode (William Rizzo)
 

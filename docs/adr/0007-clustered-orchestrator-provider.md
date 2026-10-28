@@ -1213,7 +1213,8 @@ follows; A2's `pendingHost` is its prerequisite.
 >   created VM's `spec.resources` and `spec.classRef` are ignored, so editing
 >   them costs a tenant nothing and blocks nobody. A VMClass the VM's namespace
 >   may not use (no consumer grant) sizes nothing. Every VM counts at least
->   1 vCPU and 128 MiB. While a create is pending, a CRD rule makes
+>   1 vCPU and 128 MiB. *(The fallback for a VM whose VMClass cannot be
+>   resolved is superseded by the 2026-10-28 amendment below.)* While a create is pending, a CRD rule makes
 >   `spec.classRef` and `spec.resources` immutable. The rule freezes the
 >   references, not the VMClass they point to, so a retried `Create` whose
 >   effective size exceeds `pendingResources`, or that would gain a memory
@@ -1404,6 +1405,8 @@ follows; A2's `pendingHost` is its prerequisite.
 >   with that record. Only once that write is stored is the VM's resize
 >   assumption narrowed to the recorded footprint. Failed, partial,
 >   restart-pending and asynchronous outcomes keep the reservation.
+>   *(The release condition is restated as an allow-list by the 2026-10-28
+>   amendment below.)*
 > - **Recovery.** After a restart or leader change the reservation still
 >   counts. A VM whose reservation covers its request has its `Reconfigure`
 >   sent again under it. That relies on the clustered `Reconfigure` being
@@ -1492,6 +1495,43 @@ follows; A2's `pendingHost` is its prerequisite.
 > is counted throughout). Releasing a held admission is an administrator's
 > decision and requires positive proof that no earlier operation can still
 > execute (`clustered-provider-inventory.md`); VirtRigaud never clears one.
+>
+> *(Amended 2026-10-28, fail-closed capacity accounting and resize
+> settlement.)* Two accounting rules above could under-count capacity a VM may
+> really use. Both now fail closed; no API field, provider or gRPC message
+> changes.
+>
+> - **Unresolved VMClass (supersedes the minimum-footprint fallback).** An
+>   existing placement is never counted at the minimum footprint (1 vCPU,
+>   128 MiB) merely because its VMClass is deleted or no longer granted to its
+>   namespace. Such a VM counts from its status records when they establish
+>   its footprint: `status.currentResources` with both CPU and memory, or,
+>   while its create is pending, `status.placement.pendingResources`; with no
+>   recorded `memoryCeilingMiB` it counts at the memory hot-add ceiling of that
+>   size, since the class's hot-add setting is unknown. When nothing records
+>   its size (a VM bound by a build that did not record it, or one whose
+>   recorded size is incomplete), its footprint cannot be established and the
+>   accounting pass fails (`errUnsizedPlacement`, a placement infrastructure
+>   error). Every new capacity admission on the affected Provider —
+>   scheduling, clustered resizes and clones, inherited admission
+>   revalidation — is then refused and retried with backoff, and the Host's
+>   committed gauges keep their last value. Bound VMs' lifecycle (Describe,
+>   Power, Delete) continues. The error names the VM and its VMClass in the
+>   manager log only, never in another tenant's conditions. The administrator
+>   restores the VMClass or the namespace's grant, or resolves the VM's
+>   missing size record; VirtRigaud never guesses one.
+> - **Resize settlement (supersedes the failure-reason deny-list).** A durable
+>   `resizeReservation` is released only on positive evidence that the
+>   recorded footprint covers what the provider may have applied. All of these
+>   are required: the `Reconfiguring` condition is `False` with reason
+>   `ReconcileSuccess`; no reconfigure task is outstanding; and `Describe`
+>   reported the VM's vCPUs and memory maximum (which raise the recorded size
+>   first), with the other settlement conditions above unchanged. A missing
+>   condition, any other reason — including a refusal that replaced an earlier
+>   attempt's outcome and a reason the manager does not recognise — keeps the
+>   reservation. The cost is over-reservation: a resize refused before it was
+>   sent and then withdrawn keeps its reservation until the next resize the
+>   provider confirms.
 >
 > **Resizes are admitted too** (a decision of this review round). A
 > `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
