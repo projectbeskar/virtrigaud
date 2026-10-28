@@ -358,7 +358,9 @@ func pendingCreate(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 // change them at any time, and a clustered resize-up is admitted against
 // committed capacity (admitClusteredResize) before the new size is applied and
 // recorded. class is nil when the VM names none, it does not exist, or the VM's
-// namespace may not use it; every VM counts at least the minimum footprint.
+// namespace may not use it; every VM counts at least the minimum footprint. The
+// accounting of other VMs never passes nil for a VM whose size depends on its
+// class (sizeForAccounting, unresolvedClassFootprint).
 func admittedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass) scheduler.ResourceRequest {
 	cpu, mem := classSize(class)
 	base := withMinimum(scheduler.ResourceRequest{CPU: cpu, MemoryMiB: mem})
@@ -620,8 +622,20 @@ type classMemoKey struct {
 // classMemo memoises classForSizing over one accounting pass.
 type classMemo map[classMemoKey]*infravirtrigaudiov1beta1.VMClass
 
+// errUnsizedPlacement is the error of an accounting pass that meets a placed
+// VirtualMachine whose footprint cannot be established: nothing records its
+// size (no complete status.currentResources, and no status.placement.
+// pendingResources for a pending create) and its VMClass cannot be resolved
+// (it does not exist, or the VM's namespace may not use it). Counting such a VM
+// at any guessed size could under-count what it runs with, so the pass fails
+// and every capacity admission on its Provider (scheduling, resize, clone,
+// inherited revalidation) is refused until the class is resolvable again.
+var errUnsizedPlacement = stderrors.New("placed VirtualMachine has no recorded size and its VMClass cannot be resolved")
+
 // sizeForAccounting returns vm's admittedFootprint, reading its VMClass only
 // when the footprint needs it (nothing recorded in status.currentResources).
+// When the class cannot be resolved it never falls back to a guess:
+// unresolvedClassFootprint counts the recorded size, or fails.
 func sizeForAccounting(ctx context.Context, reader client.Reader, vm *infravirtrigaudiov1beta1.VirtualMachine, seen classMemo) (scheduler.ResourceRequest, error) {
 	if hasRecordedSize(vm) && vm.Status.Placement != nil && vm.Status.Placement.MemoryCeilingMiB != nil {
 		return admittedFootprint(vm, nil), nil
@@ -630,7 +644,37 @@ func sizeForAccounting(ctx context.Context, reader client.Reader, vm *infravirtr
 	if err != nil {
 		return scheduler.ResourceRequest{}, err
 	}
+	if class == nil {
+		return unresolvedClassFootprint(vm)
+	}
 	return admittedFootprint(vm, class), nil
+}
+
+// unresolvedClassFootprint is the footprint of vm, whose VMClass cannot be
+// resolved, from what its status records alone: its complete
+// status.currentResources, else, for a pending create, its
+// status.placement.pendingResources. With no recorded memory ceiling (a VM
+// scheduled by an older manager, until its first Describe records one), the
+// class's memory hot-add setting is unknown, so it counts at the hot-add
+// ceiling of its recorded memory: over-counting only. With no recorded size it
+// returns errUnsizedPlacement.
+func unresolvedClassFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine) (scheduler.ResourceRequest, error) {
+	pl := vm.Status.Placement
+	var memMiB int64
+	switch {
+	case hasRecordedSize(vm):
+		memMiB = *vm.Status.CurrentResources.MemoryMiB
+	case pendingCreate(vm) && pl.PendingResources != nil:
+		memMiB = pl.PendingResources.MemoryMiB
+	default:
+		return scheduler.ResourceRequest{}, fmt.Errorf("size VirtualMachine %s/%s (VMClass %q): %w",
+			vm.Namespace, vm.Name, vm.Spec.ClassRef.Name, errUnsizedPlacement)
+	}
+	fp := admittedFootprint(vm, nil)
+	if pl == nil || pl.MemoryCeilingMiB == nil {
+		fp = withMemoryCeiling(fp, memoryCeilingFor(true, memMiB))
+	}
+	return fp, nil
 }
 
 // classForSizing returns vm's VMClass for sizing, read through reader and
@@ -638,7 +682,8 @@ func sizeForAccounting(ctx context.Context, reader client.Reader, vm *infravirtr
 // exist, or the VM's namespace may not use it: a class in another namespace
 // that does not select the VM's (spec.consumerNamespaceSelector) is refused
 // here exactly as for a create, so a tenant cannot size its VM from a class it
-// was never granted.
+// was never granted. A nil class sizes nothing: sizeForAccounting then counts
+// the VM from its status records alone (unresolvedClassFootprint).
 func classForSizing(
 	ctx context.Context,
 	reader client.Reader,
@@ -657,10 +702,10 @@ func classForSizing(
 	if err := getForConsumer(ctx, reader, key, class, vm.Namespace); err != nil {
 		switch {
 		case isConsumerNotAllowed(err):
-			log.FromContext(ctx).V(1).Info("VMClass of a placed VM may not be used from its namespace; counting it at the minimum footprint",
+			log.FromContext(ctx).V(1).Info("VMClass of a placed VM may not be used from its namespace; counting it from its recorded size only",
 				"class", key.String(), "vm", client.ObjectKeyFromObject(vm).String())
 		case apierrors.IsNotFound(err):
-			log.FromContext(ctx).V(1).Info("VMClass of a placed VM not found; counting it at the minimum footprint",
+			log.FromContext(ctx).V(1).Info("VMClass of a placed VM not found; counting it from its recorded size only",
 				"class", key.String(), "vm", client.ObjectKeyFromObject(vm).String())
 		default:
 			return nil, fmt.Errorf("get VMClass %s to size VirtualMachine %s/%s: %w", key, vm.Namespace, vm.Name, err)

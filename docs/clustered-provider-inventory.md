@@ -970,7 +970,21 @@ free = allocatable × overcommit ratio − committed
     because extra vCPUs stay offline until a resize (which is checked) brings
     them online;
   - a VMClass in another namespace that the VM's namespace may not use
-    (no consumer grant) sizes nothing;
+    (no consumer grant) sizes nothing, and neither does a deleted one. Such a
+    VM counts from its status alone: its recorded size
+    (`status.currentResources`, or `status.placement.pendingResources` while
+    its create is pending), and, while no memory ceiling is recorded for it,
+    at the memory hot-add ceiling of that size (the class's hot-add setting
+    is unknown). **When nothing records its size** (a VM bound by a
+    pre-v0.4.0 build, or one whose recorded size is incomplete), its
+    footprint cannot be established and every capacity admission on its
+    Provider — scheduling, clustered resizes and clones, inherited
+    revalidation — is refused (the reconcile is retried with a backoff and
+    the manager logs `placed VirtualMachine has no recorded size and its
+    VMClass cannot be resolved`, naming the VM), and its hosts' committed
+    gauges keep their last value. Restore the VMClass, or the VM
+    namespace's grant to it, to resume. Bound VMs keep being described,
+    powered and deleted;
   - every VM counts at least 1 vCPU and 128 MiB.
 - **Not counted**: domains on the host that VirtRigaud does not manage, and the
   hypervisor's own use. To keep room for them, set a ratio below 1 (for example

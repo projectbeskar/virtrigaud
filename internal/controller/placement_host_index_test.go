@@ -198,11 +198,12 @@ func edgeCaseObjects() []client.Object {
 			vm.Status.ID = "t1.hotadd"
 			vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{Host: "h1"}
 		}),
-		// A class the VM's namespace may not use: minimum footprint.
+		// A class the VM's namespace may not use, a recorded size and no
+		// recorded ceiling: counted at the hot-add ceiling of its memory.
 		edgeVM("t2", "ungranted", "a", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
 			vm.Spec.ClassRef = infravirtrigaudiov1beta1.ObjectRef{Name: "std", Namespace: "t1"}
-			vm.Status.ID = "t2.ungranted"
-			vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{Host: "h1"}
+			recorded(vm, "h1", 1, 1024)
+			vm.Status.Placement.MemoryCeilingMiB = nil
 		}),
 		// Being deleted, finalizer still on: still counts.
 		edgeVM("t1", "deleting", "a", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {

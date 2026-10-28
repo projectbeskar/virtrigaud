@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-28 03:01] - A placed VM whose VMClass cannot be resolved is never counted at the minimum size
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_placement_capacity.go`: the committed-capacity accounting no longer counts a placed VM at 1 vCPU / 128 MiB when its VMClass is deleted or no longer granted to its namespace. It counts the VM from its recorded size (`status.currentResources`, or `status.placement.pendingResources` for a pending create), at the memory hot-add ceiling of that size while no ceiling is recorded; with no recorded size it fails with `errUnsizedPlacement`, so scheduling, clustered resize and clone admission and inherited revalidation on that Provider are refused (retried) and the Host's committed gauges keep their last value.
+- `internal/controller/virtualmachine_placement_unsized_test.go` (new), `virtualmachine_placement_capacity_test.go`, `placement_host_index_test.go`: legacy bound VMs, pending creates without an admitted size, partly recorded sizes, deleted and ungranted classes, the conservative ceiling, the Host gauge and a resize admission next to an unsized VM.
+- `docs/clustered-provider-inventory.md`: how such a VM is counted and how to resume admissions.
+
+### Why
+A VM bound without a recorded size (an early v0.4.0 build) whose class was deleted, or whose namespace lost the grant, was counted at the minimum footprint, so other VMs could be admitted onto capacity it still uses.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-27 23:36] - Manager image builds the whole package; inherited-admission recovery does not rely on a provider restart
 **Author:** @wrkode (William Rizzo)
 
