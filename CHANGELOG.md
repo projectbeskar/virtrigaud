@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-28 20:56] - Resolve gosec code-scanning alerts in benchmark tooling
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/scheduler/schedbench/fixture.go`: host CPU is converted to int32 only inside an explicit range check (G115).
+- `internal/scheduler/schedbench/scenarios.go`: the scenario seed's int→uint64 conversion is annotated; its inputs are the built-in, non-negative scenario sizes (G115).
+- `test/spike1b/driver/main.go`: the fake provider's Secret name is annotated as a name, not a credential (G101).
+- `test/spike1b/driver/{audit,lifecycle,misc}.go`: result-file writes are annotated; their paths are the operator's own `--out` flag of this local benchmark CLI (G703).
+
+### Why
+GitHub code scanning (gosec) raised 10 alerts on PR #467. None is reachable from the manager or providers; one is fixed in code and the rest are annotated with the reason, as elsewhere in the repo.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-28 13:07] - ADR-0007: fail-closed capacity accounting and resize settlement
 **Author:** @wrkode (William Rizzo)
 

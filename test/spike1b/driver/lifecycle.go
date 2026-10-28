@@ -293,10 +293,10 @@ func (t *tracker) summarize(run string, start time.Time) summary {
 
 // writeResults writes the per-VM CSV and the summary JSON into dir.
 func (t *tracker) writeResults(dir, run string, s summary) error {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil { // #nosec G703 -- the path is the operator's own --out flag of this local benchmark CLI
 		return err
 	}
-	f, err := os.Create(filepath.Join(dir, run+"-vms.csv"))
+	f, err := os.Create(filepath.Join(dir, run+"-vms.csv")) // #nosec G703 -- the path is the operator's own --out flag of this local benchmark CLI
 	if err != nil {
 		return err
 	}
@@ -321,7 +321,7 @@ func (t *tracker) writeResults(dir, run string, s summary) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, run+"-summary.json"), data, 0o600)
+	return os.WriteFile(filepath.Join(dir, run+"-summary.json"), data, 0o600) // #nosec G703 -- the path is the operator's own --out flag of this local benchmark CLI
 }
 
 // burstCmd creates --count VMs at once and follows them to Ready, then
@@ -504,7 +504,7 @@ func churnCmd(fs *flag.FlagSet) func(context.Context, *env) error {
 		if err := t.writeResults(*out, *run, s); err != nil {
 			return err
 		}
-		f, err := os.Create(filepath.Join(*out, *run+"-series.csv"))
+		f, err := os.Create(filepath.Join(*out, *run+"-series.csv")) // #nosec G703 -- the path is the operator's own --out flag of this local benchmark CLI
 		if err != nil {
 			return err
 		}

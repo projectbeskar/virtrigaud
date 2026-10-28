@@ -329,7 +329,10 @@ func buildHost(i int, cfg Config, cpu, memMiB int64, rng *rand.Rand) v1beta1.Hos
 	if rng.IntN(4) == 0 {
 		features = append(features, FeatureAVX512)
 	}
-	cpu32 := int32(min(cpu, math.MaxInt32))
+	cpu32 := int32(math.MaxInt32)
+	if cpu >= 0 && cpu <= math.MaxInt32 {
+		cpu32 = int32(cpu)
+	}
 	storage := int64(4) << 40
 	return v1beta1.Host{
 		ObjectMeta: metav1.ObjectMeta{Name: HostName(cfg.NamePrefix, i), Namespace: cfg.ProviderNamespace},

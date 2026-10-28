@@ -120,7 +120,7 @@ func baseConfig(hosts, vms int) Config {
 		UnrecordedFraction: 0.01,
 		ProviderNamespace:  ProviderNamespace,
 		ProviderName:       ProviderName,
-		Seed:               uint64(hosts)*1_000_003 + uint64(vms),
+		Seed:               uint64(hosts)*1_000_003 + uint64(vms), // #nosec G115 -- hosts and vms are the non-negative sizes of the built-in scenarios below
 	}
 }
 

@@ -53,7 +53,7 @@ import (
 // Fixed names of the experiment's objects.
 const (
 	infraNamespace = "spike-infra"
-	credsSecret    = "fake-agent-creds"
+	credsSecret    = "fake-agent-creds" // #nosec G101 -- the name of the fake provider's Secret, not a credential
 	poolName       = "pool"
 	labelRun       = "spike1b/run"
 	driverQPS      = 3000

@@ -167,7 +167,7 @@ func auditCmd(fs *flag.FlagSet) func(context.Context, *env) error {
 		}
 		fmt.Println(string(data))
 		if *out != "" {
-			if err := os.WriteFile(*out, data, 0o600); err != nil {
+			if err := os.WriteFile(*out, data, 0o600); err != nil { // #nosec G703 -- the path is the operator's own --out flag of this local benchmark CLI
 				return err
 			}
 		}

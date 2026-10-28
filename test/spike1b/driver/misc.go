@@ -79,7 +79,7 @@ func hostsCmd(fs *flag.FlagSet) func(context.Context, *env) error {
 			case <-time.After(*interval):
 			}
 		}
-		f, err := os.Create(*out)
+		f, err := os.Create(*out) // #nosec G703 -- the path is the operator's own --out flag of this local benchmark CLI
 		if err != nil {
 			return err
 		}
