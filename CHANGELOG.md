@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-28 03:10] - Regression tests for an ambiguous clustered clone pendingHost write
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/vmclone_ambiguous_write_test.go` (new): a clone target's pendingHost write that is stored but answered with a timeout, or that times out without landing, retried while the cache is stale: the admission keeps counting on the same host, a concurrent create cannot take the host's last capacity, no Clone RPC is sent until the write is resolved and exactly one is sent after; a definitely rejected write releases only the clone's own admission.
+- `internal/controller/vmclone_capacity_test.go`: `createAndCloneFixtureWith` and `newCloneLaggingClientWith` (replacing `newCloneLaggingClient`) take the host size and live-store interceptors; the existing fixture delegates to them.
+
+### Why
+Clone admission had no deterministic coverage of the G2/G4 ambiguous-write cases that the VM create path has.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-28 03:06] - A resize reservation is released only on a confirmed reconfigure
 **Author:** @wrkode (William Rizzo)
 
