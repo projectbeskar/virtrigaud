@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-28 03:06] - A resize reservation is released only on a confirmed reconfigure
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_resize_gate.go`: `resizeOutcomeEstablished` no longer releases a durable resize reservation on any `Reconfiguring` reason outside a fixed deny-list. It requires positive evidence (`resizeSettledCondition`: `Reconfiguring=False/ReconcileSuccess`) besides the existing no-task and `Describe` checks; a missing condition, a refusal made before sending (which may have replaced an earlier attempt's unresolved outcome) and any unrecognised reason keep the reservation.
+- `internal/controller/virtualmachine_resize_settlement_test.go` (new): the allow-list, a synthetic unrecognised reason, a missing condition, an `InheritedAdmissionOverCapacity` refusal and an unanswered `Reconfigure` keep the reservation; a confirmed one releases it.
+- `docs/clustered-provider-inventory.md`: when a reservation is released.
+
+### Why
+With a deny-list, a new or unlisted reason (for example a pre-send refusal replacing a timed-out attempt's `ProviderError`) released capacity the host may still be using.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-28 03:01] - A placed VM whose VMClass cannot be resolved is never counted at the minimum size
 **Author:** @wrkode (William Rizzo)
 

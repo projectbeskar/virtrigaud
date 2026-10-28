@@ -493,20 +493,30 @@ func (r *VirtualMachineReconciler) settleResizeReservation(
 
 // resizeOutcomeEstablished reports whether nothing about a clustered VM's size
 // is unresolved: it needs no reconfigure (the caller's steady state), no
-// reconfigure task is outstanding, no change is pending a restart, the last
-// Reconfigure neither failed nor came back without the honest-result marker,
-// and this pass's Describe reported the vCPUs and memory maximum the VM holds.
-// Until then a resize reservation stays.
+// reconfigure task is outstanding, the VM's Reconfiguring condition positively
+// records an applied reconfigure (resizeSettledCondition), and this pass's
+// Describe reported the vCPUs and memory maximum the VM holds. Until then a
+// resize reservation stays.
 func resizeOutcomeEstablished(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) bool {
 	if vm.Status.ReconfigureTaskRef != "" || desc.VCPUs <= 0 || desc.MaxMemoryMiB <= 0 {
 		return false
 	}
-	if cond := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring); cond != nil {
-		switch cond.Reason {
-		case k8s.ReasonRestartRequired, k8s.ReasonProviderError, k8s.ReasonResizePendingPowerOff,
-			k8s.ReasonProviderLacksHonestReconfigure, k8s.ReasonTaskInProgress, k8s.ReasonUpdating:
-			return false
-		}
-	}
-	return true
+	return resizeSettledCondition(meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring))
+}
+
+// resizeSettledCondition reports whether cond, a VM's Reconfiguring condition,
+// is positive evidence that the last reconfigure the provider answered was
+// applied: Reconfiguring=False with reason ReconcileSuccess, which only a
+// confirmed Reconfigure (or the completion of its task) sets, and which the
+// power-state marker replaces only when no reconfigure outcome is open
+// (mayMarkPowerAdjusting). Anything else keeps a resize reservation: no
+// condition (the outcome of a Reconfigure sent just before a restart was
+// never recorded), a change pending a restart or a power-off, a task in
+// progress, a failed, unanswered or dishonest Reconfigure, a resize refused
+// before it was sent (whose refusal may have replaced an earlier attempt's
+// unresolved outcome), and any reason this check does not know. It is an
+// allow-list on purpose: a reason added later keeps the reservation until it
+// is classified here.
+func resizeSettledCondition(cond *metav1.Condition) bool {
+	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == k8s.ReasonReconcileSuccess
 }

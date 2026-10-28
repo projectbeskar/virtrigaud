@@ -1041,11 +1041,17 @@ counted nowhere:
    grows beyond it is admitted for that growth only. The reservation is never
    lowered while set.
 4. It is cleared only in a later reconcile in which nothing about the VM's size
-   is unresolved: no reconfigure needed or due, no reconfigure task, no change
-   pending a restart, the last `Reconfigure` neither failed nor came back
-   without the honest-result marker, and `Describe` reported the VM's vCPUs and
-   memory maximum (which raise the recorded size first). A failed, partial,
-   restart-pending or asynchronous resize keeps it.
+   is unresolved: no reconfigure needed or due, no reconfigure task, the VM's
+   `Reconfiguring` condition is `False` with reason `ReconcileSuccess` (the
+   provider confirmed the last `Reconfigure` applied), and `Describe` reported
+   the VM's vCPUs and memory maximum (which raise the recorded size first).
+   Any other `Reconfiguring` state keeps it: a failed, unanswered, partial,
+   restart-pending or asynchronous resize, a resize refused before it was sent
+   (such as `InheritedAdmissionOverCapacity`, whose refusal may have replaced an
+   earlier attempt's open outcome), no condition at all, or a reason this
+   release does not know. A reservation kept this way after the spec is set
+   back to the recorded size is released by the next resize the provider
+   confirms.
 
 After a restart, a VM whose reservation covers its requested size has its
 `Reconfigure` sent (again) under it without a new admission: the libvirt
