@@ -2083,7 +2083,7 @@ func buildTLSCredentials(config *TLSConfig) (credentials.TransportCredentials, e
 	}
 
 	if config.Insecure {
-		return credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}), nil
+		return credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}), nil // #nosec G402 -- explicit opt-in by a caller setting TLSConfig.Insecure; no caller in this repository does (the manager's resolver always passes PrebuiltConfig, see internal/runtime/remote/resolver.go)
 	}
 
 	tlsConfig := &tls.Config{}
