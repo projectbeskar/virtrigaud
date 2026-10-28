@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-28 23:29] - An earlier resize's success never releases a newer resize reservation
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_resize_gate.go`: the resize-reservation write also sets `Reconfiguring=True/ResizeReserved` in the same checked status write (restored in memory when the write is not stored). A `ReconcileSuccess` from an earlier resize can no longer settle a newer reservation, for example after a restart where the `Reconfigure` was sent but its outcome was never recorded and the resize was then withdrawn. A reservation whose `Reconfigure` was confirmed no longer lets a later request be sent without a new admission and write.
+- `internal/k8s/conditions.go`: new reason `ResizeReserved`.
+- `internal/controller/virtualmachine_resize_stale_success_test.go`: stale success after restart (reservation kept, counted, no overbooking), normal settlement, re-admission under a confirmed reservation, unstored and ambiguous reservation writes.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`, `docs/clustered-provider-inventory.md`, `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/reconfigure-results.md`, `docs/vm-status-phase.md`: document `ResizeReserved`; document that a withdrawn resize can keep its reservation indefinitely (no TTL, not released by reverting the spec, no manual removal without proof); correct the recovery and rollback steps that implied reverting the spec releases it; separate G3's guarantees from the unimplemented provider-side fencing.
+
+### Why
+A success recorded before a reservation was written could release that reservation while a `Reconfigure` sent under it was unresolved, letting the host be overbooked if that operation completed later.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-28 21:14] - Annotate the long-standing G402 alert in the gRPC transport
 **Author:** @wrkode (William Rizzo)
 

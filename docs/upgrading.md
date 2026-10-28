@@ -79,10 +79,18 @@ is gone (not merely not leading) before you act on a held admission.
 - **A new VM is described right after its `Create`**, instead of 5 seconds
   later.
 - **A clustered resize reservation is released only on a confirmed
-  `Reconfigure`** (`Reconfiguring=False/ReconcileSuccess` and a `Describe`).
-  A reservation whose resize was refused before it was sent, after which the
-  spec was set back to the recorded size, stays until the next resize the
-  provider confirms.
+  `Reconfigure`** (`Reconfiguring=False/ReconcileSuccess` recorded after the
+  reservation, and a `Describe`). Writing a reservation sets
+  `Reconfiguring=True/ResizeReserved` (phase `Reconfiguring`) until the
+  `Reconfigure`'s outcome is recorded, so an earlier resize's success never
+  releases a newer reservation.
+- **A withdrawn resize can keep its reservation indefinitely.** Setting the
+  spec back to the recorded size sends nothing, so a reservation whose last
+  `Reconfiguring` reason is `ValidationError`, `InsufficientHostCapacity`,
+  `InheritedAdmissionOverCapacity` or `ResizeReserved` stays, and keeps
+  counting, until the next resize the provider confirms or the VM's deletion.
+  No timer releases it. Do not remove it by hand without the proof described in
+  [A withdrawn resize can keep its reservation indefinitely](clustered-provider-inventory.md#a-withdrawn-resize-can-keep-its-reservation-indefinitely).
 - **A placed VM whose VMClass is deleted or no longer granted** is counted
   from its recorded size, never at the minimum footprint. If nothing records
   its size, capacity admissions on its Provider are refused and retried
@@ -120,9 +128,11 @@ below first; Helm does not.
   counted only at its recorded size again and its host can be overbooked.
   This rollback is unsupported. List the VMs that still hold one:
   `kubectl get virtualmachines -A -o jsonpath='{range .items[?(@.status.placement.resizeReservation)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`
-  and roll back only when it prints nothing (let those resizes finish, or
-  set the VMs' size back in their spec and wait until the reservation is
-  released).
+  and roll back only when it prints nothing. Let those resizes finish and be
+  confirmed. Setting a VM's size back in its spec does not necessarily
+  release its reservation (see
+  [A withdrawn resize can keep its reservation indefinitely](clustered-provider-inventory.md#a-withdrawn-resize-can-keep-its-reservation-indefinitely));
+  while one stays, rolling back remains unsupported.
 - **Roll back the manager and the chart together** (`helm rollback`). A
   v0.4.1 manager image with this release's chart does not start: it rejects
   the unknown `--client-qps` and `--client-burst` flags. If you roll back the

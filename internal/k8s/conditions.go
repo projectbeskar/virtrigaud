@@ -92,6 +92,15 @@ const (
 	// then on). status.currentResources then holds, per resource, the larger
 	// of the running size and the next-boot size.
 	ReasonRestartRequired = "RestartRequired"
+	// ReasonResizeReserved is Reconfiguring=True on a VirtualMachine of a
+	// clustered Provider whose admitted resize-up was recorded in
+	// status.placement.resizeReservation, in the same checked status write,
+	// and whose Reconfigure outcome the provider has not confirmed yet. It
+	// replaces any earlier outcome, so a Reconfiguring=False/ReconcileSuccess
+	// of an earlier resize never settles the newer reservation; the
+	// Reconfigure's own outcome (success, failure, task, restart pending)
+	// replaces it. It stays after a restart until that outcome is recorded.
+	ReasonResizeReserved = "ResizeReserved"
 	// ReasonProviderLacksHonestReconfigure is Reconfiguring=False on a VM of a
 	// clustered Provider that does not report supportsHonestReconfigure (an
 	// older provider image): its Reconfigure could report a change applied that

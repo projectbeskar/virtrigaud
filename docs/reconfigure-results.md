@@ -180,7 +180,10 @@ On a clustered Provider an admitted resize-up is written to
 `status.placement.resizeReservation` before the `Reconfigure` is sent, and the
 VM counts at it until the outcome is established (see
 [`clustered-provider-inventory.md`](clustered-provider-inventory.md#durable-resize-reservation)).
-Per outcome above:
+The reservation write also sets `Reconfiguring=True`, reason
+`ResizeReserved`, which the `Reconfigure`'s outcome below replaces; if the
+manager stops before recording that outcome, it stays and the reservation is
+kept. Per outcome above:
 
 - **Applied**: `status.currentResources` records the new size; the reservation
   is released at the next reconcile whose `Describe` reports the VM's vCPUs

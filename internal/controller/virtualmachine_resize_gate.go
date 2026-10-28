@@ -125,8 +125,15 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 	// instance is revalidated first (ADR-0007 A5, inherited admission
 	// revalidation), so a late write of a deposed leader never authorizes a
 	// Reconfigure by itself.
+	//
+	// A reservation whose outcome is confirmed (resizeSettledCondition: a
+	// Reconfigure sent under it succeeded, and it awaits release) authorizes
+	// nothing more: that success says nothing about a later Reconfigure, so a
+	// further growth is admitted again, and its reservation write records the
+	// pending outcome (recordResizeReservation) before anything is sent.
 	heldFP := currentFP
-	if adm, ok := resizeAdmissionOf(vm, providerKeyOf(providerCR)); ok {
+	if adm, ok := resizeAdmissionOf(vm, providerKeyOf(providerCR)); ok &&
+		!resizeSettledCondition(meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)) {
 		reservedFP := maxFootprint(currentFP, adm.Resources)
 		if scheduler.Grows(currentFP, desiredFP) && scheduler.Grows(currentFP, reservedFP) {
 			verdict, checkErr, err := checkInheritedAdmission(ctx, r.placementReader(), r.placementAssumptions(), providerCR, vm, adm,
@@ -400,11 +407,26 @@ func (r *VirtualMachineReconciler) recordResizeReservation(
 		CPU:       footprint.CPU,
 		MemoryMiB: min(footprint.MemoryMiB, maxRecordedMemoryMiB),
 	}
+	// The same write marks the outcome pending: an earlier resize's
+	// Reconfiguring=False/ReconcileSuccess must never settle this reservation
+	// (resizeSettledCondition). Only the Reconfigure's own outcome replaces it.
+	heldCond := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	if heldCond != nil {
+		heldCond = heldCond.DeepCopy()
+	}
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionReconfiguring,
+		Status:             metav1.ConditionTrue,
+		Reason:             k8s.ReasonResizeReserved,
+		Message:            resizeReservedMessage,
+		ObservedGeneration: vm.Generation,
+	})
 	precondition := vm.ResourceVersion
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
 	defer cancel()
 	if err := r.Status().Update(writeCtx, vm); err != nil {
 		pl.ResizeReservation = held
+		restoreReconfiguringCondition(vm, heldCond)
 		if pendingHostWriteRejected(err) {
 			assumptions.WriteRejected(uid, adm.token)
 		} else {
@@ -429,6 +451,20 @@ func (r *VirtualMachineReconciler) recordResizeReservation(
 	}
 	assumptions.WriteStored(uid, adm.token)
 	return ctrl.Result{}, true, nil
+}
+
+// resizeReservedMessage is the message of Reconfiguring=True/ResizeReserved.
+// It names no host and no capacity figure, as every placement message.
+const resizeReservedMessage = "resize reserved on the VM's host; waiting for the provider to confirm the Reconfigure"
+
+// restoreReconfiguringCondition puts back vm's Reconfiguring condition as it
+// was before a status write that did not store (prev nil: there was none).
+func restoreReconfiguringCondition(vm *infravirtrigaudiov1beta1.VirtualMachine, prev *metav1.Condition) {
+	if prev == nil {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionReconfiguring)
+		return
+	}
+	meta.SetStatusCondition(&vm.Status.Conditions, *prev)
 }
 
 // errResizeReservationPruned is a resize reservation the API server stored
@@ -509,7 +545,10 @@ func resizeOutcomeEstablished(vm *infravirtrigaudiov1beta1.VirtualMachine, desc 
 // applied: Reconfiguring=False with reason ReconcileSuccess, which only a
 // confirmed Reconfigure (or the completion of its task) sets, and which the
 // power-state marker replaces only when no reconfigure outcome is open
-// (mayMarkPowerAdjusting). Anything else keeps a resize reservation: no
+// (mayMarkPowerAdjusting). Every reservation write sets
+// Reconfiguring=True/ResizeReserved (recordResizeReservation), so a success
+// seen with a reservation was recorded after it, by a Reconfigure sent under
+// it; a success from before the reservation never settles it. Anything else keeps a resize reservation: no
 // condition (the outcome of a Reconfigure sent just before a restart was
 // never recorded), a change pending a restart or a power-off, a task in
 // progress, a failed, unanswered or dishonest Reconfigure, a resize refused

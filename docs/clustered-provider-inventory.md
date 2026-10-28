@@ -1034,24 +1034,67 @@ counted nowhere:
    resourceVersion-checked status update. The `Reconfigure` is sent only when
    the write was stored **and** the API server's answer still carries the
    field. A CRD older than the field prunes it; the resize is then not sent and
-   the VM gets `Reconfiguring=False/PlacementError` naming the field.
+   the VM gets `Reconfiguring=False/PlacementError` naming the field. The same
+   write sets `Reconfiguring=True` with reason `ResizeReserved` (the VM's
+   phase is `Reconfiguring`), replacing any earlier outcome: a
+   `ReconcileSuccess` left by an earlier resize can never release this
+   reservation. Only the `Reconfigure`'s own outcome replaces
+   `ResizeReserved`. A write whose answer was lost sends nothing; if it
+   landed, it stored both.
 3. While the field is set the VM counts at the larger of it and its recorded
    size, per resource, in placement decisions and in the committed-capacity
-   gauges. A later request within the reservation goes on under it; one that
-   grows beyond it is admitted for that growth only. The reservation is never
-   lowered while set.
+   gauges. While its outcome is pending, a later request within the
+   reservation goes on under it, and one that grows beyond it is admitted for
+   that growth only. Once a `Reconfigure` under it is confirmed, a further
+   growth is admitted again, and written again (with `ResizeReserved`), before
+   it is sent. The reservation is never lowered while set.
 4. It is cleared only in a later reconcile in which nothing about the VM's size
    is unresolved: no reconfigure needed or due, no reconfigure task, the VM's
-   `Reconfiguring` condition is `False` with reason `ReconcileSuccess` (the
-   provider confirmed the last `Reconfigure` applied), and `Describe` reported
-   the VM's vCPUs and memory maximum (which raise the recorded size first).
-   Any other `Reconfiguring` state keeps it: a failed, unanswered, partial,
-   restart-pending or asynchronous resize, a resize refused before it was sent
-   (such as `InheritedAdmissionOverCapacity`, whose refusal may have replaced an
-   earlier attempt's open outcome), no condition at all, or a reason this
-   release does not know. A reservation kept this way after the spec is set
-   back to the recorded size is released by the next resize the provider
-   confirms.
+   `Reconfiguring` condition is `False` with reason `ReconcileSuccess` recorded
+   after the reservation's write (the provider confirmed a `Reconfigure` sent
+   under it), and `Describe` reported the VM's vCPUs and memory maximum (which
+   raise the recorded size first). Any other `Reconfiguring` state keeps it: a
+   failed, unanswered, partial, restart-pending or asynchronous resize,
+   `ResizeReserved` (an outcome never recorded, for example because the
+   manager stopped after sending the `Reconfigure`), a resize refused before
+   it was sent (such as `InheritedAdmissionOverCapacity`, whose refusal may
+   have replaced an earlier attempt's open outcome), no condition at all, or a
+   reason this release does not know.
+
+**What this guarantees, and what it does not.** A `Reconfigure` is never sent
+without a stored reservation, and a reservation is released only on a
+confirmation recorded after it was written. Leader election still does not
+fence the provider: a paused previous leader can send a `Reconfigure` it
+admitted before it notices it lost its lease (see
+[Admissions inherited from an earlier manager](#admissions-inherited-from-an-earlier-manager)).
+
+##### A withdrawn resize can keep its reservation indefinitely
+
+Setting the VM's size back in its spec withdraws a resize but does **not**
+necessarily release its reservation. With the spec back at the recorded size
+nothing is sent, so nothing can confirm the reservation's outcome. It then
+stays, and keeps counting against the host, when the last `Reconfiguring`
+reason is one the manager does not retry by itself:
+
+- `ValidationError`, `InsufficientHostCapacity` or
+  `InheritedAdmissionOverCapacity` (a later step was refused after the
+  reservation was stored);
+- `ResizeReserved` (the manager stopped before recording the outcome, and a
+  new manager found the resize already withdrawn).
+
+After `ProviderError` or `ResizePendingPowerOff` the manager sends the
+`Reconfigure` again by itself, so a confirmed result still releases it.
+
+No timer releases a reservation whose outcome is unresolved: expiring it
+could free room that a `Reconfigure` sent earlier may still use. It is
+released by the next resize the provider confirms, or when the VM is
+deleted. Until a recovery mechanism exists (one that can prove no
+`Reconfigure` sent under the reservation can still execute), **do not remove
+it by hand** unless you have established, exactly as for a held admission
+below, that every manager and provider process that might have sent or
+received a `Reconfigure` for the VM has exited, that nothing for the VM still
+runs on its host, and that the domain's vCPUs and maximum memory are no more
+than its recorded size. VirtRigaud cannot check any of this for you.
 
 After a restart, a VM whose reservation covers its requested size has its
 `Reconfigure` sent (again) under it without a new admission: the libvirt
@@ -1115,8 +1158,9 @@ that a `Create` or `Clone` sent by an earlier manager cannot still complete.
    `status.placement.pendingHost` (the VM is then scheduled again), for example
    `kubectl patch vm <name> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/placement/pendingHost"}]'`,
    and check the old host once more afterwards. A held resize is withdrawn by
-   setting the VM's size back in its spec; its reservation is released only
-   once the provider confirms the size, never by hand.
+   setting the VM's size back in its spec, which sends nothing; it does not
+   release the reservation, which keeps counting
+   ([A withdrawn resize can keep its reservation indefinitely](#a-withdrawn-resize-can-keep-its-reservation-indefinitely)).
 4. If the outcome stays uncertain, keep the record: it only over-reserves.
    Investigate, or isolate the execution path (cordon the host, stop the
    provider for it) until the outcome is known.

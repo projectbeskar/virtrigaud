@@ -79,11 +79,13 @@ amendments.
 - **A resize-up is reserved durably before it is sent (G3).** The admitted footprint is written to
   the new `status.placement.resizeReservation` (a resourceVersion-checked status write) before
   `Reconfigure` is sent. If the API server does not keep the field (an older CRD), the resize is
-  held with `Reconfiguring=False/PlacementError` instead of being sent unreserved. The reservation
-  counts until the provider has confirmed the applied size: `Reconfiguring=False` with reason
-  `ReconcileSuccess`, and a `Describe` that reports the VM's vCPUs and memory maximum. Any other
-  outcome keeps it: failed, unanswered, pending a restart, asynchronous, refused before it was
-  sent, or a reason the manager does not recognise.
+  held with `Reconfiguring=False/PlacementError` instead of being sent unreserved. The same write
+  sets `Reconfiguring=True/ResizeReserved`, so a success left by an earlier resize can never
+  release the new reservation. The reservation counts until the provider has confirmed a
+  `Reconfigure` sent under it: `Reconfiguring=False` with reason `ReconcileSuccess`, and a
+  `Describe` that reports the VM's vCPUs and memory maximum. Any other outcome keeps it: failed,
+  unanswered or never recorded, pending a restart, asynchronous, refused before it was sent, or
+  a reason the manager does not recognise.
 - **Inherited admissions are checked before they are executed (C1).** Leader election does not
   fence writes, so a `pendingHost` or reservation write sent by a previous leader can land after
   the new leader gave the capacity to another VM. A durable admission this manager instance did
@@ -147,10 +149,16 @@ amendments.
   each `Reconfigure` a recoverable operation identity and accept a repeated request
   idempotently before they are admitted for clustered resizes. The libvirt provider's
   `Reconfigure` is synchronous and declarative.
-- **A reservation can outlive its resize.** A resize reservation is released only on a confirmed
-  `Reconfigure`. If a resize is refused before it is sent, and the spec is then set back to the
-  recorded size, the reservation stays until the next resize the provider confirms
-  (over-reserving only).
+- **A withdrawn resize can keep its reservation indefinitely.** Setting the spec back to the
+  recorded size sends nothing, so a reservation whose last `Reconfiguring` reason is
+  `ValidationError`, `InsufficientHostCapacity`, `InheritedAdmissionOverCapacity` or
+  `ResizeReserved` (an outcome a stopped manager never recorded) is not released. No timer
+  releases it, because expiring it could free room a `Reconfigure` sent earlier may still use. It
+  stays, and keeps counting, until the next resize the provider confirms or the VM is deleted:
+  this over-reserves capacity, it never overbooks a host. Do not remove it by hand without
+  proof that no earlier `Reconfigure` can still execute
+  ([details](../clustered-provider-inventory.md#a-withdrawn-resize-can-keep-its-reservation-indefinitely)).
+  A safe recovery mechanism is future work.
 - **Placement is still serialized per Provider.** With the client rate limit raised, the
   per-Provider placement step, slowed by CPU throttling, was the next limit measured.
 - **The client rate limits apply to every resource type alike** and change only at a restart.

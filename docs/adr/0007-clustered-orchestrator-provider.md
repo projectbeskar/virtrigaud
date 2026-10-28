@@ -1529,9 +1529,34 @@ follows; A2's `pendingHost` is its prerequisite.
 >   first), with the other settlement conditions above unchanged. A missing
 >   condition, any other reason — including a refusal that replaced an earlier
 >   attempt's outcome and a reason the manager does not recognise — keeps the
->   reservation. The cost is over-reservation: a resize refused before it was
->   sent and then withdrawn keeps its reservation until the next resize the
->   provider confirms.
+>   reservation.
+> - **The success must postdate the reservation.** Every reservation write
+>   sets `Reconfiguring=True/ResizeReserved` in the same checked status write
+>   (`recordResizeReservation`); a write that is not stored restores the
+>   earlier condition in memory, and one that landed stored both. Only the
+>   `Reconfigure`'s own outcome replaces it, and the power-state marker never
+>   does (`mayMarkPowerAdjusting`). So a `ReconcileSuccess` left by an earlier
+>   resize cannot release a newer reservation, including after a restart in
+>   which the `Reconfigure` was sent and its outcome never recorded. A
+>   reservation whose `Reconfigure` was confirmed authorizes nothing more: a
+>   further growth is admitted again and written again before it is sent.
+> - **A withdrawn resize can keep its reservation indefinitely.** With the
+>   spec set back to the recorded size nothing is sent, so a reservation whose
+>   last reason is `ValidationError`, `InsufficientHostCapacity`,
+>   `InheritedAdmissionOverCapacity` or `ResizeReserved` is never confirmed
+>   and stays until the next confirmed resize or the VM's deletion. No TTL
+>   releases it: the conditions record only the latest outcome, and nothing
+>   durable proves that no `Reconfigure` was sent under it, so expiry could
+>   free room an earlier `Reconfigure` may still use. This costs availability
+>   only. Administrators must not remove it without establishing that no
+>   earlier operation can still execute. A recovery mechanism (an operation
+>   identity per reservation, or a provider confirmation of the applied size)
+>   is follow-up work.
+> - **Scope.** G3 ensures that no `Reconfigure` is sent without a stored
+>   reservation and that a reservation is released only on a confirmation
+>   recorded after it. It does not fence a paused previous leader, which can
+>   still send a `Reconfigure` it admitted before noticing it lost its lease
+>   (provider-side fencing, not implemented).
 >
 > **Resizes are admitted too** (a decision of this review round). A
 > `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
