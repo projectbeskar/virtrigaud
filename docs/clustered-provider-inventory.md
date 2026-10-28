@@ -975,8 +975,8 @@ free = allocatable × overcommit ratio − committed
     (`status.currentResources`, or `status.placement.pendingResources` while
     its create is pending), and, while no memory ceiling is recorded for it,
     at the memory hot-add ceiling of that size (the class's hot-add setting
-    is unknown). **When nothing records its size** (a VM bound by a
-    pre-v0.4.0 build, or one whose recorded size is incomplete), its
+    is unknown). **When nothing records its size** (a VM bound by a build
+    that did not record it, or one whose recorded size is incomplete), its
     footprint cannot be established and every capacity admission on its
     Provider — scheduling, clustered resizes and clones, inherited
     revalidation — is refused (the reconcile is retried with a backoff and

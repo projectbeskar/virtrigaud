@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-28 03:13] - Next-release notes and the v0.4.1 to next upgrade guide
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/v0.4.1.md`: the v0.4.1 GA notes, archived from `next.md` (header comment only changed).
+- `docs/release-notes/next.md` (new): the notes for the release after v0.4.1 (no version chosen): performance (F1/F2, F3, F4/F5, F7, C′ with the Spike 1A/1B figures and their environment), admission safety (G1/G2/G4, G3, C1, the unsized-VM and resize-settlement fixes), the client rate limits (with the single QPS 100 measurement, not a recommendation), compatibility, known limitations (no provider-side fencing, the leader-transition window, asynchronous providers, a reservation that outlives its resize) and the rollback warning.
+- `docs/upgrading.md`: "Upgrading from v0.4.1 to the next release" gains its visible behaviour changes (polling cadence, provider validation, Provider resync, post-create describe, reservation release, unsized VMs).
+- `docs/README.md`: the release-notes and upgrade-guide rows.
+
+### Why
+The integration onto v0.4.1 needs release notes for what it adds and an upgrade guide from v0.4.1, including the rollback that Helm allows but that is unsafe while resize reservations are outstanding.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-28 03:10] - Regression tests for an ambiguous clustered clone pendingHost write
 **Author:** @wrkode (William Rizzo)
 
@@ -47,7 +65,7 @@ With a deny-list, a new or unlisted reason (for example a pre-send refusal repla
 - `docs/clustered-provider-inventory.md`: how such a VM is counted and how to resume admissions.
 
 ### Why
-A VM bound without a recorded size (an early v0.4.0 build) whose class was deleted, or whose namespace lost the grant, was counted at the minimum footprint, so other VMs could be admitted onto capacity it still uses.
+A VM bound without a recorded size (by a build that did not record it) whose class was deleted, or whose namespace lost the grant, was counted at the minimum footprint, so other VMs could be admitted onto capacity it still uses.
 
 ### Impact
 - [ ] Breaking change

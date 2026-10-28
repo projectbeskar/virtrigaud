@@ -64,6 +64,31 @@ longer fits; it does not stop the old one. Restarting a provider pod does not
 cancel an operation it already accepted either. Make sure the old manager pod
 is gone (not merely not leading) before you act on a held admission.
 
+### Behaviour changes that are visible but not breaking
+
+- **Running VMs are polled every 2 minutes** (5 when powered off), as intended;
+  v0.4.1 polled every VM every 10 seconds. `status.powerState` and
+  `status.ips` of a VM changed outside VirtRigaud are refreshed on that
+  cadence (a VM without an address, or in an unknown state, is still polled
+  every 10 seconds). A status write that would store nothing is no longer sent.
+- **A provider connection is validated once**, not before every call: a
+  cached client is reused while its Provider's configuration, its connection
+  and its circuit breaker are unchanged.
+- **A clustered Provider is reconciled on a 60-second resync** instead of on
+  every Host heartbeat.
+- **A new VM is described right after its `Create`**, instead of 5 seconds
+  later.
+- **A clustered resize reservation is released only on a confirmed
+  `Reconfigure`** (`Reconfiguring=False/ReconcileSuccess` and a `Describe`).
+  A reservation whose resize was refused before it was sent, after which the
+  spec was set back to the recorded size, stays until the next resize the
+  provider confirms.
+- **A placed VM whose VMClass is deleted or no longer granted** is counted
+  from its recorded size, never at the minimum footprint. If nothing records
+  its size, capacity admissions on its Provider are refused and retried
+  until the class or the grant is restored (see
+  [Committed capacity](clustered-provider-inventory.md#committed-capacity)).
+
 ### Configurable Kubernetes client rate limits
 
 The manager's client-side Kubernetes API rate limits, fixed at 20 requests per
