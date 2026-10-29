@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-29 03:23] - Update golang.org/x/net to v0.62.0
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `go.sum`, `proto/go.mod`, `proto/go.sum`, `sdk/go.mod`, `sdk/go.sum`: `golang.org/x/net` v0.60.0 → v0.62.0, fixing CVE-2026-78661 (GO-2026-6860) and CVE-2026-97045 (GO-2026-6866). The new version's requirements also move `golang.org/x/crypto` v0.58.0, `x/sys` v0.49.0, `x/term` v0.47.0, `x/text` v0.43.0, and, in the root module, `x/sync` v0.24.0 and `x/tools` v0.51.0.
+- `test/proxmox-grpc-test/go.mod`, `test/proxmox-grpc-test/go.sum`: `golang.org/x/net` v0.48.0 → v0.62.0. Its `go` directive moves from 1.24.0 to 1.26.10, and its `grpc`, `protobuf` and `genproto` versions move to those the local `proto` module it replaces already requires. This also clears the older `x/net`, `x/text`, `x/sys` and `grpc` advisories Trivy reported for this module. The module did not build before this change, because the `proto` module it replaces requires go 1.26.10.
+
+### Why
+govulncheck reported both advisories at module level only: no vulnerable symbol is reachable from VirtRigaud code. Trivy reports by dependency version and flagged every module, so the dependency is updated rather than suppressed. No code, API or behaviour change is intended.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-28 23:29] - An earlier resize's success never releases a newer resize reservation
 **Author:** @wrkode (William Rizzo)
 
