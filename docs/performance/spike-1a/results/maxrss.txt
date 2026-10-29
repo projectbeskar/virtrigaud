@@ -1,0 +1,3 @@
+BenchmarkPlacementScan/h1000_v100k/base-20         	       5	 192615881 ns/op	       157.3 store-heap-MiB	139836771 B/op	  101164 allocs/op
+	Command being timed: "docs/performance/spike-1a/results/controller.test -test.run ^$ -test.bench BenchmarkPlacementScan$ -test.benchtime=5x"
+	Maximum resident set size (kbytes): 553948

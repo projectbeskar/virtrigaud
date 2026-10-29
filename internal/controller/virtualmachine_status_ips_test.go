@@ -86,7 +86,7 @@ func TestReconcileVM_StatusIPsAreNormalised(t *testing.T) {
 // only has a loopback or link-local address is still waiting for an IP.
 func TestGetRequeueInterval_UnreachableAddressesAreNotAnIP(t *testing.T) {
 	r := &VirtualMachineReconciler{}
-	const poweredOn = "poweredOn"
+	poweredOn := string(contracts.PowerStateOn)
 
 	waiting := contracts.DescribeResponse{
 		Exists: true, PowerState: poweredOn,

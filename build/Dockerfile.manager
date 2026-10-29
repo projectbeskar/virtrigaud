@@ -71,7 +71,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a \
     -ldflags="-s -w \
       -X 'github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION}' \
       -X 'github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}'" \
-    -o manager cmd/manager/main.go
+    -o manager ./cmd/manager
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details

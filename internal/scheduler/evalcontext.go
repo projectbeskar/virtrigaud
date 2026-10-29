@@ -48,6 +48,10 @@ type evalContext struct {
 	// counted once. It is subtracted from the host's effective capacity.
 	committedByHost map[string]committed
 
+	// scopedByHost counts, per host, the VMs in the affinity scope that the
+	// caller summed into Request.Committed instead of listing them.
+	scopedByHost map[string]int
+
 	// Policy sub-structs, nil when the policy (or that section) is absent.
 	hard         *v1beta1.PlacementConstraints
 	soft         *v1beta1.PlacementConstraints
@@ -79,12 +83,30 @@ func newEvalContext(req Request) (*evalContext, error) {
 	}
 
 	placedByHost, committedByHost := indexPlaced(req.PlacedVMs, req.VMUID)
+	var scopedByHost map[string]int
+	for host, hc := range req.Committed {
+		if hc.ScopedVMs > 0 && NeedsPlacedVMLabels(req.Policy) {
+			// Summed VMs carry no labels: VM (anti-)affinity could not see them.
+			return nil, fmt.Errorf("scheduler: %d VMs in the affinity scope on host %s were summed, but the policy matches VM labels", hc.ScopedVMs, host)
+		}
+		c := committedByHost[host]
+		c.cpu = SaturatingAdd(c.cpu, hc.CPU)
+		c.memMiB = SaturatingAdd(c.memMiB, hc.MemoryMiB)
+		committedByHost[host] = c
+		if hc.ScopedVMs > 0 {
+			if scopedByHost == nil {
+				scopedByHost = make(map[string]int, len(req.Committed))
+			}
+			scopedByHost[host] += hc.ScopedVMs
+		}
+	}
 	ec := &evalContext{
 		req:             req,
 		cpuRatio:        cpuRatio,
 		memRatio:        memRatio,
 		placedByHost:    placedByHost,
 		committedByHost: committedByHost,
+		scopedByHost:    scopedByHost,
 	}
 	if req.Policy != nil {
 		ec.hard = req.Policy.Spec.Hard
@@ -172,7 +194,7 @@ func (ec *evalContext) freeCapacity(h *v1beta1.Host) (cpu int64, memMiB int64) {
 // Request.PlacedVMs set (the operator owns the binding, ADR-0007 D1). It drives
 // the spread/binpack tie-break and the host-anti-affinity VM cap.
 func (ec *evalContext) boundCount(hostID string) int {
-	return len(ec.placedByHost[hostID])
+	return len(ec.placedByHost[hostID]) + ec.scopedByHost[hostID]
 }
 
 // policySuffix renders a short ", policy <name>" fragment for decision traces, or

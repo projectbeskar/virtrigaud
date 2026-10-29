@@ -1,0 +1,6 @@
+hosts=1000 vms=100000 config=D memory=6Gi
+container_started=2026-10-26T02:51:22Z
+vm_workers_started=2026-10-26T02:51:50Z
+cache_init_seconds=28.0
+peak_working_set_mib_first_2min=2274
+restarts_after_2min=0 

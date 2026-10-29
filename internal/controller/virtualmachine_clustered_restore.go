@@ -407,7 +407,7 @@ func (r *VirtualMachineReconciler) moveToOwnDomain(
 	p := reattachPlacement(found, h, req,
 		"re-attach: this VirtualMachine's own domain was found on this host (ADR-0007 A6, R4); the pending host moved here")
 	if !r.assumeReattach(ctx, providerCR, vm, p) {
-		logger.V(1).Info("Provider's placement lock is busy; keeping the hold until the next retry")
+		logger.V(1).Info("Provider's placement lock is busy, or an earlier pick is unresolved; keeping the hold until the next retry")
 		return ctrl.Result{}, false, nil
 	}
 
@@ -427,11 +427,23 @@ func (r *VirtualMachineReconciler) moveToOwnDomain(
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		"create pending on the host where this VirtualMachine's own domain was found (ADR-0007 A6, R4); the create retry binds it")
 	applyDerivedPhase(vm)
+	assumptions := r.placementAssumptions()
+	uid := vmSchedulingUID(vm)
+	if !assumptions.BeginWrite(uid, p.assumeToken) {
+		return ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, true, nil
+	}
+	precondition := vm.ResourceVersion
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
 	defer cancel()
 	if err := r.Status().Update(writeCtx, vm); err != nil {
+		// As for a scheduled pick (recordPendingHost): released only when
+		// this write provably did not land and no earlier one may. A retry
+		// that finds the domain on the same host again continues this
+		// assumption (assume.Cache.Assume), so it stays reserved.
 		if pendingHostWriteRejected(err) {
-			r.placementAssumptions().Forget(vmSchedulingUID(vm))
+			assumptions.WriteRejected(uid, p.assumeToken)
+		} else {
+			assumptions.WriteAmbiguous(uid, p.assumeToken, precondition)
 		}
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, true, nil
@@ -439,6 +451,7 @@ func (r *VirtualMachineReconciler) moveToOwnDomain(
 		return ctrl.Result{}, false, fmt.Errorf("move the pending host of VirtualMachine %s/%s to its own domain's host: %w",
 			vm.Namespace, vm.Name, err)
 	}
+	assumptions.WriteStored(uid, p.assumeToken)
 	logger.Info("Moved the pending host to the host of the VM's own domain (ADR-0007 A6, R4)", "from", pending, "to", p.hostID,
 		"cpu", p.resources.CPU, "memoryMiB", p.resources.MemoryMiB)
 	return ctrl.Result{Requeue: true}, true, nil
@@ -608,8 +621,12 @@ func (r *VirtualMachineReconciler) providerHost(ctx context.Context, providerCR 
 // assumeReattach records p — a re-attach placement, not admitted — as vm's
 // placement assumption under the Provider's assume lock, as a scheduled
 // placement is (scheduleUnderLock): concurrent schedules of the Provider count
-// the domain on its host from now on, before the pendingHost write lands. It
-// reports false, assuming nothing, when the lock is busy.
+// the domain on its host from now on, before the pendingHost write lands, and
+// sets p.assumeToken. An assumption of the host vm's cached record names (the
+// pending host the domain moves from) is settled first: that record is in the
+// informer cache, so it counts from now on. It reports false, assuming
+// nothing, when the lock is busy or an earlier pick of another host is still
+// unresolved.
 func (r *VirtualMachineReconciler) assumeReattach(ctx context.Context, providerCR *infravirtrigaudiov1beta1.Provider,
 	vm *infravirtrigaudiov1beta1.VirtualMachine, p *clusterPlacement) bool {
 	assumptions := r.placementAssumptions()
@@ -619,15 +636,20 @@ func (r *VirtualMachineReconciler) assumeReattach(ctx context.Context, providerC
 		return false
 	}
 	defer unlock()
-	assumptions.Assume(providerKey, assume.Assumption{
-		UID:       vmSchedulingUID(vm),
+	uid := vmSchedulingUID(vm)
+	assumptions.SettleVisible(uid, placementHosts(vm))
+	token, ok := assumptions.Assume(providerKey, assume.Assumption{
+		UID:       uid,
 		Namespace: vm.Namespace,
 		Name:      vm.Name,
 		HostID:    p.hostID,
 		Labels:    vm.Labels, // Assume keeps its own copy
 		Resources: withMemoryCeiling(p.resources, p.memoryCeilingMiB),
+		// vm was read from the informer cache.
+		Observed: true,
 	})
-	return true
+	p.assumeToken = token
+	return ok
 }
 
 // discoveredPlacement is the placement R4 records for a VM whose own domain
@@ -655,7 +677,7 @@ func (r *VirtualMachineReconciler) discoveredPlacement(
 	p := reattachPlacement(found, h, req,
 		"re-attach: the pre-schedule check found this VirtualMachine's own domain on this host (ADR-0007 A6, R4); not scheduled")
 	if !r.assumeReattach(ctx, providerCR, vm, p) {
-		log.FromContext(ctx).V(1).Info("Provider's placement lock is busy; requeueing")
+		log.FromContext(ctx).V(1).Info("Provider's placement lock is busy, or an earlier pick is unresolved; requeueing")
 		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
 	}
 	return p, ctrl.Result{}, nil

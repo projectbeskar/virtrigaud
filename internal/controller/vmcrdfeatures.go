@@ -125,6 +125,10 @@ const (
 	// an older CRD would prune it, so a VM whose VMClass later turned memory
 	// hot-add off would be counted below the ceiling its domain has.
 	crdFeatureMemoryCeiling = "status.placement.memoryCeilingMiB"
+	// crdFeatureResizeReservation is the durable resize reservation (G3); an
+	// older CRD would prune it, and every clustered resize-up would be held
+	// (the resize gate fails closed when the API server does not keep it).
+	crdFeatureResizeReservation = "status.placement.resizeReservation"
 	// crdFeatureObservedPowerState is the Suspended and Unknown values of
 	// status.powerState (review R1); an older CRD would reject every status
 	// write of a VM its provider reports suspended or in an unknown state.
@@ -333,6 +337,10 @@ func missingVMCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
 		"properties", "memoryCeilingMiB"); !found {
 		missing = append(missing, crdFeatureMemoryCeiling)
 	}
+	if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties", "placement",
+		"properties", "resizeReservation"); !found {
+		missing = append(missing, crdFeatureResizeReservation)
+	}
 	if !enumHas(schemaRoot, []string{"properties", "status", "properties", "powerState", "enum"},
 		string(infravirtrigaudiov1beta1.ObservedPowerStateSuspended), string(infravirtrigaudiov1beta1.ObservedPowerStateUnknown)) {
 		missing = append(missing, crdFeatureObservedPowerState)
@@ -433,7 +441,7 @@ func (c *VMCRDFeatureChecker) Evaluate(ctx context.Context) (string, []string) {
 		case metrics.CRDFeaturesVerified:
 			logger.Info("The installed CRDs have the security features this manager relies on")
 		case metrics.CRDFeaturesMissing:
-			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without the pending-size rule and status.placement.pendingResources a clustered VM can be grown after it was scheduled; without status.placement.memoryCeilingMiB a memory hot-add VM can be under-counted; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused; without VMImage status.providerStatus[].providerUID and taskRef no prepared image is trusted and no asynchronous prepare is tracked; without VMImage status.providerStatus[].sourceDigest and Provider status.reportedCapabilities.supportsImageArtifactIdentity no prepared image can be matched to its source and import-style prepares are held. Readiness fails until the CRDs are upgraded",
+			logger.Error(ErrVMCRDSecurityFeaturesMissing, "Upgrade the CRDs: without the VirtualMachine provider-binding features a bound VM's spec.providerRef can still be changed and status.boundProvider is pruned; without the pending-size rule and status.placement.pendingResources a clustered VM can be grown after it was scheduled; without status.placement.memoryCeilingMiB a memory hot-add VM can be under-counted; without status.placement.resizeReservation every clustered resize-up is held; without spec.consumerNamespaceSelector no cross-namespace grant can be set and every cross-namespace reference is refused; without VMImage status.providerStatus[].providerUID and taskRef no prepared image is trusted and no asynchronous prepare is tracked; without VMImage status.providerStatus[].sourceDigest and Provider status.reportedCapabilities.supportsImageArtifactIdentity no prepared image can be matched to its source and import-style prepares are held. Readiness fails until the CRDs are upgraded",
 				"missing", missing)
 		case metrics.CRDFeaturesUnknown:
 			logger.Info("WARNING: cannot verify the CRDs' security features (a CRD cannot be read); make sure the CRDs are upgraded with the manager",

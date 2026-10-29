@@ -1,0 +1,624 @@
+{
+ "burst_100": {
+  "api_latency_s": {
+   "mean": 0.008418230135184468,
+   "p99": 0.015960565371024735
+  },
+  "api_requests_per_s": {
+   "GET/customresourcedefinitions": 0.07462686567164178,
+   "GET/providers": 0.5223880597014925,
+   "PATCH/virtualmachines": 0.4975124378109453,
+   "PATCH/virtualmachines/status": 0.4427860696517413,
+   "PUT/deployments": 1.164179104477612,
+   "PUT/hosts/status": 1.492537313432836,
+   "PUT/leases": 0.4975124378109453,
+   "PUT/providers/status": 1.164179104477612,
+   "PUT/serviceaccounts": 1.164179104477612,
+   "PUT/services": 1.164179104477612,
+   "PUT/virtualmachines": 0.9203980099502488,
+   "PUT/virtualmachines/status": 18.129353233830845,
+   "WATCH/providers": 0.004975124378109453,
+   "WATCH/services": 0.004975124378109453,
+   "WATCH/virtualmachines": 0.004975124378109453,
+   "WATCH/vmclones": 0.004975124378109453,
+   "WATCH/vmimages": 0.004975124378109453
+  },
+  "api_total_per_s": 27.258706467661693,
+  "api_writes_per_s": 26.63681592039801,
+  "apiserver": {
+   "cpu_cores": 0.3672636815920406,
+   "etcd_vm_updates_per_s": 3.4378109452736316,
+   "flowcontrol_rejected": 0,
+   "flowcontrol_wait_mean_s": 7.318559544158018e-05,
+   "inflight_max": 4.0,
+   "manager_vm_status_puts_per_s": 18.129353233830845,
+   "requests_by_verb_per_s": {
+    "CONNECT": 0.19402985074626866,
+    "DELETE": 0.4975124378109453,
+    "GET": 2.0348258706467663,
+    "LIST": 0.19900497512437812,
+    "PATCH": 1.0149253731343284,
+    "POST": 0.004975124378109453,
+    "PUT": 26.975124378109452,
+    "WATCH": 0.4079601990049751
+   },
+   "requests_per_s": 31.328358208955223,
+   "rss_max_bytes": 593281024.0
+  },
+  "etcd": {
+   "cpu_cores": 0.08109452736318414,
+   "db_bytes": 45854720.0,
+   "proposals_per_s": 7.562189054726368,
+   "wal_fsync_mean_s": 0.0014989433668763015
+  },
+  "fake": {
+   "fake-fake-p0": {
+    "duplicate_identity": 0.0,
+    "rpcs_per_s": {
+     "capabilities": 1.6616915422885572,
+     "create": 0.4975124378109453,
+     "delete": 0.44776119402985076,
+     "describe": 17.069651741293534,
+     "hostinfo": 1.492537313432836,
+     "listvms": 0.4975124378109453,
+     "validate": 20.676616915422887
+    },
+    "slot_wait_create_mean_s": 5.762490000000009e-06,
+    "vms": 1010.0
+   }
+  },
+  "go": {
+   "alloc_bytes_per_s": 10535604.218905473,
+   "gc_pause_s_per_s": 7.808908955223881e-05,
+   "gc_per_s": 0.7711442786069652,
+   "goroutines_max": 392.0,
+   "heap_inuse_max_bytes": 34250752.0,
+   "process_cpu_cores": 0.12711442786069652,
+   "rss_max_bytes": 89329664.0
+  },
+  "host_queue_depth": {
+   "max": 0.0,
+   "mean": 0.0
+  },
+  "manager_container": {
+   "cpu_cores": 0.13473724875621892,
+   "throttled_period_fraction": 0.0,
+   "throttled_s_per_s": 0.0,
+   "working_set_max_bytes": 48975872.0
+  },
+  "placement_lock": {
+   "busy": 0,
+   "decisions": 100.0,
+   "hold_mean_s": 0.0032295736399999995,
+   "hold_p99_s": 0.01024,
+   "wait_mean_s": 5.92487e-06,
+   "wait_p99_s": 2e-05
+  },
+  "provider_container_cpu_cores": 0.042308786069651716,
+  "provider_rpc_latency_s": {
+   "Create": {
+    "mean": 0.20079045353999997,
+    "p99": 0.4998095238095238
+   },
+   "Delete": {
+    "mean": 0.0946593455505618,
+    "p99": 0.24786285714285716
+   },
+   "Describe": {
+    "mean": 0.006187186536109449,
+    "p99": 0.015508550983899819
+   },
+   "GetCapabilities": {
+    "mean": 0.0016952419491017936,
+    "p99": 0.003796521739130437
+   },
+   "GetHostInfo": {
+    "mean": 0.020818924363333314,
+    "p99": 0.03184905660377359
+   },
+   "ListVMs": {
+    "mean": 0.02090242886,
+    "p99": 0.03184
+   },
+   "Validate": {
+    "mean": 0.0020152603473658883,
+    "p99": 0.0044027272727272995
+   }
+  },
+  "provider_rpcs_per_s": {
+   "Create": 0.4975124378109453,
+   "Delete": 0.4427860696517413,
+   "Describe": 17.084577114427862,
+   "GetCapabilities": 1.6616915422885572,
+   "GetHostInfo": 1.492537313432836,
+   "ListVMs": 0.4975124378109453,
+   "Validate": 20.681592039800996
+  },
+  "rate_limiter_wait_s": {
+   "mean": 0.34832737723894824,
+   "p50": 0.533939134860051,
+   "p99": 0.813494782697201
+  },
+  "reconcile_errors_per_s": {},
+  "reconciles_per_s": {
+   "host": 1.492537313432836,
+   "provider": 1.164179104477612,
+   "virtualmachine": 18.55223880597015
+  },
+  "seconds": 201,
+  "snapshots": 14,
+  "vm_queue_depth": {
+   "max": 1013.0,
+   "mean": 913.2857142857143
+  },
+  "vm_queue_wait_s": {
+   "mean": 47.124467748079795,
+   "p99": 99.1
+  },
+  "vm_reconcile_time_s": {
+   "mean": 0.5382559120713262,
+   "p50": 0.5005624629958555,
+   "p99": 1.6349074074074075
+  }
+ },
+ "burst_1000": {
+  "api_latency_s": {
+   "mean": 0.007995660718558712,
+   "p99": 0.01596999878241812
+  },
+  "api_requests_per_s": {
+   "GET/customresourcedefinitions": 0.07393715341959335,
+   "GET/providers": 1.9408502772643252,
+   "PATCH/virtualmachines": 1.8484288354898337,
+   "PATCH/virtualmachines/status": 1.7208872458410351,
+   "PUT/deployments": 1.2051756007393715,
+   "PUT/hosts/status": 1.6635859519408502,
+   "PUT/leases": 0.49722735674676527,
+   "PUT/providers/status": 1.2051756007393715,
+   "PUT/serviceaccounts": 1.2051756007393715,
+   "PUT/services": 1.2051756007393715,
+   "PUT/virtualmachines": 3.563770794824399,
+   "PUT/virtualmachines/status": 12.853974121996304,
+   "WATCH/deployments": 0.0018484288354898336,
+   "WATCH/hostpools": 0.0036968576709796672,
+   "WATCH/hosts": 0.0018484288354898336,
+   "WATCH/namespaces": 0.0018484288354898336,
+   "WATCH/persistentvolumeclaims": 0.0018484288354898336,
+   "WATCH/providers": 0.0018484288354898336,
+   "WATCH/secrets": 0.0018484288354898336,
+   "WATCH/serviceaccounts": 0.0036968576709796672,
+   "WATCH/services": 0.0036968576709796672,
+   "WATCH/virtualmachines": 0.0018484288354898336,
+   "WATCH/vmclasses": 0.0036968576709796672,
+   "WATCH/vmclones": 0.0018484288354898336,
+   "WATCH/vmimages": 0.0018484288354898336,
+   "WATCH/vmmigrations": 0.0018484288354898336,
+   "WATCH/vmnetworkattachments": 0.0036968576709796672,
+   "WATCH/vmsets": 0.0018484288354898336,
+   "WATCH/vmsnapshots": 0.0036968576709796672
+  },
+  "api_total_per_s": 29.025878003696857,
+  "api_writes_per_s": 26.96857670979667,
+  "apiserver": {
+   "cpu_cores": 0.37772643253234733,
+   "etcd_vm_updates_per_s": 12.811460258780038,
+   "flowcontrol_rejected": 0,
+   "flowcontrol_wait_mean_s": 7.136087561993006e-05,
+   "inflight_max": 4.0,
+   "manager_vm_status_puts_per_s": 12.853974121996304,
+   "requests_by_verb_per_s": {
+    "CONNECT": 0.19408502772643252,
+    "DELETE": 1.8484288354898337,
+    "GET": 3.4473197781885396,
+    "LIST": 0.19963031423290203,
+    "PATCH": 3.6395563770794825,
+    "POST": 0.0018484288354898336,
+    "PUT": 24.68761552680222,
+    "WATCH": 0.39186691312384475
+   },
+   "requests_per_s": 34.41035120147874,
+   "rss_max_bytes": 660025344.0
+  },
+  "etcd": {
+   "cpu_cores": 0.09353049907578563,
+   "db_bytes": 45854720.0,
+   "proposals_per_s": 18.53974121996303,
+   "wal_fsync_mean_s": 0.0011285400293989682
+  },
+  "fake": {
+   "fake-fake-p0": {
+    "duplicate_identity": 0.0,
+    "rpcs_per_s": {
+     "capabilities": 3.053604436229205,
+     "create": 1.8484288354898337,
+     "delete": 1.7208872458410351,
+     "describe": 9.142329020332717,
+     "hostinfo": 1.6635859519408502,
+     "listvms": 1.8484288354898337,
+     "validate": 15.580406654343808
+    },
+    "slot_wait_create_mean_s": 5.4973979999999784e-06,
+    "vms": 1069.0
+   }
+  },
+  "go": {
+   "alloc_bytes_per_s": 20242330.513863217,
+   "gc_pause_s_per_s": 0.00011505316451016638,
+   "gc_per_s": 1.0757855822550833,
+   "goroutines_max": 371.0,
+   "heap_inuse_max_bytes": 47529984.0,
+   "process_cpu_cores": 0.15325323475046213,
+   "rss_max_bytes": 108261376.0
+  },
+  "host_queue_depth": {
+   "max": 1.0,
+   "mean": 0.027777777777777776
+  },
+  "manager_container": {
+   "cpu_cores": 0.15334608687615528,
+   "throttled_period_fraction": 0.0,
+   "throttled_s_per_s": 0.0,
+   "working_set_max_bytes": 68546560.0
+  },
+  "placement_lock": {
+   "busy": 0,
+   "decisions": 1000.0,
+   "hold_mean_s": 0.006018312008999999,
+   "hold_p99_s": 0.02520615384615385,
+   "wait_mean_s": 6.044368000000006e-06,
+   "wait_p99_s": 1.1666666666666668e-05
+  },
+  "provider_container_cpu_cores": 0.031716646950092464,
+  "provider_rpc_latency_s": {
+   "Create": {
+    "mean": 0.2004855221579998,
+    "p99": 0.5009655172413793
+   },
+   "Delete": {
+    "mean": 0.10214079381847471,
+    "p99": 0.25070364444444443
+   },
+   "Describe": {
+    "mean": 0.0061632803574459966,
+    "p99": 0.015556195121951222
+   },
+   "GetCapabilities": {
+    "mean": 0.0016890803831719084,
+    "p99": 0.003754893617021277
+   },
+   "GetHostInfo": {
+    "mean": 0.021250329997777703,
+    "p99": 0.03197674418604651
+   },
+   "ListVMs": {
+    "mean": 0.020983754795000004,
+    "p99": 0.03185585585585586
+   },
+   "Validate": {
+    "mean": 0.0020343870971299845,
+    "p99": 0.0066525405405405465
+   }
+  },
+  "provider_rpcs_per_s": {
+   "Create": 1.8484288354898337,
+   "Delete": 1.7208872458410351,
+   "Describe": 9.147874306839187,
+   "GetCapabilities": 3.053604436229205,
+   "GetHostInfo": 1.6635859519408502,
+   "ListVMs": 1.8484288354898337,
+   "Validate": 15.585951940850277
+  },
+  "rate_limiter_wait_s": {
+   "mean": 0.31397493565873247,
+   "p50": 0.4896706003078502,
+   "p99": 0.8126094120061571
+  },
+  "reconcile_errors_per_s": {},
+  "reconciles_per_s": {
+   "host": 1.6635859519408502,
+   "provider": 1.2051756007393715,
+   "virtualmachine": 14.569316081330868
+  },
+  "seconds": 541,
+  "snapshots": 36,
+  "vm_queue_depth": {
+   "max": 1957.0,
+   "mean": 1733.8333333333333
+  },
+  "vm_queue_wait_s": {
+   "mean": 113.46251463497326,
+   "p99": 984.4297629499562
+  },
+  "vm_reconcile_time_s": {
+   "mean": 0.6857223658113429,
+   "p50": 0.5185020242914979,
+   "p99": 1.7215902366863907
+  }
+ },
+ "steady": {
+  "api_latency_s": {
+   "mean": 0.008538090155905538,
+   "p99": 0.01594434952404198
+  },
+  "api_requests_per_s": {
+   "GET/customresourcedefinitions": 0.08620689655172414,
+   "GET/providers": 0.034482758620689655,
+   "PUT/deployments": 1.2801724137931034,
+   "PUT/hosts/status": 1.6163793103448276,
+   "PUT/leases": 0.5,
+   "PUT/providers/status": 1.2844827586206897,
+   "PUT/serviceaccounts": 1.2801724137931034,
+   "PUT/services": 1.2801724137931034,
+   "PUT/virtualmachines/status": 20.00862068965517,
+   "WATCH/persistentvolumeclaims": 0.004310344827586207,
+   "WATCH/serviceaccounts": 0.004310344827586207,
+   "WATCH/virtualmachines": 0.004310344827586207,
+   "WATCH/vmclasses": 0.004310344827586207,
+   "WATCH/vmclones": 0.004310344827586207,
+   "WATCH/vmmigrations": 0.004310344827586207,
+   "WATCH/vmnetworkattachments": 0.004310344827586207,
+   "WATCH/vmsets": 0.004310344827586207,
+   "WATCH/vmsnapshots": 0.004310344827586207
+  },
+  "api_total_per_s": 27.40948275862069,
+  "api_writes_per_s": 27.25,
+  "apiserver": {
+   "cpu_cores": 0.36396551724137954,
+   "etcd_vm_updates_per_s": 0.0,
+   "flowcontrol_rejected": 0,
+   "flowcontrol_wait_mean_s": 7.28254820851725e-05,
+   "inflight_max": 4.0,
+   "manager_vm_status_puts_per_s": 20.00862068965517,
+   "requests_by_verb_per_s": {
+    "CONNECT": 0.1939655172413793,
+    "GET": 1.5603448275862069,
+    "LIST": 0.2629310344827586,
+    "PATCH": 0.09482758620689655,
+    "POST": 0.004310344827586207,
+    "PUT": 28.461206896551722,
+    "WATCH": 0.3706896551724138
+   },
+   "requests_per_s": 30.948275862068964,
+   "rss_max_bytes": 771612672.0
+  },
+  "etcd": {
+   "cpu_cores": 0.0772413793103449,
+   "db_bytes": 45854720.0,
+   "proposals_per_s": 3.8663793103448274,
+   "wal_fsync_mean_s": 0.0018799645973003232
+  },
+  "fake": {
+   "fake-fake-p0": {
+    "duplicate_identity": 0.0,
+    "rpcs_per_s": {
+     "capabilities": 1.2672413793103448,
+     "describe": 20.017241379310345,
+     "hostinfo": 1.5991379310344827,
+     "validate": 22.88362068965517
+    },
+    "slot_wait_create_mean_s": null,
+    "vms": 1000.0
+   }
+  },
+  "go": {
+   "alloc_bytes_per_s": 9548025.965517242,
+   "gc_pause_s_per_s": 7.531339224137933e-05,
+   "gc_per_s": 0.7241379310344828,
+   "goroutines_max": 391.0,
+   "heap_inuse_max_bytes": 35577856.0,
+   "process_cpu_cores": 0.1276724137931034,
+   "rss_max_bytes": 90333184.0
+  },
+  "host_queue_depth": {
+   "max": 1.0,
+   "mean": 0.0625
+  },
+  "manager_container": {
+   "cpu_cores": 0.13140817672413793,
+   "throttled_period_fraction": 0.0,
+   "throttled_s_per_s": 0.0,
+   "working_set_max_bytes": 50626560.0
+  },
+  "placement_lock": {
+   "busy": 0,
+   "decisions": 0,
+   "hold_mean_s": null,
+   "hold_p99_s": null,
+   "wait_mean_s": null,
+   "wait_p99_s": null
+  },
+  "provider_container_cpu_cores": 0.04228031034482759,
+  "provider_rpc_latency_s": {
+   "Describe": {
+    "mean": 0.006149521548567687,
+    "p99": 0.015538781725888323
+   },
+   "GetCapabilities": {
+    "mean": 0.0016750665771812097,
+    "p99": 0.0038957894736842097
+   },
+   "GetHostInfo": {
+    "mean": 0.021045289186666722,
+    "p99": 0.031846153846153843
+   },
+   "Validate": {
+    "mean": 0.0020192334468285235,
+    "p99": 0.0039981669535283995
+   }
+  },
+  "provider_rpcs_per_s": {
+   "Describe": 20.012931034482758,
+   "GetCapabilities": 1.2844827586206897,
+   "GetHostInfo": 1.6163793103448276,
+   "Validate": 22.900862068965516
+  },
+  "rate_limiter_wait_s": {
+   "mean": 0.3517376268329391,
+   "p50": 0.5390611242730994,
+   "p99": 0.813597222485462
+  },
+  "reconcile_errors_per_s": {},
+  "reconciles_per_s": {
+   "host": 1.6163793103448276,
+   "provider": 1.2844827586206897,
+   "virtualmachine": 20.00862068965517
+  },
+  "seconds": 232,
+  "snapshots": 16,
+  "vm_queue_depth": {
+   "max": 790.0,
+   "mean": 789.9375
+  },
+  "vm_queue_wait_s": {
+   "mean": 39.499681277290776,
+   "p99": 99.1
+  },
+  "vm_reconcile_time_s": {
+   "mean": 0.49998690654266414,
+   "p50": 0.4993619736282433,
+   "p99": 0.5979738105630729
+  }
+ },
+ "warmup": {
+  "api_latency_s": {
+   "mean": 0.0077558238206724755,
+   "p99": 0.0158964979253112
+  },
+  "api_requests_per_s": {
+   "GET/customresourcedefinitions": 0.08823529411764706,
+   "GET/providers": 0.03529411764705882,
+   "PUT/deployments": 1.4941176470588236,
+   "PUT/hosts/status": 1.7647058823529411,
+   "PUT/leases": 0.5,
+   "PUT/providers/status": 1.4941176470588236,
+   "PUT/serviceaccounts": 1.4941176470588236,
+   "PUT/services": 1.4941176470588236,
+   "PUT/virtualmachines/status": 19.976470588235294,
+   "WATCH/deployments": 0.0058823529411764705,
+   "WATCH/hostpools": 0.0058823529411764705,
+   "WATCH/hosts": 0.0058823529411764705,
+   "WATCH/namespaces": 0.0058823529411764705,
+   "WATCH/providers": 0.0058823529411764705,
+   "WATCH/secrets": 0.0058823529411764705,
+   "WATCH/services": 0.0058823529411764705,
+   "WATCH/vmimages": 0.0058823529411764705
+  },
+  "api_total_per_s": 28.388235294117646,
+  "api_writes_per_s": 28.21764705882353,
+  "apiserver": {
+   "cpu_cores": 0.34941176470588287,
+   "etcd_vm_updates_per_s": 0.0,
+   "flowcontrol_rejected": 0,
+   "flowcontrol_wait_mean_s": 6.80945771018998e-05,
+   "inflight_max": 3.0,
+   "manager_vm_status_puts_per_s": 19.976470588235294,
+   "requests_by_verb_per_s": {
+    "CONNECT": 0.19411764705882353,
+    "GET": 1.5470588235294118,
+    "LIST": 0.23529411764705882,
+    "PATCH": 0.07058823529411765,
+    "PUT": 29.511764705882353,
+    "WATCH": 0.4176470588235294
+   },
+   "requests_per_s": 31.976470588235294,
+   "rss_max_bytes": 774520832.0
+  },
+  "etcd": {
+   "cpu_cores": 0.0736470588235293,
+   "db_bytes": 45854720.0,
+   "proposals_per_s": 4.017647058823529,
+   "wal_fsync_mean_s": 0.0016057617374631438
+  },
+  "fake": {
+   "fake-fake-p0": {
+    "duplicate_identity": 0.0,
+    "rpcs_per_s": {
+     "capabilities": 1.4941176470588236,
+     "describe": 19.976470588235294,
+     "hostinfo": 1.7647058823529411,
+     "validate": 23.235294117647058
+    },
+    "slot_wait_create_mean_s": null,
+    "vms": 1000.0
+   }
+  },
+  "go": {
+   "alloc_bytes_per_s": 10746756.564705882,
+   "gc_pause_s_per_s": 7.939825294117647e-05,
+   "gc_per_s": 0.8117647058823529,
+   "goroutines_max": 392.0,
+   "heap_inuse_max_bytes": 29007872.0,
+   "process_cpu_cores": 0.1226470588235294,
+   "rss_max_bytes": 83607552.0
+  },
+  "host_queue_depth": {
+   "max": 0.0,
+   "mean": 0.0
+  },
+  "manager_container": {
+   "cpu_cores": 0.1176570764705882,
+   "throttled_period_fraction": 0.0,
+   "throttled_s_per_s": 0.0,
+   "working_set_max_bytes": 47013888.0
+  },
+  "placement_lock": {
+   "busy": 0,
+   "decisions": 0,
+   "hold_mean_s": null,
+   "hold_p99_s": null,
+   "wait_mean_s": null,
+   "wait_p99_s": null
+  },
+  "provider_container_cpu_cores": 0.0410256823529412,
+  "provider_rpc_latency_s": {
+   "Describe": {
+    "mean": 0.006130966876288659,
+    "p99": 0.015513653136531368
+   },
+   "GetCapabilities": {
+    "mean": 0.0016302499685039373,
+    "p99": 0.0038768000000000006
+   },
+   "GetHostInfo": {
+    "mean": 0.02090758195,
+    "p99": 0.03185585585585586
+   },
+   "Validate": {
+    "mean": 0.001980670024816406,
+    "p99": 0.004239047619047596
+   }
+  },
+  "provider_rpcs_per_s": {
+   "Describe": 19.970588235294116,
+   "GetCapabilities": 1.4941176470588236,
+   "GetHostInfo": 1.7647058823529411,
+   "Validate": 23.235294117647058
+  },
+  "rate_limiter_wait_s": {
+   "mean": 0.3397155752519695,
+   "p50": 0.528644522968198,
+   "p99": 0.813388890459364
+  },
+  "reconcile_errors_per_s": {},
+  "reconciles_per_s": {
+   "host": 1.7647058823529411,
+   "provider": 1.4941176470588236,
+   "virtualmachine": 19.976470588235294
+  },
+  "seconds": 170,
+  "snapshots": 12,
+  "vm_queue_depth": {
+   "max": 790.0,
+   "mean": 790.0
+  },
+  "vm_queue_wait_s": {
+   "mean": 39.500057606790506,
+   "p99": 99.1
+  },
+  "vm_reconcile_time_s": {
+   "mean": 0.4999933898657213,
+   "p50": 0.4998532002348796,
+   "p99": 0.5979940933254577
+  }
+ }
+}

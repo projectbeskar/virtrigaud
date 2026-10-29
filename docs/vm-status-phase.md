@@ -110,7 +110,7 @@ Providers whose power operations are synchronous (vSphere, libvirt) never set it
   `Reconfiguring` is absent or settled (`False` with `ReconcileSuccess` or
   `PowerTaskFailed`) and no `status.reconfigureTaskRef` is recorded. A power
   operation sent while `Reconfiguring` is `True` (a reconfigure in flight,
-  `RestartRequired`) or `False` with any reason other than `ReconcileSuccess` and
+  `ResizeReserved`, `RestartRequired`) or `False` with any reason other than `ReconcileSuccess` and
   `PowerTaskFailed` (`ProviderError`, `ResizePendingPowerOff`,
   `ProviderLacksHonestReconfigure`, `ValidationError`, `ShrinkPendingPowerOff`,
   `InsufficientHostCapacity`, ...) leaves that condition as it is, and the

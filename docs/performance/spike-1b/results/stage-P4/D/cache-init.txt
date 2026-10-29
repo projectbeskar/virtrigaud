@@ -1,0 +1,1 @@
+config D pod virtrigaud-manager-6c784b694-x82rv

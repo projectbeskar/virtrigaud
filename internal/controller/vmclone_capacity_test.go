@@ -28,11 +28,13 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
 
 // These tests pin the capacity check of a CLUSTERED clone (vmclone_capacity.go):
@@ -157,8 +159,10 @@ func TestVMClone_Clustered_HotAddCloneCountsAtItsCeiling(t *testing.T) {
 }
 
 // TestVMClone_Clustered_AdmittedPendingCloneIsNotReChecked: a target whose
-// pending host is already recorded holds its capacity durably (an earlier
-// attempt admitted it); a retry is sent even if the host has filled since.
+// pending host this manager instance recorded holds its capacity durably (an
+// earlier attempt admitted it); a retry is sent even if the host has filled
+// since. One an earlier instance recorded is revalidated first
+// (placement_handover_test.go).
 func TestVMClone_Clustered_AdmittedPendingCloneIsNotReChecked(t *testing.T) {
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-c-target"}}
 	target := &infrav1beta1.VirtualMachine{
@@ -170,6 +174,8 @@ func TestVMClone_Clustered_AdmittedPendingCloneIsNotReChecked(t *testing.T) {
 			PendingResources: &infrav1beta1.PlacementResources{CPU: 4, MemoryMiB: 8192}}},
 	}
 	r, clone := clusteredCloneFixture(t, sizedSource(), cp, smallCloneHost(6), target)
+	r.placementAssumptions().Establish(vmSchedulingUID(target),
+		pendingAdmissionOf(target, "default/prov-c", assume.AdmissionClone, string(clone.UID)))
 	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
 	assert.Equal(t, 1, cp.cloneCnt, "the retry of an admitted clone is sent")
 }
@@ -216,6 +222,14 @@ func TestVMClone_Clustered_UnknownSizeWaits(t *testing.T) {
 // cache, as in the manager.
 func createAndCloneFixture(t *testing.T) (*VirtualMachineReconciler, *VMCloneReconciler, *clonerProvider, *infrav1beta1.VMClone, *laggingClient) {
 	t.Helper()
+	return createAndCloneFixtureWith(t, 4, interceptor.Funcs{})
+}
+
+// createAndCloneFixtureWith is createAndCloneFixture with hostCPU vCPUs on
+// host-a and funcs intercepting the live store (writes and authoritative
+// reads); the lagging snapshot is not intercepted.
+func createAndCloneFixtureWith(t *testing.T, hostCPU int32, funcs interceptor.Funcs) (*VirtualMachineReconciler, *VMCloneReconciler, *clonerProvider, *infrav1beta1.VMClone, *laggingClient) {
+	t.Helper()
 	cpu, mem := int32(2), int64(4096)
 	src := capVM("src")
 	src.Status.ID = "default.src"
@@ -238,9 +252,9 @@ func createAndCloneFixture(t *testing.T) (*VirtualMachineReconciler, *VMCloneRec
 		// UID is not recorded yet is recorded first, in a pass of its own).
 		Status: infrav1beta1.VMCloneStatus{TargetUID: "uid-copy"},
 	}
-	objs := append(capBase(), capHost("host-a", 4), capVM("a"), src, target, clone)
+	objs := append(capBase(), capHost("host-a", hostCPU), capVM("a"), src, target, clone)
 	s := cloneTestScheme(t)
-	lc := newCloneLaggingClient(t, s, objs...)
+	lc := newCloneLaggingClientWith(t, s, funcs, objs...)
 
 	vmr := &VirtualMachineReconciler{Client: lc, Scheme: s}
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.copy"}}
@@ -253,22 +267,27 @@ func createAndCloneFixture(t *testing.T) (*VirtualMachineReconciler, *VMCloneRec
 	return vmr, cr, cp, clone, lc
 }
 
-// newCloneLaggingClient is newLaggingClient whose stores also serve the
-// VMClone status subresource (the clone reconciler writes it).
-func newCloneLaggingClient(t *testing.T, s *runtime.Scheme, objs ...client.Object) *laggingClient {
+// newCloneLaggingClientWith is newLaggingClient whose stores also serve the
+// VMClone status subresource (the clone reconciler writes it) and whose live
+// store runs funcs (as laggingClientWith).
+func newCloneLaggingClientWith(t *testing.T, s *runtime.Scheme, funcs interceptor.Funcs, objs ...client.Object) *laggingClient {
 	t.Helper()
-	build := func() client.Client {
+	build := func(withFuncs bool) client.Client {
 		copies := make([]client.Object, 0, len(objs))
 		for _, o := range objs {
 			c, ok := o.DeepCopyObject().(client.Object)
 			require.True(t, ok, "deep copy of %T is not a client.Object", o)
 			copies = append(copies, c)
 		}
-		return fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
-			WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
-			WithStatusSubresource(&infrav1beta1.VirtualMachine{}, &infrav1beta1.VMClone{}).Build()
+		b := fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
+			WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
+			WithStatusSubresource(&infrav1beta1.VirtualMachine{}, &infrav1beta1.VMClone{})
+		if withFuncs {
+			b = b.WithInterceptorFuncs(funcs)
+		}
+		return b.Build()
 	}
-	return &laggingClient{Client: build(), scheme: s, reader: build()}
+	return &laggingClient{Client: build(true), scheme: s, reader: build(false)}
 }
 
 // catchUpWithClones is laggingClient.catchUp for a store that also holds
@@ -293,7 +312,7 @@ func catchUpWithClones(t *testing.T, c *laggingClient) {
 		objs = append(objs, &clones.Items[i])
 	}
 	fresh := fake.NewClientBuilder().WithScheme(c.scheme).WithObjects(objs...).
-		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infrav1beta1.VirtualMachine{}, &infrav1beta1.VMClone{}).Build()
 	c.mu.Lock()
 	c.reader = fresh

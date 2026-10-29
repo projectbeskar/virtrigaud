@@ -1,0 +1,6 @@
+hosts=1000 vms=100000 config=D memory=chart
+container_started=2026-10-26T02:43:36Z
+vm_workers_started=2026-10-26T02:44:06Z
+cache_init_seconds=30.0
+peak_working_set_mib_first_2min=1882
+restarts_after_2min=2 OOMKilled

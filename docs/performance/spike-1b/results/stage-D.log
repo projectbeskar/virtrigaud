@@ -1,0 +1,85 @@
+Creating cluster "virtrigaud-spike1b" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-virtrigaud-spike1b"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-virtrigaud-spike1b
+
+Have a nice day! 👋
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:5c459dc54ce654e915886fe121e4334ac62c3adb9e9f3bf359868b94d5b3657e" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:5c459dc54ce654e915886fe121e4334ac62c3adb9e9f3bf359868b94d5b3657e" not yet present on node "virtrigaud-spike1b-worker", loading...
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+W1025 23:56:23.392714 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.392753 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.412437 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.412496 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.450106 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.450161 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.492545 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.492589 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.527628 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.527657 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.559133 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.559161 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.580834 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.580874 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.602825 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.602872 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.626558 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.626649 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.663602 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.663647 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.697941 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.697994 3687780 warnings.go:70] unrecognized format "int64"
+W1025 23:56:23.716478 3687780 warnings.go:70] unrecognized format "int32"
+W1025 23:56:23.716618 3687780 warnings.go:70] unrecognized format "int64"
+cluster up, manager on config A
+setup done: 1 provider(s), 1000 hosts, 100000 seeded VMs, host 540 vCPU / 1679360 MiB
+populating 100000 VMs for fake-p0
+  9034/100000 (903/s)
+  17410/100000 (870/s)
+  25730/100000 (858/s)
+  33822/100000 (845/s)
+  41795/100000 (836/s)
+  49960/100000 (833/s)
+  58079/100000 (830/s)
+  65830/100000 (823/s)
+  74146/100000 (824/s)
+  82260/100000 (822/s)
+  90344/100000 (821/s)
+  98618/100000 (822/s)
+populate done in 2m2s
+populate: 122 s
+setup+populate: 156 s
+== stage D config D
+Error from server (NotFound): pods "virtrigaud-manager-5765844cf4-7sf92" not found
+config D active
+burst 1000 done: "ready": 0
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+stage D config D done
+== stage D config A
+config A active
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+stage D config A done

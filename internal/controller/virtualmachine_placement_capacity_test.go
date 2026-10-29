@@ -148,7 +148,7 @@ func newLaggingClient(t *testing.T, s *runtime.Scheme, objs ...client.Object) *l
 			copies = append(copies, c)
 		}
 		return fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
-			WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+			WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 			WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).Build()
 	}
 	return &laggingClient{Client: build(), scheme: s, reader: build()}
@@ -184,7 +184,7 @@ func (c *laggingClient) catchUp(t *testing.T) {
 		objs = append(objs, items...)
 	}
 	fresh := fake.NewClientBuilder().WithScheme(c.scheme).WithObjects(objs...).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).Build()
 	c.mu.Lock()
 	c.reader = fresh
@@ -282,6 +282,8 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 		vm.Namespace = "tenant-b"
 		vm.Spec.ProviderRef.Namespace = capNS
 		vm.Spec.ClassRef = infravirtrigaudiov1beta1.ObjectRef{Name: "test-class", Namespace: capNS}
+		// tenant-b may not use that class, so the VM counts from its record.
+		vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(2), MemoryMiB: i64p(4096)}
 		return vm
 	}
 	bound := func(name string) *infravirtrigaudiov1beta1.VirtualMachine {
@@ -292,6 +294,9 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 		name   string
 		others []client.Object
 		fits   bool
+		// failsClosed: the committed capacity cannot be established, so the
+		// VM is not placed and the pass returns errUnsizedPlacement.
+		failsClosed bool
 	}{
 		{name: "empty host", fits: true},
 		{name: "one bound VM", others: []client.Object{bound("a")}, fits: true},
@@ -367,7 +372,7 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 			fits: false,
 		},
 		{
-			name: "a class in another namespace the VM may not use sizes nothing (minimum footprint)",
+			name: "an unsized VM whose class in another namespace it may not use fails closed",
 			others: []client.Object{
 				&infravirtrigaudiov1beta1.VMClass{
 					ObjectMeta: metav1.ObjectMeta{Name: "huge", Namespace: "infra"},
@@ -379,17 +384,36 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 					return vm
 				}(),
 			},
-			fits: true,
+			failsClosed: true,
 		},
 		{
-			name: "a VM whose class is gone is sized from its current resources",
+			name: "a VM whose class is gone is sized from its recorded resources",
+			others: []client.Object{bound("a"), func() client.Object {
+				vm := bound("classless")
+				vm.Spec.ClassRef.Name = "deleted-class"
+				vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(2), MemoryMiB: i64p(4096)}
+				return vm
+			}()},
+			fits: false,
+		},
+		{
+			name: "a VM whose class is gone and whose size is only partly recorded fails closed",
 			others: []client.Object{bound("a"), func() client.Object {
 				vm := bound("classless")
 				vm.Spec.ClassRef.Name = "deleted-class"
 				vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(2)}
 				return vm
 			}()},
-			fits: false,
+			failsClosed: true,
+		},
+		{
+			name: "a legacy bound VM with no recorded size whose class is gone fails closed",
+			others: []client.Object{func() client.Object {
+				vm := bound("legacy")
+				vm.Spec.ClassRef.Name = "deleted-class"
+				return vm
+			}()},
+			failsClosed: true,
 		},
 	}
 	for _, tc := range cases {
@@ -399,6 +423,13 @@ func TestClusteredCapacity_CommittedSources(t *testing.T) {
 			objs = append(objs, tc.others...)
 			r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &concurrentCreateProvider{}}, objs...)
 
+			if tc.failsClosed {
+				p, _, err := r.resolveClusterPlacement(context.Background(), vm, clusteredProviderCR("prov-cluster", capNS), capCreateReq(), nil)
+				require.ErrorIs(t, err, errUnsizedPlacement)
+				assert.Nil(t, p, "nothing is placed while a placed VM cannot be sized")
+				assert.Empty(t, pendingHost(vm))
+				return
+			}
 			host, res := resolve(t, r, vm)
 			if tc.fits {
 				assert.Equal(t, "host-alpha", host)
@@ -775,7 +806,7 @@ func TestClusteredCapacity_AmbiguousPendingHostWriteKeepsTheAssumption(t *testin
 			s := coverageTestScheme(t)
 			objs := append(capBase(), capHost("host-alpha", 4), capVM("vm"))
 			fc := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-				WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+				WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 				WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
 				WithInterceptorFuncs(interceptor.Funcs{
 					SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {

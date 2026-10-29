@@ -1,0 +1,13 @@
+{
+  "time": "2026-10-25T23:53:40.906533369Z",
+  "vms": 10000,
+  "executions": 10000,
+  "bound": 10000,
+  "pendingWithoutID": 0,
+  "pendingWithExecution": 0,
+  "violations": {},
+  "informational": {
+    "seeded_hosts_over_capacity": 100
+  },
+  "examples": null
+}

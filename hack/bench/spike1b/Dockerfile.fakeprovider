@@ -1,0 +1,19 @@
+# Spike 1B test-only fake clustered provider. NOT a supported provider.
+# Build from the repository root:
+#   docker build -f hack/bench/spike1b/Dockerfile.fakeprovider -t spike1b.local/fakeprovider:dev .
+ARG BUILDER_IMAGE=docker.io/golang:1.26.10
+ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
+FROM ${BUILDER_IMAGE} AS builder
+WORKDIR /workspace
+COPY go.mod go.sum ./
+COPY sdk/ sdk/
+COPY proto/ proto/
+RUN go mod download
+COPY api/ api/
+COPY internal/ internal/
+COPY test/spike1b/ test/spike1b/
+RUN CGO_ENABLED=0 go build -o fakeprovider ./test/spike1b/fakeprovider
+FROM ${BASE_IMAGE}
+COPY --from=builder /workspace/fakeprovider /fakeprovider
+USER 65532:65532
+ENTRYPOINT ["/fakeprovider"]

@@ -156,6 +156,43 @@ type PlacedVM struct {
 	CapacityOnly bool
 }
 
+// HostCommitted is committed capacity summed per host by the caller
+// (Request.Committed): the vCPUs and memory (MiB) of the VMs summed on the
+// host, and how many of them are in the scheduled VM's affinity scope (counted
+// as bound VMs, like PlacedVMs entries not marked CapacityOnly).
+type HostCommitted struct {
+	CPU       int64
+	MemoryMiB int64
+	// VMs is how many VMs were summed; ScopedVMs how many of them are in the
+	// affinity scope (only ScopedVMs reaches the scheduling decision).
+	VMs       int
+	ScopedVMs int
+}
+
+// Add sums one VM holding r on the host into c (saturating, like the
+// scheduler's own sums); scoped marks a VM in the affinity scope.
+func (c HostCommitted) Add(r ResourceRequest, scoped bool) HostCommitted {
+	c.CPU = SaturatingAdd(c.CPU, nonNegative(int64(r.CPU)))
+	c.MemoryMiB = SaturatingAdd(c.MemoryMiB, nonNegative(r.MemoryMiB))
+	c.VMs++
+	if scoped {
+		c.ScopedVMs++
+	}
+	return c
+}
+
+// NeedsPlacedVMLabels reports whether scheduling under policy matches placed
+// VMs' labels (VM affinity or anti-affinity terms): every VM in the
+// scheduled VM's affinity scope must then be listed in Request.PlacedVMs, not
+// summed into Request.Committed.
+func NeedsPlacedVMLabels(policy *v1beta1.VMPlacementPolicy) bool {
+	if policy == nil {
+		return false
+	}
+	return (policy.Spec.Affinity != nil && policy.Spec.Affinity.VMAffinity != nil) ||
+		(policy.Spec.AntiAffinity != nil && policy.Spec.AntiAffinity.VMAntiAffinity != nil)
+}
+
 // Request is the pure, self-contained input to Schedule. It carries no Kubernetes
 // client and no I/O handle: the caller resolves everything before calling.
 type Request struct {
@@ -185,6 +222,16 @@ type Request struct {
 	// marked CapacityOnly also drive VM (anti-)affinity matching and per-host
 	// bound-VM counts. Caller-supplied.
 	PlacedVMs []PlacedVM
+
+	// Committed is committed capacity the caller has already summed per host
+	// for VMs it does NOT list in PlacedVMs (nil: none). It is added to what
+	// PlacedVMs commits. The caller keeps the two disjoint — a VM (UID, host)
+	// is either listed or summed, never both — excludes the scheduled VM from
+	// it, and sums a VM into it only when nothing needs it individually: not
+	// when an assumption of the same UID must be merged with it, and not when
+	// it is in the scheduled VM's affinity scope while the policy has VM
+	// (anti-)affinity terms (NeedsPlacedVMLabels), which match labels.
+	Committed map[string]HostCommitted
 
 	// VMUID identifies the VM being scheduled (its Kubernetes UID). PlacedVMs
 	// entries with this UID are ignored: the VM's own binding, pending host or

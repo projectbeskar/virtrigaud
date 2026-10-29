@@ -411,34 +411,40 @@ var _ = Describe("VirtualMachine Controller", func() {
 		})
 
 		Describe("getRequeueInterval", func() {
-			It("should return 10s for poweredOn VM with no IPs (waiting for VMware Tools)", func() {
+			// Providers report the canonical contracts power states.
+			It("should return 10s for a powered-on VM with no IPs (waiting for an address)", func() {
 				vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-				desc := contracts.DescribeResponse{PowerState: "poweredOn", IPs: nil}
+				desc := contracts.DescribeResponse{PowerState: string(contracts.PowerStateOn), IPs: nil}
 				Expect(reconciler.getRequeueInterval(vm, desc)).To(Equal(10 * time.Second))
 			})
 
-			It("should return 2m for poweredOn VM with IPs", func() {
+			It("should return 2m for a powered-on VM with IPs", func() {
 				vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-				desc := contracts.DescribeResponse{PowerState: "poweredOn", IPs: []string{"10.0.0.1"}}
+				desc := contracts.DescribeResponse{PowerState: string(contracts.PowerStateOn), IPs: []string{"10.0.0.1"}}
 				Expect(reconciler.getRequeueInterval(vm, desc)).To(Equal(2 * time.Minute))
 			})
 
-			It("should return 5m for poweredOff VM", func() {
+			It("should return 5m for a powered-off VM", func() {
 				vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-				desc := contracts.DescribeResponse{PowerState: "poweredOff"}
+				desc := contracts.DescribeResponse{PowerState: string(contracts.PowerStateOff)}
 				Expect(reconciler.getRequeueInterval(vm, desc)).To(Equal(5 * time.Minute))
 			})
 
-			It("should return 2m for suspended VM", func() {
+			It("should return 2m for a suspended VM", func() {
 				vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-				desc := contracts.DescribeResponse{PowerState: "suspended"}
+				desc := contracts.DescribeResponse{PowerState: string(contracts.PowerStateSuspended)}
 				Expect(reconciler.getRequeueInterval(vm, desc)).To(Equal(2 * time.Minute))
 			})
 
-			It("should return 10s for unknown/transitional state", func() {
+			It("should return 10s for an unknown, empty or unrecognised state", func() {
 				vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-				desc := contracts.DescribeResponse{PowerState: "unknown"}
-				Expect(reconciler.getRequeueInterval(vm, desc)).To(Equal(10 * time.Second))
+				// Unknown, nothing reported yet (incomplete provisioning), a
+				// graceful shutdown in progress, and the vSphere-native strings
+				// no provider reports any more all poll fast.
+				for _, state := range []string{string(contracts.PowerStateUnknown), "", "OffGraceful", "poweredOn", "poweredOff"} {
+					desc := contracts.DescribeResponse{PowerState: state, IPs: []string{"10.0.0.1"}}
+					Expect(reconciler.getRequeueInterval(vm, desc)).To(Equal(10*time.Second), "state %q", state)
+				}
 			})
 		})
 

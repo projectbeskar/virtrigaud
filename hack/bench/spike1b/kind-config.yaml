@@ -1,0 +1,22 @@
+# Spike 1B kind cluster: one control plane (API server + etcd) and one worker
+# for the manager and the fake provider. The etcd backend quota is raised to
+# 8 GiB so that object count, not the 2 GiB default, limits the large stages;
+# everything else is kind's default. The node image is pinned.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: virtrigaud-spike1b
+nodes:
+- role: control-plane
+  image: kindest/node:v1.34.0
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    etcd:
+      local:
+        extraArgs:
+          quota-backend-bytes: "8589934592"
+          listen-metrics-urls: "http://127.0.0.1:2381"
+- role: worker
+  image: kindest/node:v1.34.0
+  labels:
+    spike1b/role: workload

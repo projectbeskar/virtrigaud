@@ -1,0 +1,110 @@
+  t=   5s submitted=10 created=9 ready=0 deleteReq=0 gone=0
+  t=  10s submitted=20 created=19 ready=8 deleteReq=7 gone=7
+  t=  15s submitted=30 created=29 ready=16 deleteReq=15 gone=14
+  t=  20s submitted=40 created=39 ready=23 deleteReq=22 gone=20
+  t=  25s submitted=50 created=49 ready=31 deleteReq=30 gone=28
+  t=  30s submitted=60 created=59 ready=41 deleteReq=39 gone=37
+  t=  35s submitted=70 created=69 ready=50 deleteReq=48 gone=47
+  t=  40s submitted=80 created=79 ready=60 deleteReq=58 gone=56
+  t=  45s submitted=90 created=89 ready=69 deleteReq=68 gone=66
+  t=  50s submitted=100 created=99 ready=79 deleteReq=77 gone=75
+  t=  55s submitted=110 created=109 ready=89 deleteReq=87 gone=85
+  t=  60s submitted=120 created=119 ready=99 deleteReq=97 gone=95
+  t=  65s submitted=130 created=129 ready=109 deleteReq=107 gone=105
+  t=  70s submitted=140 created=139 ready=119 deleteReq=117 gone=115
+  t=  75s submitted=150 created=149 ready=129 deleteReq=127 gone=125
+  t=  80s submitted=160 created=159 ready=139 deleteReq=137 gone=135
+  t=  85s submitted=170 created=169 ready=149 deleteReq=147 gone=145
+  t=  90s submitted=180 created=179 ready=159 deleteReq=157 gone=155
+  t=  95s submitted=190 created=189 ready=169 deleteReq=167 gone=165
+  t= 100s submitted=200 created=199 ready=179 deleteReq=177 gone=175
+  t= 105s submitted=210 created=209 ready=189 deleteReq=187 gone=185
+  t= 110s submitted=220 created=219 ready=199 deleteReq=197 gone=195
+  t= 115s submitted=230 created=229 ready=209 deleteReq=207 gone=205
+  t= 120s submitted=240 created=239 ready=219 deleteReq=217 gone=215
+  t= 125s submitted=250 created=249 ready=229 deleteReq=227 gone=225
+  t= 130s submitted=260 created=259 ready=239 deleteReq=237 gone=235
+  t= 135s submitted=270 created=269 ready=249 deleteReq=247 gone=245
+  t= 140s submitted=280 created=279 ready=259 deleteReq=257 gone=255
+  t= 145s submitted=290 created=289 ready=269 deleteReq=267 gone=265
+  t= 150s submitted=300 created=299 ready=279 deleteReq=277 gone=275
+  t= 155s submitted=310 created=309 ready=289 deleteReq=287 gone=285
+  t= 160s submitted=320 created=319 ready=299 deleteReq=297 gone=295
+  t= 165s submitted=330 created=329 ready=309 deleteReq=307 gone=305
+  t= 170s submitted=340 created=339 ready=319 deleteReq=317 gone=315
+  t= 175s submitted=350 created=349 ready=329 deleteReq=327 gone=325
+  t= 180s submitted=360 created=359 ready=339 deleteReq=337 gone=335
+c2x1792979071: load stopped after 360 submits; following the backlog
+  t= 185s submitted=360 created=360 ready=349 deleteReq=347 gone=345
+  t= 190s submitted=360 created=360 ready=360 deleteReq=358 gone=356
+  t= 195s submitted=360 created=360 ready=360 deleteReq=360 gone=360
+  t= 195s submitted=360 created=360 ready=360 deleteReq=360 gone=360
+{
+  "run": "c2x1792979071",
+  "submitted": 360,
+  "reached": {
+    "bound": 360,
+    "created": 360,
+    "deletereq": 360,
+    "gone": 360,
+    "pending": 360,
+    "ready": 360,
+    "reconciled": 360
+  },
+  "latencyMs": {
+    "bound": {
+      "max": 3809,
+      "p50": 3638,
+      "p90": 3738,
+      "p99": 3780
+    },
+    "created": {
+      "max": 35,
+      "p50": 6,
+      "p90": 12,
+      "p99": 18
+    },
+    "deletereq": {
+      "max": 11024,
+      "p50": 10510,
+      "p90": 11010,
+      "p99": 11019
+    },
+    "gone": {
+      "max": 1869,
+      "p50": 1773,
+      "p90": 1840,
+      "p99": 1860
+    },
+    "pending": {
+      "max": 3425,
+      "p50": 3358,
+      "p90": 3398,
+      "p99": 3419
+    },
+    "ready": {
+      "max": 10449,
+      "p50": 10262,
+      "p90": 10381,
+      "p99": 10432
+    },
+    "reconciled": {
+      "max": 1670,
+      "p50": 1605,
+      "p90": 1645,
+      "p99": 1656
+    }
+  },
+  "throughputPerSec": {
+    "bound": 1.9601571039045027,
+    "created": 1.9998735931009681,
+    "deletereq": 1.8946690152480639,
+    "gone": 1.883259359085577,
+    "pending": 1.9635817832387885,
+    "ready": 1.8973365989663138,
+    "reconciled": 1.9823910532950961
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 195.001358481
+}

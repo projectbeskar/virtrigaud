@@ -1,0 +1,49 @@
+File: controller.test
+Build ID: 302f14bf985fbc5be1442bb1a25cd8e738b9ef8e
+Type: cpu
+Time: 2026-10-25 14:46:00 UTC
+Duration: 6.06s, Total samples = 11.39s (187.91%)
+Showing nodes accounting for 7.50s, 65.85% of 11.39s total
+Dropped 162 nodes (cum <= 0.06s)
+Showing top 40 nodes out of 105
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      6.04s 53.03%  testing.(*B).runN
+         0     0%     0%      6.03s 52.94%  github.com/projectbeskar/virtrigaud/internal/controller.BenchmarkPlacementDecision.func1
+         0     0%     0%      5.60s 49.17%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).scheduleAndAssume
+         0     0%     0%      5.60s 49.17%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).scheduleUnderLock
+     0.01s 0.088% 0.088%      5.39s 47.32%  runtime.systemstack
+         0     0% 0.088%      5.09s 44.69%  runtime.gcBgMarkWorker
+         0     0% 0.088%      5.09s 44.69%  runtime.gcBgMarkWorker.func2
+     0.02s  0.18%  0.26%      5.09s 44.69%  runtime.gcDrain
+         0     0%  0.26%      5.08s 44.60%  testing.(*B).launch
+         0     0%  0.26%      4.45s 39.07%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).placedWithAssumptions (inline)
+         0     0%  0.26%      4.45s 39.07%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).placementRequest
+     0.19s  1.67%  1.93%      4.45s 39.07%  github.com/projectbeskar/virtrigaud/internal/controller.committedPlacementsFrom
+         0     0%  1.93%      4.45s 39.07%  github.com/projectbeskar/virtrigaud/internal/controller.placedWithAssumptionsFrom
+     1.39s 12.20% 14.14%      3.67s 32.22%  runtime.scanObject
+         0     0% 14.14%      3.40s 29.85%  runtime.gcDrainMarkWorkerIdle (inline)
+     1.43s 12.55% 26.69%      2.23s 19.58%  runtime.tryDeferToSpanScan
+         0     0% 26.69%      1.76s 15.45%  github.com/projectbeskar/virtrigaud/internal/controller.(*storeClient).List
+         0     0% 26.69%      1.76s 15.45%  github.com/projectbeskar/virtrigaud/internal/controller.listProviderVMs
+         0     0% 26.69%      1.69s 14.84%  runtime.gcDrainMarkWorkerDedicated (inline)
+     0.02s  0.18% 26.87%      1.37s 12.03%  runtime.scanSpan
+     0.81s  7.11% 33.98%      1.33s 11.68%  runtime.scanObjectsSmall
+     1.32s 11.59% 45.57%      1.32s 11.59%  runtime.memmove
+     0.05s  0.44% 46.01%      1.22s 10.71%  k8s.io/apimachinery/pkg/api/meta.SetList
+         0     0% 46.01%      1.15s 10.10%  github.com/projectbeskar/virtrigaud/internal/scheduler.Schedule
+     0.10s  0.88% 46.88%      1.15s 10.10%  github.com/projectbeskar/virtrigaud/internal/scheduler.indexPlaced
+         0     0% 46.88%      1.15s 10.10%  github.com/projectbeskar/virtrigaud/internal/scheduler.newEvalContext
+     1.09s  9.57% 56.45%      1.09s  9.57%  aeshashbody
+     0.05s  0.44% 56.89%      1.07s  9.39%  runtime.typedmemmove
+         0     0% 56.89%      1.04s  9.13%  reflect.Value.Set
+         0     0% 56.89%      1.03s  9.04%  reflect.typedmemmove
+         0     0% 56.89%      0.96s  8.43%  testing.(*B).run1.func1
+     0.23s  2.02% 58.91%      0.89s  7.81%  runtime.mapaccess1_faststr
+     0.03s  0.26% 59.17%      0.64s  5.62%  runtime.mapassign_faststr
+     0.60s  5.27% 64.44%      0.60s  5.27%  runtime.spanClass.sizeclass (inline)
+         0     0% 64.44%      0.54s  4.74%  k8s.io/client-go/tools/cache.(*cache).ByIndex
+     0.05s  0.44% 64.88%      0.54s  4.74%  k8s.io/client-go/tools/cache.(*threadSafeMap).ByIndex
+     0.02s  0.18% 65.06%      0.52s  4.57%  runtime.growslice
+     0.03s  0.26% 65.32%      0.50s  4.39%  runtime.mapaccess2
+     0.06s  0.53% 65.85%      0.49s  4.30%  github.com/projectbeskar/virtrigaud/internal/controller.sizeForAccounting
+         0     0% 65.85%      0.46s  4.04%  internal/runtime/maps.(*table).rehash

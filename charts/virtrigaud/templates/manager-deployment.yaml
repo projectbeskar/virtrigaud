@@ -59,6 +59,14 @@ spec:
         # it.
         - --max-disk-size={{ . }}
         {{- end }}
+        {{- with include "virtrigaud.clientRateLimitValue" (dict "value" .Values.manager.clientQPS "name" "manager.clientQPS" "whole" false) }}
+        # Client-side Kubernetes API rate limit (requests per second) of each
+        # REST client the manager builds; not an API-server limit.
+        - --client-qps={{ . }}
+        {{- end }}
+        {{- with include "virtrigaud.clientRateLimitValue" (dict "value" .Values.manager.clientBurst "name" "manager.clientBurst" "whole" true) }}
+        - --client-burst={{ . }}
+        {{- end }}
         {{- if .Values.webhooks.enabled }}
         # Webhook serving certs are mounted at this path; the manager's certwatcher
         # loads tls.crt/tls.key from here and serves on controller-runtime's default

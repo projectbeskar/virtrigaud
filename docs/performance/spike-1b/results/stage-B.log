@@ -1,0 +1,105 @@
+Creating cluster "virtrigaud-spike1b" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-virtrigaud-spike1b"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-virtrigaud-spike1b
+
+Have a nice day! 👋
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:f5a50a7e6feacc5b122b20a3f63ab439a1eb24a84dd8df485ca9749e9ce26dde" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:f5a50a7e6feacc5b122b20a3f63ab439a1eb24a84dd8df485ca9749e9ce26dde" not yet present on node "virtrigaud-spike1b-worker", loading...
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+W1025 20:32:37.756000 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.756035 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.766367 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.766422 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.809615 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.809641 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.839213 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.839278 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.886412 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.886470 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.919408 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.919436 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.939469 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.939515 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.971201 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:37.971232 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.990025 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:37.990061 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:38.033734 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:38.033793 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:38.065369 2415867 warnings.go:70] unrecognized format "int32"
+W1025 20:32:38.065403 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:38.080354 2415867 warnings.go:70] unrecognized format "int64"
+W1025 20:32:38.080390 2415867 warnings.go:70] unrecognized format "int32"
+cluster up, manager on config A
+setup done: 1 provider(s), 100 hosts, 10000 seeded VMs, host 648 vCPU / 1900544 MiB
+populating 10000 VMs for fake-p0
+  8968/10000 (896/s)
+populate done in 11s
+populate: 11 s
+setup+populate: 44 s
+== stage B config A
+Error from server (NotFound): pods "virtrigaud-manager-6c784b694-bwxrj" not found
+config A active
+burst 100 done: "ready": 0
+== stage B config B
+config B active
+burst 100 done: "ready": 100
+burst 1000 done: "ready": 963
+  "violations": {
+    "api_committed_over_capacity": 10,
+    "executed_over_capacity": 10,
+    "execution_without_vm": 2
+  },
+  "examples": [
+    "execution_without_vm: tenant-04.b1000x1792962679-000494 on p0-host-0042 (owner 329191cc-c14e-4219-909d-bdb0c4f20daf)",
+    "execution_without_vm: tenant-07.b1000x1792962679-000497 on p0-host-0043 (owner 9f0c07ed-3c12-45b8-b887-3d1278ca4eee)",
+    "api_committed_over_capacity: p0-host-0049: 800 vCPU / 3276800 MiB",
+stage B config B done
+== stage B config D
+Error from server (NotFound): pods "virtrigaud-manager-5f5cbb5fcd-g99bv" not found
+config D active
+burst 100 done: "ready": 100
+burst 1000 done: "ready": 1000
+  "violations": {
+    "api_committed_over_capacity": 10,
+    "executed_over_capacity": 10,
+    "execution_without_vm": 2
+  },
+  "examples": [
+    "execution_without_vm: tenant-04.b1000x1792962679-000494 on p0-host-0042 (owner 329191cc-c14e-4219-909d-bdb0c4f20daf)",
+    "execution_without_vm: tenant-07.b1000x1792962679-000497 on p0-host-0043 (owner 9f0c07ed-3c12-45b8-b887-3d1278ca4eee)",
+    "api_committed_over_capacity: p0-host-0079: 800 vCPU / 3276800 MiB",
+stage B config D done
+== stage B config C
+Error from server (NotFound): pods "virtrigaud-manager-6b756775f4-wvrr4" not found
+config C active
+burst 100 done: "ready": 0
+  "violations": {
+    "api_committed_over_capacity": 10,
+    "executed_over_capacity": 10,
+    "execution_without_vm": 2
+  },
+  "examples": [
+    "execution_without_vm: tenant-04.b1000x1792962679-000494 on p0-host-0042 (owner 329191cc-c14e-4219-909d-bdb0c4f20daf)",
+    "execution_without_vm: tenant-07.b1000x1792962679-000497 on p0-host-0043 (owner 9f0c07ed-3c12-45b8-b887-3d1278ca4eee)",
+    "api_committed_over_capacity: p0-host-0019: 800 vCPU / 3276800 MiB",
+stage B config C done

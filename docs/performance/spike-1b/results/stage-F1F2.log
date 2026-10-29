@@ -1,0 +1,68 @@
+Creating cluster "virtrigaud-spike1b" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-virtrigaud-spike1b"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-virtrigaud-spike1b
+
+Thanks for using kind! 😊
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/manager:f1f2" with ID "sha256:63e72c5ff38f34ebb4275938419b551c5356a9d14743614e7503d36b8f9d2297" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/manager:f1f2" with ID "sha256:63e72c5ff38f34ebb4275938419b551c5356a9d14743614e7503d36b8f9d2297" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:d282a4f81a617f9c884616e7e4ed200e3c0ee505658a8460866f778d916250cb" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:d282a4f81a617f9c884616e7e4ed200e3c0ee505658a8460866f778d916250cb" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+W1026 08:15:08.783471 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:08.783526 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:08.800581 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:08.800652 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:08.882090 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:08.882175 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:08.924281 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:08.924325 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:08.949455 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:08.949493 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:08.974548 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:08.974581 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:09.003014 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:09.003086 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:09.037158 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:09.037218 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:09.068297 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:09.068353 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:09.116488 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:09.116560 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:09.156564 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:09.156622 3353728 warnings.go:70] unrecognized format "int64"
+W1026 08:15:09.184410 3353728 warnings.go:70] unrecognized format "int32"
+W1026 08:15:09.184468 3353728 warnings.go:70] unrecognized format "int64"
+cluster up, manager on config A
+setup done: 1 provider(s), 100 hosts, 1000 seeded VMs, host 180 vCPU / 425984 MiB
+populating 1000 VMs for fake-p0
+populate done in 1s
+populate: 1 s
+setup+populate: 36 s
+== stage F1F2 config AF
+Error from server (NotFound): pods "virtrigaud-manager-6c784b694-v6sks" not found
+config AF active
+burst 100 done: "ready": 100
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+stage F1F2 config AF done

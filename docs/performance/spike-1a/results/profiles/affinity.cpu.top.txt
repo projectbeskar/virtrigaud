@@ -1,0 +1,49 @@
+File: scheduler.test
+Build ID: 504a9eee3f33940d710577158aeb8796ab418541
+Type: cpu
+Time: 2026-10-25 14:46:09 UTC
+Duration: 3.92s, Total samples = 7.38s (188.05%)
+Showing nodes accounting for 6.25s, 84.69% of 7.38s total
+Dropped 153 nodes (cum <= 0.04s)
+Showing top 40 nodes out of 113
+      flat  flat%   sum%        cum   cum%
+     1.04s 14.09% 14.09%      1.42s 19.24%  runtime.tryDeferToSpanScan
+     0.70s  9.49% 23.58%      1.98s 26.83%  runtime.scanObject
+     0.70s  9.49% 33.06%      1.21s 16.40%  runtime.scanObjectsSmall
+     0.34s  4.61% 37.67%      0.34s  4.61%  internal/runtime/maps.(*Map).getWithoutKeySmallFastStr
+     0.30s  4.07% 41.73%      0.64s  8.67%  runtime.mapaccess2_faststr
+     0.25s  3.39% 45.12%      0.25s  3.39%  aeshashbody
+     0.25s  3.39% 48.51%      0.60s  8.13%  regexp.(*Regexp).tryBacktrack
+     0.23s  3.12% 51.63%      2.56s 34.69%  github.com/projectbeskar/virtrigaud/internal/scheduler.(*evalContext).hostRunsMatchingVM
+     0.22s  2.98% 54.61%      0.22s  2.98%  runtime.spanClass.sizeclass (inline)
+     0.17s  2.30% 56.91%      0.17s  2.30%  regexp.(*bitState).shouldVisit (inline)
+     0.17s  2.30% 59.21%      0.17s  2.30%  runtime.typePointers.nextFast (inline)
+     0.16s  2.17% 61.38%      0.59s  7.99%  runtime.mallocgcSmallScanNoHeader
+     0.15s  2.03% 63.41%         1s 13.55%  github.com/projectbeskar/virtrigaud/internal/scheduler.indexPlaced
+     0.13s  1.76% 65.18%      0.13s  1.76%  runtime.memclrNoHeapPointers
+     0.10s  1.36% 66.53%      0.11s  1.49%  runtime.heapArenaOf (inline)
+     0.10s  1.36% 67.89%      0.10s  1.36%  runtime.memmove
+     0.10s  1.36% 69.24%      0.10s  1.36%  runtime.nextFreeFast (inline)
+     0.09s  1.22% 70.46%      0.09s  1.22%  internal/runtime/maps.ctrlGroup.matchH2 (inline)
+     0.08s  1.08% 71.54%      0.08s  1.08%  runtime.extractHeapBitsSmall
+     0.08s  1.08% 72.63%      0.80s 10.84%  runtime.mallocgc
+     0.06s  0.81% 73.44%      1.15s 15.58%  k8s.io/apimachinery/pkg/labels.NewRequirement
+     0.06s  0.81% 74.25%      0.06s  0.81%  memeqbody
+     0.06s  0.81% 75.07%      0.07s  0.95%  regexp.(*bitState).push (inline)
+     0.05s  0.68% 75.75%      1.64s 22.22%  k8s.io/apimachinery/pkg/apis/meta/v1.LabelSelectorAsSelector
+     0.05s  0.68% 76.42%      0.05s  0.68%  regexp/syntax.(*Inst).MatchRunePos
+     0.05s  0.68% 77.10%      0.08s  1.08%  runtime.(*mspan).writeHeapBitsSmall
+     0.05s  0.68% 77.78%      0.10s  1.36%  runtime.findObject
+     0.05s  0.68% 78.46%      0.07s  0.95%  runtime.typePointers.next
+     0.05s  0.68% 79.13%      0.05s  0.68%  sync.(*Pool).Get
+     0.04s  0.54% 79.67%      0.09s  1.22%  fmt.(*pp).doPrintf
+     0.04s  0.54% 80.22%      0.27s  3.66%  github.com/projectbeskar/virtrigaud/internal/scheduler/schedbench.Build
+     0.04s  0.54% 80.76%      0.04s  0.54%  internal/runtime/atomic.(*Uint32).Add
+     0.04s  0.54% 81.30%      0.05s  0.68%  internal/runtime/maps.(*Iter).Next
+     0.04s  0.54% 81.84%      0.04s  0.54%  internal/runtime/maps.(*ctrlGroup).setEmpty (inline)
+     0.04s  0.54% 82.38%      0.06s  0.81%  regexp.(*inputString).step
+     0.04s  0.54% 82.93%      0.04s  0.54%  runtime.acquirem (inline)
+     0.04s  0.54% 83.47%      0.05s  0.68%  runtime.spanOf (inline)
+     0.03s  0.41% 83.88%      0.05s  0.68%  runtime.bulkBarrierPreWrite
+     0.03s  0.41% 84.28%      0.22s  2.98%  runtime.mapaccess1_faststr
+     0.03s  0.41% 84.69%      0.11s  1.49%  runtime.mapassign_faststr

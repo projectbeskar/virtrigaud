@@ -1,0 +1,40 @@
+# C′ before/after (Spike 1A harness; medians of 5 runs, contention 3 runs)
+# before: e2a84c61, after: perf/placement-snapshot-accounting; i9-10900X, 20 threads, go default GOGC
+
+## Decision and scan: ns/op, B/op, allocs/op
+BenchmarkPlacementScan/h100_v1k/base | ns/op: 1,129,065 -> 278,759 (-75%) | B/op: 1,275,588 -> 56,048 (-96%) | allocs/op: 1,099 -> 66 (-94%)
+BenchmarkPlacementScan/h100_v10k/base | ns/op: 16,615,482 -> 5,303,899 (-68%) | B/op: 13,864,537 -> 408,480 (-97%) | allocs/op: 10,487 -> 387 (-96%)
+BenchmarkPlacementScan/h1000_v10k/base | ns/op: 15,808,798 -> 6,461,705 (-59%) | B/op: 13,857,703 -> 614,688 (-96%) | allocs/op: 10,466 -> 377 (-96%)
+BenchmarkPlacementScan/h1000_v100k/base | ns/op: 194,819,195 -> 105,789,705 (-46%) | B/op: 139,836,762 -> 2,854,480 (-98%) | allocs/op: 101,164 -> 614 (-99%)
+BenchmarkPlacementDecision/h100_v1k/base | ns/op: 1,546,591 -> 345,315 (-78%) | B/op: 1,652,460 -> 82,982 (-95%) | allocs/op: 1,264 -> 211 (-83%)
+BenchmarkPlacementDecision/h100_v10k/base | ns/op: 18,421,562 -> 7,854,552 (-57%) | B/op: 16,943,024 -> 435,278 (-97%) | allocs/op: 10,891 -> 522 (-95%)
+BenchmarkPlacementDecision/h1000_v10k/base | ns/op: 19,914,109 -> 8,138,974 (-59%) | B/op: 17,026,020 -> 945,910 (-94%) | allocs/op: 11,828 -> 1,467 (-88%)
+BenchmarkPlacementDecision/h1000_v100k/base | ns/op: 229,892,376 -> 107,283,581 (-53%) | B/op: 166,102,132 -> 3,185,000 (-98%) | allocs/op: 104,814 -> 1,664 (-98%)
+BenchmarkPlacementDecision/h100_v10k/util-low | ns/op: 18,948,068 -> 5,865,045 (-69%) | B/op: 16,943,023 -> 435,282 (-97%) | allocs/op: 10,891 -> 522 (-95%)
+BenchmarkPlacementDecision/h100_v10k/util-high | ns/op: 18,962,291 -> 6,190,358 (-67%) | B/op: 16,943,025 -> 435,270 (-97%) | allocs/op: 10,891 -> 522 (-95%)
+BenchmarkPlacementDecision/h100_v10k/hetero | ns/op: 19,115,863 -> 5,834,599 (-69%) | B/op: 16,945,842 -> 435,282 (-97%) | allocs/op: 10,885 -> 522 (-95%)
+BenchmarkPlacementDecision/h100_v10k/binpack | ns/op: 19,459,449 -> 5,817,722 (-70%) | B/op: 16,943,017 -> 435,282 (-97%) | allocs/op: 10,891 -> 522 (-95%)
+BenchmarkPlacementDecision/h100_v10k/req-small | ns/op: 18,884,192 -> 6,017,524 (-68%) | B/op: 16,943,014 -> 435,280 (-97%) | allocs/op: 10,891 -> 522 (-95%)
+BenchmarkPlacementDecision/h100_v10k/req-large | ns/op: 19,132,740 -> 5,641,682 (-71%) | B/op: 16,943,019 -> 435,286 (-97%) | allocs/op: 10,891 -> 522 (-95%)
+BenchmarkPlacementDecision/h100_v10k/unschedulable | ns/op: 19,559,284 -> 5,278,723 (-73%) | B/op: 16,955,682 -> 447,571 (-97%) | allocs/op: 11,388 -> 1,016 (-91%)
+BenchmarkPlacementDecision/h100_v10k/constrained | ns/op: 19,199,104 -> 6,112,029 (-68%) | B/op: 16,939,280 -> 431,369 (-97%) | allocs/op: 10,811 -> 442 (-96%)
+BenchmarkPlacementDecision/h100_v10k/affinity | ns/op: 33,141,726 -> 26,421,661 (-20%) | B/op: 22,589,989 -> 12,674,995 (-44%) | allocs/op: 98,751 -> 88,261 (-11%)
+
+## Breakdown: snapshot vs Schedule
+BenchmarkPlacementBreakdown/h100_v1k/base | scan-ns/op: 1,258,803 -> 276,509 (-78%) | schedule-ns/op: 364,131 -> 45,146 (-88%)
+BenchmarkPlacementBreakdown/h100_v10k/base | scan-ns/op: 16,053,168 -> 5,527,094 (-66%) | schedule-ns/op: 2,811,293 -> 51,453 (-98%)
+BenchmarkPlacementBreakdown/h1000_v10k/base | scan-ns/op: 16,117,297 -> 6,673,002 (-59%) | schedule-ns/op: 3,075,809 -> 419,554 (-86%)
+BenchmarkPlacementBreakdown/h1000_v100k/base | scan-ns/op: 195,029,274 -> 100,328,910 (-49%) | schedule-ns/op: 54,616,878 -> 513,710 (-99%)
+BenchmarkPlacementBreakdown/h100_v10k/util-low | scan-ns/op: 16,725,938 -> 4,995,099 (-70%) | schedule-ns/op: 3,052,628 -> 50,654 (-98%)
+BenchmarkPlacementBreakdown/h100_v10k/util-high | scan-ns/op: 16,607,163 -> 5,159,832 (-69%) | schedule-ns/op: 3,039,750 -> 52,045 (-98%)
+BenchmarkPlacementBreakdown/h100_v10k/hetero | scan-ns/op: 15,410,528 -> 5,327,148 (-65%) | schedule-ns/op: 2,676,706 -> 50,546 (-98%)
+BenchmarkPlacementBreakdown/h100_v10k/binpack | scan-ns/op: 15,875,645 -> 5,334,803 (-66%) | schedule-ns/op: 2,714,995 -> 52,694 (-98%)
+BenchmarkPlacementBreakdown/h100_v10k/req-small | scan-ns/op: 16,112,309 -> 5,418,720 (-66%) | schedule-ns/op: 2,785,204 -> 53,830 (-98%)
+BenchmarkPlacementBreakdown/h100_v10k/req-large | scan-ns/op: 16,705,441 -> 5,231,078 (-69%) | schedule-ns/op: 2,844,242 -> 50,813 (-98%)
+BenchmarkPlacementBreakdown/h100_v10k/unschedulable | scan-ns/op: 15,787,668 -> 6,178,665 (-61%) | schedule-ns/op: 2,822,061 -> 98,789 (-96%)
+BenchmarkPlacementBreakdown/h100_v10k/constrained | scan-ns/op: 15,728,206 -> 5,963,458 (-62%) | schedule-ns/op: 2,842,404 -> 73,558 (-97%)
+BenchmarkPlacementBreakdown/h100_v10k/affinity | scan-ns/op: 15,806,321 -> 8,193,500 (-48%) | schedule-ns/op: 17,881,248 -> 17,894,236 (+0%)
+
+## Contention (h100_v10k, 1 Provider, no write delay, 1,500 decisions): lock hold (cs) and throughput
+BenchmarkPlacementContention/h100_v10k/providers1/delay0s/w1 | cs-p50-us: 20,440 -> 7,721 (-62%) | cs-p99-us: 31,164 -> 13,754 (-56%) | decisions/s: 48 -> 126 (+164%)
+BenchmarkPlacementContention/h100_v10k/providers1/delay0s/w8 | cs-p50-us: 20,535 -> 7,648 (-63%) | cs-p99-us: 30,950 -> 13,842 (-55%) | decisions/s: 48 -> 130 (+172%)

@@ -1,0 +1,6 @@
+== diag (260 s)
+  reconciles/s {"host": 2.87, "hostpool": 1.54, "provider": 0.87, "virtualmachine": 93.4, "vmclass": 0.15, "vmimage": 0.04}
+  api total/s 103.6 writes/s 103.0 ratelimit wait mean/p99 0.04805561194992334 / 0.17354710204081647
+  rpcs/s {"Validate": 21.15, "Describe": 17.4, "GetHostInfo": 2.87, "GetCapabilities": 0.87}
+  cpu cores 1.7702312038461538 throttled 0.1546266233766234 ws 2111 MiB  queue depth max 97902.0
+  etcd VM updates/s 91.88076923076923 vs manager status PUT/s 17.403846153846153

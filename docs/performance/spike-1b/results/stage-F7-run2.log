@@ -1,0 +1,9 @@
+== config AF7:f7
+spike1b.local/manager:f7
+queue drained after 62 s (depth 0)
+burst 100 done: "ready": 100
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+config AF7:f7 done

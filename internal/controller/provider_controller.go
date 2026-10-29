@@ -343,7 +343,30 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	}
 
-	return result, err
+	return withClusteredResync(&provider, result, err), err
+}
+
+// clusteredProviderResync is how often a clustered Provider is reconciled
+// without an event: its host-inventory Secret is re-rendered (picking up a
+// fixed Host credential Secret, which nothing watches) and its connectedVMs
+// recounted. The Host controller's heartbeat status writes used to re-enqueue
+// the Provider once per Host per minute; the Host watch now ignores status
+// writes (hostInventoryChanged), so this keeps the same nominal one-minute
+// cadence with one reconcile per Provider instead of one per Host (a nominal
+// interval, not a deadline: queueing and error backoff can delay it).
+const clusteredProviderResync = hostHeartbeatInterval
+
+// withClusteredResync bounds a successful clustered Provider reconcile's
+// requeue to clusteredProviderResync. Single-topology or deleting Providers,
+// errors, immediate requeues and shorter requeues are returned unchanged.
+func withClusteredResync(provider *infravirtrigaudiov1beta1.Provider, result ctrl.Result, err error) ctrl.Result {
+	if err != nil || result.Requeue || !isClusterTopology(provider) || provider.DeletionTimestamp != nil {
+		return result
+	}
+	if result.RequeueAfter == 0 || result.RequeueAfter > clusteredProviderResync {
+		result.RequeueAfter = clusteredProviderResync
+	}
+	return result
 }
 
 // reconcileRuntimeStatus reconciles the Provider's remote runtime (Service,
@@ -1376,30 +1399,12 @@ const (
 	sshKeyMountPath  = "/tmp/virtrigaud-libvirt"
 )
 
-// countConnectedVMs counts the number of VirtualMachines managed by this provider
+// countConnectedVMs counts the VirtualMachines whose spec.providerRef names
+// this Provider (bound or not; an empty namespace is the VM's own), through
+// the specProviderIndex instead of listing — and deep-copying — every
+// VirtualMachine in the cluster.
 func (r *ProviderReconciler) countConnectedVMs(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (int32, error) {
-	// List all VirtualMachines
-	vmList := &infravirtrigaudiov1beta1.VirtualMachineList{}
-	if err := r.List(ctx, vmList); err != nil {
-		return 0, fmt.Errorf("failed to list VirtualMachines: %w", err)
-	}
-
-	// Count VMs that reference this provider
-	count := int32(0)
-	for _, vm := range vmList.Items {
-		// Check if VM references this provider
-		// Provider namespace defaults to VM namespace if not specified
-		providerNamespace := vm.Namespace
-		if vm.Spec.ProviderRef.Namespace != "" {
-			providerNamespace = vm.Spec.ProviderRef.Namespace
-		}
-
-		if vm.Spec.ProviderRef.Name == provider.Name && providerNamespace == provider.Namespace {
-			count++
-		}
-	}
-
-	return count, nil
+	return countSpecProviderVMs(ctx, r.Client, client.ObjectKeyFromObject(provider))
 }
 
 // cleanupRemoteRuntime cleans up deployment and service for remote providers
@@ -1456,6 +1461,9 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexProviderInUse(mgr); err != nil {
 		return err
 	}
+	if err := indexSpecProvider(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Provider{}).
 		Owns(&appsv1.Deployment{}).
@@ -1481,9 +1489,13 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Host or HostPool CRs changes (ADR-0007 D3), mapping each back to its
 		// owning Provider via spec.providerRef. Single-topology Providers own no
 		// Hosts/HostPools, so these watches never enqueue work for them.
+		// Host status writes (the inventory heartbeat) change nothing the
+		// render reads, so only spec, identity and deletion changes enqueue
+		// (hostInventoryChanged).
 		Watches(
 			&infravirtrigaudiov1beta1.Host{},
 			handler.EnqueueRequestsFromMapFunc(r.providersForHost),
+			builder.WithPredicates(hostInventoryChanged()),
 		).
 		Watches(
 			&infravirtrigaudiov1beta1.HostPool{},

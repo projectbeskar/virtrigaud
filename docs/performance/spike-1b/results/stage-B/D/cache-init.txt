@@ -1,0 +1,1 @@
+config D pod virtrigaud-manager-5f5cbb5fcd-g99bv

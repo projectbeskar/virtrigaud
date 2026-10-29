@@ -1,0 +1,1 @@
+config B pod virtrigaud-manager-74cd87c694-wz7vm

@@ -304,9 +304,9 @@ func TestResizeAssumptionSettles(t *testing.T) {
 	assert.False(t, snap(recordedVM{hosts: []string{"host-beta"}}).settled(create), "not on a record elsewhere")
 }
 
-// TestResizeAssumptionOutlivesTheReconfigureCall (review N4): an admitted
-// resize stays assumed for the Reconfigure deadline plus the status-write
-// bound, not only the create path's shorter TTL.
+// TestResizeAssumptionOutlivesTheReconfigureCall (review N4, G3): an admitted
+// resize whose reservation write was sent stays assumed past every TTL — it
+// ends on evidence (the cache showing the reservation), never on time.
 func TestResizeAssumptionOutlivesTheReconfigureCall(t *testing.T) {
 	require.GreaterOrEqual(t, resizeAssumeTTL, contracts.ReconfigureCallTimeout+placementStatusWriteTimeout)
 	require.Greater(t, resizeAssumeTTL, placementAssumeTTL)
@@ -323,7 +323,7 @@ func TestResizeAssumptionOutlivesTheReconfigureCall(t *testing.T) {
 	now = now.Add(placementAssumeTTL + time.Minute)
 	assert.Equal(t, []string{"uid-app"}, assumedUIDs(r), "still assumed after the create TTL")
 	now = now.Add(resizeAssumeTTL)
-	assert.Empty(t, assumedUIDs(r), "gone after its own TTL")
+	assert.Equal(t, []string{"uid-app"}, assumedUIDs(r), "and after its own: the reservation write was sent")
 }
 
 // TestResizeGate_UnusablePoolFailsClosed (review N6): a host whose HostPool is

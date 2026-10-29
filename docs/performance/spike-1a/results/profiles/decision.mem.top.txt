@@ -1,0 +1,41 @@
+File: controller.test
+Build ID: 302f14bf985fbc5be1442bb1a25cd8e738b9ef8e
+Type: alloc_space
+Time: 2026-10-25 14:46:06 UTC
+Showing nodes accounting for 3903.81MB, 98.75% of 3953.03MB total
+Dropped 103 nodes (cum <= 19.77MB)
+      flat  flat%   sum%        cum   cum%
+ 1596.88MB 40.40% 40.40%  1596.88MB 40.40%  reflect.unsafe_NewArray
+ 1355.61MB 34.29% 74.69%  3061.46MB 77.45%  github.com/projectbeskar/virtrigaud/internal/controller.committedPlacementsFrom
+  597.52MB 15.12% 89.80%   597.52MB 15.12%  github.com/projectbeskar/virtrigaud/internal/scheduler.indexPlaced
+  112.56MB  2.85% 92.65%   112.56MB  2.85%  github.com/projectbeskar/virtrigaud/internal/scheduler/schedbench.baseVM
+   95.09MB  2.41% 95.06%   219.15MB  5.54%  github.com/projectbeskar/virtrigaud/internal/scheduler/schedbench.Build
+      38MB  0.96% 96.02%       38MB  0.96%  github.com/projectbeskar/virtrigaud/internal/controller.placementHosts
+   33.73MB  0.85% 96.87%  1664.35MB 42.10%  github.com/projectbeskar/virtrigaud/internal/controller.(*storeClient).List
+   33.73MB  0.85% 97.73%    33.73MB  0.85%  k8s.io/client-go/tools/cache.(*threadSafeMap).ByIndex
+   27.17MB  0.69% 98.41%    27.17MB  0.69%  k8s.io/apimachinery/pkg/util/sets.Set[go.shape.string].Insert (inline)
+   12.47MB  0.32% 98.73%    55.14MB  1.39%  k8s.io/client-go/tools/cache.(*threadSafeMap).Update
+    1.03MB 0.026% 98.75%   600.06MB 15.18%  github.com/projectbeskar/virtrigaud/internal/scheduler.Schedule
+         0     0% 98.75%  3061.46MB 77.45%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).placedWithAssumptions (inline)
+         0     0% 98.75%  3061.46MB 77.45%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).placementRequest
+         0     0% 98.75%  3661.52MB 92.63%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).scheduleAndAssume
+         0     0% 98.75%  3661.52MB 92.63%  github.com/projectbeskar/virtrigaud/internal/controller.(*VirtualMachineReconciler).scheduleUnderLock
+         0     0% 98.75%    57.14MB  1.45%  github.com/projectbeskar/virtrigaud/internal/controller.(*informerStore).mustAdd
+         0     0% 98.75%  3937.81MB 99.61%  github.com/projectbeskar/virtrigaud/internal/controller.BenchmarkPlacementDecision.func1
+         0     0% 98.75%  1664.35MB 42.10%  github.com/projectbeskar/virtrigaud/internal/controller.listProviderVMs
+         0     0% 98.75%    57.14MB  1.45%  github.com/projectbeskar/virtrigaud/internal/controller.newBenchWorld
+         0     0% 98.75%  3061.46MB 77.45%  github.com/projectbeskar/virtrigaud/internal/controller.placedWithAssumptionsFrom
+         0     0% 98.75%   276.30MB  6.99%  github.com/projectbeskar/virtrigaud/internal/controller.worldFor
+         0     0% 98.75%   597.52MB 15.12%  github.com/projectbeskar/virtrigaud/internal/scheduler.newEvalContext
+         0     0% 98.75%  1596.88MB 40.40%  k8s.io/apimachinery/pkg/api/meta.SetList
+         0     0% 98.75%    27.17MB  0.69%  k8s.io/apimachinery/pkg/util/sets.String.Insert (inline)
+         0     0% 98.75%    57.14MB  1.45%  k8s.io/client-go/tools/cache.(*cache).Add
+         0     0% 98.75%    33.73MB  0.85%  k8s.io/client-go/tools/cache.(*cache).ByIndex
+         0     0% 98.75%    27.17MB  0.69%  k8s.io/client-go/tools/cache.(*storeIndex).addKeyToIndex (inline)
+         0     0% 98.75%    42.67MB  1.08%  k8s.io/client-go/tools/cache.(*storeIndex).updateIndices (inline)
+         0     0% 98.75%    42.67MB  1.08%  k8s.io/client-go/tools/cache.(*storeIndex).updateSingleIndex
+         0     0% 98.75%    55.14MB  1.39%  k8s.io/client-go/tools/cache.(*threadSafeMap).Add
+         0     0% 98.75%  1596.88MB 40.40%  reflect.MakeSlice
+         0     0% 98.75%  3346.72MB 84.66%  testing.(*B).launch
+         0     0% 98.75%   591.09MB 14.95%  testing.(*B).run1.func1
+         0     0% 98.75%  3937.81MB 99.61%  testing.(*B).runN

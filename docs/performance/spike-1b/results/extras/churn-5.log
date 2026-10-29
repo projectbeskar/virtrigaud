@@ -1,0 +1,112 @@
+  t=   5s submitted=25 created=24 ready=0 deleteReq=0 gone=0
+  t=  10s submitted=50 created=49 ready=9 deleteReq=6 gone=2
+  t=  15s submitted=75 created=74 ready=26 deleteReq=22 gone=15
+  t=  20s submitted=100 created=99 ready=40 deleteReq=38 gone=29
+  t=  25s submitted=125 created=124 ready=56 deleteReq=53 gone=43
+  t=  30s submitted=150 created=149 ready=75 deleteReq=72 gone=60
+  t=  35s submitted=175 created=174 ready=95 deleteReq=91 gone=75
+  t=  40s submitted=200 created=199 ready=117 deleteReq=113 gone=95
+  t=  45s submitted=225 created=224 ready=139 deleteReq=134 gone=117
+  t=  50s submitted=250 created=249 ready=160 deleteReq=155 gone=139
+  t=  55s submitted=275 created=274 ready=182 deleteReq=178 gone=160
+  t=  60s submitted=300 created=299 ready=205 deleteReq=200 gone=182
+  t=  65s submitted=325 created=324 ready=228 deleteReq=223 gone=205
+  t=  70s submitted=350 created=349 ready=252 deleteReq=247 gone=225
+  t=  75s submitted=375 created=374 ready=275 deleteReq=270 gone=247
+  t=  80s submitted=400 created=399 ready=299 deleteReq=295 gone=270
+  t=  85s submitted=425 created=424 ready=323 deleteReq=319 gone=295
+  t=  90s submitted=450 created=449 ready=347 deleteReq=343 gone=319
+  t=  95s submitted=475 created=474 ready=371 deleteReq=366 gone=343
+  t= 100s submitted=500 created=499 ready=395 deleteReq=390 gone=366
+  t= 105s submitted=525 created=524 ready=420 deleteReq=415 gone=390
+  t= 110s submitted=550 created=549 ready=445 deleteReq=440 gone=415
+  t= 115s submitted=575 created=574 ready=470 deleteReq=465 gone=440
+  t= 120s submitted=600 created=599 ready=495 deleteReq=489 gone=465
+  t= 125s submitted=625 created=624 ready=519 deleteReq=514 gone=489
+  t= 130s submitted=650 created=649 ready=543 deleteReq=539 gone=514
+  t= 135s submitted=675 created=674 ready=569 deleteReq=564 gone=539
+  t= 140s submitted=700 created=699 ready=593 deleteReq=588 gone=564
+  t= 145s submitted=725 created=724 ready=618 deleteReq=613 gone=588
+  t= 150s submitted=750 created=749 ready=643 deleteReq=638 gone=613
+  t= 155s submitted=775 created=774 ready=668 deleteReq=663 gone=638
+  t= 160s submitted=800 created=799 ready=693 deleteReq=687 gone=663
+  t= 165s submitted=825 created=824 ready=717 deleteReq=713 gone=687
+  t= 170s submitted=850 created=849 ready=743 deleteReq=738 gone=713
+  t= 175s submitted=875 created=874 ready=767 deleteReq=763 gone=738
+c5x1792979266: load stopped after 900 submits; following the backlog
+  t= 180s submitted=900 created=899 ready=793 deleteReq=788 gone=763
+  t= 185s submitted=900 created=900 ready=817 deleteReq=812 gone=788
+  t= 190s submitted=900 created=900 ready=843 deleteReq=839 gone=812
+  t= 195s submitted=900 created=900 ready=874 deleteReq=868 gone=843
+  t= 200s submitted=900 created=900 ready=900 deleteReq=899 gone=880
+  t= 205s submitted=900 created=900 ready=900 deleteReq=900 gone=900
+  t= 205s submitted=900 created=900 ready=900 deleteReq=900 gone=900
+{
+  "run": "c5x1792979266",
+  "submitted": 900,
+  "reached": {
+    "bound": 900,
+    "created": 900,
+    "deletereq": 900,
+    "gone": 900,
+    "pending": 900,
+    "ready": 900,
+    "reconciled": 900
+  },
+  "latencyMs": {
+    "bound": {
+      "max": 11263,
+      "p50": 10705,
+      "p90": 11112,
+      "p99": 11224
+    },
+    "created": {
+      "max": 71,
+      "p50": 5,
+      "p90": 8,
+      "p99": 18
+    },
+    "deletereq": {
+      "max": 22423,
+      "p50": 21209,
+      "p90": 22011,
+      "p99": 22408
+    },
+    "gone": {
+      "max": 5649,
+      "p50": 5324,
+      "p90": 5539,
+      "p99": 5604
+    },
+    "pending": {
+      "max": 10915,
+      "p50": 10423,
+      "p90": 10824,
+      "p99": 10895
+    },
+    "ready": {
+      "max": 21658,
+      "p50": 20809,
+      "p90": 21455,
+      "p99": 21608
+    },
+    "reconciled": {
+      "max": 5467,
+      "p50": 5144,
+      "p90": 5372,
+      "p99": 5444
+    }
+  },
+  "throughputPerSec": {
+    "bound": 4.71355644521794,
+    "created": 4.999388507877003,
+    "deletereq": 4.499659718318418,
+    "gone": 4.440853623253694,
+    "pending": 4.721672143119953,
+    "ready": 4.520282441885652,
+    "reconciled": 4.856044249232163
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 205.000614872
+}

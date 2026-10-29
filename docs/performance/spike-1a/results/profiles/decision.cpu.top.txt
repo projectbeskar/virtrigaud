@@ -1,0 +1,49 @@
+File: controller.test
+Build ID: 302f14bf985fbc5be1442bb1a25cd8e738b9ef8e
+Type: cpu
+Time: 2026-10-25 14:46:00 UTC
+Duration: 6.06s, Total samples = 11.39s (187.91%)
+Showing nodes accounting for 10.48s, 92.01% of 11.39s total
+Dropped 162 nodes (cum <= 0.06s)
+Showing top 40 nodes out of 105
+      flat  flat%   sum%        cum   cum%
+     1.43s 12.55% 12.55%      2.23s 19.58%  runtime.tryDeferToSpanScan
+     1.39s 12.20% 24.76%      3.67s 32.22%  runtime.scanObject
+     1.32s 11.59% 36.35%      1.32s 11.59%  runtime.memmove
+     1.09s  9.57% 45.92%      1.09s  9.57%  aeshashbody
+     0.81s  7.11% 53.03%      1.33s 11.68%  runtime.scanObjectsSmall
+     0.60s  5.27% 58.30%      0.60s  5.27%  runtime.spanClass.sizeclass (inline)
+     0.39s  3.42% 61.72%      0.39s  3.42%  internal/runtime/maps.ctrlGroup.matchH2 (inline)
+     0.36s  3.16% 64.88%      0.36s  3.16%  github.com/projectbeskar/virtrigaud/internal/controller.hasRecordedSize (inline)
+     0.35s  3.07% 67.95%      0.35s  3.07%  github.com/projectbeskar/virtrigaud/internal/controller.boundProviderKey (inline)
+     0.29s  2.55% 70.50%      0.29s  2.55%  memeqbody
+     0.23s  2.02% 72.52%      0.89s  7.81%  runtime.mapaccess1_faststr
+     0.22s  1.93% 74.45%      0.22s  1.93%  runtime.typePointers.nextFast (inline)
+     0.22s  1.93% 76.38%      0.22s  1.93%  strings.TrimSpace
+     0.19s  1.67% 78.05%      4.45s 39.07%  github.com/projectbeskar/virtrigaud/internal/controller.committedPlacementsFrom
+     0.17s  1.49% 79.54%      0.17s  1.49%  runtime.memclrNoHeapPointers
+     0.11s  0.97% 80.51%      0.16s  1.40%  runtime.heapArenaOf (inline)
+     0.10s  0.88% 81.39%      1.15s 10.10%  github.com/projectbeskar/virtrigaud/internal/scheduler.indexPlaced
+     0.10s  0.88% 82.27%      0.10s  0.88%  runtime.extractHeapBitsSmall
+     0.10s  0.88% 83.14%      0.22s  1.93%  runtime.findObject
+     0.10s  0.88% 84.02%      0.11s  0.97%  runtime.typePointers.next
+     0.09s  0.79% 84.81%      0.30s  2.63%  github.com/projectbeskar/virtrigaud/internal/controller.boundHost (inline)
+     0.09s  0.79% 85.60%      0.10s  0.88%  runtime.spanOf (inline)
+     0.07s  0.61% 86.22%      0.08s   0.7%  github.com/projectbeskar/virtrigaud/internal/controller.pendingHost (inline)
+     0.07s  0.61% 86.83%      0.07s  0.61%  runtime.(*mspan).moveInlineMarks
+     0.06s  0.53% 87.36%      0.49s  4.30%  github.com/projectbeskar/virtrigaud/internal/controller.sizeForAccounting
+     0.06s  0.53% 87.88%      0.22s  1.93%  github.com/projectbeskar/virtrigaud/internal/scheduler/schedbench.Build
+     0.06s  0.53% 88.41%      0.06s  0.53%  runtime.arenaIndex (inline)
+     0.05s  0.44% 88.85%      1.22s 10.71%  k8s.io/apimachinery/pkg/api/meta.SetList
+     0.05s  0.44% 89.29%      0.54s  4.74%  k8s.io/client-go/tools/cache.(*threadSafeMap).ByIndex
+     0.05s  0.44% 89.73%      1.07s  9.39%  runtime.typedmemmove
+     0.04s  0.35% 90.08%      0.06s  0.53%  github.com/projectbeskar/virtrigaud/internal/controller.admittedFootprint
+     0.03s  0.26% 90.34%      0.06s  0.53%  fmt.(*pp).doPrintf
+     0.03s  0.26% 90.61%      0.50s  4.39%  runtime.mapaccess2
+     0.03s  0.26% 90.87%      0.64s  5.62%  runtime.mapassign_faststr
+     0.03s  0.26% 91.13%      0.11s  0.97%  runtime.wbBufFlush1
+     0.02s  0.18% 91.31%      5.09s 44.69%  runtime.gcDrain
+     0.02s  0.18% 91.48%      0.52s  4.57%  runtime.growslice
+     0.02s  0.18% 91.66%      0.39s  3.42%  runtime.mallocgc
+     0.02s  0.18% 91.83%      1.37s 12.03%  runtime.scanSpan
+     0.02s  0.18% 92.01%      0.15s  1.32%  runtime.sweepone

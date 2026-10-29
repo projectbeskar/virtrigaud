@@ -274,10 +274,11 @@ func hostInUseMessage(users []string) string {
 // it only when its placement Provider (placementProviderKey: the Provider it is
 // bound through, else its spec.providerRef) is that same Provider. VMs may live
 // in other namespaces than their Provider, so all VirtualMachines are listed; a
-// same-named Host of another Provider is never confused with this one.
+// same-named Host of another Provider is never confused with this one. Only
+// the VMs placed on this host are read, through placementHostIndex.
 func (r *HostReconciler) vmsUsingHost(ctx context.Context, host *infravirtrigaudiov1beta1.Host) ([]string, error) {
 	provider := hostProviderKey(host)
-	vms, err := listProviderVMs(ctx, r.Client, provider)
+	vms, err := listHostPlacementVMs(ctx, r.Client, provider, host.Name)
 	if err != nil {
 		return nil, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", host.Namespace, host.Name, err)
 	}
@@ -506,6 +507,9 @@ func (r *HostReconciler) getProviderInstance(ctx context.Context, provider *infr
 // is independent of the event predicate.
 func (r *HostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
+	if err := indexPlacementHost(mgr); err != nil {
 		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).

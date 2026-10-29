@@ -1,0 +1,58 @@
+inflight1792981338: 200 creates submitted in 71ms
+  t=   9s created=200 reconciled=62 pending=10 bound=0 ready=0 gone=190
+  t=  14s created=200 reconciled=62 pending=10 bound=0 ready=0 gone=200
+{
+  "run": "inflight1792981338",
+  "submitted": 200,
+  "reached": {
+    "bound": 0,
+    "created": 200,
+    "deletereq": 200,
+    "gone": 200,
+    "pending": 10,
+    "ready": 0,
+    "reconciled": 62
+  },
+  "latencyMs": {
+    "created": {
+      "max": 31,
+      "p50": 15,
+      "p90": 27,
+      "p99": 31
+    },
+    "deletereq": {
+      "max": 4032,
+      "p50": 4015,
+      "p90": 4027,
+      "p99": 4032
+    },
+    "gone": {
+      "max": 6666,
+      "p50": 4,
+      "p90": 1711,
+      "p99": 6628
+    },
+    "pending": {
+      "max": 773,
+      "p50": 677,
+      "p90": 773,
+      "p99": 773
+    },
+    "reconciled": {
+      "max": 683,
+      "p50": 249,
+      "p90": 567,
+      "p99": 683
+    }
+  },
+  "throughputPerSec": {
+    "created": 2824.464010291217,
+    "deletereq": 49.10830102161408,
+    "gone": 18.69359598458313,
+    "pending": 12.927519233957405,
+    "reconciled": 87.37366863209789
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 14.075752666
+}

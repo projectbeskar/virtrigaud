@@ -1,0 +1,4 @@
+Placed=True/Bound                                  1200
+Ready=True/ReconcileSuccess                        1198
+Ready=missing                                      2
+total                                              1200

@@ -1,0 +1,190 @@
+{
+ "steady": {
+  "api_latency_s": {
+   "mean": null,
+   "p99": null
+  },
+  "api_requests_per_s": {},
+  "api_total_per_s": 0.0,
+  "api_writes_per_s": 0.0,
+  "apiserver": {
+   "cpu_cores": 0.3487719298245607,
+   "etcd_vm_updates_per_s": 0.0,
+   "flowcontrol_rejected": 0,
+   "flowcontrol_wait_mean_s": 7.825554626870246e-05,
+   "inflight_max": 3.0,
+   "manager_vm_status_puts_per_s": 0.0,
+   "requests_by_verb_per_s": {
+    "CONNECT": 0.19298245614035087,
+    "GET": 1.4152046783625731,
+    "LIST": 0.2631578947368421,
+    "PATCH": 0.07017543859649122,
+    "POST": 0.005847953216374269,
+    "PUT": 1.2748538011695907,
+    "WATCH": 0.3508771929824561
+   },
+   "requests_per_s": 3.573099415204678,
+   "rss_max_bytes": 5518696448.0
+  },
+  "etcd": {
+   "cpu_cores": 0.04380116959064333,
+   "db_bytes": 601022464.0,
+   "proposals_per_s": 1.6608187134502923,
+   "wal_fsync_mean_s": 0.0030063445234662597
+  },
+  "fake": {
+   "fake-fake-p0": {
+    "duplicate_identity": 0.0,
+    "rpcs_per_s": {},
+    "slot_wait_create_mean_s": null,
+    "vms": 100000.0
+   }
+  },
+  "go": {
+   "alloc_bytes_per_s": 0.0,
+   "gc_pause_s_per_s": 0.0,
+   "gc_per_s": 0.0,
+   "goroutines_max": 0,
+   "heap_inuse_max_bytes": 0,
+   "process_cpu_cores": 0.0,
+   "rss_max_bytes": 0
+  },
+  "host_queue_depth": {
+   "max": 0,
+   "mean": 0.0
+  },
+  "manager_container": {
+   "cpu_cores": 0.0,
+   "throttled_period_fraction": null,
+   "throttled_s_per_s": 0.0,
+   "working_set_max_bytes": 0
+  },
+  "placement_lock": {
+   "busy": 0,
+   "decisions": 0,
+   "hold_mean_s": null,
+   "hold_p99_s": null,
+   "wait_mean_s": null,
+   "wait_p99_s": null
+  },
+  "provider_container_cpu_cores": 0.003061461988304093,
+  "provider_rpc_latency_s": {},
+  "provider_rpcs_per_s": {},
+  "rate_limiter_wait_s": {
+   "mean": null,
+   "p50": null,
+   "p99": null
+  },
+  "reconcile_errors_per_s": {},
+  "reconciles_per_s": {},
+  "seconds": 171,
+  "snapshots": 12,
+  "vm_queue_depth": {
+   "max": 0,
+   "mean": 0.0
+  },
+  "vm_queue_wait_s": {
+   "mean": null,
+   "p99": null
+  },
+  "vm_reconcile_time_s": {
+   "mean": null,
+   "p50": null,
+   "p99": null
+  }
+ },
+ "warmup": {
+  "api_latency_s": {
+   "mean": null,
+   "p99": null
+  },
+  "api_requests_per_s": {},
+  "api_total_per_s": 0.0,
+  "api_writes_per_s": 0.0,
+  "apiserver": {
+   "cpu_cores": 0.18797413793103504,
+   "etcd_vm_updates_per_s": 0.0,
+   "flowcontrol_rejected": 0,
+   "flowcontrol_wait_mean_s": 7.878916849825721e-05,
+   "inflight_max": 4.0,
+   "manager_vm_status_puts_per_s": 0.0,
+   "requests_by_verb_per_s": {
+    "CONNECT": 0.1939655172413793,
+    "GET": 1.5603448275862069,
+    "LIST": 0.23275862068965517,
+    "PATCH": 0.1939655172413793,
+    "POST": 0.034482758620689655,
+    "PUT": 1.3620689655172413,
+    "WATCH": 0.375
+   },
+   "requests_per_s": 3.9525862068965516,
+   "rss_max_bytes": 5044051968.0
+  },
+  "etcd": {
+   "cpu_cores": 0.031896551724137835,
+   "db_bytes": 601022464.0,
+   "proposals_per_s": 1.8793103448275863,
+   "wal_fsync_mean_s": 0.0028505562654025833
+  },
+  "fake": {
+   "fake-fake-p0": {
+    "duplicate_identity": 0.0,
+    "rpcs_per_s": {},
+    "slot_wait_create_mean_s": null,
+    "vms": 100000.0
+   }
+  },
+  "go": {
+   "alloc_bytes_per_s": 0.0,
+   "gc_pause_s_per_s": 0.0,
+   "gc_per_s": 0.0,
+   "goroutines_max": 53.0,
+   "heap_inuse_max_bytes": 299720704.0,
+   "process_cpu_cores": 0.0,
+   "rss_max_bytes": 496599040.0
+  },
+  "host_queue_depth": {
+   "max": 0,
+   "mean": 0.0
+  },
+  "manager_container": {
+   "cpu_cores": 0.0,
+   "throttled_period_fraction": null,
+   "throttled_s_per_s": 0.0,
+   "working_set_max_bytes": 410103808.0
+  },
+  "placement_lock": {
+   "busy": 0,
+   "decisions": 0,
+   "hold_mean_s": null,
+   "hold_p99_s": null,
+   "wait_mean_s": null,
+   "wait_p99_s": null
+  },
+  "provider_container_cpu_cores": 0.0030589224137931074,
+  "provider_rpc_latency_s": {},
+  "provider_rpcs_per_s": {},
+  "rate_limiter_wait_s": {
+   "mean": null,
+   "p50": null,
+   "p99": null
+  },
+  "reconcile_errors_per_s": {},
+  "reconciles_per_s": {},
+  "seconds": 232,
+  "snapshots": 16,
+  "vm_queue_depth": {
+   "max": 0,
+   "mean": 0.0
+  },
+  "vm_queue_wait_s": {
+   "mean": null,
+   "p99": null
+  },
+  "vm_reconcile_time_s": {
+   "mean": null,
+   "p50": null,
+   "p99": null
+  }
+ }
+}

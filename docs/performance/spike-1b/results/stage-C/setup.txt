@@ -1,0 +1,6 @@
+setup done: 1 provider(s), 1000 hosts, 10000 seeded VMs, host 72 vCPU / 262144 MiB
+populating 10000 VMs for fake-p0
+  8950/10000 (895/s)
+populate done in 11s
+populate: 12 s
+setup+populate: 45 s

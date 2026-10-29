@@ -75,11 +75,19 @@ func setResizeRefused(vm *infravirtrigaudiov1beta1.VirtualMachine, reason, msg s
 
 // admitClusteredResize decides whether the reconfigure the VM's spec asks for
 // may be sent to its clustered Provider. It returns admitted == true when the
-// VM does not grow, or when every growing resource fits in the free capacity
-// of hostID (the VM's own current footprint excluded); an admitted resize-up
-// is assumed at its new size, so a concurrent schedule or resize of the same
-// Provider counts it before the provider has applied it and
-// status.currentResources records it. Otherwise it has recorded
+// VM does not grow beyond what it already holds — its applied footprint and
+// any durable resize reservation (status.placement.resizeReservation) — or
+// when every growing resource fits in the free capacity of hostID (the VM's
+// own footprint excluded) AND the admitted footprint is durably reserved.
+//
+// An admitted resize-up is assumed at its footprint (a token-protected
+// assumption, as a create's pick), so a concurrent schedule or resize of the
+// same Provider counts it at once; the footprint is then written to
+// status.placement.resizeReservation with a resourceVersion-checked status
+// update (recordResizeReservation). The Reconfigure is sent only once that
+// write was stored and the API server's answer carries the reservation: a
+// restart, a leader change or a lost assumption can then never leave a size
+// the provider applied counted nowhere. Otherwise it has recorded
 // Reconfiguring=False with the reason on vm, persisted the status, and
 // returns the requeue; the VM keeps its current size and no provider call is
 // made. A failed cache read is returned as an error.
@@ -109,7 +117,40 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 	// within the ceiling commits nothing new and needs no check.
 	ceiling := memoryCeilingOf(vm, vmClass)
 	currentFP, desiredFP := withMemoryCeiling(current, ceiling), withMemoryCeiling(desired, ceiling)
-	if !scheduler.Grows(currentFP, desiredFP) {
+	// What the VM already holds durably: its applied footprint and any resize
+	// reservation, which is never lowered while an earlier resize is
+	// unresolved. Nothing beyond it needs admitting: the Reconfigure goes on
+	// under the reservation already recorded (after a restart too) — once
+	// this manager instance has established it: one recorded by an earlier
+	// instance is revalidated first (ADR-0007 A5, inherited admission
+	// revalidation), so a late write of a deposed leader never authorizes a
+	// Reconfigure by itself.
+	//
+	// A reservation whose outcome is confirmed (resizeSettledCondition: a
+	// Reconfigure sent under it succeeded, and it awaits release) authorizes
+	// nothing more: that success says nothing about a later Reconfigure, so a
+	// further growth is admitted again, and its reservation write records the
+	// pending outcome (recordResizeReservation) before anything is sent.
+	heldFP := currentFP
+	if adm, ok := resizeAdmissionOf(vm, providerKeyOf(providerCR)); ok &&
+		!resizeSettledCondition(meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)) {
+		reservedFP := maxFootprint(currentFP, adm.Resources)
+		if scheduler.Grows(currentFP, desiredFP) && scheduler.Grows(currentFP, reservedFP) {
+			verdict, checkErr, err := checkInheritedAdmission(ctx, r.placementReader(), r.placementAssumptions(), providerCR, vm, adm,
+				currentFP, reservedFP)
+			switch {
+			case err != nil:
+				return ctrl.Result{}, false, err
+			case verdict == inheritedBusy:
+				return ctrl.Result{RequeueAfter: placementLockBusyRetry()}, false, nil
+			case verdict == inheritedHeld:
+				msg := inheritedHoldMessage("the VM's resize", reservedFP, checkErr)
+				return r.refuseResize(ctx, vm, k8s.ReasonInheritedAdmissionOverCapacity, msg, r.unschedulable.next(uid, r.now())), false, nil
+			}
+		}
+		heldFP = reservedFP
+	}
+	if !scheduler.Grows(heldFP, desiredFP) {
 		r.unschedulable.reset(uid)
 		return ctrl.Result{}, true, nil
 	}
@@ -142,8 +183,11 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 	poolSpec := pool.Spec
 
 	providerNN := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}
-	resize := scheduler.ResizeRequest{Host: *host, Pool: poolSpec, VMUID: uid, Current: currentFP, Desired: desiredFP}
-	locked, checkErr := r.checkResizeUnderLock(ctx, r.placementAssumptions(), providerNN, vm, resize)
+	// The footprint admitted is the per-resource maximum of what the VM holds
+	// and what it asks for: a mixed change keeps its shrinking resource at
+	// its held size until the provider has confirmed the smaller one.
+	resize := scheduler.ResizeRequest{Host: *host, Pool: poolSpec, VMUID: uid, Current: heldFP, Desired: maxFootprint(heldFP, desiredFP)}
+	locked, admission, checkErr := r.checkResizeUnderLock(ctx, r.placementAssumptions(), providerNN, vm, resize)
 	if !locked {
 		logger.V(1).Info("Provider's placement lock is busy; requeueing the resize", "provider", providerNN.String())
 		return ctrl.Result{RequeueAfter: placementLockBusyRetry()}, false, nil
@@ -159,7 +203,15 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 		r.unschedulable.reset(uid)
 		logger.Info("Admitted a clustered resize-up against its host's free capacity",
 			"host", hostID, "cpu", desired.CPU, "memoryMiB", desired.MemoryMiB)
-		return ctrl.Result{}, true, nil
+		res, admitted, err := r.recordResizeReservation(ctx, vm, admission)
+		if admitted {
+			// Recorded by this manager instance: its Reconfigure needs no
+			// revalidation while the VM records exactly this reservation.
+			if adm, ok := resizeAdmissionOf(vm, providerKeyOf(providerCR)); ok {
+				r.placementAssumptions().Establish(uid, adm)
+			}
+		}
+		return res, admitted, err
 	case stderrors.As(checkErr, &tooBig):
 		retryAfter := r.unschedulable.next(uid, r.now())
 		// No committed, capacity or free figure (review M3); the arithmetic is
@@ -269,41 +321,157 @@ func (r *VirtualMachineReconciler) applyPendingShrinkWhileOff(
 	return res, true, err
 }
 
+// resizeAdmission is an admitted resize-up: the assumption that reserves it
+// (token) and the footprint to record durably (footprint: the assumption's,
+// which also covers any earlier unresolved admission of the VM).
+type resizeAdmission struct {
+	token     uint64
+	footprint scheduler.ResourceRequest
+}
+
 // checkResizeUnderLock is the part of admitClusteredResize that runs under the
 // Provider's assume lock: read what is committed, check the resize, and on a
-// fit assume the VM at its new size. It returns locked == false, doing nothing,
-// when the lock is not free within placementLockWait. err is a failed cache
-// read (a *placementInfraError) or scheduler.CheckResize's verdict. The lock is
-// released by a deferred call, so a panic inside cannot leave it held.
+// fit assume the VM at its new footprint. It returns locked == false, doing
+// nothing, when the lock is not free within placementLockWait. err is a failed
+// cache read (a *placementInfraError) or scheduler.CheckResize's verdict. The
+// lock is released by a deferred call, so a panic inside cannot leave it held.
 func (r *VirtualMachineReconciler) checkResizeUnderLock(
 	ctx context.Context,
 	assumptions *assume.Cache,
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	resize scheduler.ResizeRequest,
-) (locked bool, err error) {
+) (locked bool, admission resizeAdmission, err error) {
 	providerKey := provider.String()
 	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
 	if !locked {
-		return false, nil
+		return false, resizeAdmission{}, nil
 	}
 	defer unlock()
 	lockCtx, cancel := lockBoundContext(ctx)
 	defer cancel()
-	placed, err := r.placedWithAssumptions(lockCtx, assumptions, providerKey, provider, vm)
+	view, selfPresent, err := r.placedWithAssumptions(lockCtx, assumptions, providerKey, provider, vm)
 	if err != nil {
-		return true, &placementInfraError{err: err}
+		return true, resizeAdmission{}, &placementInfraError{err: err}
 	}
-	resize.PlacedVMs = placed
+	resize.PlacedVMs, resize.Committed = view.placed, view.byHost
 	if err := scheduler.CheckResize(resize); err != nil {
-		return true, err
+		return true, resizeAdmission{}, err
 	}
-	assumptions.AssumeFor(providerKey, assume.Assumption{
+	token, ok := assumptions.AssumeFor(providerKey, assume.Assumption{
 		UID: resize.VMUID, Namespace: vm.Namespace, Name: vm.Name, HostID: resize.Host.Name,
-		Labels: vm.Labels, Resources: resize.Desired, Resize: true,
+		Labels: vm.Labels, Resources: resize.Desired, Resize: true, Observed: selfPresent,
 	}, resizeAssumeTTL)
-	return true, nil
+	if !ok {
+		// The VM's create pick is still unresolved (assume.Cache.Assume): retry
+		// once it is, as for a busy lock.
+		return false, resizeAdmission{}, nil
+	}
+	// An earlier admission of the VM whose reservation write is unresolved is
+	// continued at the larger of both footprints: record that one.
+	a, _, _ := assumptions.Lookup(resize.VMUID)
+	return true, resizeAdmission{token: token, footprint: maxFootprint(a.Resources, resize.Desired)}, nil
 }
+
+// recordResizeReservation writes the admitted footprint to
+// status.placement.resizeReservation with a resourceVersion-checked status
+// update, and reports admitted == true only when the API server stored it AND
+// its answer carries it: a VirtualMachine CRD older than this field would
+// prune it silently, and the Reconfigure must never run unreserved. The
+// write's outcome is recorded on the assumption, as for a pendingHost
+// (assume.Cache): a definitive rejection releases it, an ambiguous failure
+// keeps it counting until a later admission records the reservation (the
+// write only ever raises the reservation, so sending it again is harmless).
+// It never lowers a reservation already recorded.
+func (r *VirtualMachineReconciler) recordResizeReservation(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	adm resizeAdmission,
+) (ctrl.Result, bool, error) {
+	logger := log.FromContext(ctx)
+	assumptions := r.placementAssumptions()
+	uid := vmSchedulingUID(vm)
+	if !assumptions.BeginWrite(uid, adm.token) {
+		logger.Info("The resize assumption changed before its reservation write; requeueing without writing it")
+		return ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, false, nil
+	}
+	pl := vm.Status.Placement
+	if pl == nil {
+		// A routed VM is bound (status.placement.host): not reached.
+		assumptions.ForgetIf(uid, adm.token)
+		return ctrl.Result{}, false, fmt.Errorf("record the resize reservation of VirtualMachine %s/%s: it has no placement", vm.Namespace, vm.Name)
+	}
+	footprint := withResizeReservation(adm.footprint, vm)
+	held := pl.ResizeReservation
+	pl.ResizeReservation = &infravirtrigaudiov1beta1.PlacementResources{
+		CPU:       footprint.CPU,
+		MemoryMiB: min(footprint.MemoryMiB, maxRecordedMemoryMiB),
+	}
+	// The same write marks the outcome pending: an earlier resize's
+	// Reconfiguring=False/ReconcileSuccess must never settle this reservation
+	// (resizeSettledCondition). Only the Reconfigure's own outcome replaces it.
+	heldCond := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	if heldCond != nil {
+		heldCond = heldCond.DeepCopy()
+	}
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionReconfiguring,
+		Status:             metav1.ConditionTrue,
+		Reason:             k8s.ReasonResizeReserved,
+		Message:            resizeReservedMessage,
+		ObservedGeneration: vm.Generation,
+	})
+	precondition := vm.ResourceVersion
+	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
+	defer cancel()
+	if err := r.Status().Update(writeCtx, vm); err != nil {
+		pl.ResizeReservation = held
+		restoreReconfiguringCondition(vm, heldCond)
+		if pendingHostWriteRejected(err) {
+			assumptions.WriteRejected(uid, adm.token)
+		} else {
+			assumptions.WriteAmbiguous(uid, adm.token, precondition)
+		}
+		if apierrors.IsConflict(err) {
+			logger.Info("Resize reservation write lost a resourceVersion race; requeueing without reconfiguring")
+			return ctrl.Result{Requeue: true}, false, nil
+		}
+		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
+		return ctrl.Result{}, false, fmt.Errorf("record the resize reservation of VirtualMachine %s/%s: %w", vm.Namespace, vm.Name, err)
+	}
+	if got, ok := resizeReservationOf(vm); !ok || scheduler.Grows(got, footprint) {
+		// Stored without the field: the installed CRD predates it. Nothing
+		// was sent to the provider, and no earlier write of this admission can
+		// land any more (the object moved past its precondition): the
+		// assumption is released and the resize waits, failing closed.
+		assumptions.ForgetIf(uid, adm.token)
+		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
+		logger.Error(errResizeReservationPruned, "Not reconfiguring: the API server did not keep the resize reservation")
+		return r.refuseResize(ctx, vm, k8s.ReasonPlacementError, errResizeReservationPruned.Error(), placementConfigRetryInterval), false, nil
+	}
+	assumptions.WriteStored(uid, adm.token)
+	return ctrl.Result{}, true, nil
+}
+
+// resizeReservedMessage is the message of Reconfiguring=True/ResizeReserved.
+// It names no host and no capacity figure, as every placement message.
+const resizeReservedMessage = "resize reserved on the VM's host; waiting for the provider to confirm the Reconfigure"
+
+// restoreReconfiguringCondition puts back vm's Reconfiguring condition as it
+// was before a status write that did not store (prev nil: there was none).
+func restoreReconfiguringCondition(vm *infravirtrigaudiov1beta1.VirtualMachine, prev *metav1.Condition) {
+	if prev == nil {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionReconfiguring)
+		return
+	}
+	meta.SetStatusCondition(&vm.Status.Conditions, *prev)
+}
+
+// errResizeReservationPruned is a resize reservation the API server stored
+// the status write of but did not keep: the VirtualMachine CRD installed in the
+// cluster is older than the manager.
+var errResizeReservationPruned = stderrors.New("the resize is not applied: the API server did not keep status.placement.resizeReservation, " +
+	"so the installed VirtualMachine CRD is older than this manager; install this release's CRDs, then the resize is retried")
 
 // refuseResize records a refused resize on vm, persists the status (bounded,
 // after the assume lock is released) and returns the requeue.
@@ -318,4 +486,76 @@ func (r *VirtualMachineReconciler) refuseResize(
 	metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 	r.updatePlacementStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: retryAfter}
+}
+
+// settleResizeReservation releases a clustered VM's durable resize reservation
+// once the outcome of every resize admitted under it is established
+// (resizeOutcomeEstablished): the provider confirmed the VM at its desired
+// size, and this pass's Describe has raised the recorded CPU and memory
+// ceiling to whatever the VM holds (syncRecordedCPU, syncMemoryCeiling), so
+// the record vm carries counts it at no less than it can use. The reservation
+// is cleared with that record in one checked status write; only once it is
+// stored is the VM's resize assumption, if any, narrowed to the recorded
+// footprint (it keeps counting that until the informer cache shows the
+// record). A failed write keeps the reservation; the next pass tries again.
+func (r *VirtualMachineReconciler) settleResizeReservation(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+	desc contracts.DescribeResponse,
+) {
+	if !resizeOutcomeEstablished(vm, desc) {
+		return
+	}
+	if pl := vm.Status.Placement; pl != nil && pl.ResizeReservation != nil {
+		held := pl.ResizeReservation
+		pl.ResizeReservation = nil
+		writeCtx, cancel := context.WithTimeout(ctx, placementStatusWriteTimeout)
+		defer cancel()
+		if err := r.writeStatus(writeCtx, vm); err != nil {
+			pl.ResizeReservation = held
+			log.FromContext(ctx).Info("Keeping the resize reservation: its release was not stored", "error", err.Error())
+			return
+		}
+		log.FromContext(ctx).Info("Released the resize reservation: the provider confirmed the applied size",
+			"cpu", held.CPU, "memoryMiB", held.MemoryMiB)
+	}
+	assumptions := r.placementAssumptions()
+	uid := vmSchedulingUID(vm)
+	if a, token, ok := assumptions.Lookup(uid); ok && a.Resize {
+		assumptions.Narrow(uid, token, admittedFootprint(vm, vmClass))
+	}
+}
+
+// resizeOutcomeEstablished reports whether nothing about a clustered VM's size
+// is unresolved: it needs no reconfigure (the caller's steady state), no
+// reconfigure task is outstanding, the VM's Reconfiguring condition positively
+// records an applied reconfigure (resizeSettledCondition), and this pass's
+// Describe reported the vCPUs and memory maximum the VM holds. Until then a
+// resize reservation stays.
+func resizeOutcomeEstablished(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) bool {
+	if vm.Status.ReconfigureTaskRef != "" || desc.VCPUs <= 0 || desc.MaxMemoryMiB <= 0 {
+		return false
+	}
+	return resizeSettledCondition(meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring))
+}
+
+// resizeSettledCondition reports whether cond, a VM's Reconfiguring condition,
+// is positive evidence that the last reconfigure the provider answered was
+// applied: Reconfiguring=False with reason ReconcileSuccess, which only a
+// confirmed Reconfigure (or the completion of its task) sets, and which the
+// power-state marker replaces only when no reconfigure outcome is open
+// (mayMarkPowerAdjusting). Every reservation write sets
+// Reconfiguring=True/ResizeReserved (recordResizeReservation), so a success
+// seen with a reservation was recorded after it, by a Reconfigure sent under
+// it; a success from before the reservation never settles it. Anything else keeps a resize reservation: no
+// condition (the outcome of a Reconfigure sent just before a restart was
+// never recorded), a change pending a restart or a power-off, a task in
+// progress, a failed, unanswered or dishonest Reconfigure, a resize refused
+// before it was sent (whose refusal may have replaced an earlier attempt's
+// unresolved outcome), and any reason this check does not know. It is an
+// allow-list on purpose: a reason added later keeps the reservation until it
+// is classified here.
+func resizeSettledCondition(cond *metav1.Condition) bool {
+	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == k8s.ReasonReconcileSuccess
 }
