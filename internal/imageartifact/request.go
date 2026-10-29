@@ -42,8 +42,8 @@ const (
 	ModeIdentity Mode = iota + 1
 	// ModeLegacy is a request from a manager older than ADR-0009: no identity,
 	// a bare target name. It is served with the pre-ADR bare-name naming and
-	// reuse by name, without an artifact echo, for this release only, and
-	// signalled (SignalLegacyRequest). The next release refuses it with
+	// reuse by name, without an artifact echo, and signalled
+	// (SignalLegacyRequest). It is deprecated: a later release refuses it with
 	// FailedPrecondition.
 	ModeLegacy
 )
@@ -211,7 +211,7 @@ func SourceUnavailableError(message string) error {
 // LegacyRequestWarning is the warning logged for every legacy (identity-less)
 // ImagePrepare request (ADR-0009 D7).
 const LegacyRequestWarning = "deprecated: image prepare without identity from an older manager; " +
-	"upgrade the manager; refused from the next release"
+	"upgrade the manager; refused in a later release"
 
 // SignalLegacyRequest emits the ADR-0009 D7 deprecation signal for a legacy
 // request for targetName served by a provider of providerType ("vsphere",

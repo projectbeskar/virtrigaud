@@ -40,7 +40,7 @@
 > keyed on (host, id) — see [Listing and adoption](#listing-and-adoption-slice-4).
 > **Addendum B** adds migration into a clustered provider — see
 > [Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b).
-> `topology: cluster` is **experimental** in v0.4.1: ADR-0007 slice 5 ran a
+> `topology: cluster` is **experimental** in v0.4.1 and v0.4.2: ADR-0007 slice 5 ran a
 > single-`Host` lab validation, and the v0.4.0 release-candidate runs on a
 > two-host pool are described in the release notes. Not implemented:
 > host→host migration (P2).

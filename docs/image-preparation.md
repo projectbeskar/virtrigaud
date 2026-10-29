@@ -522,13 +522,13 @@ the provider log only, so a `VMImage`'s status tells nothing about what an arbit
 serves.
 
 **Requests from an older manager (deprecated).** A manager older than ADR-0009 sends a bare
-target name and no identity. In v0.4.0 and v0.4.1 only, the provider serves it the pre-ADR way
+target name and no identity. Up to and including v0.4.2, the provider serves it the pre-ADR way
 (a template named after the `VMImage`, reused by name anywhere in the datacenter, no
 stamp), logs `deprecated: image prepare without identity from an older manager; upgrade
-the manager; refused from the next release` at `WARN`, and increments
+the manager; refused in a later release` at `WARN`, and increments
 `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="vsphere"}`, which
-the vSphere provider serves at `/metrics` on its health port. Alert on that counter. The
-release after v0.4.1 refuses such requests. Legacy templates and identity
+the vSphere provider serves at `/metrics` on its health port. Alert on that counter. A later
+release, not chosen yet, refuses such requests. Legacy templates and identity
 templates never share a name, so neither mode can touch the other's templates.
 
 **Legacy templates are left alone.** Templates prepared before this change (named after
@@ -834,10 +834,10 @@ are disjoint). In legacy mode, two `VMImage`s with the **same name in different 
 prepared through one Provider (or through Providers that share the pool directory) **share
 one file**, `<pool dir>/<VMImage name>.qcow2`: whichever is prepared first is what both get.
 This is the pre-ADR defect, and it is why legacy mode is temporary. Every such request logs
-`WARN deprecated: image prepare without identity from an older manager; upgrade the manager; refused from the next release`
+`WARN deprecated: image prepare without identity from an older manager; upgrade the manager; refused in a later release`
 and increments `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="libvirt"}`.
 Alert when that counter is non-zero, and do not run an older manager against a Provider
-shared across tenants. The release after v0.4.1 refuses these requests with `FailedPrecondition`.
+shared across tenants. A later release, not chosen yet, refuses these requests with `FailedPrecondition`.
 
 Bare-name files prepared by earlier releases are never deleted, renamed, re-stamped or
 adopted; after the upgrade, the first create for each image prepares a new artifact and the
