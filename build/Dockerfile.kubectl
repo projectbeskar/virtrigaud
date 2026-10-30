@@ -3,12 +3,12 @@
 FROM alpine:3.24
 
 # Install kubectl from official Kubernetes release
-# v1.35.9 is the latest patch of a supported Kubernetes minor. The image only
+# v1.35.10 is the latest patch of a supported Kubernetes minor. The image only
 # runs `kubectl apply --server-side` for the chart's CRD hook (server-side apply
 # is stable since Kubernetes 1.22). Re-scan before every release: a
 # kubectl release bundles the Go toolchain and modules it was built with, so a
 # newer patch release is what picks up fixes in them.
-ARG KUBECTL_VERSION=1.35.9
+ARG KUBECTL_VERSION=1.35.10
 # TARGETARCH is auto-populated by BuildKit/buildx per target platform (amd64,
 # arm64) and matches the k8s release URL convention (linux/<arch>). Hardcoding
 # amd64 here made the arm64 image install an amd64 binary, which then failed the
