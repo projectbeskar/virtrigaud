@@ -5,8 +5,8 @@ This guide covers upgrading a VirtRigaud installation from **v0.3.11** (2026-06-
 **breaking** or change operator-visible behavior. Read the "Breaking changes" table
 below before you upgrade, then follow "Required upgrade order". If you are on a v0.4.0
 release candidate, see [Upgrading from a v0.4.0 release candidate](#upgrading-from-a-v040-release-candidate).
-For v0.4.1, see [Upgrading from v0.4.0 to v0.4.1](#upgrading-from-v040-to-v041); for the release after v0.4.1, see
-[Upgrading from v0.4.1 to the next release](#upgrading-from-v041-to-the-next-release).
+For v0.4.1, see [Upgrading from v0.4.0 to v0.4.1](#upgrading-from-v040-to-v041); for v0.4.2, see
+[Upgrading from v0.4.1 to v0.4.2](#upgrading-from-v041-to-v042).
 
 Each change below links to the in-tree page that documents it in full — this guide
 is the index and the sequencing, not a duplicate of that detail.
@@ -17,12 +17,18 @@ is the index and the sequencing, not a duplicate of that detail.
 > intermediate state that only matters if you deployed a `main` build from inside
 > that window.
 
-## Upgrading from v0.4.1 to the next release
+## Upgrading from v0.4.1 to v0.4.2
 
-This section covers the release after v0.4.1 (control-plane scalability and
-admission safety; see the [next-release notes](release-notes/next.md)). The
-roll order is unchanged: **CRDs, then the manager, then the providers**. No
-provider image change is required; the gRPC contract is unchanged.
+This section covers v0.4.2 (control-plane scalability, admission safety and a
+dependency security update; see the [v0.4.2 release notes](release-notes/next.md)).
+v0.4.2 is a patch release of v0.4.1, but it adds an optional CRD status field
+and two manager flags, and **rolling back is unsupported while a clustered VM
+holds a resize reservation** (see [Rolling back to v0.4.1](#rolling-back-to-v041)).
+A v0.4.2 release candidate follows the same steps. The roll order is
+unchanged: **CRDs, then the manager, then the providers**. The gRPC contract
+is unchanged, so providers need no configuration change, but **roll the
+provider images too**: the manager and provider binaries are rebuilt with
+`golang.org/x/net` v0.62.0 (CVE-2026-78661, CVE-2026-97045).
 
 ### CRDs first: `status.placement.resizeReservation`
 
@@ -48,7 +54,9 @@ provider has confirmed the applied size.
 Replacing the manager (this upgrade, a rolling restart, or any later leader
 change) hands the new instance pending creates, pending clone targets and
 resize reservations it did not admit itself. Each is checked once against its
-host's committed capacity before anything is sent to the provider. One that
+host's committed capacity before anything is sent to the provider (a resize
+whose requested size the VM's recorded size already covers, for example after
+a failed `Reconfigure`, has nothing left to admit and is not held). One that
 no longer fits is **not executed**: its record is kept and keeps counting, and
 the VM waits with `InheritedAdmissionOverCapacity` (`Placed=False` for a
 create or clone, `Reconfiguring=False` for a resize) until the host has room.
@@ -108,9 +116,36 @@ server limits.
 
 - **Helm:** the chart now passes `--client-qps=20 --client-burst=40` by
   default, so the manager Deployment changes (one rollout of the manager pod)
-  with the same limits. `helm upgrade --reuse-values` from an older values
-  file renders without the flags, and the manager's defaults (the same values)
-  apply.
+  with the same limits. **Carry your own values with
+  `helm upgrade --reset-then-reuse-values` (Helm 3.14+), not `--reuse-values`.**
+  `--reuse-values` reuses the v0.4.1 chart's defaults, including its image
+  tags, so the manager stays on v0.4.1 while the chart's CRD hook still
+  applies the new CRDs. If you do use `--reuse-values`, also set the image
+  tags (for example `--set manager.image.tag=v0.4.2`); the manager then
+  starts without the flags and applies its defaults (the same values).
+- **Image tags you set yourself are kept by both options.**
+  `--reset-then-reuse-values` drops only the old chart's defaults: a tag you
+  supplied (`--set manager.image.tag=...`, `crdUpgrade.image.tag`, or a
+  `providers.*.image.tag` for a chart-templated provider) is carried over
+  unchanged. List them before upgrading with
+  `helm get values <release> -n <namespace>`, and override every pinned tag
+  that still names v0.4.1 (`--set manager.image.tag=v0.4.2`, and so on), or
+  pin the release's digests if you mirror images.
+- **Providers created from `Provider` resources are not upgraded by Helm.**
+  Their image is `spec.runtime.image` on each `Provider`; set it to the
+  v0.4.2 image to roll the provider (they carry the `golang.org/x/net`
+  update).
+- **After upgrading, check the images that actually run:**
+  `kubectl -n <namespace> get deploy -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image`
+  for the manager (and any chart-templated provider), and
+  `kubectl get providers.infra.virtrigaud.io -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.runtime.image`
+  for the providers. Every VirtRigaud image should end in `:v0.4.2` (or the
+  candidate tag you installed). Confirm the manager pod is the new one and
+  `Ready`: `kubectl -n <namespace> get pods -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image,READY:.status.containerStatuses[*].ready`.
+- **A later plain `helm upgrade` reuses the previous revision's values.** If
+  you rolled the image back with `--set manager.image.tag=v0.4.1` (see
+  [Rolling back to v0.4.1](#rolling-back-to-v041)), upgrade again with
+  `--reset-then-reuse-values` or set the tag explicitly.
 - **Kustomize:** `config/manager` passes neither flag; the defaults apply.
 
 See [Kubernetes API client rate limits](../charts/virtrigaud/README.md#kubernetes-api-client-rate-limits)
@@ -142,6 +177,20 @@ below first; Helm does not.
   works with it.
 - After a rollback, a v0.4.1 manager does not re-check inherited admissions
   (that check is new in this release).
+- Rolling the providers back to v0.4.1 brings back `golang.org/x/net`
+  v0.60.0 and the two CVEs it fixes.
+
+### ImagePrepare from an older manager is still served
+
+As in v0.4.0 and v0.4.1, an identity-less ImagePrepare request from a manager
+older than v0.4.0 (ADR-0009 D7) is still served in deprecated legacy mode,
+logged at `WARN` and counted in
+`virtrigaud_provider_image_prepare_legacy_requests_total`. The v0.4.1 docs and
+log line said the release after v0.4.1 refuses it; that refusal is deferred to
+a later release, not chosen yet. The log line now ends `refused in a later
+release` instead of `refused from the next release`; if you match on the log
+text, update the pattern (the counter is unchanged). See
+[image preparation](image-preparation.md#deprecated-requests-from-an-older-manager).
 
 ## Upgrading from v0.4.0 to v0.4.1
 
@@ -747,7 +796,7 @@ No action is required for new calls; an object that a v0.4.0 manager or a v0.4.1
   (from a manager older than v0.4.0, ADR-0009) is served in deprecated legacy mode by
   v0.4.1 as it was by v0.4.0, logged at `WARN` and counted in
   `virtrigaud_provider_image_prepare_legacy_requests_total`. The log line says "refused from the
-  next release": that is the release after v0.4.1 (see
+  next release". That refusal did not ship in v0.4.2 either; it is deferred to a later release (see
   [image preparation](image-preparation.md#deprecated-requests-from-an-older-manager)). Keep an
   alert on the counter.
 

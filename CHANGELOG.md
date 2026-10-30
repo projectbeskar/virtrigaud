@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-29 22:42] - v0.4.2-rc1 release preparation
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo requires point at `v0.4.2-rc1` (`make set-module-versions VERSION=v0.4.2-rc1`), so the `sdk` and `proto` module tags of the candidate resolve.
+- `docs/release-notes/next.md`: titled for v0.4.2 (a patch release of v0.4.1 that adds one optional status field and two manager flags); performance figures labelled end-to-end (Spike 1B, fake provider) or microbenchmark (Spike 1A); new Security section (`golang.org/x/net` v0.62.0, CVE-2026-78661, CVE-2026-97045, and the advisories that remain); known limitations link #468, the rollback restriction and clustered libvirt being experimental; providers are rolled for the dependency update.
+- `docs/upgrading.md`: "Upgrading from v0.4.1 to the next release" becomes "Upgrading from v0.4.1 to v0.4.2"; roll the provider images too; rolling providers back restores the vulnerable `x/net`; ImagePrepare legacy mode still served.
+- `docs/upgrading.md`, `docs/release-notes/next.md`: Helm upgrades: both `--reuse-values` and `--reset-then-reuse-values` keep image tags the operator pinned (check `helm get values`, override them); providers created from `Provider` resources are rolled through `spec.runtime.image`, not Helm; commands to check the images that actually run after the upgrade. The release notes' container-image note gives the provider images' unfixed Debian 12 findings (83 CVEs, 4 critical) and the `kubectl` hook image's six advisories.
+- `internal/imageartifact/request.go`, `docs/image-preparation.md`, `docs/adr/0009-prepared-image-artifact-identity.md`, `docs/upgrading.md`: the ADR-0009 D7 refusal of identity-less ImagePrepare requests, announced for "the release after v0.4.1", is deferred to a later release (maintainer decision, 2026-10-29). The provider's `WARN` line now ends `refused in a later release`; the counter is unchanged.
+- `docs/README.md`, `docs/clustered-provider-inventory.md`: v0.4.2 references.
+
+### Why
+Prepares the first v0.4.2 release candidate from main (#467, #469) following the v0.4.1 release process, and stops the docs and the provider log from promising a refusal this release does not ship.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only (the provider's legacy-mode `WARN` text also changes)
+
 ## [2026-10-29 03:23] - Update golang.org/x/net to v0.62.0
 **Author:** @wrkode (William Rizzo)
 

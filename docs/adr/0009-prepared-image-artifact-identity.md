@@ -12,8 +12,9 @@ that ships cross-namespace `VMImage` sharing
 listed under *Implementation slices*.
 
 *Legacy mode:* D7 serves an identity-less request from an older manager for one release and
-refuses it from the next. v0.4.0 and v0.4.1 both still serve it (the refusal did not ship in the
-patch release); the release after v0.4.1 refuses it.
+refuses it from the next. v0.4.0, v0.4.1 and v0.4.2 all still serve it: the refusal did not ship
+in either patch release, and on 2026-10-29 the maintainer deferred it again, to a later release
+that is not chosen yet.
 
 **Review:** staff-architect, 2026-09-25: *accept with changes*. The changes are applied
 in this revision.
@@ -640,7 +641,8 @@ from an older manager with **today's bare-name naming and reuse-by-name**:
 **The deprecation signal** covers every legacy request, Proxmox included:
 
 - a provider-side `WARN` log: "deprecated: image prepare without identity from an older
-  manager; upgrade the manager; refused from the next release";
+  manager; upgrade the manager; refused in a later release" (until v0.4.2 the text read
+  "refused from the next release");
 - the provider counter
   `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}`, next to the
   existing `virtrigaud_provider_*` metrics (`internal/obs/metrics/metrics.go`).
