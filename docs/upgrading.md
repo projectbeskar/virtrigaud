@@ -119,10 +119,29 @@ server limits.
   with the same limits. **Carry your own values with
   `helm upgrade --reset-then-reuse-values` (Helm 3.14+), not `--reuse-values`.**
   `--reuse-values` reuses the v0.4.1 chart's defaults, including its image
-  tags, so the manager and providers stay on v0.4.1 while the chart's CRD hook
-  still applies the new CRDs. If you do use `--reuse-values`, also set the
-  image tags (for example `--set manager.image.tag=v0.4.2`); the manager then
+  tags, so the manager stays on v0.4.1 while the chart's CRD hook still
+  applies the new CRDs. If you do use `--reuse-values`, also set the image
+  tags (for example `--set manager.image.tag=v0.4.2`); the manager then
   starts without the flags and applies its defaults (the same values).
+- **Image tags you set yourself are kept by both options.**
+  `--reset-then-reuse-values` drops only the old chart's defaults: a tag you
+  supplied (`--set manager.image.tag=...`, `crdUpgrade.image.tag`, or a
+  `providers.*.image.tag` for a chart-templated provider) is carried over
+  unchanged. List them before upgrading with
+  `helm get values <release> -n <namespace>`, and override every pinned tag
+  that still names v0.4.1 (`--set manager.image.tag=v0.4.2`, and so on), or
+  pin the release's digests if you mirror images.
+- **Providers created from `Provider` resources are not upgraded by Helm.**
+  Their image is `spec.runtime.image` on each `Provider`; set it to the
+  v0.4.2 image to roll the provider (they carry the `golang.org/x/net`
+  update).
+- **After upgrading, check the images that actually run:**
+  `kubectl -n <namespace> get deploy -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image`
+  for the manager (and any chart-templated provider), and
+  `kubectl get providers.infra.virtrigaud.io -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.runtime.image`
+  for the providers. Every VirtRigaud image should end in `:v0.4.2` (or the
+  candidate tag you installed). Confirm the manager pod is the new one and
+  `Ready`: `kubectl -n <namespace> get pods -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image,READY:.status.containerStatuses[*].ready`.
 - **A later plain `helm upgrade` reuses the previous revision's values.** If
   you rolled the image back with `--set manager.image.tag=v0.4.1` (see
   [Rolling back to v0.4.1](#rolling-back-to-v041)), upgrade again with

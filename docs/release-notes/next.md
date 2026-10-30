@@ -144,7 +144,8 @@ amendments.
   manager rollout, same limits). Upgrade with `helm upgrade --reset-then-reuse-values`, not
   `--reuse-values`: `--reuse-values` keeps the v0.4.1 chart's image tags, so the manager is not
   upgraded while the new CRDs are. With `--reuse-values` and the image tags set, the manager
-  starts without the flags and applies its defaults.
+  starts without the flags and applies its defaults. Both options keep image tags you set
+  yourself: check `helm get values` and override any pinned v0.4.1 tag.
 - **Manager image:** the manager is now built from the `cmd/manager` package, not a single file.
   This only matters if you build the image yourself from `build/Dockerfile.manager`.
 - **gRPC contract and providers:** unchanged; providers need no configuration change. Their
@@ -174,11 +175,16 @@ amendments.
   - GO-2026-5932, the deprecated `golang.org/x/crypto/openpgp` package: no VirtRigaud build
     imports it, and there is no fixed version.
 - **Container images.** The manager image has no HIGH or CRITICAL finding. The provider images
-  are based on Debian 12 and carry operating-system package advisories that Debian has not fixed
-  yet; the release scan ignores unfixed findings. The chart's CRD-hook image (`kubectl`) ships
-  the upstream `kubectl` 1.35.9 binary, which is built with an older `golang.org/x/net` and Go
-  standard library and is reported with advisories that need a newer upstream `kubectl`; it
-  runs only during `helm install` and `helm upgrade`.
+  are based on Debian 12.15 and carry HIGH and CRITICAL operating-system package advisories (83
+  distinct CVEs, 4 of them CRITICAL: in GLib, libxml2, zlib's MiniZip and the Proxmox image's
+  OpenSSH client) for which Debian 12 has no fixed package: they are marked affected, fix
+  deferred or will not fix. The release scan ignores unfixed findings, so these do not fail it;
+  that is not a statement that they are harmless. Most are in packages the providers do not use
+  at run time (for example QEMU device emulation in the vSphere image, which uses only
+  `qemu-img`). The chart's CRD-hook image (`kubectl`) ships the upstream `kubectl` 1.35.9 binary,
+  built with Go 1.26.8, `golang.org/x/net` v0.56.0 and `x/text` v0.39.0; Trivy reports six HIGH
+  advisories against it. It runs only during `helm install` and `helm upgrade`, and talks only to
+  the cluster's API server.
 
 ## Known limitations
 
@@ -223,8 +229,9 @@ before upgrading. It covers CRD ordering, the new manager's re-check of inherite
 the client rate limits, and **rolling back**. A `helm rollback` can succeed and still be unsafe
 while any clustered VM holds `status.placement.resizeReservation`: the v0.4.1 manager drops the
 field and counts the VM at its recorded size. Roll the manager and the chart back together; a
-v0.4.1 manager does not start with the new flags. Roll the providers too: they carry the
-`golang.org/x/net` update.
+v0.4.1 manager does not start with the new flags. Roll the providers too, by setting
+`spec.runtime.image` on each `Provider` (Helm does not change it): they carry the
+`golang.org/x/net` update. Then check the images that actually run, as the upgrade guide shows.
 
 ## Changelog
 
