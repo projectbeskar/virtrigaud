@@ -181,9 +181,13 @@ amendments.
   deferred or will not fix. The release scan ignores unfixed findings, so these do not fail it;
   that is not a statement that they are harmless. Most are in packages the providers do not use
   at run time (for example QEMU device emulation in the vSphere image, which uses only
-  `qemu-img`). The chart's CRD-hook image (`kubectl`) ships the upstream `kubectl` 1.35.9 binary,
-  built with Go 1.26.8, `golang.org/x/net` v0.56.0 and `x/text` v0.39.0; Trivy reports six HIGH
-  advisories against it. It runs only during `helm install` and `helm upgrade`, and talks only to
+  `qemu-img`). The chart's CRD-hook image (`kubectl`) now ships the upstream `kubectl` 1.35.10
+  binary (was 1.35.9), built with Go 1.26.10, which fixes four HIGH Go standard-library
+  advisories (CVE-2026-78667, CVE-2026-78669, CVE-2026-97031, CVE-2026-111943). Upstream still
+  builds it with `golang.org/x/net` v0.56.0 and `x/text` v0.39.0: Trivy reports two HIGH
+  advisories (CVE-2026-78669 in `x/net`, CVE-2026-56851 in `x/text`), and also reports CVE-2026-78661
+  and CVE-2026-97045, not yet rated, against that `x/net`. No upstream `kubectl` release is built with the fixed
+  versions yet. The image runs only during `helm install` and `helm upgrade`, and talks only to
   the cluster's API server.
 
 ## Known limitations

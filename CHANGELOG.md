@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-30 02:25] - Update the CRD hook's kubectl to 1.35.10
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `build/Dockerfile.kubectl`: `KUBECTL_VERSION` 1.35.9 → 1.35.10. The upstream binary is built with Go 1.26.10 instead of 1.26.8, which fixes CVE-2026-78667, CVE-2026-78669 (standard library), CVE-2026-97031 and CVE-2026-111943. Still reported: CVE-2026-78669 in `golang.org/x/net` v0.56.0 and CVE-2026-56851 in `x/text` v0.39.0 (no upstream `kubectl` is built with fixed versions yet).
+- `docs/release-notes/next.md`: the container-image note describes the updated hook image and its remaining advisories.
+
+### Why
+The CRD hook image ships an upstream `kubectl` binary; a newer patch release is the only way to pick up fixes in the Go toolchain it was built with. Same minor, same Alpine base, same hook.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-29 22:42] - v0.4.2-rc1 release preparation
 **Author:** @wrkode (William Rizzo)
 
