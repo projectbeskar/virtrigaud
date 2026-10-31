@@ -192,7 +192,7 @@ func (q isoQueue) Less(i, j int) bool {
 	}
 	return q[i].at.Before(q[j].at)
 }
-func (q isoQueue) Swap(i, j int)       { q[i], q[j] = q[j], q[i] }
+func (q isoQueue) Swap(i, j int) { q[i], q[j] = q[j], q[i] }
 func (q *isoQueue) Push(x interface{}) {
 	if e, ok := x.(isoEvent); ok {
 		*q = append(*q, e)

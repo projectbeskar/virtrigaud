@@ -334,8 +334,10 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 }
 
 // isInfraFailure reports whether the given error is an infrastructure-
-// class gRPC failure that should count toward a CircuitBreaker's failure
-// threshold. Treats the following codes as infra failures:
+// class gRPC failure by its code and reasons alone. Whether it counts toward
+// the CircuitBreaker also depends on whether the provider answered it: an
+// answered Internal or Unknown is a VM-level answer and does not count
+// (countsTowardBreaker, #472). Treats the following codes as infra failures:
 //
 //   - Unavailable        — provider pod down, network partition
 //   - DeadlineExceeded   — provider hung past the call timeout
