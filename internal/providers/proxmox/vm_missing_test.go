@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pvefake"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -71,6 +72,10 @@ func TestDescribe_MissingOnlyFromThisNodeIsNotGone(t *testing.T) {
 	_, err := p.Describe(ctx, &providerv1.DescribeRequest{Id: "702"})
 	require.Error(t, err, "a VM on another node is never reported as gone")
 	assert.Equal(t, codes.Unavailable, status.Code(err))
+	assert.Equal(t, "service unavailable: Proxmox VM 702 is not on node pve but exists elsewhere in the cluster",
+		status.Convert(err).Message(), "the message is unchanged")
+	assert.True(t, contracts.HasErrorInfoReason(err, contracts.VMOperationFailedReason),
+		"one VM's placement says nothing about the provider's health: kept out of the circuit breaker (#472)")
 
 	resp, err := p.Describe(ctx, &providerv1.DescribeRequest{Id: "703"})
 	require.NoError(t, err)
@@ -91,6 +96,11 @@ func TestDelete_MissingOnlyFromThisNodeIsHeld(t *testing.T) {
 	_, err := p.Delete(ctx, &providerv1.DeleteRequest{Id: "704"})
 	require.Error(t, err, "success would release the finalizer of a VM that still exists")
 	assert.NotEqual(t, codes.NotFound, status.Code(err))
+	assert.Equal(t, codes.Unavailable, status.Code(err))
+	assert.Equal(t, "service unavailable: Proxmox VM 704 is not on node pve but exists elsewhere in the cluster; not deleting",
+		status.Convert(err).Message(), "the message is unchanged")
+	assert.True(t, contracts.HasErrorInfoReason(err, contracts.VMOperationFailedReason),
+		"a refused delete did nothing and is VM-scoped: kept out of the circuit breaker (#472)")
 	_, exists := srv.GetVM(704)
 	assert.True(t, exists)
 

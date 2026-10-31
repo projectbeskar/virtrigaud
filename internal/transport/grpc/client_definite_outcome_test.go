@@ -42,7 +42,7 @@ func TestMapGRPCError_SingleHostLibvirtDefiniteAnswers(t *testing.T) {
 	assert.True(t, contracts.IsNothingDone(mapped), "a not-performed answer proves nothing was done")
 	assert.True(t, contracts.IsRetryable(mapped))
 	assert.False(t, isInfraFailure(notPerformed), "one tenant's failing export must not open the Provider's breaker")
-	assert.False(t, countsTowardBreaker("/provider.v1.Provider/ExportDisk", notPerformed))
+	assert.False(t, countsTowardBreaker("/provider.v1.Provider/ExportDisk", notPerformed, false))
 
 	assert.True(t, contracts.IsNotFound(c.mapGRPCError(op, status.Error(codes.NotFound, "the libvirt domain was not found on the host"))))
 	assert.True(t, contracts.IsInvalidSpec(c.mapGRPCError(op, status.Error(codes.InvalidArgument, "bad"))))

@@ -86,7 +86,11 @@ after a command that may change the VM was sent is `Unknown` +
 [a host that stops answering](provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering)).
 On a single-host Provider a failure of the operation on the
 VM also carries `VM_OPERATION_FAILED` (historical code and message kept); a host
-that could not be reached keeps the plain error, which the breaker counts.
+that could not be reached keeps the plain error (gRPC `Unknown`). Since v0.4.2 the
+breaker does not count that either: the provider's gRPC server answered it, and the
+manager counts only failures the provider did not answer (no connection, a dropped
+connection, no answer before the call's deadline) and answered `Unavailable` or
+`DeadlineExceeded` without a VM-scoped reason.
 
 ## Power states: "Off" means powered off
 

@@ -37,14 +37,57 @@ import (
 // never reached the provider. One that failed after it (the connection
 // dropped mid-RPC, the provider pod was killed) may have been processed.
 
+// The same stats handler also tells whether the PROVIDER ANSWERED an RPC: it
+// reports an InTrailer only when grpc-go received the final HEADERS frame
+// (END_STREAM) of a response it recognised as gRPC — a response whose
+// content-type is application/grpc (http2_client.go operateHeaders). That
+// covers a normal response (headers, message, trailers) and a trailers-only
+// error response alike: the status the RPC returns is the one the server
+// sent. Everything grpc-go synthesizes on the client is reported without one:
+// no connection (refused, reset, TLS failure), the transport closing
+// mid-RPC, the client's own deadline or cancellation, a stream the server
+// reset (RST_STREAM, e.g. REFUSED_STREAM under load), and a non-gRPC HTTP
+// response (a proxy's or load balancer's 502/503 page, whose status grpc-go
+// derives from the HTTP code). The circuit breaker uses this to tell a
+// provider that is unreachable or overloaded from one that answered that a
+// single VM's operation failed (countsTowardBreaker).
+
 // requestSentKey is the context key of an RPC's *requestSent.
 type requestSentKey struct{}
 
-// requestSent records whether an RPC began (the gRPC client started it) and
-// whether its request headers were sent.
+// requestSent records whether an RPC began (the gRPC client started it),
+// whether its request headers were sent, and whether the provider answered
+// it (a gRPC response's trailers were received).
 type requestSent struct {
-	begun atomic.Bool
-	sent  atomic.Bool
+	begun    atomic.Bool
+	sent     atomic.Bool
+	answered atomic.Bool
+}
+
+// providerAnswered reports whether the RPC's status came from the provider's
+// gRPC server: grpc-go received the response's trailers (InTrailer). The
+// stats handler runs on the transport's reader before the RPC completes, so
+// by the time the invoker has returned the flag is final. Without the stats
+// handler nothing is recorded and the RPC counts as not answered (fail
+// closed: the breaker keeps counting its failure as before).
+func (rs *requestSent) providerAnswered() bool {
+	return rs.answered.Load()
+}
+
+// requestSentFrom returns the RPC's *requestSent carried by ctx, if any.
+func requestSentFrom(ctx context.Context) (*requestSent, bool) {
+	rs, ok := ctx.Value(requestSentKey{}).(*requestSent)
+	return rs, ok
+}
+
+// withRequestSent returns ctx carrying the RPC's *requestSent, creating one
+// when ctx has none (an interceptor chain without requestSentInterceptor).
+func withRequestSent(ctx context.Context) (context.Context, *requestSent) {
+	if rs, ok := requestSentFrom(ctx); ok {
+		return ctx, rs
+	}
+	rs := &requestSent{}
+	return context.WithValue(ctx, requestSentKey{}, rs), rs
 }
 
 // notSent reports whether the RPC provably never sent its request: it began
@@ -55,8 +98,8 @@ func (rs *requestSent) notSent() bool {
 	return rs.begun.Load() && !rs.sent.Load()
 }
 
-// requestSentStatsHandler marks an RPC's requestSent on its Begin and
-// OutHeader.
+// requestSentStatsHandler marks an RPC's requestSent on its Begin,
+// OutHeader and InTrailer.
 type requestSentStatsHandler struct{}
 
 // TagRPC implements stats.Handler.
@@ -64,10 +107,10 @@ func (requestSentStatsHandler) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) 
 	return ctx
 }
 
-// HandleRPC implements stats.Handler: the RPC began, or its request's
-// headers were sent.
+// HandleRPC implements stats.Handler: the RPC began, its request's headers
+// were sent, or the provider's gRPC response trailers were received.
 func (requestSentStatsHandler) HandleRPC(ctx context.Context, s stats.RPCStats) {
-	rs, ok := ctx.Value(requestSentKey{}).(*requestSent)
+	rs, ok := requestSentFrom(ctx)
 	if !ok {
 		return
 	}
@@ -76,6 +119,8 @@ func (requestSentStatsHandler) HandleRPC(ctx context.Context, s stats.RPCStats) 
 		rs.begun.Store(true)
 	case *stats.OutHeader:
 		rs.sent.Store(true)
+	case *stats.InTrailer:
+		rs.answered.Store(true)
 	}
 }
 

@@ -623,7 +623,7 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 			p.logCause("cannot confirm that the VM is gone", goneErr)
 			return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s and the cluster could not be checked for it; not deleting", vmid, node), nil)
 		case !gone:
-			return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster; not deleting", vmid, node), nil)
+			return nil, vmElsewhereError(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster; not deleting", vmid, node))
 		}
 		return &providerv1.TaskResponse{}, nil
 	}
@@ -810,7 +810,7 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 				return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s and the cluster could not be checked for it", vmid, node), nil)
 			}
 			if !gone {
-				return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster", vmid, node), nil)
+				return nil, vmElsewhereError(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster", vmid, node))
 			}
 			return &providerv1.DescribeResponse{
 				Exists:     false,

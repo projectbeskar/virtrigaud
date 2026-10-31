@@ -63,7 +63,7 @@ func TestMapGRPCError_VMDiskInUseIsConflict(t *testing.T) {
 		assert.False(t, contracts.IsRetryable(mapped))
 		assert.Contains(t, mapped.Error(), "delete the linked clones first")
 		for _, m := range []string{providerv1.Provider_Delete_FullMethodName, providerv1.Provider_SnapshotRevert_FullMethodName} {
-			assert.False(t, countsTowardBreaker(m, err), "routed=%v %s: a refusal says nothing about the provider's health", routed, m)
+			assert.False(t, countsTowardBreaker(m, err, false), "routed=%v %s: a refusal says nothing about the provider's health", routed, m)
 		}
 	}
 
@@ -98,11 +98,11 @@ func TestVMDiskCheckFailed_RetriedButNeverCounted(t *testing.T) {
 		}
 		for _, m := range []string{providerv1.Provider_Delete_FullMethodName, providerv1.Provider_SnapshotDelete_FullMethodName,
 			providerv1.Provider_SnapshotRevert_FullMethodName, providerv1.Provider_SnapshotCreate_FullMethodName} {
-			assert.False(t, countsTowardBreaker(m, st.Err()), "routed=%v %s", routed, m)
+			assert.False(t, countsTowardBreaker(m, st.Err(), false), "routed=%v %s", routed, m)
 		}
 		mapped := (&Client{}).mapGRPCError("delete", st.Err())
 		assert.True(t, contracts.IsRetryable(mapped), "%v", mapped)
 		assert.False(t, contracts.IsConflict(mapped))
 	}
-	assert.True(t, countsTowardBreaker(providerv1.Provider_Delete_FullMethodName, status.Error(codes.Unavailable, "provider down")))
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Delete_FullMethodName, status.Error(codes.Unavailable, "provider down"), false))
 }

@@ -56,7 +56,7 @@ func TestMapGRPCError_VMPreviousIncarnationIsMarkedConflict(t *testing.T) {
 		assert.Contains(t, mapped.Error(), "previous incarnation")
 	}
 	for _, m := range []string{providerv1.Provider_Create_FullMethodName, providerv1.Provider_Clone_FullMethodName} {
-		assert.False(t, countsTowardBreaker(m, st.Err()), "%s: the provider answered", m)
+		assert.False(t, countsTowardBreaker(m, st.Err(), false), "%s: the provider answered", m)
 	}
 
 	assert.False(t, contracts.IsVMOwnDomainElsewhere((&Client{}).mapGRPCError("create", st.Err())),
@@ -104,7 +104,7 @@ func TestClusterDiskGuardFailures_NeverCounted(t *testing.T) {
 	for _, st := range []*status.Status{unreachable, checkFailed} {
 		for _, m := range []string{providerv1.Provider_Create_FullMethodName, providerv1.Provider_Clone_FullMethodName,
 			providerv1.Provider_Delete_FullMethodName} {
-			assert.False(t, countsTowardBreaker(m, st.Err()), "%s: %s", m, st.Message())
+			assert.False(t, countsTowardBreaker(m, st.Err(), false), "%s: %s", m, st.Message())
 		}
 		assert.True(t, contracts.IsRetryable((&Client{}).mapGRPCError("create", st.Err())), st.Message())
 	}

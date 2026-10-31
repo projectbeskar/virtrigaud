@@ -242,18 +242,17 @@ func createVSphereClient(config *Config) (*govmomi.Client, error) {
 	//
 	// The keepalive goroutine is started by the Login below (HandlerSOAP starts
 	// its ticker on a Login round-trip) and probes every vSphereKeepAliveInterval.
-	// On a failed probe it re-logs-in and returns nil so the goroutine keeps
-	// running; Start() is idempotent, so the re-login round-trip is safe. It
-	// returns an error — which permanently stops the goroutine — only when the
-	// re-login itself fails, in which case Validate's real-probe reconnect is the
-	// safety net.
-	vimClient.RoundTripper = keepalive.NewHandlerSOAP(vimClient.RoundTripper, vSphereKeepAliveInterval, func() error {
-		ctx := context.Background()
-		if _, err := methods.GetCurrentTime(ctx, vimClient); err != nil {
-			return client.Login(ctx, userInfo)
-		}
-		return nil
-	})
+	// On a failed probe it re-logs-in; Start() is idempotent, so the re-login
+	// round-trip is safe. A failed re-login is retried at the next tick
+	// (vSphereKeepAlive never stops the goroutine).
+	vimClient.RoundTripper = keepalive.NewHandlerSOAP(vimClient.RoundTripper, vSphereKeepAliveInterval, vSphereKeepAlive(
+		func(ctx context.Context) error {
+			_, err := methods.GetCurrentTime(ctx, vimClient)
+			return err
+		},
+		func(ctx context.Context) error { return client.Login(ctx, userInfo) },
+		slog.Default(),
+	))
 
 	// Login to vSphere with explicit credentials (proper govmomi authentication
 	// method). This also starts the keepalive ticker configured above.
@@ -264,6 +263,29 @@ func createVSphereClient(config *Config) (*govmomi.Client, error) {
 	// Inventory navigation uses a finder per call (Provider.dcFinder); none is
 	// created here.
 	return client, nil
+}
+
+// vSphereKeepAlive returns the keepalive handler's send function: probe the
+// session and, when the probe fails, log in again.
+//
+// It never returns an error: govmomi stops the keepalive for good when send
+// does, and a re-login fails whenever vCenter is unreachable at the tick (a
+// vCenter restart or maintenance longer than vSphereKeepAliveInterval). The
+// manager validates a cached Provider client only when its connection or
+// circuit breaker reports trouble (#472), so a stopped keepalive would leave
+// every RPC failing NotAuthenticated after vCenter returns. The failure is
+// logged and the next tick tries again.
+func vSphereKeepAlive(probe, login func(context.Context) error, logger *slog.Logger) func() error {
+	return func() error {
+		ctx := context.Background()
+		if err := probe(ctx); err != nil {
+			if lerr := login(ctx); lerr != nil {
+				logger.Warn("vSphere keepalive: re-login failed; retrying at the next keepalive interval",
+					"interval", vSphereKeepAliveInterval, "error", lerr)
+			}
+		}
+		return nil
+	}
 }
 
 // resolveDatastoreFromStoragePod picks the datastore with the most free space from the
@@ -481,9 +503,10 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 	// which returns true even after the server-side session has expired during a
 	// long idle — the exact failure mode where Validate reported OK while the
 	// next operation hit NotAuthenticated (#190). GetCurrentTime round-trips to
-	// vCenter; on failure, reconnect with a fresh login. Because the manager
-	// calls Validate before operations, this real probe is the safety net that
-	// complements the keepalive handler in createVSphereClient.
+	// vCenter; on failure, reconnect with a fresh login. The manager calls
+	// Validate when it connects and when the Provider's connection or circuit
+	// breaker reports trouble, not before every operation (#472): between
+	// those, the keepalive handler in createVSphereClient keeps the session.
 	if _, err := methods.GetCurrentTime(ctx, p.client.Client); err != nil {
 		client, rerr := createVSphereClient(p.config)
 		if rerr != nil {

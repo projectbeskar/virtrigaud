@@ -76,22 +76,21 @@ func TestIsInfraFailure(t *testing.T) {
 }
 
 // newTestClientWithCB is a sibling of newTestClient (in
-// client_metrics_test.go) but also chains the CircuitBreaker interceptor
-// AFTER the metrics interceptor, matching the production order set by
-// NewClient. Returns the client and the breaker so tests can assert on
+// client_metrics_test.go) built with the production call options, so the
+// CircuitBreaker interceptor sits after the request-sent and metrics
+// interceptors exactly as NewClient wires it. Returns the client and the breaker so tests can assert on
 // the breaker's state directly.
 func newTestClientWithCB(t *testing.T, dialer func(context.Context, string) (net.Conn, error), providerType, providerName string, cfg *resilience.Config) (*Client, *resilience.CircuitBreaker) {
 	t.Helper()
 	cb := resilience.NewCircuitBreaker("rpc", providerType, providerName, cfg)
-	conn, err := grpc.NewClient(
-		"passthrough:///bufnet",
+	// The production call options (providerCallDialOptions, shared with
+	// NewClient): the request-sent / provider-answered tracking the breaker
+	// classifies with is in place.
+	opts := append([]grpc.DialOption{
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(
-			providerRPCMetricsInterceptor(providerType),
-			providerCircuitBreakerInterceptor(cb),
-		),
-	)
+	}, providerCallDialOptions(providerType, cb)...)
+	conn, err := grpc.NewClient("passthrough:///bufnet", opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	// vmOps initialised so the deferred recordVMOp in production

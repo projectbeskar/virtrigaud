@@ -5,6 +5,63 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-31 15:23] - vSphere provider renews its session after a vCenter outage on its own (#472)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: the session keepalive (`vSphereKeepAlive`) no longer stops for good when its re-login fails (vCenter unreachable at the tick); it logs a warning and tries again at the next 5-minute tick. `Validate`'s comment no longer claims the manager calls it before every operation.
+
+### Added
+- `internal/providers/vsphere/session_test.go`: the keepalive keeps probing and logs in after failed re-logins (on govmomi's real keepalive handler); a healthy session sends no login.
+- `internal/runtime/remote/breaker_outage_test.go`: a genuine Provider outage through the real Resolver, client and default breaker: opens, fails fast without connecting while open, recovers through half-open on one new connection, and the healthy VM is managed again without per-reconcile `Validate`.
+
+### Changed
+- `docs/release-notes/next.md`: the vSphere fix under "Changes in v0.4.2-rc2"; roll vSphere providers with the manager; provider-wide failures answered as `Internal`/`Unknown` added to the breaker limitation.
+- `docs/upgrading.md`: roll vSphere providers with the manager; the already-excluded reasons stay excluded (wording fix).
+
+### Why
+govmomi stops the keepalive when its send function returns an error, after which only the provider's `Validate` logged in again. Since F3 the manager validates a cached client only when its connection or breaker reports trouble, and with the #472 fix a provider answering "not authenticated" for every VM no longer opens the breaker, so a vSphere provider whose session was lost during a vCenter outage longer than 5 minutes would have failed every call until its pod restarted.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Roll the vSphere provider images together with the manager.
+
+## [2026-10-31 01:40] - Keep one VM's failures out of its Provider's circuit breaker (#472)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/transport/grpc/client.go`: `countsTowardBreaker` takes whether the provider's gRPC server answered the RPC and is the single place the breaker's accounting is decided. An answered `Internal`, or `Unknown` with a message (one VM's backend error from libvirt, vSphere or Proxmox), no longer counts; failures without an answer (connection refused or dropped, client deadline, a proxy's non-gRPC HTTP response) and answered `Unavailable` / `DeadlineExceeded` still count, and every existing exclusion is kept. GoDoc documents the seven fault domains and how each is classified. `providerCircuitBreakerInterceptor` returns the invoker's error unchanged; only the breaker's record changes.
+- `internal/transport/grpc/request_sent.go`: the request-sent stats handler also records an `InTrailer` (grpc-go reports one only for the trailers of a response it recognised as gRPC), giving each RPC a `providerAnswered` flag. The request-not-sent / outcome-unknown handling is unchanged.
+- `internal/providers/proxmox/server.go`, `internal/providers/proxmox/create_errors.go`: a `Describe` or `Delete` of a VM that exists on another node of the cluster answers `Unavailable` + `VM_OPERATION_FAILED` (code and message unchanged), so one misplaced VM cannot open the breaker.
+
+### Added
+- `internal/resilience/circuitbreaker.go`: `Config.Now`, the clock `ResetTimeout` is measured on (nil = `time.Now`), so tests drive the breaker on a simulated clock.
+- `internal/transport/grpc/provider_answered_test.go`: the answered detector over real connections (handler errors, trailers-only and headers-first responses, connection refused, server hang, connection dropped mid-RPC, non-gRPC HTTP/2 and HTTP/1 endpoints, breaker fast-fail).
+- `internal/transport/grpc/client_breaker_isolation_test.go`: classification table; transport failure opens and recovers; overload still opens; clustered `HOST_UNAVAILABLE` excluded; ambiguous outcomes and returned errors unchanged; concurrency under `-race`.
+- `internal/runtime/remote/breaker_isolation_test.go`: mixed failing/healthy VMs through the real Resolver, client and breaker on the controller's requeue cadence (default breaker, 20 simulated minutes), and the F3 connection-reuse measurement.
+- `internal/resilience/circuitbreaker_clock_test.go`, `internal/providers/proxmox/vm_missing_test.go`: tests for the clock and the Proxmox reason.
+
+### Changed
+- `internal/transport/grpc/client_circuitbreaker_test.go`: the breaker test client uses the production call options (`providerCallDialOptions`).
+- `internal/transport/grpc/client_host_unavailable_test.go`: an answered plain `Unknown` no longer opens the breaker (was pinned as opening it).
+- `docs/release-notes/next.md`: "Changes in v0.4.2-rc2" with the fix and before/after figures; a known limitation for what the breaker still counts.
+- `docs/upgrading.md`, `docs/reconfigure-results.md`: what the circuit breaker counts.
+
+### Why
+v0.4.2-rc1 reuses a validated provider client without a per-reconcile `Validate` (F3), so nothing reset the per-Provider breaker between VM calls: a few VMs whose backend calls failed opened it, and every VM of the Provider, healthy ones included, was refused (`Ready=False`, lifecycle calls blocked). In a simulated test 1 failing VM next to 6 healthy ones kept it open or half-open 69% of the time; after the fix it never opens in any tested mix, and the client is still validated once and reused.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Roll the manager image (the fix is manager-side and also covers providers on older images); roll the Proxmox provider for the "exists elsewhere" reason. No CRD, gRPC contract or configuration change.
+
 ## [2026-10-30 02:25] - Update the CRD hook's kubectl to 1.35.10
 **Author:** @wrkode (William Rizzo)
 

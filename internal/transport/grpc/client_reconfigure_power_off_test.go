@@ -74,9 +74,9 @@ func TestMapGRPCError_ReconfigureNeedsPowerOffIsRetryableAndMarked(t *testing.T)
 func TestReconfigureTaskFault_NeverCountsTowardTheBreaker(t *testing.T) {
 	err := needsPowerOffErr(t, codes.Unknown, contracts.ErrorInfoDomain, contracts.VMOperationFailedReason)
 	assert.False(t, isInfraFailure(err))
-	assert.False(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, err))
+	assert.False(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, err, false))
 	plain := status.Error(codes.Unknown, "vCenter unreachable")
-	assert.True(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, plain), "an unmarked Unknown still counts")
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, plain, false), "an unmarked Unknown still counts")
 }
 
 // TestReconfigureNeedsPowerOff_NeverCountsTowardTheBreaker: the refusal is the
@@ -85,5 +85,5 @@ func TestReconfigureTaskFault_NeverCountsTowardTheBreaker(t *testing.T) {
 func TestReconfigureNeedsPowerOff_NeverCountsTowardTheBreaker(t *testing.T) {
 	err := needsPowerOffErr(t, codes.FailedPrecondition, contracts.ErrorInfoDomain, contracts.ReconfigureNeedsPowerOffReason)
 	assert.False(t, isInfraFailure(err))
-	assert.False(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, err))
+	assert.False(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, err, false))
 }

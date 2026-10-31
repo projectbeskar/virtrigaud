@@ -272,11 +272,11 @@ func TestClient_PrepareImage_ConflictMapped(t *testing.T) {
 func TestClient_PrepareImage_InProgressIsTypedAndNotAnInfraFailure(t *testing.T) {
 	inProgress := imageartifact.InProgressError("team-a.ubuntu_3c9e1f0a7b2d4e61")
 	prepare := providerv1.Provider_ImagePrepare_FullMethodName
-	assert.False(t, countsTowardBreaker(prepare, inProgress), "in progress says nothing about the provider's health")
-	assert.True(t, countsTowardBreaker(prepare, status.Error(codes.Unavailable, "provider down")))
-	assert.True(t, countsTowardBreaker(providerv1.Provider_Create_FullMethodName, inProgress),
+	assert.False(t, countsTowardBreaker(prepare, inProgress, false), "in progress says nothing about the provider's health")
+	assert.True(t, countsTowardBreaker(prepare, status.Error(codes.Unavailable, "provider down"), false))
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Create_FullMethodName, inProgress, false),
 		"on any other RPC the reason is not a VirtRigaud answer: the Unavailable counts")
-	assert.True(t, countsTowardBreaker(providerv1.Provider_TaskStatus_FullMethodName, inProgress))
+	assert.True(t, countsTowardBreaker(providerv1.Provider_TaskStatus_FullMethodName, inProgress, false))
 
 	// The typed mapping is ImagePrepare's too: another RPC maps the same
 	// status to a plain retryable error.

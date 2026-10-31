@@ -94,7 +94,7 @@ func TestSourceRunning_NeverCountsTowardTheBreaker(t *testing.T) {
 		sourceRunningErr(t, contracts.ErrorInfoDomain, contracts.VMSourceRunningReason, contracts.VMOperationFailedReason),
 	} {
 		assert.False(t, isInfraFailure(err))
-		assert.False(t, countsTowardBreaker(providerv1.Provider_Clone_FullMethodName, err))
+		assert.False(t, countsTowardBreaker(providerv1.Provider_Clone_FullMethodName, err, false))
 	}
 }
 

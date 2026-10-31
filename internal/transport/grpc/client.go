@@ -102,7 +102,9 @@ type Client struct {
 //
 // cb is an optional CircuitBreaker wrapping every outbound RPC. When
 // non-nil, infrastructure-class gRPC errors (Unavailable, DeadlineExceeded,
-// Internal, Unknown) count toward the breaker's failure threshold; once
+// Internal, Unknown) count toward the breaker's failure threshold, except
+// those the provider answered with a VM-scoped status (countsTowardBreaker:
+// one VM's failure must not fast-fail every VM of the Provider, #472); once
 // the threshold trips, subsequent RPCs short-circuit with a synthesized
 // Unavailable status until ResetTimeout elapses (G6 / #111). Pass nil to
 // disable circuit-breaker protection — useful in unit tests that exercise
@@ -275,8 +277,10 @@ func grpcCodeString(err error) string {
 //
 // Behaviour:
 //   - When the breaker is Closed or HalfOpen, the invoker runs normally.
-//     If it returns an infrastructure-class error (see isInfraFailure),
-//     that counts as a failure toward the breaker's threshold. Business
+//     If it returns a failure that counts (countsTowardBreaker: an
+//     infrastructure-class error the provider did not answer with a
+//     VM-scoped status), that counts as a failure toward the breaker's
+//     threshold. Business
 //     errors (NotFound, InvalidArgument, ...) are returned to the caller
 //     unchanged AND do not trip the breaker — those are signs the
 //     provider is healthy and the request was bad, not the other way.
@@ -297,12 +301,20 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
+		// The RPC's request-sent tracking (request_sent.go) also records
+		// whether the provider's gRPC server answered it. It is normally
+		// installed by requestSentInterceptor; a chain without it gets one
+		// here, which reports "not answered" unless the stats handler marks
+		// it (fail closed: the failure counts, as before).
+		ctx, rs := withRequestSent(ctx)
 		var invokerErr error
 		cbErr := cb.Call(ctx, func(ctx context.Context) error {
 			invokerErr = invoker(ctx, fullMethod, req, reply, cc, opts...)
-			// Only infra failures count toward the breaker's threshold.
-			// Business errors are returned out-of-band via invokerErr.
-			if countsTowardBreaker(fullMethod, invokerErr) {
+			// Only failures that say something about the provider's health
+			// count toward the breaker's threshold (countsTowardBreaker).
+			// The caller always gets invokerErr unchanged: the accounting
+			// decides only what the breaker records.
+			if countsTowardBreaker(fullMethod, invokerErr, rs.providerAnswered()) {
 				return invokerErr
 			}
 			return nil
@@ -322,8 +334,10 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 }
 
 // isInfraFailure reports whether the given error is an infrastructure-
-// class gRPC failure that should count toward a CircuitBreaker's failure
-// threshold. Treats the following codes as infra failures:
+// class gRPC failure by its code and reasons alone. Whether it counts toward
+// the CircuitBreaker also depends on whether the provider answered it: an
+// answered Internal or Unknown is a VM-level answer and does not count
+// (countsTowardBreaker, #472). Treats the following codes as infra failures:
 //
 //   - Unavailable        — provider pod down, network partition
 //   - DeadlineExceeded   — provider hung past the call timeout
@@ -403,14 +417,70 @@ func isInfraFailure(err error) bool {
 }
 
 // countsTowardBreaker reports whether err, returned by the RPC fullMethod,
-// counts toward the per-Provider circuit breaker: an infra failure
-// (isInfraFailure), except an ImagePrepare answered with
-// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4) or IMAGE_SOURCE_UNAVAILABLE. In both
-// cases the provider answered: a long import through one Provider must not open
-// the breaker of every Provider that shares its image location, and one
-// tenant's failing image source (retried) must not open it for every tenant of
-// the Provider. The reasons are honoured on ImagePrepare only: on any other RPC
-// they are not a VirtRigaud answer, and the Unavailable counts.
+// counts toward the per-Provider circuit breaker. answered says whether the
+// provider's gRPC server answered the RPC (requestSent.providerAnswered: the
+// status was received from the server, not synthesized by grpc-go on the
+// client). It is the one place the breaker's accounting is decided; it never
+// changes the error returned to the caller, only whether the breaker records
+// a failure.
+//
+// One breaker guards every VM of a Provider, so it must open only for faults
+// of the whole Provider, never for one VM's. The fault domains, and how each
+// is classified:
+//
+//  1. Transport failure (connection refused or reset, provider pod gone,
+//     transport closing mid-RPC, TLS failure, a non-gRPC HTTP answer from a
+//     proxy): no provider answer. Unavailable / Unknown / Internal: COUNTED.
+//  2. Provider-wide unavailability the provider answers (e.g. "PVE client not
+//     configured", a clustered provider's provider-level host failure): an
+//     answered Unavailable: COUNTED, unless it carries a VM-scoped reason
+//     (3rd rule below).
+//  3. Provider-wide overload or hang: the client's deadline expires with no
+//     answer (DeadlineExceeded), or the server resets the stream
+//     (REFUSED_STREAM -> Unavailable): COUNTED. An answered DeadlineExceeded
+//     counts too. ResourceExhausted never counts (rate limit: back off this
+//     call, see isInfraFailure).
+//  4. Single host failure on a clustered provider: HOST_UNAVAILABLE and
+//     OUTCOME_UNKNOWN_RETRY: NOT counted (isInfraFailure).
+//  5. Single VM backend failure: the provider answered, with Internal (sdk
+//     errors.NewInternal, ToGRPCError of a plain error) or Unknown (a
+//     handler's plain error, which grpc-go sends as Unknown: libvirt
+//     single-host, vSphere): NOT counted, because the provider answered. Also
+//     NOT counted: VM_OPERATION_FAILED / VM_DISK_CHECK_FAILED on any code.
+//  6. Single VM operation refusal: the provider answered with a business code
+//     (NotFound, FailedPrecondition, InvalidArgument, AlreadyExists, ...):
+//     NOT counted (isInfraFailure), or with Unavailable + VM_OPERATION_FAILED
+//     (e.g. Proxmox "exists elsewhere in the cluster"): NOT counted.
+//  7. Unknown or ambiguous outcome (request sent, connection dropped): no
+//     answer: COUNTED, as a transport failure. Its error and its
+//     request-not-sent / outcome-unknown handling (requestSentInterceptor,
+//     mapGRPCError) are not touched by this accounting.
+//
+// So: an answered Internal or Unknown is a VM-level answer and does not
+// count — the provider process and its transport demonstrably work. The one
+// exception is an answered Unknown with an empty message: that is what
+// grpc-go reports for a gRPC-content-type response that carried no
+// grpc-status (a broken peer, or a proxy faking the content-type), not a
+// provider handler's error, so it counts. An answered Unavailable or
+// DeadlineExceeded still counts (meshes and proxies generate them, and
+// providers use Unavailable for provider-level conditions) unless one of the
+// excluded reasons applies.
+//
+// The consequence of not counting answered Internal / Unknown: a provider
+// whose server answers but whose backend is down for every VM (e.g. a
+// hypervisor API that is unreachable) no longer opens the breaker; each
+// failing VM is retried on its own cadence and the provider answers fast. As
+// in v0.4.1, where per-reconcile validation kept the breaker from opening in
+// that case too.
+//
+// Method-specific exclusions: an ImagePrepare answered with
+// IMAGE_ARTIFACT_IN_PROGRESS (ADR-0009 D4) or IMAGE_SOURCE_UNAVAILABLE does
+// not count. In both cases the provider answered: a long import through one
+// Provider must not open the breaker of every Provider that shares its image
+// location, and one tenant's failing image source (retried) must not open it
+// for every tenant of the Provider. The reasons are honoured on ImagePrepare
+// only: on any other RPC they are not a VirtRigaud answer, and the
+// Unavailable counts.
 //
 // Nor does an ImagePrepare that the manager itself gave up on count
 // (DeadlineExceeded, from PrepareImage's own timeout, or Canceled): an import
@@ -418,8 +488,11 @@ func isInfraFailure(err error) bool {
 // drip-feeds its bytes — says nothing about the provider's health, and would
 // otherwise open the breaker for every tenant of the Provider on every retry.
 // On every other RPC a DeadlineExceeded still counts.
-func countsTowardBreaker(fullMethod string, err error) bool {
+func countsTowardBreaker(fullMethod string, err error, answered bool) bool {
 	if !isInfraFailure(err) {
+		return false
+	}
+	if answered && isVMScopedAnswer(err) {
 		return false
 	}
 	if fullMethod == providerv1.Provider_ImagePrepare_FullMethodName {
@@ -433,6 +506,26 @@ func countsTowardBreaker(fullMethod string, err error) bool {
 		}
 	}
 	return true
+}
+
+// isVMScopedAnswer reports whether a failure the provider's gRPC server
+// answered is a VM-level answer that says nothing about the provider's
+// health: Internal, or Unknown with a message (a provider handler's error).
+// An Unknown without a message is what grpc-go reports for a gRPC response
+// that carried no grpc-status, so it is not treated as one.
+func isVMScopedAnswer(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch st.Code() {
+	case codes.Internal:
+		return true
+	case codes.Unknown:
+		return st.Message() != ""
+	default:
+		return false
+	}
 }
 
 // recordVMOp records a virtrigaud_vm_operations_total sample for the

@@ -55,9 +55,9 @@ func TestRoutedBudgetAnswers_StayOutOfTheBreaker(t *testing.T) {
 		providerv1.Provider_SnapshotCreate_FullMethodName,
 		providerv1.Provider_ExportDisk_FullMethodName,
 	} {
-		assert.False(t, countsTowardBreaker(method, stopped), "%s: a budget overrun is VM-scoped", method)
-		assert.False(t, countsTowardBreaker(method, inProgress), "%s: a copy in progress is VM-scoped", method)
-		assert.True(t, countsTowardBreaker(method, status.Error(codes.DeadlineExceeded, "deadline")),
+		assert.False(t, countsTowardBreaker(method, stopped, false), "%s: a budget overrun is VM-scoped", method)
+		assert.False(t, countsTowardBreaker(method, inProgress, false), "%s: a copy in progress is VM-scoped", method)
+		assert.True(t, countsTowardBreaker(method, status.Error(codes.DeadlineExceeded, "deadline"), false),
 			"%s: a plain DeadlineExceeded still counts — which is why the provider answers first", method)
 	}
 

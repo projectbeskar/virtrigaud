@@ -18,9 +18,12 @@ package vsphere
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/url"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -100,4 +103,55 @@ func TestValidate_ReconnectsAfterSessionLoss(t *testing.T) {
 	_, err = p.Validate(context.Background(), &providerv1.ValidateRequest{})
 	require.NoError(t, err)
 	_ = p.client.Logout(context.Background())
+}
+
+// TestKeepAlive_KeepsRetryingAfterFailedRelogin: a re-login that fails (vCenter
+// unreachable when the keepalive ticked) must not stop the keepalive for good.
+// govmomi stops it when the send function returns an error, and since v0.4.2
+// the manager no longer calls Validate (the only other re-login) while the
+// Provider's breaker is closed, so a stopped keepalive would leave every RPC
+// failing NotAuthenticated after vCenter returns. The keepalive keeps probing
+// and logs in once vCenter accepts it again.
+func TestKeepAlive_KeepsRetryingAfterFailedRelogin(t *testing.T) {
+	var probes, logins atomic.Int64
+	loggedIn := make(chan struct{})
+	send := vSphereKeepAlive(
+		func(context.Context) error {
+			probes.Add(1)
+			return errors.New("NotAuthenticated")
+		},
+		func(context.Context) error {
+			if logins.Add(1) < 3 {
+				return errors.New("dial tcp: connect: connection refused")
+			}
+			if logins.Load() == 3 {
+				close(loggedIn)
+			}
+			return nil
+		},
+		slog.Default(),
+	)
+
+	h := keepalive.NewHandlerSOAP(nil, 5*time.Millisecond, send)
+	h.Start()
+	defer h.Stop()
+
+	select {
+	case <-loggedIn:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("keepalive stopped after a failed re-login: %d probes, %d logins", probes.Load(), logins.Load())
+	}
+	assert.GreaterOrEqual(t, probes.Load(), int64(3))
+}
+
+// TestKeepAlive_HealthySessionDoesNotLogIn: a probe that succeeds sends no login.
+func TestKeepAlive_HealthySessionDoesNotLogIn(t *testing.T) {
+	var logins atomic.Int64
+	send := vSphereKeepAlive(
+		func(context.Context) error { return nil },
+		func(context.Context) error { logins.Add(1); return nil },
+		slog.Default(),
+	)
+	require.NoError(t, send())
+	assert.Zero(t, logins.Load())
 }
