@@ -103,20 +103,24 @@ type isoServer struct {
 	failing   map[string]isoShape
 	validates atomic.Int64
 	rpcs      atomic.Int64
-	describes sync.Map // id -> *atomic.Int64 (Describes that reached the server)
+	mu        sync.Mutex
+	describes map[string]int64 // Describes that reached the server, per VM
 }
 
 func (s *isoServer) count(id string) {
 	s.rpcs.Add(1)
-	v, _ := s.describes.LoadOrStore(id, &atomic.Int64{})
-	v.(*atomic.Int64).Add(1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.describes == nil {
+		s.describes = map[string]int64{}
+	}
+	s.describes[id]++
 }
 
 func (s *isoServer) reached(id string) int64 {
-	if v, ok := s.describes.Load(id); ok {
-		return v.(*atomic.Int64).Load()
-	}
-	return 0
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.describes[id]
 }
 
 func (s *isoServer) Validate(context.Context, *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
@@ -189,7 +193,11 @@ func (q isoQueue) Less(i, j int) bool {
 	return q[i].at.Before(q[j].at)
 }
 func (q isoQueue) Swap(i, j int)       { q[i], q[j] = q[j], q[i] }
-func (q *isoQueue) Push(x interface{}) { *q = append(*q, x.(isoEvent)) }
+func (q *isoQueue) Push(x interface{}) {
+	if e, ok := x.(isoEvent); ok {
+		*q = append(*q, e)
+	}
+}
 func (q *isoQueue) Pop() interface{} {
 	old := *q
 	e := old[len(old)-1]
@@ -282,8 +290,8 @@ func runIsolation(t *testing.T, failing, healthy int, shape func(i int) isoShape
 	healthyIdx := failing // the VM whose lifecycle ops are driven
 
 	for q.Len() > 0 {
-		ev := heap.Pop(q).(isoEvent)
-		if ev.at.After(end) {
+		ev, ok := heap.Pop(q).(isoEvent)
+		if !ok || ev.at.After(end) {
 			break
 		}
 		if state != resilience.StateClosed {
