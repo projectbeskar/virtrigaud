@@ -241,7 +241,7 @@ go test ./internal/providers/proxmox/...
 
    # Point the in-repo requires of go.mod and sdk/go.mod at the release
    # (every release candidate and the final release), and commit them
-   make set-module-versions VERSION=v0.4.1
+   make set-module-versions VERSION=v0.4.2
    ```
 
    Do not edit `charts/virtrigaud/Chart.yaml` or the image tags in
@@ -250,13 +250,13 @@ go test ./internal/providers/proxmox/...
 
 2. **Create release**, from the merged preparation commit:
    ```bash
-   make check-module-versions VERSION=v0.4.1
-   git tag v0.4.1
-   git push origin v0.4.1
+   make check-module-versions VERSION=v0.4.2
+   git tag v0.4.2
+   git push origin v0.4.2
    ```
 
    To re-run a release by hand (`workflow_dispatch`), start the workflow from
-   the tag ("Use workflow from: v0.4.1"), not from a branch: the run refuses
+   the tag ("Use workflow from: v0.4.2"), not from a branch: the run refuses
    to build a commit other than the tag's.
 
 3. **CI handles**:
@@ -266,7 +266,7 @@ go test ./internal/providers/proxmox/...
    - Creating GitHub release
    - Publishing Helm charts
    - Generating CLI binaries
-   - Tagging the SDK and proto Go modules (`sdk/v0.4.1`, `proto/v0.4.1`) on
+   - Tagging the SDK and proto Go modules (`sdk/v0.4.2`, `proto/v0.4.2`) on
      the release commit, after the GitHub release
 
    See [`docs/go-modules.md`](docs/go-modules.md) for the module versioning

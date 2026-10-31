@@ -6,7 +6,7 @@ section A6). It explains what happens when such a VirtualMachine comes back
 from a backup, a GitOps re-apply or a re-create, and how an administrator
 re-attaches it to its existing domain.
 
-Clustered Providers are **experimental** in v0.4.1. Single-host libvirt,
+Clustered Providers are **experimental** in v0.4.2. Single-host libvirt,
 vSphere and Proxmox Providers are not changed by anything on this page; their
 recovery is in [Other Providers](#other-providers).
 
@@ -364,7 +364,7 @@ nothing, and the VM is created as new.
 
 ## Re-attach runbook
 
-Re-attaching is not automated in v0.4.1; the `VMRestoreBinding` kind (A6.4)
+Re-attaching is not automated in v0.4.2; the `VMRestoreBinding` kind (A6.4)
 will automate it later. The steps below need root (or the provider's SSH user)
 on the hosts, and read access to VirtualMachines in all namespaces.
 

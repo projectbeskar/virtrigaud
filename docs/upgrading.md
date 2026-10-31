@@ -19,17 +19,23 @@ is the index and the sequencing, not a duplicate of that detail.
 
 ## Upgrading from v0.4.1 to v0.4.2
 
-This section covers v0.4.2 (control-plane scalability, admission safety and a
-dependency security update; see the [v0.4.2 release notes](release-notes/next.md)).
+This section covers v0.4.2 (control-plane scalability, admission safety, fault
+isolation and a dependency security update; see the
+[v0.4.2 release notes](release-notes/v0.4.2.md)).
 v0.4.2 is a patch release of v0.4.1, but it adds an optional CRD status field
 and two manager flags, and **rolling back is unsupported while a clustered VM
 holds a resize reservation** (see [Rolling back to v0.4.1](#rolling-back-to-v041)).
-A v0.4.2 release candidate follows the same steps; from v0.4.2-rc1, see
-[Upgrading from v0.4.2-rc1](#upgrading-from-v042-rc1). The roll order is
-unchanged: **CRDs, then the manager, then the providers**. The gRPC contract
-is unchanged, so providers need no configuration change, but **roll the
-provider images too**: the manager and provider binaries are rebuilt with
-`golang.org/x/net` v0.62.0 (CVE-2026-78661, CVE-2026-97045).
+If you run v0.4.2-rc1 or v0.4.2-rc2, see
+[Upgrading from a v0.4.2 release candidate](#upgrading-from-a-v042-release-candidate).
+The roll order is unchanged: **CRDs, then the manager, then the providers**.
+The gRPC contract is unchanged, so providers need no configuration change, but
+**roll the provider images too**: the manager and provider binaries are
+rebuilt with `golang.org/x/net` v0.62.0 (CVE-2026-78661, CVE-2026-97045), and
+the vSphere and Proxmox providers carry fixes. **Roll the vSphere providers
+together with the manager**: a vSphere provider older than v0.4.2-rc2 behind a
+v0.4.2 manager does not renew a vCenter session it lost during an outage on
+its own (restart its pod if that happens). Helm does not change a Provider's
+image: set `spec.runtime.image` on each `Provider`.
 
 ### CRDs first: `status.placement.resizeReservation`
 
@@ -155,8 +161,7 @@ server limits.
   `kubectl -n <namespace> get deploy -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image`
   for the manager (and any chart-templated provider), and
   `kubectl get providers.infra.virtrigaud.io -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.runtime.image`
-  for the providers. Every VirtRigaud image should end in `:v0.4.2` (or the
-  candidate tag you installed). Confirm the manager pod is the new one and
+  for the providers. Every VirtRigaud image should end in `:v0.4.2`. Confirm the manager pod is the new one and
   `Ready`: `kubectl -n <namespace> get pods -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image,READY:.status.containerStatuses[*].ready`.
 - **A later plain `helm upgrade` reuses the previous revision's values.** If
   you rolled the image back with `--set manager.image.tag=v0.4.1` (see
@@ -208,28 +213,32 @@ release` instead of `refused from the next release`; if you match on the log
 text, update the pattern (the counter is unchanged). See
 [image preparation](image-preparation.md#deprecated-requests-from-an-older-manager).
 
-### Upgrading from v0.4.2-rc1
+### Upgrading from a v0.4.2 release candidate
 
-From rc1 to rc2 (and later candidates) only the manager and the provider images
+From v0.4.2-rc1 or v0.4.2-rc2 to v0.4.2 only the manager and provider images
 change: the CRDs, RBAC, the chart's templates and values and the gRPC contract
-are the same as rc1's, so there is nothing to migrate. rc2 changes the manager's
-circuit-breaker accounting, the vSphere provider's session keepalive and one
-Proxmox error reason ([#472](https://github.com/projectbeskar/virtrigaud/issues/472));
-roll **the manager and every provider together**. A vSphere provider older than
-rc2 behind an rc2 manager does not renew a vCenter session it lost during an
-outage on its own: restart its pod if that happens.
+are the same as both candidates', so there is nothing to migrate. Compared
+with rc1, v0.4.2 also changes the manager's circuit-breaker accounting, the
+vSphere provider's session keepalive and one Proxmox error reason
+([#472](https://github.com/projectbeskar/virtrigaud/issues/472)); compared with
+rc2, the code is the same and the images are rebuilt from the release tag.
+Roll **the manager and every provider together**.
 
-1. **Chart:** `helm upgrade` to the new chart with
+1. **Chart:** `helm upgrade` to the v0.4.2 chart with
    `--reset-then-reuse-values` (Helm 3.14+). List the tags you pinned with
    `helm get values <release> -n <namespace>` and override each one that
-   names `v0.4.2-rc1` (for example `--set manager.image.tag=v0.4.2-rc2`,
+   names a release candidate (for example `--set manager.image.tag=v0.4.2`,
    `crdUpgrade.image.tag`, any `providers.*.image.tag`), because both
    `--reuse-values` and `--reset-then-reuse-values` keep a tag you supplied.
-2. **Providers:** set `spec.runtime.image` on each `Provider` to the new
-   image (Helm does not change it).
+2. **Providers:** set `spec.runtime.image` on each `Provider` to the v0.4.2
+   image (Helm does not change it). Include the vSphere providers in the same
+   change as the manager.
 3. **Check the images that actually run** with the commands in
    [Configurable Kubernetes client rate limits](#configurable-kubernetes-client-rate-limits):
-   no VirtRigaud image should still end in `:v0.4.2-rc1`.
+   no VirtRigaud image should still end in `:v0.4.2-rc1` or `:v0.4.2-rc2`.
+4. **Resize reservations** written by a release candidate are kept and keep
+   counting; the rollback restrictions in
+   [Rolling back to v0.4.1](#rolling-back-to-v041) apply to them too.
 
 ## Upgrading from v0.4.0 to v0.4.1
 
