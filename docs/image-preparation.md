@@ -212,7 +212,7 @@ prepared templates by identity (see
 [vSphere: identity-safe prepared templates](#vsphere-identity-safe-prepared-templates)).
 libvirt names, stamps and publishes its prepared images by identity (single-host providers;
 see [libvirt prepared images](#libvirt-prepared-images-sourcelibvirturl)). Proxmox reports
-it because it prepares nothing by name: in v0.4.1 it refuses every URL import with
+it because it prepares nothing by name: in v0.4.2 it refuses every URL import with
 `InvalidSpec`, so such an image gets reason `InvalidSource` rather than a hold (see
 [Proxmox image sources](#proxmox-image-sources)). Until a provider reports it, import-style images (`ovaURL`, a
 libvirt `url`, an `http` source) are held on it with `ProviderLacksArtifactIdentity`;
@@ -306,7 +306,7 @@ changed. See ADR-0005 "Out of scope" for the original PR-6 framing.
 
 ## Proxmox image sources
 
-**Proxmox URL image import is not supported in v0.4.1.** Use a template that already
+**Proxmox URL image import is not supported in v0.4.2.** Use a template that already
 exists on Proxmox VE and reference it by VMID:
 
 ```yaml
@@ -825,8 +825,8 @@ and query removed.
 
 ### Deprecated: requests from an older manager
 
-A manager older than ADR-0009 sends a bare `target_name` and no identity. For **v0.4.0
-and v0.4.1 only**, the libvirt provider serves such a request the pre-ADR way — the artifact is
+A manager older than ADR-0009 sends a bare `target_name` and no identity. For **v0.4.0,
+v0.4.1 and v0.4.2 only**, the libvirt provider serves such a request the pre-ADR way — the artifact is
 `<pool dir>/<VMImage name>.qcow2`, an existing file of that name is reused by name, no stamp
 is written or echoed — but with the fixes above (retryable probe, private staging, read-only
 image published with `ln`, never chowned). It can never reach an ADR-0009 artifact (the names

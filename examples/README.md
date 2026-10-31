@@ -1,16 +1,16 @@
 # VirtRigaud Examples
 
-All examples use `apiVersion: infra.virtrigaud.io/v1beta1` and the 12 CRDs of VirtRigaud v0.4.1. `make test` checks every `infra.virtrigaud.io` object here against the CRDs (see [Validation](#validation)). Pin images to the release you run: the examples use `v0.4.1`.
+All examples use `apiVersion: infra.virtrigaud.io/v1beta1` and the 12 CRDs of VirtRigaud v0.4.2. `make test` checks every `infra.virtrigaud.io` object here against the CRDs (see [Validation](#validation)). Pin images to the release you run: the examples use `v0.4.2`.
 
 ## Read before applying an example
 
 - **A Provider needs a TLS decision.** The manager talks to provider pods over TLS by default. A `Provider` with no `spec.runtime.service.tls` block is not deployed (`TLSConfigured=False`, reason `TLSBlockMissing`). The Provider examples set `tls.enabled: true` with a `secretRef` to a Secret holding `tls.crt`, `tls.key` and `ca.crt`; create it first, or set `enabled: false` for a plaintext lab.
 - **libvirt connects over SSH.** Use a `qemu+ssh://` endpoint. The credentials Secret needs `username`, `ssh-privatekey` (or `password`) and `known_hosts`; the provider does not trust a host key on first use. See [secrets/libvirt-creds.yaml](secrets/libvirt-creds.yaml).
-- **libvirt linked clones are refused** in v0.4.1; use `FullClone` ([docs/libvirt-clones.md](../docs/libvirt-clones.md)).
+- **libvirt linked clones are refused** in v0.4.2; use `FullClone` ([docs/libvirt-clones.md](../docs/libvirt-clones.md)).
 - **Proxmox** reads its credentials from files in the Provider's Secret (`token_id` and `token_secret`, or `username` and `password`); it does not use `envFrom: secretRef`. It does not import images from a URL (`source.http`): use an existing template. It applies the whole user-data through a NoCloud seed it builds on the PVE node over SSH, so a Proxmox Provider whose VMs carry user-data needs `ssh_user`, `ssh_privatekey` (or `ssh_password`) and `known_hosts` in its Secret ([docs/proxmox-cloud-init-storage.md](../docs/proxmox-cloud-init-storage.md)). It makes full clones only (no `LinkedClone`).
 - **`spec.lifecycle`** (`preStop`, `postStart`, `gracefulShutdownTimeout`) is accepted by the API, but no controller runs it. For a graceful shutdown use `spec.powerState: OffGraceful` ([graceful-shutdown-examples.yaml](graceful-shutdown-examples.yaml)).
 - **Migration** is validated over S3 and NFS staging between vSphere, libvirt and Proxmox in any direction. `storage.type: pvc` is a legacy path that does not work for Proxmox. Migration into a clustered libvirt Provider is experimental. See [migration/README.md](migration/README.md).
-- **Clustered libvirt** (`topology: cluster`) is experimental in v0.4.1 ([docs/clustered-provider-inventory.md](../docs/clustered-provider-inventory.md)).
+- **Clustered libvirt** (`topology: cluster`) is experimental in v0.4.2 ([docs/clustered-provider-inventory.md](../docs/clustered-provider-inventory.md)).
 
 For full documentation see the [documentation index](../docs/README.md).
 
@@ -154,4 +154,4 @@ Quote `powerState` values (`"On"`, `"Off"`, `"OffGraceful"`): YAML 1.1, which
 
 ## Version compatibility
 
-These examples target **v0.4.1**. For earlier versions, check git history.
+These examples target **v0.4.2**. For earlier versions, check git history.

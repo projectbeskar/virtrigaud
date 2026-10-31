@@ -13,7 +13,7 @@ spec:
     name: vsphere-creds
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.1"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.2"
     service:
       port: 9090
       # A Provider with no tls block is not deployed (TLSConfigured=False, reason
@@ -43,7 +43,7 @@ spec:
     name: libvirt-creds
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.1"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.2"
     service:
       port: 9090
       # Secret with tls.crt, tls.key and ca.crt (see the TLS note on the first Provider).

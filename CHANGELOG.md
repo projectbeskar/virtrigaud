@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-31 19:19] - Prepare VirtRigaud v0.4.2 GA
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo module requires point at `v0.4.2` (`make set-module-versions VERSION=v0.4.2`); the release workflow creates the `sdk/` and `proto/` tags.
+- `docs/release-notes/next.md` → `docs/release-notes/v0.4.2.md`: archived as the GA notes; #472 presented as fixed in rc2 ("Fault isolation and recovery"); new "Validation" section (rc1 functional and rc2 fault-isolation qualification, scenarios not exercised); known limitations keep #468, #473, missing provider-side fencing, the breaker classification limits and the rollback restriction.
+- `docs/upgrading.md`: links to `v0.4.2.md`; roll vSphere providers with the manager; "Upgrading from a v0.4.2 release candidate" replaces the rc1-only section.
+- `README.md`, `CONTRIBUTING.md`, `charts/virtrigaud/README.md`, `charts/virtrigaud-provider-runtime/values.yaml` and its examples, `providers/catalog.yaml`, `ca-certs/README.md`, `examples/`, `docs/` (go-modules, image-preparation, vm-ownership, clustered docs, ADR-0012 status line, index): current-version references v0.4.1 → v0.4.2. Historical references are unchanged.
+
+### Why
+v0.4.2-rc2 passed real-lab qualification (rc1 functional, rc2 fault isolation, #472 closed). GA ships the rc2 code; this prepares versions and documentation only, replacing the rc1-based preparation in #474.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+Release preparation: module versions, version references and documentation; no production code, CRD, chart template or RBAC change.
+
 ## [2026-10-31 16:31] - Prepare VirtRigaud v0.4.2-rc2
 **Author:** @wrkode (William Rizzo)
 
