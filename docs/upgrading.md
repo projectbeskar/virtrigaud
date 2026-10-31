@@ -82,6 +82,18 @@ is gone (not merely not leading) before you act on a held admission.
 - **A provider connection is validated once**, not before every call: a
   cached client is reused while its Provider's configuration, its connection
   and its circuit breaker are unchanged.
+- **A Provider's circuit breaker counts only failures of the Provider, not of
+  one VM** (v0.4.2-rc2, [#472](https://github.com/projectbeskar/virtrigaud/issues/472)).
+  A failure the provider's gRPC server answered with `Internal` or `Unknown`
+  (one VM's backend error: a libvirt or vSphere error message, a Proxmox API
+  error for one VM) is not counted. Failures the provider did not answer
+  (connection refused or dropped, no answer before the call's deadline, a
+  proxy's non-gRPC error page) and answered `Unavailable` or
+  `DeadlineExceeded` still count, as do all the reasons that were already
+  excluded. So a few failing VMs no longer make the breaker refuse every VM of
+  their Provider. A Provider whose server answers but whose hypervisor is
+  unreachable for every VM no longer opens the breaker either, as in v0.4.1:
+  each VM reports the provider's error and is retried on its own schedule.
 - **A clustered Provider is reconciled on a 60-second resync** instead of on
   every Host heartbeat.
 - **A new VM is described right after its `Create`**, instead of 5 seconds

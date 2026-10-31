@@ -1,7 +1,8 @@
 <!--
 Release notes for VirtRigaud v0.4.2; title the release "v0.4.2" and, for a release candidate,
 "v0.4.2-rc<N>" (mark it as a pre-release). v0.4.2 is a patch release of v0.4.1. The notes are
-cumulative since v0.4.1 and are updated for each candidate; this file starts with rc1. The
+cumulative since v0.4.1 and are updated for each candidate; this file starts with rc1 and is
+updated for rc2 ("Changes in v0.4.2-rc2"). The
 v0.4.1 notes are kept in v0.4.1.md. See docs/upgrading.md ("Upgrading from v0.4.1 to v0.4.2")
 for the upgrade guide these notes link to, and CHANGELOG.md for the complete, dated changelog.
 GitHub's limit for a release body is 125,000 characters; this file is far below it, so it is
@@ -32,6 +33,48 @@ resize reservation**: read [Upgrade](#upgrade) first.
 - **Compatibility:** install the CRDs before the manager (the chart's hook does); **do not roll
   back while a clustered VM holds a resize reservation**, and roll the manager and the chart
   back together. See [Upgrade](#upgrade).
+- **Fault isolation (rc2):** one VM's failure no longer opens its Provider's circuit breaker and
+  blocks the Provider's other VMs ([#472](https://github.com/projectbeskar/virtrigaud/issues/472)).
+  See [Changes in v0.4.2-rc2](#changes-in-v042-rc2).
+
+## Changes in v0.4.2-rc2
+
+### Fixes
+
+- **A Provider's circuit breaker no longer opens for failures of individual VMs**
+  ([#472](https://github.com/projectbeskar/virtrigaud/issues/472)). One breaker guards every VM
+  of a Provider. In rc1 a cached provider client is reused without a `Validate` (see
+  [Performance](#performance), F3), so nothing reset the breaker's failure count between VM calls
+  any more: a few VMs whose `Describe`, `Power` or `Delete` kept failing in the hypervisor (a
+  locked VM, a per-VM permission fault, a Proxmox API error for one VM) opened it after 10
+  failures. While it was open, every VM of that Provider was refused, healthy ones included:
+  they went `Ready=False` ("cannot reach this VirtualMachine's Provider") and their power,
+  reconfigure, delete, create and clone calls waited. v0.4.1 did not behave this way.
+
+  The manager now counts a failure toward the breaker by whether the provider's gRPC server
+  answered it. An answer with `Internal` or `Unknown` (how the libvirt, vSphere and Proxmox
+  providers report one VM's backend error) proves the provider and its connection work, and is
+  not counted. Failures the provider did not answer (connection refused or dropped, the
+  provider pod gone, no answer before the call's deadline, a proxy's non-gRPC error page) and
+  answered `Unavailable` or `DeadlineExceeded` still count, so a Provider that is down or
+  overloaded still opens the breaker, fails fast while it is open, and recovers. The reasons
+  that were already excluded (`HOST_UNAVAILABLE`, `VM_OPERATION_FAILED`, `VM_DISK_CHECK_FAILED`,
+  `OUTCOME_UNKNOWN_RETRY`, the image-prepare reasons) are unchanged. Only the breaker's
+  accounting changed: the errors VMs report, and how an unknown outcome or a request that was
+  never sent is handled, are the same. In a simulated test with the default breaker settings
+  (10 failures, 60 s reset), 1 failing VM next to 6 healthy ones kept the breaker open or
+  half-open 69% of the time in rc1 and 70 of 100 healthy lifecycle calls were refused; 3 failing next to 6 healthy, 90%
+  of the time; 40 failing next to 6, and 20 next to 60, all of the time. In rc2 the breaker never
+  opened in any of these mixes and no healthy call was refused; a provider connection is still
+  validated once and reused.
+
+  The fix is in the manager, so it also applies to providers on older images. Roll the manager
+  to pick it up.
+- **Proxmox: "exists elsewhere in the cluster" is VM-scoped.** A `Describe` or `Delete` of a VM
+  that is not on the node asked but exists on another node of the cluster answered a plain
+  `Unavailable`, which the breaker counts, so one misplaced VM retried by its finalizer could
+  open it. The answer now also carries `VM_OPERATION_FAILED`; its code and message are
+  unchanged. Roll the Proxmox provider to pick it up.
 
 ## Performance
 
@@ -225,6 +268,16 @@ amendments.
 - **Placement is still serialized per Provider.** With the client rate limit raised, the
   per-Provider placement step, slowed by CPU throttling, was the next limit measured.
 - **The client rate limits apply to every resource type alike** and change only at a restart.
+- **What the circuit breaker still counts** ([#472](https://github.com/projectbeskar/virtrigaud/issues/472)).
+  A failure the provider answered with `Unavailable` or `DeadlineExceeded` still counts, also
+  when it concerns one VM: for example the Proxmox provider's answer that it cannot read one VM's
+  configuration to check its owner, the vSphere provider's answers about a migration disk or a
+  snapshot it cannot confirm, a Proxmox provider older than rc2 answering "exists elsewhere in the
+  cluster", and a call for one VM that takes longer than the manager's deadline. Enough of these
+  in a row, with no successful call in between, still open the breaker for the whole Provider.
+  The other way round, a Provider whose gRPC server answers but whose hypervisor is unreachable
+  for every VM no longer opens the breaker (as in v0.4.1): each VM reports the provider's error
+  and is retried on its own schedule, and the provider answers those calls at once.
 
 ## Upgrade
 
