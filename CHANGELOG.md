@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-31 00:56] - v0.4.2 GA release notes, version references and module versions
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo requires name `v0.4.2` instead of `v0.4.2-rc1` (`make set-module-versions VERSION=v0.4.2`; the `replace` directives still resolve them from the working tree).
+- `docs/release-notes/next.md` → `docs/release-notes/v0.4.2.md`: the notes become the archived GA notes for v0.4.2 (v0.4.2 ships the code of v0.4.2-rc1; the release candidate wording is gone and a header comment says so). The notes are not kept as `next.md` any more; the next release cycle creates a new `next.md`.
+- `docs/upgrading.md`: "Upgrading from v0.4.1 to v0.4.2" uses GA wording (the images should end in `:v0.4.2`) and points at the new "Upgrading from v0.4.2-rc1" subsection; its release notes link names `v0.4.2.md`.
+- `docs/README.md`: the index entry names `docs/release-notes/v0.4.2.md` as archived.
+- `README.md`, `charts/virtrigaud/README.md`, `ca-certs/README.md`, `CONTRIBUTING.md`, `docs/go-modules.md`, `examples/**` (provider image tags, install commands, the examples' version statements), `providers/catalog.yaml`, `charts/virtrigaud-provider-runtime/values.yaml` and `charts/virtrigaud-provider-runtime/examples/*.yaml`: the current release is v0.4.2 (chart `--version 0.4.2`, `:v0.4.2` provider images). `README.md` and `charts/virtrigaud/README.md` point at the v0.4.1 to v0.4.2 upgrade section. Historical statements ("since v0.4.1", older upgrade sections, `docs/release-notes/v0.4.0.md`, `docs/release-notes/v0.4.1.md`, past CHANGELOG entries) are unchanged.
+- `docs/clustered-restore.md`, `docs/clustered-provider-inventory.md`, `docs/image-preparation.md`: statements about the current behaviour (clustered Providers are experimental, linked clones are refused on a clustered Provider, Proxmox refuses URL imports, the automated re-attach comes later) name v0.4.2.
+- `docs/image-preparation.md`, `docs/vm-ownership.md`, `docs/adr/0012-proxmox-legacy-unstamped-name-rule.md`: the legacy (identity-less) `ImagePrepare` mode is served by v0.4.2 too, and ADR-0012 phase 1 is not in v0.4.2 (the advice and the accepted risk cover v0.4.0, v0.4.1 and v0.4.2).
+
+### Added
+- `docs/release-notes/v0.4.2.md`: a "Validation" section (what the v0.4.2-rc1 lab run covered and did not cover, sanitised) and two "Known limitations" entries: a Provider whose gRPC server answers but keeps failing can open its circuit breaker (#472, new in v0.4.2), and a refused resize leaves its `Reconfiguring` condition until the next resize (#473, also in v0.4.1). #468 is unchanged.
+- `docs/upgrading.md`: "Upgrading from v0.4.2-rc1" (the CRDs are identical to rc1's; override any image tag pinned to `v0.4.2-rc1`; set each Provider's `spec.runtime.image` to the v0.4.2 image; check the running images).
+
+### Why
+v0.4.2 ships the code of v0.4.2-rc1, which was qualified in a lab. The GA notes, the upgrade guide, the install commands and the module versions must name v0.4.2 before the tag, and the two limitations found during qualification (#472, #473) must be stated.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+The `go.mod` change points the in-repo requires at the v0.4.2 tags that the release workflow creates; until `v0.4.2` is tagged, `go build` works through the `replace` directives only. No Go code, CRD, chart template or dependency changed.
+
 ## [2026-10-30 02:25] - Update the CRD hook's kubectl to 1.35.10
 **Author:** @wrkode (William Rizzo)
 
