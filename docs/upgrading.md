@@ -20,11 +20,12 @@ is the index and the sequencing, not a duplicate of that detail.
 ## Upgrading from v0.4.1 to v0.4.2
 
 This section covers v0.4.2 (control-plane scalability, admission safety and a
-dependency security update; see the [v0.4.2 release notes](release-notes/next.md)).
+dependency security update; see the [v0.4.2 release notes](release-notes/v0.4.2.md)).
 v0.4.2 is a patch release of v0.4.1, but it adds an optional CRD status field
 and two manager flags, and **rolling back is unsupported while a clustered VM
 holds a resize reservation** (see [Rolling back to v0.4.1](#rolling-back-to-v041)).
-A v0.4.2 release candidate follows the same steps. The roll order is
+If you are on v0.4.2-rc1, see
+[Upgrading from v0.4.2-rc1](#upgrading-from-v042-rc1). The roll order is
 unchanged: **CRDs, then the manager, then the providers**. The gRPC contract
 is unchanged, so providers need no configuration change, but **roll the
 provider images too**: the manager and provider binaries are rebuilt with
@@ -139,8 +140,7 @@ server limits.
   `kubectl -n <namespace> get deploy -o custom-columns=NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image`
   for the manager (and any chart-templated provider), and
   `kubectl get providers.infra.virtrigaud.io -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.runtime.image`
-  for the providers. Every VirtRigaud image should end in `:v0.4.2` (or the
-  candidate tag you installed). Confirm the manager pod is the new one and
+  for the providers. Every VirtRigaud image should end in `:v0.4.2`. Confirm the manager pod is the new one and
   `Ready`: `kubectl -n <namespace> get pods -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image,READY:.status.containerStatuses[*].ready`.
 - **A later plain `helm upgrade` reuses the previous revision's values.** If
   you rolled the image back with `--set manager.image.tag=v0.4.1` (see
@@ -191,6 +191,25 @@ a later release, not chosen yet. The log line now ends `refused in a later
 release` instead of `refused from the next release`; if you match on the log
 text, update the pattern (the counter is unchanged). See
 [image preparation](image-preparation.md#deprecated-requests-from-an-older-manager).
+
+### Upgrading from v0.4.2-rc1
+
+v0.4.2 ships the code of v0.4.2-rc1: there is no code, CRD, RBAC or gRPC contract
+difference, so the upgrade only re-tags the images. The CRDs are identical to
+rc1's. The manager and provider images are rebuilt from the release tag, so roll
+both; there is nothing to migrate.
+
+1. **Chart:** `helm upgrade` to the v0.4.2 chart with
+   `--reset-then-reuse-values` (Helm 3.14+). List the tags you pinned with
+   `helm get values <release> -n <namespace>` and override each one that
+   names `v0.4.2-rc1` (`--set manager.image.tag=v0.4.2`,
+   `crdUpgrade.image.tag`, any `providers.*.image.tag`), because both
+   `--reuse-values` and `--reset-then-reuse-values` keep a tag you supplied.
+2. **Providers:** set `spec.runtime.image` on each `Provider` to the v0.4.2
+   image (Helm does not change it).
+3. **Check the images that actually run** with the commands in
+   [Configurable Kubernetes client rate limits](#configurable-kubernetes-client-rate-limits):
+   no VirtRigaud image should still end in `:v0.4.2-rc1`.
 
 ## Upgrading from v0.4.0 to v0.4.1
 
