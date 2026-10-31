@@ -57,6 +57,12 @@ type Config struct {
 	FailureThreshold int           // Number of failures to open the circuit
 	ResetTimeout     time.Duration // Time to wait before transitioning to half-open
 	HalfOpenMaxCalls int           // Maximum calls allowed in half-open state
+
+	// Now is the clock the breaker measures ResetTimeout with. Nil means
+	// time.Now. It exists so tests can drive the breaker on a simulated
+	// clock (deterministic open / half-open / closed transitions without
+	// sleeping); production code leaves it nil.
+	Now func() time.Time
 }
 
 // DefaultConfig returns default circuit breaker configuration
@@ -138,7 +144,7 @@ func (cb *CircuitBreaker) allowCall() bool {
 		return true
 	case StateOpen:
 		// Check if we should transition to half-open.
-		if time.Since(cb.lastFailureTime) <= cb.config.ResetTimeout {
+		if cb.now().Sub(cb.lastFailureTime) <= cb.config.ResetTimeout {
 			return false
 		}
 		cb.transitionToHalfOpen()
@@ -155,6 +161,15 @@ func (cb *CircuitBreaker) allowCall() bool {
 	default:
 		return false
 	}
+}
+
+// now returns the current time on the breaker's clock (Config.Now, or
+// time.Now when it is nil).
+func (cb *CircuitBreaker) now() time.Time {
+	if cb.config.Now != nil {
+		return cb.config.Now()
+	}
+	return time.Now()
 }
 
 // recordResult records the result of a call
@@ -178,7 +193,7 @@ func (cb *CircuitBreaker) recordResult(err error) {
 // distinct from the state gauge (which only tracks current state).
 func (cb *CircuitBreaker) recordFailure() {
 	cb.failures++
-	cb.lastFailureTime = time.Now()
+	cb.lastFailureTime = cb.now()
 	cb.metrics.RecordFailure()
 
 	switch cb.state {
