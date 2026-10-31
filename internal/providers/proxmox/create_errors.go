@@ -137,6 +137,18 @@ func statusWithReasons(code codes.Code, msg string, reasons ...string) error {
 	return withInfo.Err()
 }
 
+// vmElsewhereError is the answer of a Describe or Delete for a VM that is not
+// on the node asked but exists on another node of the cluster: retryable
+// codes.Unavailable with the message errors.NewUnavailable gave it, plus
+// VM_OPERATION_FAILED. The refusal is about this one VM (its placement), and
+// the provider did nothing (a Describe reads; a Delete is refused before
+// anything is destroyed), so the manager keeps it out of the Provider's
+// circuit breaker (#472) and may read it as "not performed". An older manager
+// maps it exactly as before (a retryable Unavailable).
+func vmElsewhereError(msg string) error {
+	return statusWithReasons(codes.Unavailable, errors.NewUnavailable(msg, nil).Error(), contracts.VMOperationFailedReason)
+}
+
 // outcomeUnknown is the answer of a Create or Clone after which a VM may
 // exist: codes.Unavailable without CREATE_NOT_PERFORMED. cause is logged,
 // never sent.
