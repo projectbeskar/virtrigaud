@@ -69,12 +69,24 @@ resize reservation**: read [Upgrade](#upgrade) first.
   validated once and reused.
 
   The fix is in the manager, so it also applies to providers on older images. Roll the manager
-  to pick it up.
+  to pick it up, and roll the vSphere providers with it (next item).
 - **Proxmox: "exists elsewhere in the cluster" is VM-scoped.** A `Describe` or `Delete` of a VM
   that is not on the node asked but exists on another node of the cluster answered a plain
   `Unavailable`, which the breaker counts, so one misplaced VM retried by its finalizer could
   open it. The answer now also carries `VM_OPERATION_FAILED`; its code and message are
   unchanged. Roll the Proxmox provider to pick it up.
+- **vSphere: the provider logs in again after a vCenter outage on its own.** The provider keeps
+  its vCenter session alive with a keepalive that probes it every 5 minutes and logs in again
+  when the probe fails. If that login also failed (vCenter was unreachable at the tick, as in a
+  vCenter restart or maintenance longer than 5 minutes), the keepalive stopped for good, and only
+  the provider's `Validate` logged in again. Since rc1 the manager calls `Validate` only when it
+  connects to a provider or the Provider's connection or circuit breaker reports trouble, and
+  with the fix above a provider answering "not authenticated" for every VM no longer opens the
+  breaker, so a vSphere provider whose session was lost this way would have answered every call
+  with that error until its pod restarted. The keepalive now logs the failed login and tries
+  again at the next tick, so the provider recovers within 5 minutes of vCenter accepting logins
+  again. Roll the vSphere providers together with the manager: a vSphere provider older than rc2
+  behind an rc2 manager does not recover from this on its own (restart its pod).
 
 ## Performance
 
@@ -277,7 +289,14 @@ amendments.
   in a row, with no successful call in between, still open the breaker for the whole Provider.
   The other way round, a Provider whose gRPC server answers but whose hypervisor is unreachable
   for every VM no longer opens the breaker (as in v0.4.1): each VM reports the provider's error
-  and is retried on its own schedule, and the provider answers those calls at once.
+  and is retried on its own schedule, and the provider answers those calls at once. The same holds
+  for other failures that affect every VM of a Provider but that the provider still answers as
+  `Internal` or `Unknown` (lost hypervisor credentials, a shared backend subsystem failing, the
+  provider process running out of resources): they are retried per VM rather than failed fast.
+  The libvirt and Proxmox providers recover from these on their own (libvirt dials its SSH
+  connection again when a command finds it dead; Proxmox authenticates every request with its API
+  token), and the vSphere
+  provider renews its session itself (see [Changes in v0.4.2-rc2](#changes-in-v042-rc2)).
 
 ## Upgrade
 

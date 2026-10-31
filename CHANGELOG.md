@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-31 15:23] - vSphere provider renews its session after a vCenter outage on its own (#472)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: the session keepalive (`vSphereKeepAlive`) no longer stops for good when its re-login fails (vCenter unreachable at the tick); it logs a warning and tries again at the next 5-minute tick. `Validate`'s comment no longer claims the manager calls it before every operation.
+
+### Added
+- `internal/providers/vsphere/session_test.go`: the keepalive keeps probing and logs in after failed re-logins (on govmomi's real keepalive handler); a healthy session sends no login.
+- `internal/runtime/remote/breaker_outage_test.go`: a genuine Provider outage through the real Resolver, client and default breaker: opens, fails fast without connecting while open, recovers through half-open on one new connection, and the healthy VM is managed again without per-reconcile `Validate`.
+
+### Changed
+- `docs/release-notes/next.md`: the vSphere fix under "Changes in v0.4.2-rc2"; roll vSphere providers with the manager; provider-wide failures answered as `Internal`/`Unknown` added to the breaker limitation.
+- `docs/upgrading.md`: roll vSphere providers with the manager; the already-excluded reasons stay excluded (wording fix).
+
+### Why
+govmomi stops the keepalive when its send function returns an error, after which only the provider's `Validate` logged in again. Since F3 the manager validates a cached client only when its connection or breaker reports trouble, and with the #472 fix a provider answering "not authenticated" for every VM no longer opens the breaker, so a vSphere provider whose session was lost during a vCenter outage longer than 5 minutes would have failed every call until its pod restarted.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Roll the vSphere provider images together with the manager.
+
 ## [2026-10-31 01:40] - Keep one VM's failures out of its Provider's circuit breaker (#472)
 **Author:** @wrkode (William Rizzo)
 

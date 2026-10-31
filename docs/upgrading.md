@@ -89,11 +89,14 @@ is gone (not merely not leading) before you act on a held admission.
   error for one VM) is not counted. Failures the provider did not answer
   (connection refused or dropped, no answer before the call's deadline, a
   proxy's non-gRPC error page) and answered `Unavailable` or
-  `DeadlineExceeded` still count, as do all the reasons that were already
+  `DeadlineExceeded` still count; the reasons that were already excluded stay
   excluded. So a few failing VMs no longer make the breaker refuse every VM of
   their Provider. A Provider whose server answers but whose hypervisor is
   unreachable for every VM no longer opens the breaker either, as in v0.4.1:
   each VM reports the provider's error and is retried on its own schedule.
+  Roll the vSphere providers together with the manager: from rc2 the vSphere
+  provider logs in to vCenter again on its own after an outage, which an older
+  vSphere provider behind an rc2 manager does not (restart its pod).
 - **A clustered Provider is reconciled on a 60-second resync** instead of on
   every Host heartbeat.
 - **A new VM is described right after its `Create`**, instead of 5 seconds
