@@ -1,8 +1,8 @@
 <!--
 Release notes for VirtRigaud v0.4.2; title the release "v0.4.2" and, for a release candidate,
 "v0.4.2-rc<N>" (mark it as a pre-release). v0.4.2 is a patch release of v0.4.1. The notes are
-cumulative since v0.4.1 and are updated for each candidate; this file starts with rc1 and is
-updated for rc2 ("Changes in v0.4.2-rc2"). The
+cumulative since v0.4.1 and are updated for each candidate: they were published for rc1 and
+are updated for rc2 ("Changes in v0.4.2-rc2"). The
 v0.4.1 notes are kept in v0.4.1.md. See docs/upgrading.md ("Upgrading from v0.4.1 to v0.4.2")
 for the upgrade guide these notes link to, and CHANGELOG.md for the complete, dated changelog.
 GitHub's limit for a release body is 125,000 characters; this file is far below it, so it is
@@ -34,10 +34,25 @@ resize reservation**: read [Upgrade](#upgrade) first.
   back while a clustered VM holds a resize reservation**, and roll the manager and the chart
   back together. See [Upgrade](#upgrade).
 - **Fault isolation (rc2):** one VM's failure no longer opens its Provider's circuit breaker and
-  blocks the Provider's other VMs ([#472](https://github.com/projectbeskar/virtrigaud/issues/472)).
-  See [Changes in v0.4.2-rc2](#changes-in-v042-rc2).
+  blocks the Provider's other VMs, and the vSphere provider renews a lost vCenter session on its
+  own ([#472](https://github.com/projectbeskar/virtrigaud/issues/472)). Roll the manager and the
+  providers together. See [Changes in v0.4.2-rc2](#changes-in-v042-rc2).
 
 ## Changes in v0.4.2-rc2
+
+rc1 was qualified on a non-production lab with clustered and single-host libvirt Providers. The
+upgrade, polling, placement, capacity refusal, resize reservations, clones, migration, manager
+restarts and rollback behaved as documented, but an analysis of a finding from that lab showed
+that the per-Provider circuit breaker could block every VM of a Provider because of a few failing
+VMs (below). rc2 fixes that and a vSphere session-recovery gap the fix would otherwise have
+exposed. Compared with rc1:
+
+- **Changed:** the manager (circuit-breaker accounting), the vSphere provider (session keepalive)
+  and the Proxmox provider (one error reason). The libvirt provider's code is unchanged; its
+  image is rebuilt.
+- **Unchanged:** CRDs, RBAC, the Helm chart's templates and values, the gRPC contract, the `sdk`
+  and `proto` modules' code, and the command-line tools.
+- **Upgrade:** see [Upgrading from v0.4.2-rc1](../upgrading.md#upgrading-from-v042-rc1).
 
 ### Fixes
 
@@ -68,6 +83,13 @@ resize reservation**: read [Upgrade](#upgrade) first.
   opened in any of these mixes and no healthy call was refused; a provider connection is still
   validated once and reused.
 
+  A Provider that is really down is still handled as before: when its gRPC server does not
+  answer, the breaker opens after 10 failures, refuses calls at once without connecting while it
+  is open, lets 3 trial calls through after 60 s, and closes when they succeed; the healthy VMs
+  are then managed again on one new connection. Some failures are still classified by their code
+  rather than by the VM they concern: see
+  [What the circuit breaker still counts](#known-limitations).
+
   The fix is in the manager, so it also applies to providers on older images. Roll the manager
   to pick it up, and roll the vSphere providers with it (next item).
 - **Proxmox: "exists elsewhere in the cluster" is VM-scoped.** A `Describe` or `Delete` of a VM
@@ -84,8 +106,9 @@ resize reservation**: read [Upgrade](#upgrade) first.
   with the fix above a provider answering "not authenticated" for every VM no longer opens the
   breaker, so a vSphere provider whose session was lost this way would have answered every call
   with that error until its pod restarted. The keepalive now logs the failed login and tries
-  again at the next tick, so the provider recovers within 5 minutes of vCenter accepting logins
-  again. Roll the vSphere providers together with the manager: a vSphere provider older than rc2
+  again at the next tick, so the provider recovers within 5 minutes (the keepalive interval) of
+  vCenter accepting logins again; until then, calls fail with the authentication error and each VM
+  is retried on its own schedule. Roll the vSphere providers together with the manager: a vSphere provider older than rc2
   behind an rc2 manager does not recover from this on its own (restart its pod).
 
 ## Performance
@@ -271,6 +294,11 @@ amendments.
   ([details](../clustered-provider-inventory.md#a-withdrawn-resize-can-keep-its-reservation-indefinitely)).
   A safe recovery mechanism is tracked in
   [#468](https://github.com/projectbeskar/virtrigaud/issues/468).
+- **A withdrawn refused resize keeps its `Reconfiguring` condition
+  ([#473](https://github.com/projectbeskar/virtrigaud/issues/473)).** After a resize refused with
+  `InsufficientHostCapacity` is withdrawn, the condition stays until the next resize. Nothing is
+  reserved or retried, and the phase, `Ready` and the accounting are not affected. This is also
+  the case in v0.4.1.
 - **Rolling back to v0.4.1 is unsupported while a clustered VM holds a resize reservation**, and
   the manager and the chart must be rolled back together. See
   [Rolling back to v0.4.1](../upgrading.md#rolling-back-to-v041).
@@ -308,6 +336,11 @@ field and counts the VM at its recorded size. Roll the manager and the chart bac
 v0.4.1 manager does not start with the new flags. Roll the providers too, by setting
 `spec.runtime.image` on each `Provider` (Helm does not change it): they carry the
 `golang.org/x/net` update. Then check the images that actually run, as the upgrade guide shows.
+
+From **v0.4.2-rc1**, roll the manager and every provider to rc2 (the vSphere and Proxmox
+providers carry fixes; a vSphere provider older than rc2 behind an rc2 manager does not renew a
+lost vCenter session on its own). The CRDs are unchanged since rc1. See
+[Upgrading from v0.4.2-rc1](../upgrading.md#upgrading-from-v042-rc1).
 
 ## Changelog
 

@@ -24,7 +24,8 @@ dependency security update; see the [v0.4.2 release notes](release-notes/next.md
 v0.4.2 is a patch release of v0.4.1, but it adds an optional CRD status field
 and two manager flags, and **rolling back is unsupported while a clustered VM
 holds a resize reservation** (see [Rolling back to v0.4.1](#rolling-back-to-v041)).
-A v0.4.2 release candidate follows the same steps. The roll order is
+A v0.4.2 release candidate follows the same steps; from v0.4.2-rc1, see
+[Upgrading from v0.4.2-rc1](#upgrading-from-v042-rc1). The roll order is
 unchanged: **CRDs, then the manager, then the providers**. The gRPC contract
 is unchanged, so providers need no configuration change, but **roll the
 provider images too**: the manager and provider binaries are rebuilt with
@@ -206,6 +207,29 @@ a later release, not chosen yet. The log line now ends `refused in a later
 release` instead of `refused from the next release`; if you match on the log
 text, update the pattern (the counter is unchanged). See
 [image preparation](image-preparation.md#deprecated-requests-from-an-older-manager).
+
+### Upgrading from v0.4.2-rc1
+
+From rc1 to rc2 (and later candidates) only the manager and the provider images
+change: the CRDs, RBAC, the chart's templates and values and the gRPC contract
+are the same as rc1's, so there is nothing to migrate. rc2 changes the manager's
+circuit-breaker accounting, the vSphere provider's session keepalive and one
+Proxmox error reason ([#472](https://github.com/projectbeskar/virtrigaud/issues/472));
+roll **the manager and every provider together**. A vSphere provider older than
+rc2 behind an rc2 manager does not renew a vCenter session it lost during an
+outage on its own: restart its pod if that happens.
+
+1. **Chart:** `helm upgrade` to the new chart with
+   `--reset-then-reuse-values` (Helm 3.14+). List the tags you pinned with
+   `helm get values <release> -n <namespace>` and override each one that
+   names `v0.4.2-rc1` (for example `--set manager.image.tag=v0.4.2-rc2`,
+   `crdUpgrade.image.tag`, any `providers.*.image.tag`), because both
+   `--reuse-values` and `--reset-then-reuse-values` keep a tag you supplied.
+2. **Providers:** set `spec.runtime.image` on each `Provider` to the new
+   image (Helm does not change it).
+3. **Check the images that actually run** with the commands in
+   [Configurable Kubernetes client rate limits](#configurable-kubernetes-client-rate-limits):
+   no VirtRigaud image should still end in `:v0.4.2-rc1`.
 
 ## Upgrading from v0.4.0 to v0.4.1
 
