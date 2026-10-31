@@ -58,7 +58,7 @@ providers:
     description: "Proxmox Virtual Environment provider for VirtRigaud. ImagePrepare refuses import-style (source.http) images, so the image-prepare profile is not listed."
     repo: "https://github.com/projectbeskar/virtrigaud"
     image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox"
-    tag: "v0.4.1"
+    tag: "v0.4.2"
     capabilities:
       - core
       - snapshot
@@ -89,7 +89,7 @@ providers:
     description: "VMware vSphere provider for VirtRigaud"
     repo: "https://github.com/projectbeskar/virtrigaud"
     image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere"
-    tag: "v0.4.1"
+    tag: "v0.4.2"
     capabilities:
       - core
       - snapshot
@@ -121,7 +121,7 @@ providers:
     description: "Libvirt/KVM provider for VirtRigaud. Clone makes full copies; linked clones are not supported, so the clone profile is not listed. The image-prepare profile is for a single-host Provider; a clustered libvirt Provider does not advertise it."
     repo: "https://github.com/projectbeskar/virtrigaud"
     image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt"
-    tag: "v0.4.1"
+    tag: "v0.4.2"
     capabilities:
       - core
       - snapshot

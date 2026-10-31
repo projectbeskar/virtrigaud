@@ -20,12 +20,12 @@ If neither is true, leave this directory as-is — the upstream public CA bundle
    ```
 2. Rebuild the manager image:
    ```bash
-   make docker-build VERSION=v0.4.1 GIT_SHA=$(git rev-parse HEAD)
+   make docker-build VERSION=v0.4.2 GIT_SHA=$(git rev-parse HEAD)
    # or directly:
    docker build -f build/Dockerfile.manager \
-       --build-arg VERSION=v0.4.1 \
+       --build-arg VERSION=v0.4.2 \
        --build-arg GIT_SHA=$(git rev-parse HEAD) \
-       -t my-registry/virtrigaud-manager:v0.4.1 .
+       -t my-registry/virtrigaud-manager:v0.4.2 .
    ```
 3. `update-ca-certificates` runs as part of the build stage and rebuilds `/etc/ssl/certs/ca-certificates.crt` so all subsequent `go mod download` calls inside the same build trust the certs you provided.
 

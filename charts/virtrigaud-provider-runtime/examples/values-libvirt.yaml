@@ -1,7 +1,7 @@
 # Example values for libvirt provider  
 image:
   repository: ghcr.io/projectbeskar/virtrigaud/provider-libvirt
-  tag: "v0.4.1"
+  tag: "v0.4.2"
 
 env:
   - name: LOG_LEVEL
