@@ -3,8 +3,8 @@ module github.com/projectbeskar/virtrigaud/sdk
 go 1.26.10
 
 require (
-	github.com/projectbeskar/virtrigaud v0.4.2-rc1
-	github.com/projectbeskar/virtrigaud/proto v0.4.2-rc1
+	github.com/projectbeskar/virtrigaud v0.4.2
+	github.com/projectbeskar/virtrigaud/proto v0.4.2
 	google.golang.org/grpc v1.83.2
 	sigs.k8s.io/controller-runtime v0.20.4
 )
