@@ -72,6 +72,8 @@ helm install virtrigaud charts/virtrigaud \
 > once bound) with a required CRD → manager → provider upgrade order.
 >
 > Upgrading from v0.4.0 to v0.4.1 has [its own section](../../docs/upgrading.md#upgrading-from-v040-to-v041) in that guide.
+>
+> Upgrading from v0.4.1 to v0.4.2 has [its own section](../../docs/upgrading.md#upgrading-from-v041-to-v042) in that guide.
 
 > **Carrying custom values across chart versions:** prefer
 > `--reset-then-reuse-values` (Helm 3.14+) over `--reuse-values`.
@@ -542,7 +544,7 @@ spec:
   source:
     repoURL: https://projectbeskar.github.io/virtrigaud
     chart: virtrigaud
-    targetRevision: 0.4.1
+    targetRevision: 0.4.2
     helm:
       values: |
         crdUpgrade:
@@ -575,7 +577,7 @@ spec:
       sourceRef:
         kind: HelmRepository
         name: virtrigaud
-      version: 0.4.1
+      version: 0.4.2
   values:
     crdUpgrade:
       enabled: true  # CRDs will upgrade automatically

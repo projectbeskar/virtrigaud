@@ -579,7 +579,7 @@ Now a template reference is resolved as follows:
   owns it.
 
 The `ImagePrepare` column describes a request from a manager older than
-ADR-0009 (deprecated legacy mode, served in v0.4.0 and v0.4.1 only), whose target name is the
+ADR-0009 (deprecated legacy mode, served in v0.4.0, v0.4.1 and v0.4.2 only), whose target name is the
 `VMImage` name. That name is also the name of the template an OVA import
 creates, so it follows the VM-name rules. A request from a current manager
 carries the `VMImage` identity instead: the template is named after it, looked
@@ -1333,7 +1333,7 @@ that adoption bound before this release keeps the stamp it had.
   resizes, snapshots and copies it as its own. A VM at that VMID stamped for
   anyone else is refused.
 
-  **What to do in v0.4.0 and v0.4.1.** Do not grant `VM.Allocate` on the pools and paths
+  **What to do in v0.4.0, v0.4.1 and v0.4.2.** Do not grant `VM.Allocate` on the pools and paths
   where VirtRigaud's VMs live to any principal other than VirtRigaud's own
   Provider tokens and its administrators. Treat `VM.Allocate` there like
   `VM.Config.Options` (see [The owner stamp](#the-owner-stamp-1)). This
@@ -1346,13 +1346,13 @@ that adoption bound before this release keeps the stamp it had.
   - legacy VMs are stamped once;
   - the rule is dropped by default in v0.5.0.
 
-  The first part (phase 1) is not in v0.4.0 or v0.4.1.
-- **Accepted risk (v0.4.0 and v0.4.1): a stamp can be copied.** The stamp's checksum
+  The first part (phase 1) is not in v0.4.0, v0.4.1 or v0.4.2.
+- **Accepted risk (v0.4.0, v0.4.1 and v0.4.2): a stamp can be copied.** The stamp's checksum
   detects edits, not forgery. Anyone who knows a `VirtualMachine`'s UID and can
   set a VM's description (`VM.Config.Options`) can write that
   `VirtualMachine`'s stamp on a VM they plant at its freed VMID. The UID is not
   secret: it is readable through the Kubernetes API and in the original VM's
-  Notes with `VM.Audit`. This is accepted for v0.4.0 and v0.4.1, given the PVE ACL
+  Notes with `VM.Audit`. This is accepted for v0.4.0, v0.4.1 and v0.4.2, given the PVE ACL
   boundary above. ADR-0012's Option E (binding to a PVE creation attribute)
   would close it and is scheduled as a spike.
 - **Give each Provider its own PVE API token.** The restart guard tells this
