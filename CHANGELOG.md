@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-31 16:31] - Prepare VirtRigaud v0.4.2-rc2
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo module requires point at `v0.4.2-rc2` (`make set-module-versions VERSION=v0.4.2-rc2`); the release workflow creates the `sdk/` and `proto/` tags.
+- `docs/release-notes/next.md`: "Changes in v0.4.2-rc2" opens with the rc1 qualification outcome and what changed since rc1; genuine-outage behaviour and the vSphere recovery interval; #473 added to the known limitations; upgrade path from rc1.
+- `docs/upgrading.md`: new "Upgrading from v0.4.2-rc1" (roll the manager and every provider together; CRDs unchanged since rc1).
+
+### Why
+rc1 qualification found the circuit-breaker fault-isolation regression (#472), fixed on main with the vSphere session-recovery fix (#475); rc2 is the candidate that carries them for re-qualification before GA.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+Release preparation: module versions and notes only; no code, CRD or chart change.
+
 ## [2026-10-31 15:23] - vSphere provider renews its session after a vCenter outage on its own (#472)
 **Author:** @wrkode (William Rizzo)
 
