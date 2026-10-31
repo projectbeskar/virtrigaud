@@ -44,9 +44,9 @@ func TestClient_PrepareImage_SourceUnavailableDoesNotTripBreaker(t *testing.T) {
 	sourceDown := imageartifact.SourceUnavailableError(
 		"ImagePrepare: the image source is unavailable (details in the provider log); will retry")
 	prepare := providerv1.Provider_ImagePrepare_FullMethodName
-	assert.False(t, countsTowardBreaker(prepare, sourceDown), "a failing image source says nothing about the provider's health")
-	assert.True(t, countsTowardBreaker(prepare, status.Error(codes.Unavailable, "provider down")))
-	assert.True(t, countsTowardBreaker(providerv1.Provider_Create_FullMethodName, sourceDown),
+	assert.False(t, countsTowardBreaker(prepare, sourceDown, false), "a failing image source says nothing about the provider's health")
+	assert.True(t, countsTowardBreaker(prepare, status.Error(codes.Unavailable, "provider down"), false))
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Create_FullMethodName, sourceDown, false),
 		"on any other RPC the reason is not a VirtRigaud answer: the Unavailable counts")
 
 	mapped := (&Client{}).mapGRPCError("image prepare", sourceDown)
@@ -106,10 +106,10 @@ func (s *slowServer) Validate(ctx context.Context, _ *providerv1.ValidateRequest
 // DeadlineExceeded on any other RPC still counts.
 func TestClient_PrepareImage_OwnDeadlineDoesNotTripBreaker(t *testing.T) {
 	prepare := providerv1.Provider_ImagePrepare_FullMethodName
-	assert.False(t, countsTowardBreaker(prepare, status.Error(codes.DeadlineExceeded, "context deadline exceeded")))
-	assert.False(t, countsTowardBreaker(prepare, status.Error(codes.Canceled, "context canceled")))
+	assert.False(t, countsTowardBreaker(prepare, status.Error(codes.DeadlineExceeded, "context deadline exceeded"), false))
+	assert.False(t, countsTowardBreaker(prepare, status.Error(codes.Canceled, "context canceled"), false))
 	assert.True(t, countsTowardBreaker(providerv1.Provider_Validate_FullMethodName,
-		status.Error(codes.DeadlineExceeded, "context deadline exceeded")))
+		status.Error(codes.DeadlineExceeded, "context deadline exceeded"), false))
 
 	var prepares atomic.Int32
 	srv := &slowServer{imagePrepareFakeServer: imagePrepareFakeServer{

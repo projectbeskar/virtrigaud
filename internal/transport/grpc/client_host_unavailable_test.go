@@ -167,13 +167,15 @@ func TestIsInfraFailure_VMOperationFailedIsNotInfra(t *testing.T) {
 		"one VM's failed operation says nothing about the provider's health")
 	assert.True(t, isInfraFailure(vmOperationFailedErr(t, "example.com")), "only VirtRigaud's error domain is exempt")
 	assert.True(t, isInfraFailure(status.Error(codes.Unknown, "failed to reconfigure VM: boom")),
-		"a plain Unknown (no detail: a single-host provider, or a provider-level failure) still counts")
+		"a plain Unknown is infrastructure-class by code; whether it counts depends on whether the provider answered (countsTowardBreaker)")
 }
 
 // TestCircuitBreaker_RepeatedVMOperationFailuresDoNotTrip is the slice 2
 // review's scenario: one tenant's VM whose Reconfigure keeps failing on its
 // host (retried every few seconds) must not open the breaker for every VM of
-// the Provider — while the same failures WITHOUT the detail still do.
+// the Provider. Since #472 the same failures WITHOUT the detail do not open
+// it either when the provider answered them: an answered Unknown is a
+// VM-level answer (countsTowardBreaker).
 func TestCircuitBreaker_RepeatedVMOperationFailuresDoNotTrip(t *testing.T) {
 	vm := contracts.VMRef{ID: "web", HostID: "host-a", Owner: contracts.ObjectIdentity{UID: "uid-web"}}
 	newCB := func(name string, err error) (*routedOpErrServer, *Client, *resilience.CircuitBreaker) {
@@ -203,8 +205,8 @@ func TestCircuitBreaker_RepeatedVMOperationFailuresDoNotTrip(t *testing.T) {
 		_, err := plainCli.Power(context.Background(), vm, contracts.PowerOpOn)
 		require.Error(t, err)
 	}
-	assert.Equal(t, resilience.StateOpen, plainCB.GetState(), "a plain Unknown still opens the breaker")
-	assert.EqualValues(t, 2, plainSrv.calls.Load())
+	assert.Equal(t, resilience.StateClosed, plainCB.GetState(), "an answered plain Unknown does not open the breaker (#472)")
+	assert.EqualValues(t, 3, plainSrv.calls.Load(), "every call reached the provider")
 }
 
 func TestCircuitBreaker_ProviderUnavailableStillTrips(t *testing.T) {

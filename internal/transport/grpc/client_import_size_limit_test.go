@@ -77,7 +77,7 @@ func TestClient_ImportDiskSizeLimitOnTheWire(t *testing.T) {
 			assert.True(t, contracts.IsConflict(err))
 			assert.False(t, contracts.IsRetryable(err), "nothing was landed; not retried as a transient failure")
 			assert.False(t, isInfraFailure(tc.refusal))
-			assert.False(t, countsTowardBreaker(providerv1.Provider_ImportDisk_FullMethodName, tc.refusal))
+			assert.False(t, countsTowardBreaker(providerv1.Provider_ImportDisk_FullMethodName, tc.refusal, false))
 		})
 	}
 }
