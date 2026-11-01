@@ -615,7 +615,8 @@ func TestAsyncDelete_ClusteredHostEncodedTask(t *testing.T) {
 	prov := &asyncDeleteProvider{deleteTask: ref}
 	prov.answer(contracts.TaskStatus{IsCompleted: false}, nil)
 	r := clusteredFixture(t, prov, vm)
-	resolver := r.RemoteResolver.(*stubResolver)
+	resolver, ok := r.RemoteResolver.(*stubResolver)
+	require.True(t, ok)
 
 	_, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "db"))
 	require.NoError(t, err)
