@@ -81,7 +81,11 @@ func capabilityCases() []Case {
 					expectRouted("SnapshotRevert", err)
 				}
 				if caps.SupportsDiskExport {
-					_, err := e.Raw().ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "x", Owner: OwnerA.Proto()})
+					backend := "s3"
+					if len(caps.SupportedExportBackends) > 0 {
+						backend = caps.SupportedExportBackends[0]
+					}
+					_, err := e.Raw().ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "x", Owner: OwnerA.Proto(), BackendType: backend, TransferMode: "relay"})
 					expectRouted("ExportDisk", err)
 				}
 				if caps.SupportsRoutedClone {
@@ -431,10 +435,10 @@ func createCases() []Case {
 				_, err := e.Raw().Create(ctx, createRequest("cr-none", "", OwnerA))
 				requireCode(e, err, codes.InvalidArgument, "Create without a host")
 				_, err = e.Raw().Create(ctx, createRequest("cr-none", UnknownHost, OwnerA))
-				requireHostUnavailable(e, err, UnknownHost, "Create on an unknown host")
+				requireHostUnavailable(e, err, "", "Create on an unknown host")
 				e.HostDown(e.HostB())
 				_, err = e.Raw().Create(ctx, createRequest("cr-none", e.HostB(), OwnerA))
-				requireHostUnavailable(e, err, e.HostB(), "Create on an unreachable host")
+				requireHostUnavailable(e, err, "", "Create on an unreachable host")
 				e.HostUp(e.HostB())
 
 				list, err := e.ListVMs()
@@ -445,6 +449,21 @@ func createCases() []Case {
 				resp, err := e.Raw().Create(ctx, createRequest("cr-none", e.HostB(), OwnerA))
 				require.NoError(e.T, err, "Create works once the host is back")
 				assert.NotEmpty(e.T, resp.Id)
+			},
+		},
+		{
+			ID:       "create.unavailable-names-host",
+			Rule:     "the HOST_UNAVAILABLE answer of a Create names the unreachable target host in its ErrorInfo metadata, as every other routed call's does",
+			Source:   "internal/providers/contracts/host_unavailable.go: HostUnavailableHostKey (set when the host that could not be reached is the one the call was routed to)",
+			Requires: []Feature{FeatureCreate},
+			Run: func(e *Env) {
+				ctx, cancel := e.Call()
+				defer cancel()
+				_, err := e.Raw().Create(ctx, createRequest("cr-names", UnknownHost, OwnerA))
+				requireHostUnavailable(e, err, UnknownHost, "Create on an unknown host")
+				e.HostDown(e.HostB())
+				_, err = e.Raw().Create(ctx, createRequest("cr-names", e.HostB(), OwnerA))
+				requireHostUnavailable(e, err, e.HostB(), "Create on an unreachable host")
 			},
 		},
 		{
@@ -490,7 +509,7 @@ func createCases() []Case {
 
 				_, err = e.Raw().Create(ctx, createRequest("cr-idem", e.HostA(), OwnerB))
 				requireCode(e, err, codes.AlreadyExists, "Create of a taken name by another owner")
-				_, err = e.Manager().Create(e.Ctx(), contracts.CreateRequest{Name: "cr-idem", TargetHostID: e.HostA(), Owner: contracts.ObjectIdentity(OwnerB)})
+				_, err = e.Manager().Create(e.Ctx(), contracts.CreateRequest{Name: "cr-idem", TargetHostID: e.HostA(), Owner: contracts.ObjectIdentity{UID: OwnerB.UID, Namespace: OwnerB.Namespace, Name: "cr-idem"}})
 				assert.True(e.T, contracts.IsConflict(err), "manager mapping: %v", err)
 				vm := VM{ID: first.Id, Host: e.HostA(), Name: "cr-idem"}
 				assert.Equal(e.T, OwnerA.UID, e.Observe(vm).OwnerUID, "the stamp is not overwritten")
@@ -500,7 +519,11 @@ func createCases() []Case {
 }
 
 // createRequest is a minimal CreateRequest for name on host.
+//
+// A VM's name is the name of its VirtualMachine, so the owner identity carries
+// the same name (a provider may refuse a request whose two names differ).
 func createRequest(name, host string, owner Identity) *providerv1.CreateRequest {
+	owner.Name = name
 	return &providerv1.CreateRequest{
 		Name:         name,
 		TargetHostId: host,

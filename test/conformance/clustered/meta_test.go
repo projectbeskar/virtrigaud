@@ -60,7 +60,7 @@ func mutations() []mutation {
 		{violation: fake.HostDownAsNotFound, kills: []string{"hostdown.per-vm", "idempotency.host-unavailable", "errinfo.host-unavailable-wire-and-mapping"}},
 		{violation: fake.HostDownNoReason, kills: []string{"hostdown.per-vm", "hostdown.not-counted-against-provider", "errinfo.host-unavailable-wire-and-mapping", "idempotency.host-unavailable"}},
 		{violation: fake.HostUnavailableWrongDomain, kills: []string{"hostdown.per-vm", "errinfo.host-unavailable-wire-and-mapping"}},
-		{violation: fake.HostUnavailableNoHost, kills: []string{"hostdown.per-vm", "errinfo.host-unavailable-wire-and-mapping"}},
+		{violation: fake.HostUnavailableNoHost, kills: []string{"hostdown.per-vm", "errinfo.host-unavailable-wire-and-mapping", "create.unavailable-names-host"}},
 		{violation: fake.HostDownBreaksPeers, kills: []string{"hostdown.isolated"}},
 		{violation: fake.StickyUnreachable, kills: []string{"hostdown.recovery", "list.recovery"}},
 		{violation: fake.HostDownMutatesAnyway, kills: []string{"idempotency.host-unavailable"}},
