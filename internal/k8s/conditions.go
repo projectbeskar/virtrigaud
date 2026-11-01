@@ -587,3 +587,32 @@ func SetHealthyCondition(conditions *[]metav1.Condition, status metav1.Condition
 	observedGeneration int64) {
 	SetCondition(conditions, ConditionHealthy, status, reason, message, observedGeneration)
 }
+
+// ConditionDeleteTask is set on a VirtualMachine being deleted whose
+// provider answered its Delete with an asynchronous task. While it is True,
+// status.lastTaskRef is that Delete task: the manager polls it (TaskStatus)
+// instead of sending another Delete, and keeps the VirtualMachine finalizer
+// until the provider reports the task completed successfully. Its reasons are
+// ReasonTaskInProgress (the provider reports the task running) and
+// ReasonDeleteTaskStatusUnknown (the task's status cannot be read right now).
+// It is False with ReasonDeleteTaskFailed once the provider reported the task
+// ended without deleting the VM (or no longer knows the task): the reference
+// is cleared and the Delete is sent again after a backoff. A provider whose
+// Delete completes synchronously never sets it. Its messages are constant and
+// name the recovery path (orphan-on-delete or force-delete).
+const ConditionDeleteTask = "DeleteTask"
+
+// DeleteTask condition reasons.
+const (
+	// ReasonDeleteTaskStatusUnknown: the provider could not be asked for the
+	// recorded Delete task's status (a transient error), so it is not known
+	// whether the hypervisor VM was deleted. The task stays recorded, no
+	// Delete is sent, and the status is asked again with a backoff.
+	ReasonDeleteTaskStatusUnknown = "DeleteTaskStatusUnknown"
+	// ReasonDeleteTaskFailed: the provider reported that the recorded Delete
+	// task ended in failure, or that it does not know the task (a stale
+	// reference, e.g. after a provider restart). The reference is cleared and
+	// the Delete is sent again after a backoff; the provider's Delete answers
+	// not-found for a VM that is already gone.
+	ReasonDeleteTaskFailed = "DeleteTaskFailed"
+)

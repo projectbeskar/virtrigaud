@@ -362,6 +362,21 @@ type VirtualMachineReconciler struct {
 	// recordBackoff overrides defaultCreateRecordBackoff; nil uses it. Tests
 	// set it.
 	recordBackoff *wait.Backoff
+	// deleteTasks holds, per VM UID, the deleteTaskRecord of a provider
+	// Delete answered with an asynchronous task (virtualmachine_delete_task.go):
+	// the task in flight, so no second Delete is sent while it runs even when
+	// its status record has not landed or the cache has not caught up. In-process
+	// state is correct: only the elected leader runs this reconciler, and a new
+	// leader reads the task back from status.lastTaskRef.
+	deleteTasks sync.Map
+	// deleteTaskRetry paces re-sending a Delete whose task ended in failure,
+	// per VM: from vmDeleteRetryInterval doubling to blockedRetryMax. The VM's
+	// release forgets it.
+	deleteTaskRetry unschedulableBackoff
+	// deleteTaskStatusRetry paces asking again for the status of a Delete task
+	// that could not be read, per VM: from blockedRetryMin doubling to
+	// blockedRetryMax. Any answer of the provider resets it.
+	deleteTaskStatusRetry unschedulableBackoff
 }
 
 // now returns the reconciler's current time (clock, or time.Now).
@@ -1171,6 +1186,11 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				}
 				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftProviderUnavailable)
 			} else {
+				// A Delete answered with a task that is still in flight is
+				// observed instead of sent again (virtualmachine_delete_task.go).
+				if res, handled, err := r.continueDeleteTask(ctx, vm, providerInstance, force); handled {
+					return res, err
+				}
 				logger.Info("Deleting VM from provider", "id", ref.ID, "host", ref.HostID)
 				// The ref carries the VM's owner: a clustered provider destroys
 				// the VM only when its owner stamp matches (A2), and an
@@ -1180,8 +1200,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				switch {
 				case err == nil:
 					if taskRef != "" {
-						logger.Info("VM deletion initiated", "taskRef", taskRef)
-						// TODO: Wait for task completion in future iterations
+						// An asynchronous Delete: the finalizer is kept until
+						// the provider reports the task complete.
+						return r.recordDeleteTask(ctx, vm, taskRef)
 					}
 				case contracts.IsNotFound(err) && ref.Routed() && heldForOwnDomainElsewhere(vm):
 					// The VM's last create found its OWN domain on another host
@@ -1499,6 +1520,7 @@ func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infr
 		return ctrl.Result{}, err
 	}
 	r.forgetUnsavedCreate(vm.UID)
+	r.forgetDeleteTask(vm)
 	r.diskLimitWarned.Delete(string(vm.UID))
 
 	logger.Info("VirtualMachine deleted successfully")
