@@ -399,12 +399,28 @@ func (r *VirtualMachineReconciler) ensureDeleteTaskRecorded(
 // providers say they do not know a task reference at all (the mock provider's
 // lost task table; Proxmox VE rejecting a UPID it does not report or cannot
 // parse). They say nothing about the delete's outcome.
+//
+// Matching the provider's text is a stopgap: TaskStatus has no typed "task
+// unknown" signal yet (its answer is done plus an error string), so these
+// substrings are the only way to tell "I do not know this task" from "this
+// task failed". An answer worded otherwise is taken as a failure.
 var unknownTaskAnswers = []string{"task not found", "does not report this task", "invalid task id format"}
+
+// vSphere answers a task that vCenter has purged (an old task, or one from
+// before a vCenter restart) with the ManagedObjectNotFound fault of the Task
+// object itself, which its TaskStatus reports as done with "task failed:
+// <fault>". Only the fault text naming a vim.Task object is matched: the same
+// fault about the VM (a Destroy_Task that failed because the VM was missing)
+// names a vim.VirtualMachine and stays a failure.
+const (
+	vsphereObjectNotFoundText = "has already been deleted or has not been completely created"
+	vsphereTaskObjectText     = "'vim.task:"
+)
 
 // deleteTaskAnswerUnknown reports whether a TaskStatus answer says the
 // provider does not know the task (rather than that it ran and failed): an
 // RPC error that is not-found, invalid or unsupported, or a terminal error of
-// unknownTaskAnswers.
+// unknownTaskAnswers, or vSphere's not-found fault for the Task object.
 func deleteTaskAnswerUnknown(st contracts.TaskStatus, err error) bool {
 	if err != nil {
 		return contracts.IsNotFound(err) || contracts.IsInvalidSpec(err) || contracts.IsNotSupported(err)
@@ -415,7 +431,7 @@ func deleteTaskAnswerUnknown(st contracts.TaskStatus, err error) bool {
 			return true
 		}
 	}
-	return false
+	return strings.Contains(msg, vsphereObjectNotFoundText) && strings.Contains(msg, vsphereTaskObjectText)
 }
 
 // awaitDeleteTask polls vm's running Delete task rec (see the comment at the

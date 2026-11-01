@@ -184,8 +184,12 @@ previous one stopped.
   in memory and starts again from 15 seconds after a manager restart.
 - **The provider does not know the task.** The provider may answer the reference
   not-found, invalid or unsupported, or end it with an error that says it does
-  not know the task: the mock provider's `task not found`, or Proxmox VE's
-  `does not report this task` and `invalid task ID format`. That is typically a
+  not know the task: the mock provider's `task not found`; Proxmox VE's
+  `does not report this task` and `invalid task ID format`; or vSphere's
+  ManagedObjectNotFound fault for the Task object itself (a task vCenter has
+  purged, which names a `vim.Task` object). The task's status answer has no
+  typed "unknown task" signal yet, so these are recognised by their text; an
+  answer worded otherwise is taken as a failure. That is typically a
   provider that restarted and lost its task table, and the destroy may still be
   running. The answer is ambiguous, so `DeleteTask` becomes `Unknown` with reason
   `DeleteTaskOutcomeUnknown` (Warning event of the same name) and **no `Delete`
@@ -197,8 +201,15 @@ previous one stopped.
     for a synchronous `Delete` answered `VM_NOT_OWNED` (`VMLeftOnHypervisor` event).
   - Still present, or no answer: the finalizer is kept, and the VM is checked
     again with a backoff from when the outcome became unknown: 15 seconds,
-    growing to 5 minutes. An operator decides with `orphan-on-delete` or
-    `force-delete`.
+    growing to 5 minutes.
+
+  An unknown outcome while the VM is still present **never sends the `Delete`
+  again**, however long it lasts. Example: the provider restarted in the
+  middle of a delete, and the VM survived. Such a VM needs an operator. Delete
+  the hypervisor VM by hand, so the next check releases the VirtualMachine.
+  Or set `virtrigaud.io/orphan-on-delete=true` to detach the VirtualMachine
+  and keep the VM. Or set `virtrigaud.io/force-delete=true` to release it
+  without a confirmed delete.
 - **Failed:** a task the provider explicitly ends with any other error is cleared
   from `status.lastTaskRef`, and `DeleteTask=False/DeleteTaskFailed` is set
   (Warning event `DeleteTaskFailed`). The `Delete` is sent again once a wait has
@@ -216,7 +227,12 @@ previous one stopped.
   is gone is released as before. A VM with an unresolved task is kept instead,
   with `DeleteTask` reason `DeleteTaskProviderNotFound` (Warning event of the
   same name), because only the provider could confirm the task. When the Provider
-  object is re-created, the task is observed again.
+  object is re-created, the task is observed again. A VM whose last task
+  explicitly failed (`DeleteTaskFailed`) has no task in flight. Its state is
+  that of a VM whose synchronous `Delete` failed, and with the Provider object
+  gone it is released as before. No `Delete` could be sent without the Provider
+  either way, and keeping it would differ from the long-standing behaviour for
+  that state.
 - **Recovery.** Every message names the two escape hatches.
   `virtrigaud.io/orphan-on-delete=true` detaches the VirtualMachine without any
   provider call, as before. `virtrigaud.io/force-delete=true` releases it once the

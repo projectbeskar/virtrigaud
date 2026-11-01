@@ -546,6 +546,8 @@ var staleAnswers = map[string]struct {
 	"terminal not found":  {st: contracts.TaskStatus{IsCompleted: true, Error: "task not found"}},
 	"not reported by PVE": {st: contracts.TaskStatus{IsCompleted: true, Error: "PVE does not report this task: 400"}},
 	"invalid task id":     {st: contracts.TaskStatus{IsCompleted: true, Error: "invalid task ID format: x"}},
+	"vSphere purged task": {st: contracts.TaskStatus{IsCompleted: true, Error: "task failed: ServerFaultCode: The object " +
+		"'vim.Task:task-4211' has already been deleted or has not been completely created"}},
 }
 
 // 8. A stale reference — the provider no longer knows the task (a restarted
@@ -640,6 +642,11 @@ func TestDeleteTaskAnswerUnknown(t *testing.T) {
 	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{IsCompleted: true, Error: "Destroy_Task failed: file locked"}, nil))
 	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{}, contracts.NewRetryableError("taskStatus: reset", nil)))
 	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{IsCompleted: false}, nil))
+	// The same vSphere fault about the VM (not the task) is a failure.
+	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{IsCompleted: true, Error: "task failed: ServerFaultCode: " +
+		"The object 'vim.VirtualMachine:vm-17' has already been deleted or has not been completely created"}, nil))
+	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{IsCompleted: true, Error: "task failed: The object has " +
+		"already been deleted or has not been completely created"}, nil), "no object type: not safely a purged task")
 }
 
 // 10. The task record is a status patch with no resourceVersion
@@ -896,4 +903,18 @@ func TestAsyncDelete_ProviderGoneWithoutTaskReleases(t *testing.T) {
 	assert.Nil(t, f.get())
 	assert.Zero(t, f.prov.deleteCalls.Load())
 	assert.Empty(t, f.events())
+}
+
+// A VM whose last task explicitly failed has no task in flight: with its
+// Provider object gone it is released, as a VM with no task always was.
+func TestAsyncDelete_ProviderGoneAfterTaskFailedReleases(t *testing.T) {
+	f := newAsyncDeleteFixture(t, nil)
+	f.reconcile(f.r)
+	f.prov.answer(contracts.TaskStatus{IsCompleted: true, Error: "failed"}, nil)
+	f.reconcile(f.r)
+	require.NoError(t, f.client.Delete(context.Background(), deletionProviderCR()))
+	f.reconcile(f.newReconciler())
+	assert.Nil(t, f.get())
+	assert.EqualValues(t, 1, f.prov.deleteCalls.Load())
+	assert.Zero(t, countPrefixed(f.events(), "Warning "+eventReasonDeleteTaskProviderNotFound))
 }
