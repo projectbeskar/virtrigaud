@@ -587,3 +587,57 @@ func SetHealthyCondition(conditions *[]metav1.Condition, status metav1.Condition
 	observedGeneration int64) {
 	SetCondition(conditions, ConditionHealthy, status, reason, message, observedGeneration)
 }
+
+// ConditionDeleteTask is set on a VirtualMachine being deleted whose
+// provider answered its Delete with an asynchronous task (a provider whose
+// Delete completes synchronously never sets it). Its status says what the
+// manager does next:
+//
+//   - True: status.lastTaskRef is that Delete task; the manager polls it
+//     (TaskStatus) instead of sending another Delete, and keeps the finalizer
+//     until the provider reports it completed successfully. Reasons
+//     ReasonTaskInProgress, ReasonDeleteTaskStatusUnknown (the status could not
+//     be read right now) and ReasonDeleteTaskProviderNotFound.
+//   - Unknown (ReasonDeleteTaskOutcomeUnknown, or
+//     ReasonDeleteTaskProviderNotFound): the provider does not know the task;
+//     no Delete is sent, and the finalizer is released only once an
+//     owner-checked Describe reports the VM absent.
+//   - False (ReasonDeleteTaskFailed): the provider reported the task failed;
+//     the reference is cleared and the Delete is sent again after a backoff
+//     counted from the condition's LastTransitionTime.
+//
+// Its messages are constant and name the recovery path (orphan-on-delete or
+// force-delete).
+const ConditionDeleteTask = "DeleteTask"
+
+// DeleteTask condition reasons.
+const (
+	// ReasonDeleteTaskStatusUnknown: the provider could not be asked for the
+	// recorded Delete task's status (a transient error), so it is not known
+	// whether the hypervisor VM was deleted. The task stays recorded, no
+	// Delete is sent, and the status is asked again with a backoff.
+	ReasonDeleteTaskStatusUnknown = "DeleteTaskStatusUnknown"
+	// ReasonDeleteTaskFailed: the provider reported that the recorded Delete
+	// task ended in failure (an explicit terminal error). The reference is
+	// cleared and the Delete is sent again after a backoff.
+	ReasonDeleteTaskFailed = "DeleteTaskFailed"
+)
+
+// More DeleteTask condition reasons.
+const (
+	// ReasonDeleteTaskOutcomeUnknown: the provider answered that it does not
+	// know the recorded Delete task (not-found, invalid, unsupported, or an
+	// answer saying the task is not known — e.g. after the provider
+	// restarted), so the task's outcome cannot be learned from it; the destroy
+	// may even still be running. DeleteTask is Unknown. No Delete is sent
+	// again: the manager asks the provider, with an owner-checked Describe,
+	// whether the VM is still there, releases the finalizer once it reports
+	// the VM absent (or another owner's), and otherwise re-checks with a
+	// backoff until an operator sets orphan-on-delete or force-delete.
+	ReasonDeleteTaskOutcomeUnknown = "DeleteTaskOutcomeUnknown"
+	// ReasonDeleteTaskProviderNotFound: the VirtualMachine's Provider object
+	// was deleted while a Delete task was recorded, so the task can no longer
+	// be observed. The finalizer is kept until the Provider is back or an
+	// operator sets orphan-on-delete or force-delete.
+	ReasonDeleteTaskProviderNotFound = "DeleteTaskProviderNotFound"
+)
