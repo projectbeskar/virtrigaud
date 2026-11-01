@@ -363,16 +363,13 @@ type VirtualMachineReconciler struct {
 	// set it.
 	recordBackoff *wait.Backoff
 	// deleteTasks holds, per VM UID, the deleteTaskRecord of a provider
-	// Delete answered with an asynchronous task (virtualmachine_delete_task.go):
-	// the task in flight, so no second Delete is sent while it runs even when
-	// its status record has not landed or the cache has not caught up. In-process
-	// state is correct: only the elected leader runs this reconciler, and a new
-	// leader reads the task back from status.lastTaskRef.
+	// Delete answered with an asynchronous task (virtualmachine_delete_task.go),
+	// so no second Delete is sent while it runs even when its status record
+	// has not landed or the cache has not caught up. In-process state is
+	// correct: only the elected leader runs this reconciler, and a new leader
+	// reads the state back from the DeleteTask condition and
+	// status.lastTaskRef.
 	deleteTasks sync.Map
-	// deleteTaskRetry paces re-sending a Delete whose task ended in failure,
-	// per VM: from vmDeleteRetryInterval doubling to blockedRetryMax. The VM's
-	// release forgets it.
-	deleteTaskRetry unschedulableBackoff
 	// deleteTaskStatusRetry paces asking again for the status of a Delete task
 	// that could not be read, per VM: from blockedRetryMin doubling to
 	// blockedRetryMax. Any answer of the provider resets it.
@@ -1155,6 +1152,10 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				}
 				// force-delete: released without any provider call.
 				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
+			case errors.IsNotFound(err) && r.hasUnresolvedDeleteTask(vm):
+				// A Delete task is recorded whose outcome only the gone
+				// Provider could tell: kept, unlike a VM with no task.
+				return r.retainForDeleteTaskProviderGone(ctx, vm, force)
 			case errors.IsNotFound(err):
 				// Provider not found, continue with cleanup
 			default:
@@ -1188,7 +1189,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			} else {
 				// A Delete answered with a task that is still in flight is
 				// observed instead of sent again (virtualmachine_delete_task.go).
-				if res, handled, err := r.continueDeleteTask(ctx, vm, providerInstance, force); handled {
+				if res, handled, err := r.continueDeleteTask(ctx, vm, providerInstance, deleteRef(vm, ref), force); handled {
 					return res, err
 				}
 				logger.Info("Deleting VM from provider", "id", ref.ID, "host", ref.HostID)
@@ -1197,6 +1198,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				// owner-checking single-host provider (Proxmox) never destroys
 				// a VM stamped with another owner (deleteRef).
 				taskRef, err := providerInstance.Delete(ctx, deleteRef(vm, ref))
+				// A failed earlier task's DeleteTask=False no longer says
+				// why the delete waits: this attempt's outcome replaces it.
+				staleTask := r.clearFailedDeleteTask(vm)
 				switch {
 				case err == nil:
 					if taskRef != "" {
@@ -1276,7 +1280,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// N8) nor the Ready=False/DeleteBlocked or
 					// ProviderUnavailable that went with it — the provider
 					// has answered. Ready says ProviderError instead.
-					if clearStaleDeleteHold(vm) {
+					if clearStaleDeleteHold(vm) || staleTask {
 						r.updateStatus(ctx, vm)
 					}
 					return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, nil
@@ -1489,7 +1493,8 @@ var providerDeleteFailedMessage = fmt.Sprintf("Delete in progress: the provider 
 // Ready=False that went with any earlier hold — reason DeleteBlocked (every
 // clustered hold, and a single-host DiskInUse refusal), ProviderUnavailable
 // (a single-host VM whose Provider could not be reached), VMIsImageArtifact
-// or OwnerStampUnreadable (a single-host refusal). Ready then becomes
+// or OwnerStampUnreadable (a single-host refusal), or DeleteTaskFailed (an
+// asynchronous Delete task that failed, its Delete now sent again). Ready then becomes
 // Ready=False/ProviderError with the constant providerDeleteFailedMessage. It
 // reports whether the status changed; a repeated failure changes nothing, so
 // it is never rewritten (and never re-triggers the deleting VM) per retry.
@@ -1497,7 +1502,8 @@ func clearStaleDeleteHold(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	changed := meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
 	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
 	staleReady := c != nil && (c.Reason == k8s.ReasonDeleteBlocked || c.Reason == k8s.ReasonProviderUnavailable ||
-		c.Reason == k8s.ReasonVMIsImageArtifact || c.Reason == k8s.ReasonOwnerStampUnreadable)
+		c.Reason == k8s.ReasonVMIsImageArtifact || c.Reason == k8s.ReasonOwnerStampUnreadable ||
+		c.Reason == k8s.ReasonDeleteTaskFailed)
 	if !changed && !staleReady {
 		return false
 	}

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,6 +61,11 @@ type asyncDeleteProvider struct {
 	taskRefs    []string
 	deleteCalls atomic.Int32
 	statusCalls atomic.Int32
+	// desc and descErr are what Describe answers (default: the VM exists).
+	desc    contracts.DescribeResponse
+	descErr error
+	// describeRefs lists the addresses Describe was asked about.
+	describeRefs []contracts.VMRef
 	// isTaskCompleteCalls counts IsTaskComplete, which the delete path must
 	// never use: TaskStatus tells a failed task from an unknown outcome.
 	isTaskCompleteCalls atomic.Int32
@@ -83,6 +89,25 @@ func (p *asyncDeleteProvider) TaskStatus(_ context.Context, ref string) (contrac
 func (p *asyncDeleteProvider) IsTaskComplete(_ context.Context, _ string) (bool, error) {
 	p.isTaskCompleteCalls.Add(1)
 	return false, stderrors.New("IsTaskComplete must not be called on the delete path")
+}
+
+func (p *asyncDeleteProvider) Describe(_ context.Context, vm contracts.VMRef) (contracts.DescribeResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.describeRefs = append(p.describeRefs, vm)
+	return p.desc, p.descErr
+}
+
+func (p *asyncDeleteProvider) answerDescribe(desc contracts.DescribeResponse, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.desc, p.descErr = desc, err
+}
+
+func (p *asyncDeleteProvider) describeCalls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.describeRefs)
 }
 
 func (p *asyncDeleteProvider) answer(st contracts.TaskStatus, err error) {
@@ -160,7 +185,7 @@ func newAsyncDeleteFixture(t *testing.T, mutate func(*infravirtrigaudiov1beta1.V
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
 		WithInterceptorFuncs(counter.funcs()).
 		Build()
-	prov := &asyncDeleteProvider{deleteTask: "task-delete-1"}
+	prov := &asyncDeleteProvider{deleteTask: "task-delete-1", desc: contracts.DescribeResponse{Exists: true, PowerState: "Off"}}
 	f := &asyncDeleteFixture{
 		t: t, client: fc, prov: prov, counter: counter,
 		resolver: &stubResolver{provider: prov},
@@ -170,6 +195,8 @@ func newAsyncDeleteFixture(t *testing.T, mutate func(*infravirtrigaudiov1beta1.V
 	}
 	f.r = f.newReconciler()
 	require.NoError(t, fc.Delete(context.Background(), vm))
+	// The clock starts at the deletion, so backoffs counted from it are exact.
+	f.now = f.get().DeletionTimestamp.Time
 	return f
 }
 
@@ -339,18 +366,81 @@ func TestAsyncDelete_TaskFailedRetriesDeleteAfterBackoff(t *testing.T) {
 	assert.Nil(t, f.get(), "a Delete that finds the VM gone releases the finalizer")
 }
 
-// 4 (continued). A second failed task backs off longer.
+// 4 (continued). Each failed task waits as long as the deletion has taken so
+// far (at least 15 s, at most 5 min): the waits grow.
 func TestAsyncDelete_RepeatedTaskFailureBacksOff(t *testing.T) {
 	f := newAsyncDeleteFixture(t, nil)
 	failed := contracts.TaskStatus{IsCompleted: true, Error: "failed"}
 	f.reconcile(f.r)
 	f.prov.answer(failed, nil)
 	assert.Equal(t, vmDeleteRetryInterval, f.reconcile(f.r).RequeueAfter)
-	f.now = f.now.Add(vmDeleteRetryInterval)
+	f.now = f.now.Add(40 * time.Second)
 	f.reconcile(f.r) // Delete again -> new task recorded
 	assert.EqualValues(t, 2, f.prov.deleteCalls.Load())
 	assert.Equal(t, "task-delete-1", f.requireHeld().Status.LastTaskRef)
-	assert.Equal(t, 2*vmDeleteRetryInterval, f.reconcile(f.r).RequeueAfter, "the second failure waits twice as long")
+	assert.Equal(t, 40*time.Second, f.reconcile(f.r).RequeueAfter, "the second failure waits as long as the delete took so far")
+	f.now = f.now.Add(time.Hour)
+	f.reconcile(f.r)
+	assert.EqualValues(t, 3, f.prov.deleteCalls.Load())
+	assert.Equal(t, blockedRetryMax, f.reconcile(f.r).RequeueAfter, "bounded")
+}
+
+// S3. The failure backoff is anchored on the DeleteTask condition: a
+// restarted manager does not send the Delete before it is over.
+func TestAsyncDelete_RestartAfterTaskFailedKeepsBackoff(t *testing.T) {
+	f := newAsyncDeleteFixture(t, nil)
+	f.reconcile(f.r)
+	f.prov.answer(contracts.TaskStatus{IsCompleted: true, Error: "failed"}, nil)
+	f.reconcile(f.r)
+	vm := f.requireHeld()
+	require.Equal(t, metav1.ConditionFalse, deleteTaskCondition(vm).Status)
+
+	restarted := f.newReconciler()
+	f.now = f.now.Add(5 * time.Second)
+	res := f.reconcile(restarted)
+	assert.InDelta(t, float64(10*time.Second), float64(res.RequeueAfter), float64(time.Second),
+		"the remaining wait comes from the stored condition")
+	assert.EqualValues(t, 1, f.prov.deleteCalls.Load(), "no Delete before the backoff is over, after a restart too")
+
+	f.now = f.now.Add(11 * time.Second)
+	f.prov.answerDelete("", nil)
+	f.reconcile(restarted)
+	assert.EqualValues(t, 2, f.prov.deleteCalls.Load())
+	assert.Nil(t, f.get())
+}
+
+// N1. A Delete sent again after a failed task that then fails synchronously
+// (or is refused) replaces the stale DeleteTask=False and its Ready message.
+func TestAsyncDelete_StaleFailedConditionClearedOnRetry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		reason string
+	}{
+		"ordinary failure": {err: stderrors.New("VM is running - destroy failed"), reason: k8s.ReasonProviderError},
+		"disk in use": {err: contracts.NewConflictError("delete: in use",
+			fmt.Errorf("%w: x", contracts.ErrVMDiskInUse)), reason: k8s.ReasonDeleteBlocked},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAsyncDeleteFixture(t, nil)
+			f.reconcile(f.r)
+			f.prov.answer(contracts.TaskStatus{IsCompleted: true, Error: "failed"}, nil)
+			f.reconcile(f.r)
+			f.now = f.now.Add(vmDeleteRetryInterval)
+			f.prov.answerDelete("", tc.err)
+			f.reconcile(f.r)
+			vm := f.requireHeld()
+			assert.EqualValues(t, 2, f.prov.deleteCalls.Load())
+			assert.Nil(t, deleteTaskCondition(vm), "the failed task's condition is gone")
+			ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, tc.reason, ready.Reason)
+			assert.NotEqual(t, deleteTaskFailedMessage, ready.Message)
+			// The next attempt is the ordinary retry, not the task backoff.
+			f.now = f.now.Add(vmDeleteRetryInterval)
+			f.reconcile(f.r)
+			assert.EqualValues(t, 3, f.prov.deleteCalls.Load())
+		})
+	}
 }
 
 // 5. A TaskStatus error is an unknown outcome: the task stays recorded, the
@@ -444,40 +534,112 @@ func TestAsyncDelete_ManagerRestartResumesTask(t *testing.T) {
 	assert.Nil(t, f.get())
 }
 
+// staleAnswers are the TaskStatus answers with which a provider says it does
+// not know a task: ambiguous, never a failure that re-sends Delete.
+var staleAnswers = map[string]struct {
+	st  contracts.TaskStatus
+	err error
+}{
+	"not found error":     {err: contracts.NewNotFoundError("taskStatus: task host is not in the registry", nil)},
+	"invalid reference":   {err: contracts.NewInvalidSpecError("taskStatus: not host-encoded", nil)},
+	"unsupported":         {err: contracts.NewNotSupportedError("taskStatus: not implemented")},
+	"terminal not found":  {st: contracts.TaskStatus{IsCompleted: true, Error: "task not found"}},
+	"not reported by PVE": {st: contracts.TaskStatus{IsCompleted: true, Error: "PVE does not report this task: 400"}},
+	"invalid task id":     {st: contracts.TaskStatus{IsCompleted: true, Error: "invalid task ID format: x"}},
+}
+
 // 8. A stale reference — the provider no longer knows the task (a restarted
-// provider, a reference it never issued) — is not a deleted VM: the reference
-// is cleared and the Delete is sent again after the backoff, which settles it.
-func TestAsyncDelete_StaleTaskReference(t *testing.T) {
-	for name, answer := range map[string]struct {
-		st  contracts.TaskStatus
-		err error
+// provider, a reference it never issued) — is ambiguous: DeleteTask=Unknown,
+// no Delete is sent again, and an owner-checked Describe that reports the VM
+// absent (or another owner's) releases it.
+func TestAsyncDelete_StaleTaskReferenceConfirmedAbsent(t *testing.T) {
+	absentAnswers := map[string]struct {
+		desc contracts.DescribeResponse
+		err  error
 	}{
-		"not found error":     {err: contracts.NewNotFoundError("taskStatus: task host is not in the registry", nil)},
-		"invalid reference":   {err: contracts.NewInvalidSpecError("taskStatus: not host-encoded", nil)},
-		"unsupported":         {err: contracts.NewNotSupportedError("taskStatus: not implemented")},
-		"terminal not found":  {st: contracts.TaskStatus{IsCompleted: true, Error: "task not found"}},
-		"error without done":  {st: contracts.TaskStatus{IsCompleted: false, Error: "task failed: unknown task"}},
-		"stale after restart": {st: contracts.TaskStatus{IsCompleted: true, Error: "PVE does not report this task"}},
-	} {
+		"exists false": {desc: contracts.DescribeResponse{Exists: false}},
+		"not found":    {err: contracts.NewNotFoundError("describe: VM not found", nil)},
+		"not owned":    {err: contracts.NewNotFoundError("describe: not ours", fmt.Errorf("%w: x", contracts.ErrVMNotOwned))},
+	}
+	for name, answer := range staleAnswers {
+		for absentName, absent := range absentAnswers {
+			t.Run(name+"/"+absentName, func(t *testing.T) {
+				f := newAsyncDeleteFixture(t, nil)
+				f.reconcile(f.r)
+				f.prov.answer(answer.st, answer.err)
+				f.prov.answerDescribe(absent.desc, absent.err)
+				f.reconcile(f.newReconciler())
+				assert.Nil(t, f.get(), "the VM is confirmed absent")
+				assert.EqualValues(t, 1, f.prov.deleteCalls.Load(), "an ambiguous answer never re-sends Delete")
+				require.Equal(t, 1, f.prov.describeCalls())
+				assert.Equal(t, "uid-vm-async", string(f.prov.describeRefs[0].Owner.UID), "the Describe is owner-checked")
+				events := f.events()
+				assert.Equal(t, 1, countPrefixed(events, "Warning "+eventReasonDeleteTaskOutcomeUnknown))
+				if absentName == "not owned" {
+					assert.Equal(t, 1, countPrefixed(events, "Warning "+eventReasonVMLeftOnHypervisor))
+				} else {
+					assert.Equal(t, 1, countPrefixed(events, "Normal "+eventReasonDeleteConfirmedAbsent))
+				}
+			})
+		}
+	}
+}
+
+// 8 (still present). The VM is still there (or Describe fails): the finalizer
+// is kept with DeleteTask=Unknown, nothing is deleted again, only Describe is
+// repeated with a bounded backoff — also after a manager restart.
+func TestAsyncDelete_StaleTaskReferenceVMStillPresent(t *testing.T) {
+	for name, answer := range staleAnswers {
 		t.Run(name, func(t *testing.T) {
 			f := newAsyncDeleteFixture(t, nil)
 			f.reconcile(f.r)
-			restarted := f.newReconciler()
 			f.prov.answer(answer.st, answer.err)
-			res := f.reconcile(restarted)
-			assert.Equal(t, vmDeleteRetryInterval, res.RequeueAfter)
+			res := f.reconcile(f.r)
+			assert.Equal(t, blockedRetryMin, res.RequeueAfter)
 			vm := f.requireHeld()
-			assert.Empty(t, vm.Status.LastTaskRef)
-			assert.Equal(t, k8s.ReasonDeleteTaskFailed, deleteTaskCondition(vm).Reason)
-			assert.EqualValues(t, 1, f.prov.deleteCalls.Load())
+			c := deleteTaskCondition(vm)
+			require.NotNil(t, c)
+			assert.Equal(t, metav1.ConditionUnknown, c.Status)
+			assert.Equal(t, k8s.ReasonDeleteTaskOutcomeUnknown, c.Reason)
+			assert.Equal(t, "task-delete-1", vm.Status.LastTaskRef, "the reference is kept as the record of what was sent")
+			assert.Contains(t, c.Message, forceDeleteAnnotation)
+			assert.Contains(t, c.Message, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+			writes := f.counter.writes.Load()
 
-			f.now = f.now.Add(vmDeleteRetryInterval)
-			f.prov.answerDelete("", nil)
+			restarted := f.newReconciler()
+			f.prov.answerDescribe(contracts.DescribeResponse{}, stderrors.New("describe: timeout"))
+			var waits []time.Duration
+			for _, step := range []time.Duration{20 * time.Second, time.Minute, 10 * time.Minute} {
+				f.now = f.now.Add(step)
+				waits = append(waits, f.reconcile(restarted).RequeueAfter)
+			}
+			assert.InDelta(t, float64(20*time.Second), float64(waits[0]), float64(time.Second))
+			assert.InDelta(t, float64(80*time.Second), float64(waits[1]), float64(time.Second))
+			assert.Equal(t, blockedRetryMax, waits[2], "bounded")
+			f.requireHeld()
+			assert.EqualValues(t, 1, f.prov.deleteCalls.Load(), "no Delete is ever sent again")
+			assert.EqualValues(t, 1, f.prov.statusCalls.Load(), "TaskStatus is not asked again")
+			assert.Equal(t, 4, f.prov.describeCalls())
+			assert.Equal(t, writes, f.counter.writes.Load(), "an unchanged hold writes no status")
+			assert.Equal(t, 1, countPrefixed(f.events(), "Warning "+eventReasonDeleteTaskOutcomeUnknown))
+
+			// The VM disappears: released.
+			f.prov.answerDescribe(contracts.DescribeResponse{Exists: false}, nil)
 			f.reconcile(restarted)
-			assert.EqualValues(t, 2, f.prov.deleteCalls.Load())
-			assert.Nil(t, f.get(), "the repeated synchronous Delete releases it")
+			assert.Nil(t, f.get())
+			assert.EqualValues(t, 1, f.prov.deleteCalls.Load())
 		})
 	}
+}
+
+// An explicit terminal error is a failure, not an unknown task.
+func TestDeleteTaskAnswerUnknown(t *testing.T) {
+	for name, answer := range staleAnswers {
+		assert.True(t, deleteTaskAnswerUnknown(answer.st, answer.err), name)
+	}
+	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{IsCompleted: true, Error: "Destroy_Task failed: file locked"}, nil))
+	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{}, contracts.NewRetryableError("taskStatus: reset", nil)))
+	assert.False(t, deleteTaskAnswerUnknown(contracts.TaskStatus{IsCompleted: false}, nil))
 }
 
 // 10. The task record is a status patch with no resourceVersion
@@ -554,6 +716,7 @@ func TestAsyncDelete_ForceDelete(t *testing.T) {
 		"running":   {st: contracts.TaskStatus{IsCompleted: false}, leftOver: true},
 		"unknown":   {err: stderrors.New("taskStatus failed: unavailable"), leftOver: true},
 		"failed":    {st: contracts.TaskStatus{IsCompleted: true, Error: "failed"}, leftOver: true},
+		"ambiguous": {st: contracts.TaskStatus{IsCompleted: true, Error: "task not found"}, leftOver: true},
 		"completed": {st: contracts.TaskStatus{IsCompleted: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -647,4 +810,90 @@ func TestAsyncDelete_ClusteredHostEncodedTask(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(r.Get(ctx, types.NamespacedName{Namespace: clusteredNS, Name: "db"}, gone)))
 	assert.EqualValues(t, 1, prov.deleteCalls.Load())
 	assert.Equal(t, []string{ref, ref}, prov.taskRefs)
+}
+
+// S4. A stale cached object (no DeleteTask condition yet) read after the
+// record was written: the in-memory record wins, no second Delete is sent and
+// the task is polled.
+func TestAsyncDelete_StaleCacheWhileMemoryHoldsRef(t *testing.T) {
+	f := newAsyncDeleteFixture(t, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseDeleting
+	})
+	f.prov.answer(contracts.TaskStatus{IsCompleted: false}, nil)
+	stale := f.get() // what a lagging cache still returns afterwards
+	f.reconcile(f.r)
+	require.Equal(t, "task-delete-1", f.requireHeld().Status.LastTaskRef, "the record was written")
+	require.Nil(t, deleteTaskCondition(stale))
+
+	_, err := f.r.handleDeletion(context.Background(), stale)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, f.prov.deleteCalls.Load(), "a stale cache never sends a second Delete")
+	assert.EqualValues(t, 1, f.prov.statusCalls.Load(), "the remembered task is polled")
+	vm := f.requireHeld()
+	assert.Equal(t, "task-delete-1", vm.Status.LastTaskRef)
+	assert.True(t, meta.IsStatusConditionTrue(vm.Status.Conditions, k8s.ConditionDeleteTask))
+}
+
+// S2. The Provider object is deleted while a Delete task is recorded: the
+// finalizer is kept (DeleteTaskProviderNotFound, one event) instead of the
+// release a VM with no task gets; force-delete releases it with the audit
+// event; once the Provider is back, the task is polled again.
+func TestAsyncDelete_ProviderGoneWithRecordedTask(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(map[bool]string{false: "in memory", true: "from status"}[restart], func(t *testing.T) {
+			f := newAsyncDeleteFixture(t, nil)
+			f.prov.answer(contracts.TaskStatus{IsCompleted: false}, nil)
+			f.reconcile(f.r)
+			require.NoError(t, f.client.Delete(context.Background(), deletionProviderCR()))
+			r := f.r
+			if restart {
+				r = f.newReconciler()
+			}
+			for range 2 {
+				res := f.reconcile(r)
+				assert.GreaterOrEqual(t, res.RequeueAfter, blockedRetryMin)
+			}
+			vm := f.requireHeld()
+			c := deleteTaskCondition(vm)
+			require.NotNil(t, c)
+			assert.Equal(t, k8s.ReasonDeleteTaskProviderNotFound, c.Reason)
+			assert.Equal(t, metav1.ConditionTrue, c.Status, "still a task to poll once the Provider is back")
+			assert.Equal(t, "task-delete-1", vm.Status.LastTaskRef)
+			assert.Equal(t, 1, countPrefixed(f.events(), "Warning "+eventReasonDeleteTaskProviderNotFound))
+
+			require.NoError(t, f.client.Create(context.Background(), deletionProviderCR()))
+			f.reconcile(r)
+			assert.Equal(t, k8s.ReasonTaskInProgress, deleteTaskCondition(f.requireHeld()).Reason)
+			f.prov.answer(contracts.TaskStatus{IsCompleted: true}, nil)
+			f.reconcile(r)
+			assert.Nil(t, f.get())
+			assert.EqualValues(t, 1, f.prov.deleteCalls.Load())
+		})
+	}
+}
+
+// S2. With force-delete, a Provider gone while a task is recorded releases the
+// VM with the VMLeftOnHypervisor event.
+func TestAsyncDelete_ProviderGoneWithRecordedTaskForceDelete(t *testing.T) {
+	f := newAsyncDeleteFixture(t, nil)
+	f.prov.answer(contracts.TaskStatus{IsCompleted: false}, nil)
+	f.reconcile(f.r)
+	require.NoError(t, f.client.Delete(context.Background(), deletionProviderCR()))
+	vm := f.get()
+	vm.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+	require.NoError(t, f.client.Update(context.Background(), vm))
+	f.reconcile(f.r)
+	assert.Nil(t, f.get())
+	assert.Equal(t, 1, countPrefixed(f.events(), "Warning "+eventReasonVMLeftOnHypervisor))
+}
+
+// S2 (unchanged). A VM with no Delete task whose Provider is gone is released
+// as before, without any provider call.
+func TestAsyncDelete_ProviderGoneWithoutTaskReleases(t *testing.T) {
+	f := newAsyncDeleteFixture(t, nil)
+	require.NoError(t, f.client.Delete(context.Background(), deletionProviderCR()))
+	f.reconcile(f.r)
+	assert.Nil(t, f.get())
+	assert.Zero(t, f.prov.deleteCalls.Load())
+	assert.Empty(t, f.events())
 }
