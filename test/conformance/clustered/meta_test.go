@@ -17,6 +17,8 @@ limitations under the License.
 package clustered_test
 
 import (
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -185,4 +187,22 @@ func TestRecorderSeesFailureAndSkip(t *testing.T) {
 	rec := clustered.NewRecorder("s")
 	assert.Equal(t, clustered.OutcomeSkipped, rec.RunRecorded(func(rt clustered.T) { rt.Skipf("not today") }))
 	assert.Equal(t, "not today", rec.SkipReason())
+}
+
+// TestReadmeListsEveryCase keeps test/conformance/README.md honest: every case
+// of the suite and every optional feature is documented there, and the
+// violation count it quotes is the real one.
+func TestReadmeListsEveryCase(t *testing.T) {
+	b, err := os.ReadFile("../README.md")
+	require.NoError(t, err)
+	readme := string(b)
+	for _, c := range clustered.Cases() {
+		assert.True(t, strings.Contains(readme, "`"+c.ID+"`"), "case %s is not in test/conformance/README.md", c.ID)
+		assert.NotEmpty(t, c.Source, "case %s cites no source", c.ID)
+		assert.NotEmpty(t, c.Rule, "case %s states no rule", c.ID)
+		for _, f := range c.Requires {
+			assert.True(t, strings.Contains(readme, "`"+string(f)+"`"), "feature %s is not in test/conformance/README.md", f)
+		}
+	}
+	assert.True(t, strings.Contains(readme, fmt.Sprintf("%d violations", len(fake.All()))), "the README quotes the number of violations (%d)", len(fake.All()))
 }

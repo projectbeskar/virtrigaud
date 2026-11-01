@@ -165,7 +165,7 @@ func Run(t *testing.T, factory Factory, opts ...Option) {
 				t.Skipf("%s skipped: %s", c.ID, rec.SkipReason())
 			default:
 				mu.Lock()
-				notes[c.ID] = fmt.Sprintf("EXPECTED FAILURE %s: %s\n    observed: %s", c.ID, pointer, strings.Join(rec.Failures(), " | "))
+				notes[c.ID] = fmt.Sprintf("EXPECTED FAILURE %s: %s\n    observed: %s", c.ID, pointer, strings.Join(strings.Fields(strings.Join(rec.Failures(), " | ")), " "))
 				mu.Unlock()
 				t.Skipf("expected failure: %s", pointer)
 			}
