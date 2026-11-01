@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-01 14:00] - Clustered-provider gRPC conformance suite
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `test/conformance/clustered/`: a reusable conformance suite for a clustered remote Provider. It starts the Provider's real gRPC server on loopback and checks the contract with a raw gRPC client (codes, `google.rpc.ErrorInfo`) and with the manager's transport client (`contracts.Is*`, circuit-breaker accounting): a required `target_host_id`, host routing, invalid, unknown and removed host ids, owner checks (including unstamped, unreadable and uid-less owners), `HOST_UNAVAILABLE`, `VM_OPERATION_FAILED` and `HOST_CONNECTION_LOST`, a host that never answers, host-encoded task references, `ListVMs` and `unreachable_host_ids`, capabilities, idempotency, a provider restart and a provider outage. 49 cases, each citing the proto, ADR or `contracts` text it comes from; 45 are Required (a failure fails the run) and 4 Recommended (a failure is reported in the summary). A provider plugs in by writing one adapter (`clustered.Target`); optional behaviour is declared as a feature and the cases that need it are skipped with a reported reason; a known deviation is recorded with a pinned failure message.
+- `test/conformance/clustered/fake/`: an instrumented in-memory clustered Provider that can break each rule (60 violations); in its asynchronous mode effects happen when the host finishes the task. `TestEveryCaseCatchesItsSeededViolation` runs the guarding cases against each violation and requires them to fail, so every case is shown able to fail (it does not show the cases complete).
+- `internal/providers/libvirt/conformance_clustered_test.go`: the clustered libvirt adapter (existing `ClusterRegistry` and `createOnHostFn` seams plus a stateful fake `virsh`; no libvirtd, no ssh).
+- `Makefile`: `make test-conformance-clustered` runs the suite with `-race` and prints the full output when it fails. The suite is also part of `make test` (about 25 s together).
+- `test/conformance/README.md`, `CONTRIBUTING.md`: how to run the suite, its cases and levels, optional features, how to write an adapter, what is not covered.
+
+### Why
+The clustered Provider contract (ADR-0007 Addenda A and B) was pinned only by provider-internal unit tests. A second clustered provider needs the same checks at the gRPC boundary without copying them, and needs evidence that they fail when a rule is broken.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Tests, a Makefile target and documentation only: no production code, proto, CRD, chart or RBAC change, so none of the boxes applies. The suite found two deviations in clustered libvirt, both Recommended and recorded, not fixed: a routed `Create`'s `HOST_UNAVAILABLE` does not set the `host` ErrorInfo metadata the other routed calls set (nothing reads it for Create today); `TaskStatus` answers `done` for a well-formed reference to a task it never issued. A host whose SSH handshake never finishes is answered inside the caller's deadline, per call and in `ListVMs`.
+
 ## [2026-10-31 19:19] - Prepare VirtRigaud v0.4.2 GA
 **Author:** @wrkode (William Rizzo)
 

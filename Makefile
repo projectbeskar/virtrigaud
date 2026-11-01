@@ -167,6 +167,13 @@ test-libvirt-integration: ## Run the go-libvirt test:///default integration test
 	@echo "Running go-libvirt test:///default integration tests (skips if no libvirtd)..."
 	@go test -race -run 'TestBuildNativeDescribe|TestNativeVsVirshParity' -v ./internal/providers/libvirt/...
 
+.PHONY: test-conformance-clustered
+test-conformance-clustered: ## Run the clustered-provider gRPC conformance suite: its fake-provider mutation meta-test and the clustered libvirt adapter. No cluster, hypervisor or network (loopback gRPC only); already part of make test, this runs just the suite with -race.
+	@echo "Running the clustered-provider conformance suite (fake + mutation meta-test, then clustered libvirt)..."
+	@go test -race -count=1 ./test/conformance/clustered/...
+	@out=$$(go test -race -count=1 -run 'TestClusteredLibvirt_Conformance' -v ./internal/providers/libvirt/ 2>&1); rc=$$?; \
+	  if [ $$rc -ne 0 ]; then echo "$$out"; else echo "$$out" | grep -E 'SKIPPED|EXPECTED FAILURE|RECOMMENDED FAILED|NOTE|^(ok|FAIL|--- FAIL)'; fi; exit $$rc
+
 .PHONY: envtest-setup
 envtest-setup: setup-envtest ## Install setup-envtest and export KUBEBUILDER_ASSETS for local runs
 	@echo "To run tests locally with envtest, export:"

@@ -225,7 +225,14 @@ make test-e2e
 go test ./internal/providers/vsphere/...
 go test ./internal/providers/libvirt/...
 go test ./internal/providers/proxmox/...
+
+# A clustered Provider's gRPC contract (host routing, owner checks, HOST_UNAVAILABLE,
+# task references, ListVMs): no cluster or hypervisor; also part of make test
+make test-conformance-clustered
 ```
+
+A new clustered Provider reuses that suite by writing an adapter only; see
+[`test/conformance/README.md`](test/conformance/README.md#clustered-provider-grpc-conformance-suite).
 
 ## Release Process
 
