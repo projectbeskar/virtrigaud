@@ -202,7 +202,7 @@ configuration the two `async-tasks` cases are skipped.
 | `hostdown.recovery` | Required | when the host comes back its VMs are found again, unchanged, and calls succeed: nothing was re-created or dropped meanwhile | - | pass | pass |
 | `hostdown.not-counted-against-provider` | Required | a host-scoped unavailability is not an infrastructure failure of the Provider: the manager's circuit breaker stays closed and calls on healthy hosts still go through | - | pass | pass |
 | `hostdown.blackholed-list` | Required | a host that accepts connections and never answers does not stall ListVMs: the call answers inside the caller's deadline and reports that host unreachable | `host-blackhole` | pass | pass |
-| `hostdown.blackholed-per-vm` | Recommended | a per-VM call to a host that never answers fails inside the caller's deadline with the host-scoped Unavailable, not a bare deadline error | `host-blackhole` | pass | **recommended fail** |
+| `hostdown.blackholed-per-vm` | Recommended | a per-VM call to a host that never answers fails inside the caller's deadline with the host-scoped Unavailable, not a bare deadline error | `host-blackhole` | pass | pass |
 | `hostdown.operation-failed` | Required | an operation that reaches its host and fails there carries VM_OPERATION_FAILED, is not NotFound or host-unavailable, changes nothing, and does not count toward the Provider's circuit breaker | `host-faults` | pass | pass |
 | `hostdown.connection-lost` | Required | a host whose connection dies while it runs an operation that changes a VM is answered with HOST_CONNECTION_LOST together with VM_OPERATION_FAILED (never NotFound, never success); repeating the operation once the host answers succeeds | `host-faults` | pass | pass |
 | `hostdown.removed-host` | Required | a host removed from the Provider's registry while VMs are bound to it is an unavailable host, not a missing VM: calls to it are the host-scoped Unavailable, its VMs are untouched, the other hosts are unaffected, and a task naming it is NotFound | `host-removal` | pass | pass |
@@ -222,7 +222,7 @@ configuration the two `async-tasks` cases are skipped.
 | `errinfo.host-unavailable-wire-and-mapping` | Required | the wire carries google.rpc.ErrorInfo{reason: HOST_UNAVAILABLE, domain: provider.virtrigaud.io}, with metadata.host naming a known host that is unreachable; the manager maps it to a retryable HostUnavailable that is not NotFound, and keeps that host id | - | pass | pass |
 | `errinfo.provider-level-unavailable` | Required | when the Provider itself cannot serve, its Unavailable is not host-scoped (no HOST_UNAVAILABLE), so the manager counts it as the Provider's failure | `provider-not-ready` | pass | skip |
 | `idempotency.reads` | Required | Describe and ListVMs are read-only: repeated calls give the same answer and change nothing | - | pass | pass |
-| `idempotency.power` | Required | a power operation repeated for a state the VM is already in succeeds (the manager re-sends after a lost answer) | - | pass | pass |
+| `idempotency.power` | Recommended | a power operation repeated for a state the VM is already in succeeds (the manager re-sends after a lost answer) | - | pass | pass |
 | `idempotency.delete` | Required | a repeated Delete is a success or NotFound (the VM is gone), never another error; and it never deletes a different VM that has since taken the name | - | pass | pass |
 | `idempotency.host-unavailable` | Required | repeated calls to an unreachable host keep giving the same host-scoped answer and change nothing | - | pass | pass |
 | `restart.state-lives-on-hosts` | Required | after the provider restarts, its VMs are found on their hosts unchanged, ListVMs lists them, other tenants' VMs are still refused, and the capabilities are the same | - | pass | pass |
@@ -237,10 +237,10 @@ configuration the two `async-tasks` cases are skipped.
 | `create.routed-to-target-host` | Required | Create lands the VM on the host named by target_host_id and stamps the requester as its owner; the VM is then found there by that owner and by no other | `create` | pass | pass |
 | `create.owner-rebind` | Required | a repeated Create by the same owner is an idempotent success (the same VM), and a Create by another owner for a taken name fails AlreadyExists and leaves the VM and its stamp alone | `create`, `create-owner-rebind` | pass | skip |
 
-Clustered libvirt: 41 Required cases pass and 5 are skipped, each with a reason (no asynchronous
+Clustered libvirt: 40 Required cases pass and 5 are skipped, each with a reason (no asynchronous
 calls; no `VM_NOT_OWNED` reason, which the contract does not require of a clustered provider;
 Create runs through a seam, so the owner rebind is left to the real-pipeline tests; no safe way to
-make the Provider itself unready). 3 Recommended cases fail and are recorded below.
+make the Provider itself unready). 4 Recommended cases: 2 pass and 2 fail (recorded below).
 
 ## Optional features
 
@@ -252,7 +252,7 @@ make the Provider itself unready). 3 Recommended cases fail and are recorded bel
 | `create` | `Create` can be driven through the gRPC server (and its VM observed). |
 | `create-owner-rebind` | A repeated Create by the same owner is idempotent; another owner's Create of a taken name is `AlreadyExists`. |
 | `provider-not-ready` | The Target can make the Provider itself, not one host, unable to serve. |
-| `host-blackhole` | The Target can make a host accept connections and never answer (`HostBlackholer`). |
+| `host-blackhole` | The Target can make a host accept connections and never answer (`HostBlackholer`). Clustered libvirt's adapter gives the host a real SSH host connection to a server that never completes the handshake, so the Provider's own bound on a host that does not answer is what ends the call. |
 | `host-faults` | The Target can make a host fail an operation cleanly, or lose its connection during one (`HostFaulter`). |
 | `host-removal` | The Target can remove a host from the Provider's registry while VMs are bound to it (`HostRemover`). |
 | `unreadable-stamp` | `SeedSpec.Stamp` can make a VM's owner stamp unreadable or ambiguous. |
@@ -293,7 +293,7 @@ breaks its rule (`fake/violation.go`, `fake/provider.go`) and its entry in `clus
 
 ## Findings recorded against clustered libvirt
 
-All three are Recommended cases; none is fixed by the change that added the suite. They are listed
+Both are Recommended cases; neither is fixed by the change that added the suite. They are listed
 in `libvirtExpectedFailures` with a pointer and a pinned message.
 
 - `create.unavailable-names-host`: a routed `Create` answered `HOST_UNAVAILABLE` does not set the
@@ -303,9 +303,6 @@ in `libvirtExpectedFailures` with a pointer and a pinned message.
 - `tasks.forged-inner-ref`: `TaskStatus` for a well-formed reference to a host it fronts, naming a
   task it never issued, answers `done`. Every routed libvirt call is synchronous, so it issues no
   task and cannot tell.
-- `hostdown.blackholed-per-vm`: a per-VM call to a host whose connection never answers ends with
-  the caller's own `DeadlineExceeded`, not a host-scoped Unavailable. `ListVMs` handles the same
-  host correctly (`hostdown.blackholed-list` passes).
 
 ## Not covered
 

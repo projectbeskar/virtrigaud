@@ -99,6 +99,59 @@ type provider struct {
 
 func (p *provider) v(x Violation) bool { return p.violations[x] }
 
+// blackholeWait answers a call to a host that accepts connections and never
+// answers: the provider gives up on it after its own short deadline, or when
+// the caller's context ends, whichever is first. It holds no lock while it
+// waits. It returns nil when the host named by raw is not blackholed.
+func (p *provider) blackholeWait(ctx context.Context, raw string) error {
+	host := strings.TrimSpace(raw)
+	p.w.mu.Lock()
+	hs := p.host(host)
+	bh := hs != nil && hs.blackholed
+	p.w.mu.Unlock()
+	if !bh {
+		return nil
+	}
+	timer := time.NewTimer(300 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	case <-timer.C:
+	}
+	if p.v(BlackholeNoReason) {
+		return status.Error(codes.DeadlineExceeded, "host did not answer")
+	}
+	return hostUnavailable(p, host, "host did not answer")
+}
+
+// waitOutBlackholes is the listing's wait for hosts that never answer: one
+// short wait for all of them, ended early by the caller's context. A provider
+// that lets such a host stall the listing waits for the caller's deadline.
+func (p *provider) waitOutBlackholes(ctx context.Context) error {
+	p.w.mu.Lock()
+	hung := false
+	for _, h := range p.w.order {
+		if hs := p.host(h); hs != nil && hs.blackholed {
+			hung = true
+		}
+	}
+	p.w.mu.Unlock()
+	if !hung {
+		return nil
+	}
+	if p.v(BlackholeStallsList) {
+		<-ctx.Done()
+		return status.FromContextError(ctx.Err()).Err()
+	}
+	select {
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	case <-time.After(300 * time.Millisecond):
+	}
+	return nil
+}
+
 // host returns the registry entry of name: nil when the provider does not
 // front it (never configured, or removed).
 func (p *provider) host(name string) *hostState {
@@ -196,17 +249,6 @@ func (p *provider) route(raw string, ignoreReach bool) (string, *hostState, erro
 			}
 		}
 	}
-	if hs.blackholed && !ignoreReach {
-		// The host accepts the connection and never answers: the provider gives
-		// up on it after its own short deadline.
-		p.w.mu.Unlock()
-		time.Sleep(300 * time.Millisecond)
-		p.w.mu.Lock()
-		if p.v(BlackholeNoReason) {
-			return "", nil, status.Error(codes.DeadlineExceeded, "host did not answer")
-		}
-		return "", nil, hostUnavailable(p, host, "host did not answer")
-	}
 	if !hs.reachable {
 		hs.stuck = true
 	}
@@ -287,7 +329,10 @@ func powerName(running bool) string {
 }
 
 // Describe implements the owner-checked, routed Describe.
-func (p *provider) Describe(_ context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
+func (p *provider) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
+	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
+		return nil, err
+	}
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
 	if err := p.gate(); err != nil {
@@ -363,7 +408,10 @@ func withInfos(c codes.Code, msg string, infos []*errdetails.ErrorInfo) error {
 }
 
 // Power implements the owner-checked, routed Power.
-func (p *provider) Power(_ context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+func (p *provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
+		return nil, err
+	}
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
 	if err := p.gate(); err != nil {
@@ -397,7 +445,10 @@ func (p *provider) Power(_ context.Context, req *providerv1.PowerRequest) (*prov
 }
 
 // Delete implements the owner-checked, routed Delete.
-func (p *provider) Delete(_ context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
+func (p *provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
+	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
+		return nil, err
+	}
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
 	if err := p.gate(); err != nil {
@@ -429,7 +480,10 @@ func (p *provider) Delete(_ context.Context, req *providerv1.DeleteRequest) (*pr
 }
 
 // Reconfigure implements the owner-checked, routed Reconfigure.
-func (p *provider) Reconfigure(_ context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+func (p *provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
+		return nil, err
+	}
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
 	if err := p.gate(); err != nil {
@@ -505,6 +559,9 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 
 // ListVMs lists the VMs of every host.
 func (p *provider) ListVMs(ctx context.Context, _ *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
+	if err := p.waitOutBlackholes(ctx); err != nil {
+		return nil, err
+	}
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
 	if err := p.gate(); err != nil {
@@ -518,15 +575,6 @@ func (p *provider) ListVMs(ctx context.Context, _ *providerv1.ListVMsRequest) (*
 			continue
 		}
 		if hs.blackholed {
-			if p.v(BlackholeStallsList) {
-				p.w.mu.Unlock()
-				<-ctx.Done()
-				p.w.mu.Lock()
-				return nil, status.FromContextError(ctx.Err()).Err()
-			}
-			p.w.mu.Unlock()
-			time.Sleep(300 * time.Millisecond)
-			p.w.mu.Lock()
 			resp.UnreachableHostIds = append(resp.UnreachableHostIds, host)
 			continue
 		}
@@ -627,7 +675,10 @@ func (p *provider) SnapshotRevert(_ context.Context, req *providerv1.SnapshotRev
 }
 
 // Create makes a VM on the target host and stamps its owner.
-func (p *provider) Create(_ context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
+func (p *provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
+	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
+		return nil, err
+	}
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
 	if err := p.gate(); err != nil {

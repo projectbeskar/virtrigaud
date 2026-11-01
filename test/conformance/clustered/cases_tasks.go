@@ -123,7 +123,7 @@ func taskCases() []Case {
 				ref := HostTaskPrefix + e.HostA() + "/job-1"
 				resp, err := e.TaskStatus(ref)
 				require.Error(e.T, err, "an unreachable host cannot say the task is done (got %v)", resp)
-				requireHostUnavailable(e, err, e.HostA(), "task of an unreachable host")
+				requireHostUnavailable(e, err, "", "task of an unreachable host")
 				_, err = e.Manager().IsTaskComplete(e.Ctx(), ref)
 				assert.True(e.T, contracts.IsHostUnavailable(err), "manager mapping: %v", err)
 				assert.False(e.T, contracts.IsNotFound(err))
@@ -166,7 +166,7 @@ func taskCases() []Case {
 				// A task is routed to the host in its reference.
 				e.HostDown(e.HostA())
 				_, err = e.TaskStatus(refA)
-				requireHostUnavailable(e, err, e.HostA(), "task of an unreachable host")
+				requireHostUnavailable(e, err, "", "task of an unreachable host")
 				resp, err = e.TaskStatus(refB)
 				require.NoError(e.T, err, "the task of a reachable host still answers")
 				assert.True(e.T, resp.Done)

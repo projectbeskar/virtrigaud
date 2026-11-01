@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -53,9 +54,7 @@ import (
 // fixture), so a power operation or a delete is visible to the next read,
 // and hands every other command to the shared ops fake (opsFakeVirsh, installed
 // next to it as virsh-ops). A host directory containing "dead" makes every
-// call die without an exit status, as a dropped SSH session does; "hang" makes
-// every call block (a host that accepts the connection and never answers);
-// "failops" makes the commands that change a domain fail cleanly, and
+// call die without an exit status, as a dropped SSH session does; "failops" makes the commands that change a domain fail cleanly, and
 // "dropops" makes the connection die while they run.
 const conformanceFakeVirsh = `#!/bin/sh
 bindir=$(dirname "$0")
@@ -65,7 +64,6 @@ if [ "$1" = "-c" ]; then uri="$2"; host="${2##*/}"; shift 2; fi
 printf '%s %s\n' "$host" "$*" >> "$FAKE_VIRSH_DIR/calls.log"
 d="$FAKE_VIRSH_DIR/$host"
 if [ -f "$d/dead" ]; then kill -9 $$; fi
-if [ -f "$d/hang" ]; then exec sleep 30; fi
 case "$1" in
   start|destroy|shutdown|undefine)
     if [ -f "$d/dropops" ]; then kill -9 $$; fi
@@ -138,6 +136,8 @@ type libvirtConformanceTarget struct {
 	mu          sync.Mutex
 	unreachable map[string]bool
 	removed     map[string]bool
+	blackholed  map[string]bool
+	stallAddr   string
 	dialed      []string
 	disks       []string
 	reg         *hostconn.ClusterRegistry
@@ -178,7 +178,12 @@ func newLibvirtConformanceTarget(t clustered.T) clustered.Target {
 		require.NoError(tt, os.WriteFile(filepath.Join(fx.dir, name), []byte(content), 0o600))
 	}
 
-	target := &libvirtConformanceTarget{t: tt, dir: fx.dir, hosts: hosts, unreachable: map[string]bool{}, removed: map[string]bool{}}
+	target := &libvirtConformanceTarget{t: tt, dir: fx.dir, hosts: hosts, unreachable: map[string]bool{}, removed: map[string]bool{}, blackholed: map[string]bool{}}
+	// A host that accepts the TCP connection and never completes the SSH
+	// handshake, for the hosts the suite blackholes.
+	stallAddr, _ := startHandshakeStallServer(tt)
+	useTempKnownHosts(tt, knownhosts.Line([]string{stallAddr}, generateTestHostKey(tt).PublicKey())+"\n")
+	target.stallAddr = stallAddr
 	tt.Cleanup(func() {
 		target.mu.Lock()
 		defer target.mu.Unlock()
@@ -233,9 +238,18 @@ func (a *libvirtConformanceTarget) Server() providerv1.ProviderServer {
 		a.mu.Lock()
 		a.dialed = append(a.dialed, h.ID)
 		down := a.unreachable[h.ID]
+		hung := a.blackholed[h.ID]
 		a.mu.Unlock()
 		if down {
 			return nil, fmt.Errorf("dial tcp: connect to %s: connection refused", h.ID)
+		}
+		if hung {
+			// The host answers the TCP connect and never the SSH handshake: a
+			// real clustered host connection (boundHostWaits, host_answer.go)
+			// that waits for the dial until the call's own deadline margin.
+			vp := testVirshProvider("virtrigaud", a.stallAddr, &Credentials{Password: "unused"})
+			vp.boundHostWaits = true
+			return newClusteredVirshConn(hostconn.HostID(h.ID), vp, func() { _ = vp.Cleanup() }), nil
 		}
 		return newClusteredVirshConn(hostconn.HostID(h.ID), localHostVP(h.ID), func() {}), nil
 	}
@@ -407,9 +421,17 @@ func (a *libvirtConformanceTarget) marker(host, name string, on bool) error {
 	return nil
 }
 
-// SetHostBlackholed makes the host's virsh block until it is killed.
+// SetHostBlackholed makes the host's SSH handshake never finish: the Provider's
+// next dial of the host gets a real SSH host connection to a server that
+// accepts the TCP connection and never speaks SSH, so the Provider's own
+// bound on a host that does not answer (host_answer.go) is what ends the call.
+// It takes effect when the host is next dialed, so a case sets it before the
+// Provider first uses the host.
 func (a *libvirtConformanceTarget) SetHostBlackholed(host string, on bool) error {
-	return a.marker(host, "hang", on)
+	a.mu.Lock()
+	a.blackholed[host] = on
+	a.mu.Unlock()
+	return nil
 }
 
 // FailHostOperations makes the commands that change a domain fail cleanly.
@@ -475,11 +497,6 @@ var libvirtExpectedFailures = map[string]clustered.ExpectedFailure{
 		Pointer: "hostTaskComplete answers done for any host-local reference of a host the registry fronts: every routed libvirt call is " +
 			"synchronous, so the provider issues no task and keeps no table to check one against. Recommended; recorded, not fixed.",
 		Contains: "a task that was never issued must not be reported",
-	},
-	"hostdown.blackholed-per-vm": {
-		Pointer: "a per-VM call to a host whose virsh never answers ends with the caller's own DeadlineExceeded, without a HOST_UNAVAILABLE " +
-			"ErrorInfo, where ListVMs reports such a host unreachable inside the caller's deadline. Recommended; recorded, not fixed.",
-		Contains: "Describe on a host that never answers",
 	},
 }
 

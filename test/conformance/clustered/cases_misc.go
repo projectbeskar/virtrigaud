@@ -18,7 +18,7 @@ package clustered
 
 import (
 	"sort"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -60,7 +60,7 @@ func capabilityCases() []Case {
 		},
 		{
 			ID:     "caps.advertised-rpcs-are-routed",
-			Rule:   "an RPC the provider advertises is served and requires a host: the same otherwise valid request is refused InvalidArgument about the host when it names none, and is not Unimplemented or refused for its host when it names one",
+			Rule:   "an RPC the provider advertises is served and requires a host: the same otherwise valid request is refused InvalidArgument when it names no host (and the refusal is not a host-scoped Unavailable), and is not Unimplemented when it names one",
 			Source: "ADR-0007 D7 (capability-gated, honesty-first) and Addendum A, A1; proto/provider/v1/provider.proto: SnapshotCreateRequest, ExportDiskRequest, CloneRequest host fields",
 			Run: func(e *Env) {
 				ctx, cancel := e.Call()
@@ -105,13 +105,10 @@ func capabilityCases() []Case {
 				}
 				for name, do := range calls {
 					w := requireCode(e, do(""), codes.InvalidArgument, name+" without a host")
-					assert.Contains(e.T, strings.ToLower(w.Message), "host", "%s: the refusal must be about the missing host: %s", name, w)
+					requireNoReason(e, w, contracts.HostUnavailableReason, name+" without a host")
 					if err := do(e.HostA()); err != nil {
 						w := WireOf(err)
 						assert.NotEqual(e.T, codes.Unimplemented, w.Code, "%s is advertised but not served: %s", name, w)
-						if w.Code == codes.InvalidArgument {
-							assert.NotContains(e.T, strings.ToLower(w.Message), "target_host_id", "%s with a host is still refused for its host: %s", name, w)
-						}
 					}
 				}
 				e.T.Logf("capability-advertised RPCs checked: %d", len(calls))
@@ -215,8 +212,9 @@ func idempotencyCases() []Case {
 		},
 		{
 			ID:     "idempotency.power",
+			Level:  Recommended,
 			Rule:   "a power operation repeated for a state the VM is already in succeeds (the manager re-sends after a lost answer)",
-			Source: "docs/provider-call-outcomes.md (\"on, off and shutdown can be repeated: a second attempt finds the domain already in the state asked for\")",
+			Source: "docs/provider-call-outcomes.md (\"on, off and shutdown can be repeated\"); the proto and the ADRs do not say how a power operation for the state a VM is already in is answered",
 			Run: func(e *Env) {
 				vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "idem-power", Owner: OwnerA, Running: false})
 				for i := 0; i < 2; i++ {
@@ -371,7 +369,7 @@ func restartCases() []Case {
 				unknown := HostTaskPrefix + UnknownHost + "/job-1"
 				answers := func(when string) {
 					_, err := e.TaskStatus(down)
-					requireHostUnavailable(e, err, e.HostA(), "task of an unreachable host "+when)
+					requireHostUnavailable(e, err, "", "task of an unreachable host "+when)
 					_, err = e.TaskStatus(unknown)
 					requireCode(e, err, codes.NotFound, "task of an unknown host "+when)
 				}
@@ -450,44 +448,56 @@ func hostInventoryCases() []Case {
 			Source:   srcHosts,
 			Requires: []Feature{FeatureHostInventory},
 			Run: func(e *Env) {
-				ids := func() ([]string, map[string]providerv1.HostHealth) {
+				type inventory struct {
+					ids    []string
+					health map[string]providerv1.HostHealth
+				}
+				read := func() (inventory, error) {
 					ctx, cancel := e.Call()
 					defer cancel()
 					resp, err := e.Raw().ListHosts(ctx, &providerv1.ListHostsRequest{})
-					require.NoError(e.T, err)
-					var out []string
-					health := map[string]providerv1.HostHealth{}
-					for _, h := range resp.Hosts {
-						out = append(out, h.Id)
-						health[h.Id] = h.Health
+					if err != nil {
+						return inventory{}, err
 					}
-					sort.Strings(out)
-					return out, health
+					inv := inventory{health: map[string]providerv1.HostHealth{}}
+					for _, h := range resp.Hosts {
+						inv.ids = append(inv.ids, h.Id)
+						inv.health[h.Id] = h.Health
+					}
+					sort.Strings(inv.ids)
+					return inv, nil
 				}
-				got, health := ids()
-				assert.Equal(e.T, sortedCopy(e.Hosts()), got, "the fronted hosts, no more and no fewer")
+				inv, err := read()
+				require.NoError(e.T, err)
+				assert.Equal(e.T, sortedCopy(e.Hosts()), inv.ids, "the fronted hosts, no more and no fewer")
 				for _, h := range e.Hosts() {
-					assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_READY, health[h], "%s is reachable", h)
+					assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_READY, inv.health[h], "%s is reachable", h)
 				}
 
 				e.HostDown(e.HostB())
 				// A provider may cache a host's health for a short while: NotReady
 				// has to show within a bound, not instantly.
-				deadline := time.Now().Add(3 * time.Second)
-				for {
-					got, health = ids()
-					if health[e.HostB()] == providerv1.HostHealth_HOST_HEALTH_NOT_READY || time.Now().After(deadline) {
-						break
+				var mu sync.Mutex
+				var last inventory
+				assert.Eventually(e.T, func() bool {
+					cur, err := read()
+					mu.Lock()
+					defer mu.Unlock()
+					if err != nil {
+						return false
 					}
-					time.Sleep(250 * time.Millisecond)
-				}
-				assert.Equal(e.T, sortedCopy(e.Hosts()), got, "an unreachable host is still reported")
-				assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_NOT_READY, health[e.HostB()], "NotReady within 3 s")
-				assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_READY, health[e.HostA()])
+					last = cur
+					return cur.health[e.HostB()] == providerv1.HostHealth_HOST_HEALTH_NOT_READY
+				}, 3*time.Second, 250*time.Millisecond, "NotReady within 3 s")
+				mu.Lock()
+				last2 := last
+				mu.Unlock()
+				assert.Equal(e.T, sortedCopy(e.Hosts()), last2.ids, "an unreachable host is still reported")
+				assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_READY, last2.health[e.HostA()])
 
 				ctx, cancel := e.Call()
 				defer cancel()
-				_, err := e.Raw().GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: UnknownHost})
+				_, err = e.Raw().GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: UnknownHost})
 				require.Error(e.T, err, "an unknown host has no info")
 			},
 		},

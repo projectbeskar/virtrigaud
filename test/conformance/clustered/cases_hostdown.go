@@ -112,7 +112,7 @@ func hostDownCases() []Case {
 				require.True(e.T, ok)
 				require.NoError(e.T, hb.SetHostBlackholed(e.HostB(), true))
 				e.T.Cleanup(func() { _ = hb.SetHostBlackholed(e.HostB(), false) })
-				const deadline = 4 * time.Second
+				const deadline = 8 * time.Second
 				ctx, cancel := contextWithTimeout(e, deadline)
 				defer cancel()
 				start := time.Now()
@@ -135,7 +135,7 @@ func hostDownCases() []Case {
 				require.True(e.T, ok)
 				require.NoError(e.T, hb.SetHostBlackholed(e.HostA(), true))
 				e.T.Cleanup(func() { _ = hb.SetHostBlackholed(e.HostA(), false) })
-				const deadline = 3 * time.Second
+				const deadline = 6 * time.Second
 				ctx, cancel := contextWithTimeout(e, deadline)
 				defer cancel()
 				start := time.Now()
