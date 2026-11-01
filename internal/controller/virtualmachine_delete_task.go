@@ -156,10 +156,9 @@ var (
 type deleteTaskPhase int
 
 const (
-	// deleteTaskNone: no Delete task (none was returned, or it was settled).
-	deleteTaskNone deleteTaskPhase = iota
 	// deleteTaskRunning: the task is polled with TaskStatus (DeleteTask=True).
-	deleteTaskRunning
+	// The zero phase is no Delete task (none was returned, or it was settled).
+	deleteTaskRunning deleteTaskPhase = iota + 1
 	// deleteTaskUnresolved: the provider does not know the task; the VM's
 	// absence is checked with Describe (DeleteTask=Unknown).
 	deleteTaskUnresolved

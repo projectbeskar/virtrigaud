@@ -572,7 +572,7 @@ func TestAsyncDelete_StaleTaskReferenceConfirmedAbsent(t *testing.T) {
 				assert.Nil(t, f.get(), "the VM is confirmed absent")
 				assert.EqualValues(t, 1, f.prov.deleteCalls.Load(), "an ambiguous answer never re-sends Delete")
 				require.Equal(t, 1, f.prov.describeCalls())
-				assert.Equal(t, "uid-vm-async", string(f.prov.describeRefs[0].Owner.UID), "the Describe is owner-checked")
+				assert.Equal(t, "uid-vm-async", f.prov.describeRefs[0].Owner.UID, "the Describe is owner-checked")
 				events := f.events()
 				assert.Equal(t, 1, countPrefixed(events, "Warning "+eventReasonDeleteTaskOutcomeUnknown))
 				if absentName == "not owned" {
