@@ -9,16 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Author:** @wrkode (William Rizzo)
 
 ### Fixed
-- `internal/controller/virtualmachine_controller.go`: a provider `Delete` answered with a task reference no longer releases the VirtualMachine finalizer at once (it was logged with a TODO and the finalizer removed). The task is recorded and observed (`recordDeleteTask`), and a task in flight is polled instead of a second `Delete` being sent (`continueDeleteTask`). A synchronous `Delete` (empty task reference) is unchanged: same RPCs, status writes, finalizer timing and requeue.
+- `internal/controller/virtualmachine_controller.go`: a provider `Delete` answered with a task reference no longer releases the VirtualMachine finalizer at once (it was logged with a TODO and the finalizer removed). The task is recorded and observed (`recordDeleteTask`); a task whose outcome is not settled is observed instead of a second `Delete` being sent (`continueDeleteTask`).
+  - A Provider object deleted while such a task is recorded no longer releases the finalizer (`DeleteTaskProviderNotFound`).
+  - A re-sent `Delete` that fails replaces the earlier `DeleteTaskFailed` condition.
+  - A synchronous `Delete` (empty task reference), and a VM with no task whose Provider is gone, behave exactly as before: same RPCs, status writes, finalizer timing and requeue.
 
 ### Added
-- `internal/controller/virtualmachine_delete_task.go`: asynchronous Delete handling. The task goes into `status.lastTaskRef` with `DeleteTask=True/TaskInProgress` and `Ready=False/Deleting`, written as a status patch with no resourceVersion precondition and retried, and kept in memory so a lost write or a lagging cache never sends a second `Delete`. Each reconcile polls `TaskStatus` (5 s, growing to 1 min). The finalizer is removed only on terminal success. A `TaskStatus` error is an unknown outcome: the task is kept, no `Delete` is sent, and the status is asked again with a backoff of 15 s doubling to 5 min (`DeleteTaskStatusUnknown`). A failed task, or one the provider no longer knows (not-found, invalid, unsupported), is cleared, and the idempotent, owner-checked `Delete` is sent again with a backoff of 15 s doubling to 5 min (`DeleteTask=False/DeleteTaskFailed`). `orphan-on-delete` is unchanged. `force-delete` releases the VM, with the `VMLeftOnHypervisor` event, while the task's outcome is unconfirmed. Status is written only when it changes.
-- `internal/k8s/conditions.go`: condition type `DeleteTask` and reasons `DeleteTaskStatusUnknown` and `DeleteTaskFailed`.
-- `internal/controller/virtualmachine_delete_task_test.go`, `internal/controller/virtualmachine_delete_task_envtest_test.go`: these tests count Delete RPCs, TaskStatus RPCs and status writes. They cover synchronous, running, completed, failed, unknown, provider unavailable, manager restart, stale references, idempotent polls, a lost or conflicting record, orphan-on-delete, force-delete, a leftover power task and a clustered host-encoded task, and run the path against a real API server.
-- `docs/vm-status-phase.md`: new section "A delete that returns a task".
+- `internal/controller/virtualmachine_delete_task.go`: asynchronous Delete handling. State lives in the `DeleteTask` condition and `status.lastTaskRef`, so a restart or leader change carries on.
+  - **Recording:** the task is written as a status patch with no resourceVersion precondition, retried, and kept in memory, so a lost write or a lagging cache never sends a second `Delete`.
+  - **Polling:** `TaskStatus` every 5 s, growing to 1 min. The finalizer is removed only on terminal success.
+  - **Transient `TaskStatus` error:** the task is kept and no `Delete` is sent (`DeleteTaskStatusUnknown`; in-memory backoff of 15 s doubling to 5 min).
+  - **Provider does not know the task** (not-found, invalid, unsupported, or a terminal "task not found" / "does not report this task" / "invalid task ID format" answer): treated as ambiguous. `DeleteTask=Unknown/DeleteTaskOutcomeUnknown` is set and `Delete` is never sent again. An owner-checked `Describe` decides:
+    - absent (`exists: false`, not-found): release, with a `DeleteConfirmedAbsent` event;
+    - another owner's VM (`VM_NOT_OWNED`): release, as for a synchronous `VM_NOT_OWNED`;
+    - otherwise: hold, re-checking with a backoff from when the outcome became unknown (15 s to 5 min).
+  - **Explicit terminal error:** the reference is cleared (`DeleteTask=False/DeleteTaskFailed`) and `Delete` is sent again. The wait is anchored on the condition's `lastTransitionTime`, so it survives a restart: it equals the time the deletion had taken, between 15 s and 5 min.
+  - **Annotations:** `orphan-on-delete` is unchanged. `force-delete` releases the VM, with the `VMLeftOnHypervisor` event, whenever the delete is not confirmed.
+  - **Status writes:** only when the observed state changes.
+- `internal/k8s/conditions.go`: condition type `DeleteTask`; reasons `DeleteTaskStatusUnknown`, `DeleteTaskOutcomeUnknown`, `DeleteTaskFailed`, `DeleteTaskProviderNotFound`.
+- `internal/controller/virtualmachine_delete_task_test.go`, `internal/controller/virtualmachine_delete_task_envtest_test.go`: the tests count Delete, TaskStatus and Describe RPCs and status writes. They cover:
+  - synchronous, running, completed, failed and repeated-failure deletes;
+  - unknown status; unknown task, both confirmed absent and still present, also after a restart;
+  - a restart after `DeleteTaskFailed`;
+  - provider unavailable; Provider object gone, with and without a task;
+  - a stale cache while memory holds the reference; a lost or conflicting record;
+  - a stale failed condition replaced on retry;
+  - orphan-on-delete and force-delete;
+  - a leftover power task and a clustered host-encoded task;
+  - a run against a real API server.
+- `docs/vm-status-phase.md`: new section "A delete that returns a task". It lists every case in which a second `Delete` can be sent, and the dormant vSphere and libvirt `TaskStatus` details.
 
 ### Why
-The finalizer exists to make sure the hypervisor VM is deleted. Releasing it as soon as a provider accepted an asynchronous `Delete` could leave the VM running, unmanaged, if the task then failed. None of the bundled production providers returns a `Delete` task today (vSphere, libvirt and Proxmox VE wait for their delete to finish), so their behaviour is unchanged. The mock provider and third-party providers that return a task get a correct contract.
+The finalizer exists to make sure the hypervisor VM is deleted. Releasing it as soon as a provider accepted an asynchronous `Delete` could leave the VM running, unmanaged, if the task then failed. None of the bundled production providers returns a `Delete` task today (vSphere, libvirt and Proxmox VE wait for their delete to finish), so their behaviour is unchanged. The mock provider and third-party providers that return a task get a conservative contract.
 
 ### Impact
 - [ ] Breaking change

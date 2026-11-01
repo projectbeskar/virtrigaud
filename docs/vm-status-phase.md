@@ -159,42 +159,96 @@ third-party provider) gets the following behaviour. Before this change the manag
 released the finalizer as soon as the task reference came back, before the task
 had run.
 
+The state is the `DeleteTask` condition together with `status.lastTaskRef`, so a
+new manager instance (after a restart or a leader change) carries on from where the
+previous one stopped.
+
 - **The task is recorded first.** The reference goes into `status.lastTaskRef`,
   with `DeleteTask=True` (reason `TaskInProgress`) and `Ready=False/Deleting`. The
   status write needs no resourceVersion and is retried, so an edit to the VM
   during the `Delete` cannot make it conflict. The manager also keeps the task in
-  memory. If the write does not land, the next reconcile writes it again before it
-  polls the task, and no second `Delete` is sent (Warning event
-  `DeleteTaskNotRecorded`).
+  memory. If the write does not land, or the cache does not show it yet, the next
+  reconcile writes it again before it polls the task, and no second `Delete` is
+  sent (Warning event `DeleteTaskNotRecorded`).
 - **The task is polled, not sent again.** While `DeleteTask=True` the manager
   calls `TaskStatus` for the recorded reference. A poll writes no status unless
   something changed. The poll interval is 5 seconds and grows with the task's age
-  (the time since `DeleteTask` became `True`) to at most 1 minute. A new manager
-  instance, after a restart or a leader change, reads the task back from status
-  and goes on polling it.
+  to at most 1 minute.
 - **Completed without an error:** the finalizer is removed. The task's success is
   the provider's confirmation, exactly as a successful synchronous `Delete` is.
-- **Status unknown:** a `TaskStatus` call that fails (a transport error or a
-  timeout) is never taken for a deleted VM. `DeleteTask` stays `True` with reason
-  `DeleteTaskStatusUnknown`, the task stays recorded, no `Delete` is sent, and the
-  status is asked again after 15 seconds, doubling to 5 minutes (Warning event
-  `DeleteTaskStatusUnknown` once).
-- **Failed, or unknown to the provider:** a task that ended with an error, or a
-  reference the provider answers not-found, invalid or unsupported (a stale
-  reference, for example after a provider restart), is cleared.
-  `DeleteTask=False/DeleteTaskFailed` is set, and the `Delete` is sent again after
-  15 seconds, doubling to 5 minutes while its tasks keep failing (Warning event
-  `DeleteTaskFailed`). Sending it again is safe because the same retry follows a
-  failed synchronous `Delete`. `Delete` is idempotent: a VM that is already gone
-  answers not-found, which releases the finalizer. It is also owner-checked: a VM
-  that reuses the id but belongs to someone else answers `VM_NOT_OWNED` and is not
-  destroyed.
-- **Recovery.** Every message names the escape hatches. `virtrigaud.io/orphan-on-delete=true`
-  releases the VirtualMachine without any provider call, as before.
-  `virtrigaud.io/force-delete=true` releases it once the task's outcome is not a
-  confirmed success: running, unknown or failed. The usual `VMLeftOnHypervisor`
-  Warning event is recorded. A provider that cannot be reached is handled as it
-  always was (`ProviderUnavailable`), and the recorded task is kept.
-- The `Delete` is sent a second time only in one case: the manager stops after
-  the provider accepted the `Delete` and before the task record was stored. That
-  second `Delete` is the same idempotent, owner-checked call.
+- **Status unknown:** a `TaskStatus` call that fails for a transient reason (a
+  transport error or a timeout) is never taken for a deleted VM. `DeleteTask` stays
+  `True` with reason `DeleteTaskStatusUnknown`, the task stays recorded, no
+  `Delete` is sent, and the status is asked again after 15 seconds, doubling to
+  5 minutes (Warning event `DeleteTaskStatusUnknown` once). This backoff is held
+  in memory and starts again from 15 seconds after a manager restart.
+- **The provider does not know the task.** The provider may answer the reference
+  not-found, invalid or unsupported, or end it with an error that says it does
+  not know the task: the mock provider's `task not found`, or Proxmox VE's
+  `does not report this task` and `invalid task ID format`. That is typically a
+  provider that restarted and lost its task table, and the destroy may still be
+  running. The answer is ambiguous, so `DeleteTask` becomes `Unknown` with reason
+  `DeleteTaskOutcomeUnknown` (Warning event of the same name) and **no `Delete`
+  is sent again**. The manager asks the provider instead, with the same
+  owner-checked `Describe` it uses for a running VM:
+  - Reported absent (`exists: false`, or not-found): the finalizer is removed,
+    with a `DeleteConfirmedAbsent` event.
+  - Reported as another owner's VM (`VM_NOT_OWNED`): the finalizer is removed, as
+    for a synchronous `Delete` answered `VM_NOT_OWNED` (`VMLeftOnHypervisor` event).
+  - Still present, or no answer: the finalizer is kept, and the VM is checked
+    again with a backoff from when the outcome became unknown: 15 seconds,
+    growing to 5 minutes. An operator decides with `orphan-on-delete` or
+    `force-delete`.
+- **Failed:** a task the provider explicitly ends with any other error is cleared
+  from `status.lastTaskRef`, and `DeleteTask=False/DeleteTaskFailed` is set
+  (Warning event `DeleteTaskFailed`). The `Delete` is sent again once a wait has
+  passed, counted from when the task failed. The wait equals the time the
+  deletion had already taken then, between 15 seconds and 5 minutes, so it
+  roughly doubles with each failure. It is anchored on the condition's
+  `lastTransitionTime`, so a manager restart does not shorten it. Sending the
+  `Delete` again is the manager's choice, the same retry a failed synchronous
+  `Delete` gets. It is not a guarantee of the provider contract. It relies on the
+  provider answering not-found for a VM that is already gone and refusing a VM
+  at the id that belongs to someone else (`VM_NOT_OWNED`), as the bundled
+  providers do. When the new attempt fails or is refused, its own condition
+  replaces `DeleteTaskFailed`.
+- **Provider object deleted:** a VM with no `Delete` task whose Provider object
+  is gone is released as before. A VM with an unresolved task is kept instead,
+  with `DeleteTask` reason `DeleteTaskProviderNotFound` (Warning event of the
+  same name), because only the provider could confirm the task. When the Provider
+  object is re-created, the task is observed again.
+- **Recovery.** Every message names the two escape hatches.
+  `virtrigaud.io/orphan-on-delete=true` detaches the VirtualMachine without any
+  provider call, as before. `virtrigaud.io/force-delete=true` releases it once the
+  delete is not confirmed: running, status unknown, outcome unknown, failed, or
+  Provider gone. The usual `VMLeftOnHypervisor` Warning event is recorded. A
+  provider that cannot be reached is handled as it always was
+  (`ProviderUnavailable`), and the recorded task is kept.
+
+A second `Delete` for the same VM can be sent in these cases:
+
+1. The manager stops after the provider accepted the `Delete` and before the task
+   record was stored. A new manager instance finds no record and sends the
+   `Delete` again.
+2. The provider explicitly ended the task with an error (`DeleteTaskFailed`). The
+   `Delete` is sent again after the wait above.
+3. A `Delete` that fails synchronously is retried, as before this change (every
+   15 seconds, or held for the reasons in
+   [provider-call-outcomes.md](provider-call-outcomes.md)).
+
+No other path sends a second `Delete`. That includes a transient `TaskStatus`
+error, a task the provider does not know, a VM still present after that, and a
+Provider object that is gone.
+
+Two dormant provider details matter only if a provider starts returning
+`Delete` tasks:
+
+- vSphere's `TaskStatus` reports any error waiting for a task, transient ones
+  included, as the task ended with an error. A vSphere `Delete` task would
+  therefore be taken as failed, and its `Delete` sent again, after a transient
+  error.
+- A single-host libvirt provider's `TaskStatus` reports every reference as
+  completed, whatever it is. A libvirt `Delete` task would release the finalizer
+  on the first poll.
+
+Neither provider returns a `Delete` task today.
