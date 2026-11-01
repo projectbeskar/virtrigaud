@@ -129,7 +129,7 @@ func listCases() []Case {
 		{
 			ID:     "list.not-counted-against-provider",
 			Rule:   "an unreachable host in ListVMs never counts toward the manager's circuit breaker (the call succeeds)",
-			Source: srcListVMs + "; internal/providers/libvirt/routed_list.go (host-scoped failures never fail the call)",
+			Source: srcListVMs + "; internal/providers/contracts/errors.go: HostUnavailableReason (a host-scoped failure is kept out of the Provider's circuit breaker)",
 			Run: func(e *Env) {
 				e.Seed(SeedSpec{Host: e.HostA(), Name: "lsb-a", Owner: OwnerA})
 				e.HostDown(e.HostB())

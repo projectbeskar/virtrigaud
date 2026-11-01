@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -33,7 +34,9 @@ const (
 )
 
 // foreignVMs seeds, on host, a running and a stopped VM for every way a VM can
-// fail to be OwnerA's: stamped for another tenant, and unstamped.
+// fail to be OwnerA's: stamped for another tenant, unstamped, and unstamped
+// but named like OwnerA's VirtualMachine (bare and namespaced), which a
+// provider might be tempted to treat as OwnerA's.
 func foreignVMs(e *Env, host string) []VM {
 	var vms []VM
 	for _, spec := range []SeedSpec{
@@ -41,11 +44,25 @@ func foreignVMs(e *Env, host string) []VM {
 		{Name: "foreign-off", Owner: OwnerB, Running: false},
 		{Name: "unstamped-run", Owner: Identity{}, Running: true},
 		{Name: "unstamped-off", Owner: Identity{}, Running: false},
+		{Name: OwnerA.Name, Owner: Identity{}, Running: true},
+		{Name: OwnerA.Namespace + "." + OwnerA.Name, Owner: Identity{}, Running: false},
 	} {
 		spec.Host = host
 		vms = append(vms, e.Seed(spec))
 	}
 	return vms
+}
+
+// requireEmptyDescribe fails unless resp says nothing about a VM: the whole
+// message is empty apart from an empty provider_raw_json.
+func requireEmptyDescribe(e *Env, resp *providerv1.DescribeResponse, what string) {
+	e.T.Helper()
+	c, ok := proto.Clone(resp).(*providerv1.DescribeResponse)
+	require.True(e.T, ok)
+	if c.ProviderRawJson == "{}" {
+		c.ProviderRawJson = ""
+	}
+	assert.True(e.T, proto.Equal(c, &providerv1.DescribeResponse{}), "%s: the answer must be empty, got %v", what, resp)
 }
 
 func ownerCases() []Case {
@@ -59,10 +76,7 @@ func ownerCases() []Case {
 					resp, err := e.Describe(vm.Host, vm.ID, OwnerA)
 					require.NoError(e.T, err, "%s: a foreign VM is reported absent, not as an error", vm.Name)
 					assert.False(e.T, resp.Exists, "%s: must be exists=false", vm.Name)
-					assert.Empty(e.T, resp.PowerState, "%s: no power state of another tenant's VM", vm.Name)
-					assert.Empty(e.T, resp.Ips, "%s: no IPs", vm.Name)
-					assert.Empty(e.T, resp.ConsoleUrl, "%s: no console", vm.Name)
-					assert.Zero(e.T, resp.Vcpus, "%s: no size", vm.Name)
+					requireEmptyDescribe(e, resp, vm.Name)
 				}
 			},
 		},
@@ -99,21 +113,49 @@ func ownerCases() []Case {
 		},
 		{
 			ID:     "owner.request-without-owner",
-			Rule:   "a request that carries no owner identity never operates on a VM, stamped or not",
-			Source: "proto/provider/v1/provider.proto: DeleteRequest.owner (\"only when its recorded owner uid equals this uid\"), CreateRequest.owner (\"An unset owner ... never authorizes\")",
+			Rule:   "a request whose owner identity is missing, or has no uid (even with the right namespace and name), never operates on a VM, stamped or not: Describe says exists=false; Power, Reconfigure and Delete are NotFound",
+			Source: "proto/provider/v1/provider.proto: DeleteRequest.owner (\"only when its recorded owner uid equals this uid\"), PowerRequest.owner, DescribeRequest.owner; CreateRequest.owner (\"An unset owner ... never authorizes\")",
 			Run: func(e *Env) {
 				stamped := e.Seed(SeedSpec{Host: e.HostA(), Name: "ownerless-stamped", Owner: OwnerA, Running: true})
-				unstamped := e.Seed(SeedSpec{Host: e.HostA(), Name: "ownerless-unstamped", Running: true})
-				for _, vm := range []VM{stamped, unstamped} {
+				named := e.Seed(SeedSpec{Host: e.HostA(), Name: OwnerA.Name, Running: true})
+				for _, owner := range []Identity{{}, {Namespace: OwnerA.Namespace, Name: OwnerA.Name}} {
+					for _, vm := range []VM{stamped, named} {
+						before := e.Observe(vm)
+						resp, err := e.Describe(vm.Host, vm.ID, owner)
+						require.NoError(e.T, err)
+						assert.False(e.T, resp.Exists, "%s: Describe with owner %+v", vm.Name, owner)
+						_, err = e.Power(vm.Host, vm.ID, owner, providerv1.PowerOp_POWER_OP_OFF)
+						requireCode(e, err, codes.NotFound, "Power with owner "+owner.Name+" on "+vm.Name)
+						_, err = e.Reconfigure(vm.Host, vm.ID, owner)
+						requireCode(e, err, codes.NotFound, "Reconfigure with owner "+owner.Name+" on "+vm.Name)
+						_, err = e.Delete(vm.Host, vm.ID, owner)
+						requireCode(e, err, codes.NotFound, "Delete with owner "+owner.Name+" on "+vm.Name)
+						requireUnchanged(e, vm, before, "calls without an owner uid")
+					}
+				}
+			},
+		},
+		{
+			ID:       "owner.unreadable-stamp",
+			Rule:     "a VM whose owner stamp is unreadable or records more than one owner is never started, stopped, resized or destroyed: Power, Reconfigure and Delete are NotFound, and Describe does not return its state",
+			Source:   "proto/provider/v1/provider.proto: PowerRequest.owner (\"a VM whose stamp is missing, unreadable or records another owner is reported NOT_FOUND\"), DeleteRequest.owner",
+			Requires: []Feature{FeatureUnreadableStamp},
+			Run: func(e *Env) {
+				for i, st := range []StampState{StampUnreadable, StampAmbiguous} {
+					vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "stamp-" + string(rune('a'+i)), Owner: OwnerA, Running: true, Stamp: st})
 					before := e.Observe(vm)
-					resp, err := e.Describe(vm.Host, vm.ID, Identity{})
-					require.NoError(e.T, err)
-					assert.False(e.T, resp.Exists, "%s: Describe without an owner", vm.Name)
-					_, err = e.Power(vm.Host, vm.ID, Identity{}, providerv1.PowerOp_POWER_OP_OFF)
-					requireCode(e, err, codes.NotFound, "Power without an owner on "+vm.Name)
-					_, err = e.Delete(vm.Host, vm.ID, Identity{})
-					requireCode(e, err, codes.NotFound, "Delete without an owner on "+vm.Name)
-					requireUnchanged(e, vm, before, "calls without an owner")
+					resp, err := e.Describe(vm.Host, vm.ID, OwnerA)
+					if err == nil {
+						assert.False(e.T, resp.Exists, "%s: Describe of a VM with a bad stamp", vm.Name)
+						requireEmptyDescribe(e, resp, vm.Name)
+					}
+					_, err = e.Power(vm.Host, vm.ID, OwnerA, providerv1.PowerOp_POWER_OP_OFF)
+					requireCode(e, err, codes.NotFound, "Power on "+vm.Name)
+					_, err = e.Reconfigure(vm.Host, vm.ID, OwnerA)
+					requireCode(e, err, codes.NotFound, "Reconfigure on "+vm.Name)
+					_, err = e.Delete(vm.Host, vm.ID, OwnerA)
+					requireCode(e, err, codes.NotFound, "Delete on "+vm.Name)
+					requireUnchanged(e, vm, before, "calls on a VM with a bad stamp")
 				}
 			},
 		},

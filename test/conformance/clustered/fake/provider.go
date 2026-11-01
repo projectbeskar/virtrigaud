@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -43,13 +44,27 @@ type vm struct {
 	name    string
 	owner   clustered.Identity
 	running bool
+	cpu     int32
+	memMiB  int64
+	stamp   clustered.StampState
+}
+
+// task is a host-local asynchronous operation: its effect is applied when the
+// host finishes it, not before.
+type task struct {
+	done  bool
+	apply func()
 }
 
 type hostState struct {
-	reachable bool
-	stuck     bool // StickyUnreachable
-	vms       map[string]*vm
-	tasks     map[string]bool // host-local task -> done
+	reachable  bool
+	stuck      bool // StickyUnreachable
+	blackholed bool
+	failOps    bool
+	dropOps    bool
+	removed    bool // removed from the provider's registry; its VMs stay
+	vms        map[string]*vm
+	tasks      map[string]*task
 }
 
 // world is the state that lives on the hosts: it survives a restart of the
@@ -78,11 +93,21 @@ type provider struct {
 	async      bool
 	notOwned   bool // declares and attaches VM_NOT_OWNED
 	capsCalls  int
-	memTasks   map[string]bool // TasksInMemory
+	memTasks   map[string]*task // TasksInMemory
 	served     int
 }
 
 func (p *provider) v(x Violation) bool { return p.violations[x] }
+
+// host returns the registry entry of name: nil when the provider does not
+// front it (never configured, or removed).
+func (p *provider) host(name string) *hostState {
+	hs := p.w.hosts[name]
+	if hs == nil || hs.removed {
+		return nil
+	}
+	return hs
+}
 
 func (p *provider) dial(host string) {
 	p.w.dialed = append(p.w.dialed, host)
@@ -151,9 +176,9 @@ func (p *provider) route(raw string, ignoreReach bool) (string, *hostState, erro
 	if len(host) > 253 || !hostIDRE.MatchString(host) {
 		return "", nil, status.Error(codes.InvalidArgument, "target_host_id is not a valid host id")
 	}
-	hs := p.w.hosts[host]
+	hs := p.host(host)
 	if hs == nil {
-		if p.v(UnknownHostNotFound) {
+		if p.v(UnknownHostNotFound) || (p.w.hosts[host] != nil && p.v(RemovedHostIsNotFound)) {
 			return "", nil, status.Error(codes.NotFound, "host not found")
 		}
 		if p.v(UnknownHostNoReason) {
@@ -170,6 +195,17 @@ func (p *provider) route(raw string, ignoreReach bool) (string, *hostState, erro
 				return "", nil, hostUnavailable(p, host, "a host of the cluster is unavailable")
 			}
 		}
+	}
+	if hs.blackholed && !ignoreReach {
+		// The host accepts the connection and never answers: the provider gives
+		// up on it after its own short deadline.
+		p.w.mu.Unlock()
+		time.Sleep(300 * time.Millisecond)
+		p.w.mu.Lock()
+		if p.v(BlackholeNoReason) {
+			return "", nil, status.Error(codes.DeadlineExceeded, "host did not answer")
+		}
+		return "", nil, hostUnavailable(p, host, "host did not answer")
 	}
 	if !hs.reachable {
 		hs.stuck = true
@@ -192,7 +228,14 @@ func (p *provider) authorize(v *vm, owner *providerv1.ObjectIdentity, mutate boo
 		return true
 	}
 	if owner.GetUid() == "" {
+		if p.v(NameMatchAuthorizes) && owner.GetName() != "" &&
+			owner.GetName() == v.owner.Name && owner.GetNamespace() == v.owner.Namespace {
+			return true
+		}
 		return p.v(MissingOwnerAuthorizes)
+	}
+	if v.stamp != clustered.StampNormal && !p.v(UnreadableStampAuthorizes) {
+		return false
 	}
 	if v.owner.UID == "" {
 		return p.v(UnstampedAuthorizes)
@@ -256,28 +299,67 @@ func (p *provider) Describe(_ context.Context, req *providerv1.DescribeRequest) 
 	}
 	v := p.findVM(host, hs, req.Id)
 	if v == nil || !p.authorize(v, req.Owner, false) {
+		if v != nil && p.v(ForeignDescribeLeaksSize) {
+			return &providerv1.DescribeResponse{Exists: false, Vcpus: v.cpu}, nil
+		}
 		return &providerv1.DescribeResponse{Exists: false}, nil
 	}
-	resp := &providerv1.DescribeResponse{Exists: true, PowerState: powerName(v.running), Vcpus: 2}
+	resp := &providerv1.DescribeResponse{Exists: true, PowerState: powerName(v.running), Vcpus: v.cpu, MaxMemoryMib: v.memMiB}
 	if p.v(DescribeFlaps) {
 		v.running = !v.running
 	}
 	return resp, nil
 }
 
-// newTask records a host-local task and returns its wire reference.
-func (p *provider) newTask(host string, hs *hostState) *providerv1.TaskRef {
+// run applies an operation's effect: at once for a synchronous provider, and
+// when the host finishes the returned task for an asynchronous one.
+func (p *provider) run(host string, hs *hostState, effect func()) *providerv1.TaskRef {
+	if !p.async {
+		effect()
+		return nil
+	}
 	p.w.taskSeq++
 	inner := "job-" + strconv.Itoa(p.w.taskSeq)
+	t := &task{apply: effect}
 	if p.v(TasksInMemory) {
-		p.memTasks[host+"/"+inner] = false
+		p.memTasks[host+"/"+inner] = t
 	} else {
-		hs.tasks[inner] = false
+		hs.tasks[inner] = t
 	}
 	if p.v(TaskNotHostEncoded) {
 		return &providerv1.TaskRef{Id: inner}
 	}
 	return &providerv1.TaskRef{Id: taskPrefix + host + "/" + inner}
+}
+
+// opFault answers an operation the host is scripted to fail or to lose its
+// connection during.
+func (p *provider) opFault(hs *hostState) error {
+	if hs.dropOps {
+		infos := []*errdetails.ErrorInfo{{Reason: contracts.VMOperationFailedReason, Domain: contracts.ErrorInfoDomain}}
+		if !p.v(ConnLostNoReason) {
+			infos = append(infos, &errdetails.ErrorInfo{Reason: contracts.HostConnectionLostReason, Domain: contracts.ErrorInfoDomain})
+		}
+		return withInfos(codes.Unavailable, "host connection lost during the operation", infos)
+	}
+	if hs.failOps {
+		if p.v(OpFailedNoReason) {
+			return status.Error(codes.Unavailable, "operation failed")
+		}
+		return withInfo(codes.Unknown, "operation failed on the host", contracts.VMOperationFailedReason, contracts.ErrorInfoDomain, nil)
+	}
+	return nil
+}
+
+func withInfos(c codes.Code, msg string, infos []*errdetails.ErrorInfo) error {
+	st := status.New(c, msg)
+	for _, i := range infos {
+		var err error
+		if st, err = st.WithDetails(i); err != nil {
+			return status.Error(c, msg)
+		}
+	}
+	return st.Err()
 }
 
 // Power implements the owner-checked, routed Power.
@@ -299,15 +381,17 @@ func (p *provider) Power(_ context.Context, req *providerv1.PowerRequest) (*prov
 	if p.v(PowerRepeatFails) && want == v.running && req.Op != providerv1.PowerOp_POWER_OP_REBOOT {
 		return nil, status.Error(codes.FailedPrecondition, "VM is already in that state")
 	}
-	if !p.v(PowerNoEffect) {
-		v.running = want
+	if err := p.opFault(hs); err != nil {
+		return nil, err
 	}
+	effect := func() { v.running = want }
+	if p.v(PowerNoEffect) {
+		effect = func() {}
+	}
+	resp := &providerv1.TaskResponse{Task: p.run(host, hs, effect)}
 	if p.v(HostDownMutatesAnyway) && !hs.reachable {
+		v.running = want
 		return nil, hostUnavailable(p, host, "host is unreachable")
-	}
-	resp := &providerv1.TaskResponse{}
-	if p.async {
-		resp.Task = p.newTask(host, hs)
 	}
 	return resp, nil
 }
@@ -333,13 +417,15 @@ func (p *provider) Delete(_ context.Context, req *providerv1.DeleteRequest) (*pr
 	if !p.authorize(v, req.Owner, true) {
 		return nil, p.refuse(v)
 	}
-	p.w.deleted = append(p.w.deleted, deletedVM{host: host, v: *v})
-	delete(hs.vms, req.Id)
-	resp := &providerv1.TaskResponse{}
-	if p.async {
-		resp.Task = p.newTask(host, hs)
+	if err := p.opFault(hs); err != nil {
+		return nil, err
 	}
-	return resp, nil
+	id := req.Id
+	gone := *v
+	return &providerv1.TaskResponse{Task: p.run(host, hs, func() {
+		p.w.deleted = append(p.w.deleted, deletedVM{host: host, v: gone})
+		delete(hs.vms, id)
+	})}, nil
 }
 
 // Reconfigure implements the owner-checked, routed Reconfigure.
@@ -357,6 +443,10 @@ func (p *provider) Reconfigure(_ context.Context, req *providerv1.ReconfigureReq
 	if v == nil || !p.authorize(v, req.Owner, true) {
 		return nil, p.refuse(v)
 	}
+	if err := p.opFault(hs); err != nil {
+		return nil, err
+	}
+	v.cpu, v.memMiB = 4, 4096
 	return &providerv1.TaskResponse{HonestResult: true}, nil
 }
 
@@ -379,7 +469,7 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 	if p.v(TaskDialsUnknownHost) {
 		p.dial(host)
 	}
-	hs := p.w.hosts[host]
+	hs := p.host(host)
 	if hs == nil {
 		if p.v(TaskUnknownHostDone) {
 			return &providerv1.TaskStatusResponse{Done: true}, nil
@@ -388,7 +478,7 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 	}
 	if p.v(TaskWrongHost) {
 		for _, h := range p.w.order {
-			if p.w.hosts[h].reachable {
+			if p.host(h) != nil && p.w.hosts[h].reachable {
 				host, hs = h, p.w.hosts[h]
 				break
 			}
@@ -398,23 +488,23 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 		return nil, hostUnavailable(p, host, "host is unreachable")
 	}
 	p.dial(host)
-	var done, known bool
+	var t *task
 	if p.v(TasksInMemory) {
-		done, known = p.memTasks[host+"/"+inner]
+		t = p.memTasks[host+"/"+inner]
 	} else {
-		done, known = hs.tasks[inner]
+		t = hs.tasks[inner]
 	}
-	if !known {
+	if t == nil {
 		if p.v(TaskForgedInnerDone) {
 			return &providerv1.TaskStatusResponse{Done: true}, nil
 		}
 		return nil, status.Error(codes.NotFound, "no such task on the host")
 	}
-	return &providerv1.TaskStatusResponse{Done: done}, nil
+	return &providerv1.TaskStatusResponse{Done: t.done}, nil
 }
 
 // ListVMs lists the VMs of every host.
-func (p *provider) ListVMs(_ context.Context, _ *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
+func (p *provider) ListVMs(ctx context.Context, _ *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
 	if err := p.gate(); err != nil {
@@ -423,7 +513,23 @@ func (p *provider) ListVMs(_ context.Context, _ *providerv1.ListVMsRequest) (*pr
 	resp := &providerv1.ListVMsResponse{}
 	seenName := map[string]bool{}
 	for _, host := range p.w.order {
-		hs := p.w.hosts[host]
+		hs := p.host(host)
+		if hs == nil {
+			continue
+		}
+		if hs.blackholed {
+			if p.v(BlackholeStallsList) {
+				p.w.mu.Unlock()
+				<-ctx.Done()
+				p.w.mu.Lock()
+				return nil, status.FromContextError(ctx.Err()).Err()
+			}
+			p.w.mu.Unlock()
+			time.Sleep(300 * time.Millisecond)
+			p.w.mu.Lock()
+			resp.UnreachableHostIds = append(resp.UnreachableHostIds, host)
+			continue
+		}
 		if !hs.reachable {
 			hs.stuck = true
 		}
@@ -554,7 +660,7 @@ func (p *provider) Create(_ context.Context, req *providerv1.CreateRequest) (*pr
 	if p.v(CreateNoOwnerStamp) {
 		owner = clustered.Identity{}
 	}
-	hs.vms[id] = &vm{name: req.Name, owner: owner}
+	hs.vms[id] = &vm{name: req.Name, owner: owner, cpu: 2, memMiB: 1024}
 	_ = host
 	return &providerv1.CreateResponse{Id: id}, nil
 }
@@ -568,7 +674,10 @@ func (p *provider) ListHosts(_ context.Context, _ *providerv1.ListHostsRequest) 
 	}
 	resp := &providerv1.ListHostsResponse{}
 	for _, host := range p.w.order {
-		hs := p.w.hosts[host]
+		hs := p.host(host)
+		if hs == nil {
+			continue
+		}
 		if !hs.reachable && p.v(InventoryDropsDownHost) {
 			continue
 		}
@@ -585,7 +694,7 @@ func (p *provider) ListHosts(_ context.Context, _ *providerv1.ListHostsRequest) 
 func (p *provider) GetHostInfo(_ context.Context, req *providerv1.GetHostInfoRequest) (*providerv1.HostInfo, error) {
 	p.w.mu.Lock()
 	defer p.w.mu.Unlock()
-	hs := p.w.hosts[req.HostId]
+	hs := p.host(req.HostId)
 	if hs == nil {
 		if p.v(GetHostInfoUnknownOK) {
 			return &providerv1.HostInfo{Id: req.HostId}, nil

@@ -118,6 +118,13 @@ func (r *Recorder) Failures() []string {
 	return append([]string(nil), r.failures...)
 }
 
+// Logs returns the lines the case logged.
+func (r *Recorder) Logs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.logs...)
+}
+
 // SkipReason returns why the case skipped, or "".
 func (r *Recorder) SkipReason() string {
 	r.mu.Lock()

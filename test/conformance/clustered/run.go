@@ -37,6 +37,9 @@ type Case struct {
 	// Requires lists the Features the Target must offer; the case is skipped,
 	// with the reason reported, when it does not.
 	Requires []Feature
+	// Level says whether the rule is stated by the contract (Required) or is
+	// good practice (Recommended). The zero value is Required.
+	Level Level
 	// Run checks the rule. It fails through e.T.
 	Run func(e *Env)
 }
@@ -95,24 +98,35 @@ func RunCase(t T, factory Factory, c Case) {
 // Option configures Run.
 type Option func(*runConfig)
 
-type runConfig struct {
-	expectedFailures map[string]string
+// ExpectedFailure records a deviation a Target is known to have.
+type ExpectedFailure struct {
+	// Pointer says where the deviation is recorded (an issue, an ADR section,
+	// a note in the adapter).
+	Pointer string
+	// Contains is a substring the case's failure output must contain, so a
+	// different failure of the same case is not mistaken for the known one.
+	Contains string
 }
 
-// WithExpectedFailures marks cases a Target is known to fail, each with a
-// pointer to where the deviation is recorded (an issue, an ADR section). Such
-// a case must still FAIL: it is reported as an expected failure with its
-// pointer, and the run fails if it starts passing, so the list cannot go
-// stale. It is the way to record a genuine contract violation without
-// hiding it and without changing the provider in the same change.
-func WithExpectedFailures(m map[string]string) Option {
+type runConfig struct {
+	expectedFailures map[string]ExpectedFailure
+}
+
+// WithExpectedFailures marks cases a Target is known to fail. Such a case must
+// still FAIL, and with a message that contains the entry's Contains: it is
+// reported as an expected failure with its pointer, and the run fails if it
+// starts passing or fails differently, so the list cannot go stale. It is the
+// way to record a genuine contract violation without hiding it and without
+// changing the provider in the same change.
+func WithExpectedFailures(m map[string]ExpectedFailure) Option {
 	return func(c *runConfig) { c.expectedFailures = m }
 }
 
 // Run runs the whole suite against Targets from factory, one subtest per
-// case. Every case that does not apply is skipped with its reason, every
-// expected failure is reported with its pointer, and both are listed again
-// when the suite ends.
+// case. A Required case that fails fails the run. A Recommended case that
+// fails is reported, and does not. Every case that does not apply is skipped
+// with its reason and every expected failure is reported with its pointer; all
+// of them are listed again when the suite ends.
 func Run(t *testing.T, factory Factory, opts ...Option) {
 	t.Helper()
 	var cfg runConfig
@@ -123,13 +137,21 @@ func Run(t *testing.T, factory Factory, opts ...Option) {
 	for _, c := range Cases() {
 		known[c.ID] = true
 	}
-	for id := range cfg.expectedFailures {
+	for id, x := range cfg.expectedFailures {
 		if !known[id] {
 			t.Fatalf("expected failure for unknown case %q", id)
+		}
+		if x.Pointer == "" || x.Contains == "" {
+			t.Fatalf("expected failure for %q needs a pointer and a substring", id)
 		}
 	}
 	var mu sync.Mutex
 	notes := map[string]string{}
+	note := func(id, text string) {
+		mu.Lock()
+		notes[id] = text
+		mu.Unlock()
+	}
 	t.Cleanup(func() {
 		mu.Lock()
 		defer mu.Unlock()
@@ -146,28 +168,35 @@ func Run(t *testing.T, factory Factory, opts ...Option) {
 		t.Run(c.ID, func(t *testing.T) {
 			tg := factory(t)
 			if why := c.SkipReason(tg.Capabilities()); why != "" {
-				mu.Lock()
-				notes[c.ID] = fmt.Sprintf("SKIPPED %s: %s", c.ID, why)
-				mu.Unlock()
+				note(c.ID, fmt.Sprintf("SKIPPED %s: %s", c.ID, why))
 				t.Skipf("%s not applicable to %s: %s", c.ID, tg.Name(), why)
 				return
 			}
-			pointer, expected := cfg.expectedFailures[c.ID]
-			if !expected {
+			expect, expected := cfg.expectedFailures[c.ID]
+			if !expected && c.Level == Required {
 				c.Run(newEnv(t, tg))
 				return
 			}
 			rec := NewRecorder(c.ID)
-			switch rec.RunRecorded(func(rt T) { c.Run(newEnv(rt, tg)) }) {
-			case OutcomePassed:
-				t.Errorf("%s is listed as an expected failure (%s) but passes: remove it from the list", c.ID, pointer)
-			case OutcomeSkipped:
+			out := rec.RunRecorded(func(rt T) { c.Run(newEnv(rt, tg)) })
+			failed := strings.Join(strings.Fields(strings.Join(rec.Failures(), " | ")), " ")
+			for _, l := range rec.Logs() {
+				note(c.ID+"/log", fmt.Sprintf("NOTE %s: %s", c.ID, l))
+			}
+			switch {
+			case out == OutcomeSkipped:
+				note(c.ID, fmt.Sprintf("SKIPPED %s: %s", c.ID, rec.SkipReason()))
 				t.Skipf("%s skipped: %s", c.ID, rec.SkipReason())
-			default:
-				mu.Lock()
-				notes[c.ID] = fmt.Sprintf("EXPECTED FAILURE %s: %s\n    observed: %s", c.ID, pointer, strings.Join(strings.Fields(strings.Join(rec.Failures(), " | ")), " "))
-				mu.Unlock()
-				t.Skipf("expected failure: %s", pointer)
+			case expected && out == OutcomePassed:
+				t.Errorf("%s is listed as an expected failure (%s) but passes: remove it from the list", c.ID, expect.Pointer)
+			case expected && !strings.Contains(failed, expect.Contains):
+				t.Errorf("%s is listed as an expected failure (%s: %q) but failed differently: %s", c.ID, expect.Pointer, expect.Contains, failed)
+			case expected:
+				note(c.ID, fmt.Sprintf("EXPECTED FAILURE %s: %s\n    observed: %s", c.ID, expect.Pointer, failed))
+				t.Skipf("expected failure: %s", expect.Pointer)
+			case out == OutcomeFailed:
+				note(c.ID, fmt.Sprintf("RECOMMENDED FAILED %s: %s\n    observed: %s", c.ID, c.Rule, failed))
+				t.Skipf("recommended rule not met: %s", c.Rule)
 			}
 		})
 	}

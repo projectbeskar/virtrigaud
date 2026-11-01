@@ -93,7 +93,7 @@ func routingCases() []Case {
 				before := e.Observe(vm)
 				for _, c := range perVMCalls() {
 					err := c.call(e, UnknownHost, vm, OwnerA)
-					requireHostUnavailable(e, err, UnknownHost, c.name+" on an unknown host")
+					requireHostUnavailable(e, err, "", c.name+" on an unknown host")
 				}
 				requireUnchanged(e, vm, before, "calls on an unknown host")
 				requireNeverDialed(e, UnknownHost)
@@ -170,12 +170,14 @@ func routingCases() []Case {
 				requireUnchanged(e, db, beforeDB, "Delete sent to the wrong host")
 
 				// Routed correctly, the effect lands on that host's VM only.
-				_, err = e.Power(e.HostA(), onA.ID, OwnerA, providerv1.PowerOp_POWER_OP_OFF)
+				pw, err := e.Power(e.HostA(), onA.ID, OwnerA, providerv1.PowerOp_POWER_OP_OFF)
 				require.NoError(e.T, err)
+				e.Settle(pw)
 				assert.False(e.T, e.Observe(onA).Running, "power off reached the named host's VM")
 				requireUnchanged(e, onB, beforeB, "power off on the other host")
-				_, err = e.Delete(e.HostA(), onA.ID, OwnerA)
+				del, err := e.Delete(e.HostA(), onA.ID, OwnerA)
 				require.NoError(e.T, err)
+				e.Settle(del)
 				assert.False(e.T, e.Observe(onA).Exists, "delete removed the VM on the named host")
 				requireUnchanged(e, onB, beforeB, "delete of the same name on the other host")
 			},
@@ -189,6 +191,7 @@ func requireNeverDialed(e *Env, hosts ...string) {
 	e.T.Helper()
 	obs, ok := e.Target.(DialObserver)
 	if !ok {
+		e.T.Logf("coverage reduced: the target cannot report dialed hosts, so a refused host id is not proven undialed")
 		return
 	}
 	dialed := map[string]bool{}

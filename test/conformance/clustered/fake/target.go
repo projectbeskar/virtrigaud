@@ -59,12 +59,13 @@ func New(opts ...Option) *Target {
 	t.w = &world{hosts: map[string]*hostState{}, ready: true}
 	for _, h := range []string{"host-a", "host-b"} {
 		t.w.order = append(t.w.order, h)
-		t.w.hosts[h] = &hostState{reachable: true, vms: map[string]*vm{}, tasks: map[string]bool{}}
+		t.w.hosts[h] = &hostState{reachable: true, vms: map[string]*vm{}, tasks: map[string]*task{}}
 	}
 	t.p = t.newProvider()
 	feats := []clustered.Feature{
 		clustered.FeatureVMNotOwnedReason, clustered.FeatureHostInventory, clustered.FeatureCreate,
-		clustered.FeatureCreateOwnerRebind, clustered.FeatureProviderNotReady,
+		clustered.FeatureCreateOwnerRebind, clustered.FeatureProviderNotReady, clustered.FeatureHostBlackhole,
+		clustered.FeatureHostFaults, clustered.FeatureHostRemoval, clustered.FeatureUnreadableStamp,
 	}
 	reasons := map[clustered.Feature]string{}
 	if t.async {
@@ -79,7 +80,7 @@ func New(opts ...Option) *Target {
 func (t *Target) newProvider() *provider {
 	return &provider{
 		w: t.w, violations: t.violations, async: t.async, notOwned: true,
-		memTasks: map[string]bool{},
+		memTasks: map[string]*task{},
 	}
 }
 
@@ -117,7 +118,7 @@ func (t *Target) SeedVM(_ context.Context, spec clustered.SeedSpec) (clustered.V
 	if hs == nil {
 		return clustered.VM{}, fmt.Errorf("fake: no host %q", spec.Host)
 	}
-	hs.vms[spec.Name] = &vm{name: spec.Name, owner: spec.Owner, running: spec.Running}
+	hs.vms[spec.Name] = &vm{name: spec.Name, owner: spec.Owner, running: spec.Running, cpu: 2, memMiB: 2048, stamp: spec.Stamp}
 	return clustered.VM{ID: spec.Name, Host: spec.Host, Name: spec.Name}, nil
 }
 
@@ -133,7 +134,7 @@ func (t *Target) Observe(_ context.Context, v clustered.VM) (clustered.Observati
 	if x == nil {
 		return clustered.Observation{}, nil
 	}
-	return clustered.Observation{Exists: true, Running: x.running, OwnerUID: x.owner.UID}, nil
+	return clustered.Observation{Exists: true, Running: x.running, OwnerUID: x.owner.UID, CPU: x.cpu, MemoryMiB: x.memMiB}, nil
 }
 
 // SetHostReachable makes a host reachable or not.
@@ -182,13 +183,22 @@ func (t *Target) Restart() error {
 func (t *Target) FinishTasks() error {
 	t.w.mu.Lock()
 	defer t.w.mu.Unlock()
-	for _, hs := range t.w.hosts {
-		for id := range hs.tasks {
-			hs.tasks[id] = true
+	finish := func(k *task) {
+		if k.done {
+			return
+		}
+		k.done = true
+		if !t.violations[TaskDoneWithoutEffect] {
+			k.apply()
 		}
 	}
-	for id := range t.p.memTasks {
-		t.p.memTasks[id] = true
+	for _, hs := range t.w.hosts {
+		for _, k := range hs.tasks {
+			finish(k)
+		}
+	}
+	for _, k := range t.p.memTasks {
+		finish(k)
 	}
 	return nil
 }
@@ -205,5 +215,37 @@ func (t *Target) SetProviderReady(ready bool) error {
 	t.w.mu.Lock()
 	defer t.w.mu.Unlock()
 	t.w.ready = ready
+	return nil
+}
+
+// SetHostBlackholed makes a host accept connections and never answer.
+func (t *Target) SetHostBlackholed(host string, blackholed bool) error {
+	return t.withHost(host, func(hs *hostState) { hs.blackholed = blackholed })
+}
+
+// FailHostOperations makes operations that change a VM fail on the host.
+func (t *Target) FailHostOperations(host string, on bool) error {
+	return t.withHost(host, func(hs *hostState) { hs.failOps = on })
+}
+
+// DropHostDuringOperations makes the host's connection die during operations
+// that change a VM.
+func (t *Target) DropHostDuringOperations(host string, on bool) error {
+	return t.withHost(host, func(hs *hostState) { hs.dropOps = on })
+}
+
+// RemoveHost removes a host from the provider's registry; its VMs stay.
+func (t *Target) RemoveHost(host string) error {
+	return t.withHost(host, func(hs *hostState) { hs.removed = true })
+}
+
+func (t *Target) withHost(host string, fn func(*hostState)) error {
+	t.w.mu.Lock()
+	defer t.w.mu.Unlock()
+	hs := t.w.hosts[host]
+	if hs == nil {
+		return fmt.Errorf("fake: no host %q", host)
+	}
+	fn(hs)
 	return nil
 }

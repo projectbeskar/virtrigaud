@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	transportgrpc "github.com/projectbeskar/virtrigaud/internal/transport/grpc"
@@ -254,6 +255,39 @@ func (e *Env) ListVMs() (*providerv1.ListVMsResponse, error) {
 	ctx, cancel := e.Call()
 	defer cancel()
 	return e.raw.ListVMs(ctx, &providerv1.ListVMsRequest{})
+}
+
+// Settle completes the task a call returned, if it returned one, so the
+// effect of the call can be observed: it finishes the Target's tasks
+// (TaskController) and requires TaskStatus to report the task done. A call
+// that returned no task has nothing to wait for.
+func (e *Env) Settle(resp *providerv1.TaskResponse) {
+	e.T.Helper()
+	ref := resp.GetTask().GetId()
+	if ref == "" {
+		return
+	}
+	ctl, ok := e.Target.(TaskController)
+	require.True(e.T, ok, "the call returned a task, so the Target must implement TaskController")
+	require.NoError(e.T, ctl.FinishTasks())
+	st, err := e.TaskStatus(ref)
+	require.NoError(e.T, err, "poll the task the call returned")
+	require.True(e.T, st.Done, "the task is done once the host finished it")
+}
+
+// CreateRequest returns a CreateRequest for name on host owned by owner, with
+// the Target's template (CreateTemplater) filled in. A VM's name is the name
+// of its VirtualMachine, so the owner identity carries the same name.
+func (e *Env) CreateRequest(name, host string, owner Identity) *providerv1.CreateRequest {
+	req := &providerv1.CreateRequest{ClassJson: `{"CPU":2,"MemoryMiB":1024}`}
+	if tpl, ok := e.Target.(CreateTemplater); ok {
+		if c, ok := proto.Clone(tpl.CreateTemplate()).(*providerv1.CreateRequest); ok {
+			req = c
+		}
+	}
+	owner.Name = name
+	req.Name, req.TargetHostId, req.Owner = name, host, owner.Proto()
+	return req
 }
 
 // Reason is one google.rpc.ErrorInfo detail of a wire error.

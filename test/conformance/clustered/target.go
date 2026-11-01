@@ -75,6 +75,24 @@ const (
 	// taken fails with AlreadyExists (proto CreateRequest.owner).
 	FeatureCreateOwnerRebind Feature = "create-owner-rebind"
 
+	// FeatureHostBlackhole means the Target can make a host accept
+	// connections but never answer (Target implements HostBlackholer).
+	FeatureHostBlackhole Feature = "host-blackhole"
+
+	// FeatureHostFaults means the Target can make a host fail one operation
+	// cleanly, or lose its connection part-way through one (Target
+	// implements HostFaulter).
+	FeatureHostFaults Feature = "host-faults"
+
+	// FeatureHostRemoval means the Target can remove a host from the
+	// Provider's registry while VMs are bound to it (Target implements
+	// HostRemover).
+	FeatureHostRemoval Feature = "host-removal"
+
+	// FeatureUnreadableStamp means SeedSpec.Stamp can make a VM's owner stamp
+	// unreadable or ambiguous.
+	FeatureUnreadableStamp Feature = "unreadable-stamp"
+
 	// FeatureProviderNotReady means the Target can make the Provider itself,
 	// not one host, unable to answer (Target.SetProviderReady).
 	FeatureProviderNotReady Feature = "provider-not-ready"
@@ -99,6 +117,27 @@ func (c Capabilities) Has(f Feature) bool {
 		}
 	}
 	return false
+}
+
+// Level says how binding a case is.
+type Level int
+
+const (
+	// Required cases check a rule the proto, the contracts package or an ADR
+	// states. A Target that fails one does not conform; the run fails.
+	Required Level = iota
+	// Recommended cases check good practice the contract does not state. A
+	// Target that fails one is reported in the run's summary, and the run
+	// does not fail.
+	Recommended
+)
+
+// String returns the level's name.
+func (l Level) String() string {
+	if l == Recommended {
+		return "recommended"
+	}
+	return "required"
 }
 
 // Identity is the owner of a VM: the VirtualMachine it was made for.
@@ -130,7 +169,22 @@ type SeedSpec struct {
 	Owner Identity
 	// Running is the initial power state.
 	Running bool
+	// Stamp makes the owner stamp unreadable or ambiguous. Only a Target that
+	// offers FeatureUnreadableStamp is asked for anything but StampNormal.
+	Stamp StampState
 }
+
+// StampState is the condition of a seeded VM's owner stamp.
+type StampState int
+
+const (
+	// StampNormal is a readable stamp (or none, when Owner is zero).
+	StampNormal StampState = iota
+	// StampUnreadable is a stamp that cannot be read.
+	StampUnreadable
+	// StampAmbiguous is a stamp that records more than one owner.
+	StampAmbiguous
+)
 
 // VM identifies a seeded or created VM in later calls.
 type VM struct {
@@ -152,6 +206,10 @@ type Observation struct {
 	Running bool
 	// OwnerUID is the uid its owner stamp records ("" when unstamped).
 	OwnerUID string
+	// CPU is its vCPU count (0 when the Target cannot tell).
+	CPU int32
+	// MemoryMiB is its memory in MiB (0 when the Target cannot tell).
+	MemoryMiB int64
 }
 
 // Target is the adapter between the suite and one clustered Provider. All
@@ -191,6 +249,40 @@ type Target interface {
 	// configuration alone. The state of the hosts (VMs, owner stamps, host
 	// reachability) is kept. Afterwards Server returns the new service.
 	Restart() error
+}
+
+// CreateTemplater is implemented by a Target whose Create needs more than a
+// name, a host and an owner (a class, an image, networks). The suite fills
+// the rest of its CreateRequest from the template.
+type CreateTemplater interface {
+	// CreateTemplate returns the request fields the Target needs on every
+	// Create: ClassJson, ImageJson, NetworksJson, DisksJson ...
+	CreateTemplate() *providerv1.CreateRequest
+}
+
+// HostBlackholer is implemented by a Target that offers FeatureHostBlackhole.
+type HostBlackholer interface {
+	// SetHostBlackholed makes a host accept connections and never answer
+	// (true), or answer again (false).
+	SetHostBlackholed(host string, blackholed bool) error
+}
+
+// HostFaulter is implemented by a Target that offers FeatureHostFaults.
+type HostFaulter interface {
+	// FailHostOperations makes every operation that changes a VM on the host
+	// fail cleanly (the host answers with an error) while on is true.
+	FailHostOperations(host string, on bool) error
+	// DropHostDuringOperations makes the host's connection die while it runs
+	// an operation that changes a VM, after earlier reads were answered, while
+	// on is true.
+	DropHostDuringOperations(host string, on bool) error
+}
+
+// HostRemover is implemented by a Target that offers FeatureHostRemoval.
+type HostRemover interface {
+	// RemoveHost removes a host from the Provider's registry (as deleting its
+	// Host would) while its VMs stay where they are.
+	RemoveHost(host string) error
 }
 
 // TaskController is implemented by a Target that offers FeatureAsyncTasks.

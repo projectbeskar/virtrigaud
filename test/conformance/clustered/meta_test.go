@@ -39,49 +39,53 @@ type mutation struct {
 	// seeded. They are chosen from the rule the violation breaks, not from
 	// what happens to fail.
 	kills []string
+	// want pins, for some of the kills, a substring the failure output must
+	// contain, so the case is shown failing for the seeded reason and not for
+	// another one.
+	want map[string]string
 }
 
 func mutations() []mutation {
 	return []mutation{
-		{violation: fake.AllowEmptyHost, kills: []string{"route.missing-host", "create.requires-routable-host"}},
+		{violation: fake.AllowEmptyHost, kills: []string{"route.missing-host", "create.requires-routable-host"}, want: map[string]string{"route.missing-host": `with host`}},
 		{violation: fake.UnknownHostNotFound, kills: []string{"route.unknown-host", "errinfo.host-unavailable-wire-and-mapping", "create.requires-routable-host"}},
 		{violation: fake.UnknownHostNoReason, kills: []string{"route.unknown-host", "errinfo.host-unavailable-wire-and-mapping"}},
 		{violation: fake.DialRequestedHostFirst, kills: []string{"route.unknown-host", "route.invalid-host-id"}},
 		{violation: fake.NormalizeHostIDs, kills: []string{"route.invalid-host-id"}},
-		{violation: fake.FallbackToAnyHost, kills: []string{"route.correct-host"}},
+		{violation: fake.FallbackToAnyHost, kills: []string{"route.correct-host"}, want: map[string]string{"route.correct-host": "does not have the VM"}},
 
-		{violation: fake.IgnoreOwnerDescribe, kills: []string{"owner.describe-foreign", "owner.request-without-owner"}},
-		{violation: fake.IgnoreOwnerMutate, kills: []string{"owner.mutate-foreign", "owner.request-without-owner", "idempotency.delete"}},
+		{violation: fake.IgnoreOwnerDescribe, kills: []string{"owner.describe-foreign", "owner.request-without-owner"}, want: map[string]string{"owner.describe-foreign": "must be exists=false"}},
+		{violation: fake.IgnoreOwnerMutate, kills: []string{"owner.mutate-foreign", "owner.request-without-owner", "idempotency.delete"}, want: map[string]string{"owner.mutate-foreign": "must be refused"}},
 		{violation: fake.UnstampedAuthorizes, kills: []string{"owner.describe-foreign", "owner.mutate-foreign"}},
 		{violation: fake.MissingOwnerAuthorizes, kills: []string{"owner.request-without-owner"}},
 		{violation: fake.ForeignWrongCode, kills: []string{"owner.mutate-foreign", "owner.refusal-discloses-nothing"}},
-		{violation: fake.OwnerLeak, kills: []string{"owner.refusal-discloses-nothing"}},
+		{violation: fake.OwnerLeak, kills: []string{"owner.refusal-discloses-nothing"}, want: map[string]string{"owner.refusal-discloses-nothing": "names the other owner"}},
 		{violation: fake.NotOwnedReasonMissing, kills: []string{"owner.vm-not-owned-reason"}},
 		{violation: fake.NotOwnedReasonOnAbsent, kills: []string{"owner.vm-not-owned-reason"}},
 
-		{violation: fake.HostDownAsNotFound, kills: []string{"hostdown.per-vm", "idempotency.host-unavailable", "errinfo.host-unavailable-wire-and-mapping"}},
-		{violation: fake.HostDownNoReason, kills: []string{"hostdown.per-vm", "hostdown.not-counted-against-provider", "errinfo.host-unavailable-wire-and-mapping", "idempotency.host-unavailable"}},
+		{violation: fake.HostDownAsNotFound, kills: []string{"hostdown.per-vm", "idempotency.host-unavailable", "errinfo.host-unavailable-wire-and-mapping"}, want: map[string]string{"hostdown.per-vm": "on an unreachable host"}},
+		{violation: fake.HostDownNoReason, kills: []string{"hostdown.per-vm", "hostdown.not-counted-against-provider", "errinfo.host-unavailable-wire-and-mapping", "idempotency.host-unavailable", "tasks.host-down-ref", "restart.task-routing"}},
 		{violation: fake.HostUnavailableWrongDomain, kills: []string{"hostdown.per-vm", "errinfo.host-unavailable-wire-and-mapping"}},
 		{violation: fake.HostUnavailableNoHost, kills: []string{"hostdown.per-vm", "errinfo.host-unavailable-wire-and-mapping", "create.unavailable-names-host"}},
 		{violation: fake.HostDownBreaksPeers, kills: []string{"hostdown.isolated"}},
 		{violation: fake.StickyUnreachable, kills: []string{"hostdown.recovery", "list.recovery"}},
 		{violation: fake.HostDownMutatesAnyway, kills: []string{"idempotency.host-unavailable"}},
 
-		{violation: fake.TaskNotHostEncoded, kills: []string{"tasks.async-routing", "tasks.synchronous-effect"}},
-		{violation: fake.TaskAcceptsMalformed, kills: []string{"tasks.malformed-ref"}},
-		{violation: fake.TaskUnknownHostDone, kills: []string{"tasks.unknown-host"}},
+		{violation: fake.TaskNotHostEncoded, kills: []string{"tasks.async-routing", "tasks.synchronous-effect"}, want: map[string]string{"tasks.async-routing": "must be host-encoded"}},
+		{violation: fake.TaskAcceptsMalformed, kills: []string{"tasks.malformed-ref"}, want: map[string]string{"tasks.malformed-ref": "must not be reported as a task result"}},
+		{violation: fake.TaskUnknownHostDone, kills: []string{"tasks.unknown-host"}, want: map[string]string{"tasks.unknown-host": "must be refused"}},
 		{violation: fake.TaskDialsUnknownHost, kills: []string{"tasks.unknown-host"}},
 		{violation: fake.TaskForgedInnerDone, kills: []string{"tasks.forged-inner-ref"}},
-		{violation: fake.TaskWrongHost, kills: []string{"tasks.async-routing"}},
+		{violation: fake.TaskWrongHost, kills: []string{"tasks.async-routing", "tasks.host-down-ref"}},
 		{violation: fake.TasksInMemory, kills: []string{"restart.task-ref"}},
 		{violation: fake.PowerNoEffect, sync: true, kills: []string{"tasks.synchronous-effect", "idempotency.power"}},
 
-		{violation: fake.ListDropsUnreachable, kills: []string{"list.unreachable-host", "list.all-unreachable", "restart.host-down-across-restart"}},
+		{violation: fake.ListDropsUnreachable, kills: []string{"list.unreachable-host", "list.all-unreachable", "restart.host-down-across-restart"}, want: map[string]string{"list.unreachable-host": "the dead host is reported unknown"}},
 		{violation: fake.ListFailsOnDownHost, kills: []string{"list.unreachable-host", "list.all-unreachable", "list.not-counted-against-provider"}},
-		{violation: fake.ListNoHostID, kills: []string{"list.all-hosts"}},
+		{violation: fake.ListNoHostID, kills: []string{"list.all-hosts"}, want: map[string]string{"list.all-hosts": "has no host_id"}},
 		{violation: fake.ListDedupesByName, kills: []string{"list.all-hosts"}},
 
-		{violation: fake.CapsNoClustering, kills: []string{"caps.clustering"}},
+		{violation: fake.CapsNoClustering, kills: []string{"caps.clustering"}, want: map[string]string{"caps.clustering": "a clustered provider says so"}},
 		{violation: fake.CapsUnstable, kills: []string{"caps.clustering"}},
 		{violation: fake.CapsAdvertiseUnrouted, kills: []string{"caps.advertised-rpcs-are-routed"}},
 		{violation: fake.NotReadyLooksHostScoped, kills: []string{"errinfo.provider-level-unavailable"}},
@@ -90,18 +94,27 @@ func mutations() []mutation {
 		{violation: fake.PowerRepeatFails, kills: []string{"idempotency.power"}},
 		{violation: fake.DeleteTwiceFails, kills: []string{"idempotency.delete"}},
 
-		{violation: fake.ForgetsVMsOnRestart, kills: []string{"restart.state-lives-on-hosts", "providerdown.outage-and-recovery"}},
+		{violation: fake.ForgetsVMsOnRestart, kills: []string{"restart.state-lives-on-hosts", "providerdown.outage-and-recovery"}, want: map[string]string{"restart.state-lives-on-hosts": "still known on its host"}},
 		{violation: fake.RestoresDeletedOnRestart, kills: []string{"restart.no-resurrection"}},
-		{violation: fake.RestartDropsDownHost, kills: []string{"restart.host-down-across-restart"}},
+		{violation: fake.RestartDropsDownHost, kills: []string{"restart.host-down-across-restart", "restart.task-routing"}},
 
 		{violation: fake.InventoryDropsDownHost, kills: []string{"hosts.inventory"}},
 		{violation: fake.InventoryDownIsReady, kills: []string{"hosts.inventory"}},
 		{violation: fake.GetHostInfoUnknownOK, kills: []string{"hosts.inventory"}},
 
+		{violation: fake.TaskDoneWithoutEffect, kills: []string{"tasks.async-routing", "tasks.synchronous-effect", "idempotency.power"}, want: map[string]string{"tasks.async-routing": "has had its effect"}},
+		{violation: fake.NameMatchAuthorizes, kills: []string{"owner.request-without-owner"}},
+		{violation: fake.UnreadableStampAuthorizes, kills: []string{"owner.unreadable-stamp"}},
+		{violation: fake.ForeignDescribeLeaksSize, kills: []string{"owner.describe-foreign"}, want: map[string]string{"owner.describe-foreign": "the answer must be empty"}},
+		{violation: fake.BlackholeStallsList, kills: []string{"hostdown.blackholed-list"}},
+		{violation: fake.BlackholeNoReason, kills: []string{"hostdown.blackholed-per-vm"}},
+		{violation: fake.OpFailedNoReason, kills: []string{"hostdown.operation-failed"}, want: map[string]string{"hostdown.operation-failed": "must carry VM_OPERATION_FAILED"}},
+		{violation: fake.ConnLostNoReason, kills: []string{"hostdown.connection-lost"}, want: map[string]string{"hostdown.connection-lost": "must carry HOST_CONNECTION_LOST"}},
+		{violation: fake.RemovedHostIsNotFound, kills: []string{"hostdown.removed-host"}},
 		{violation: fake.CreateIgnoresHost, kills: []string{"create.routed-to-target-host"}},
 		{violation: fake.CreateIgnoresReachability, kills: []string{"create.requires-routable-host"}},
 		{violation: fake.CreateNoOwnerStamp, kills: []string{"create.routed-to-target-host"}},
-		{violation: fake.CreateRebindsForeign, kills: []string{"create.owner-rebind"}},
+		{violation: fake.CreateRebindsForeign, kills: []string{"create.owner-rebind"}, want: map[string]string{"create.owner-rebind": "taken name"}},
 		{violation: fake.CreateDuplicates, kills: []string{"create.owner-rebind"}},
 	}
 }
@@ -121,8 +134,8 @@ func caseByID(t *testing.T, id string) clustered.Case {
 // every violation the fake can commit it runs the cases that guard the broken
 // rule against a fake that commits it, and requires each to FAIL. It then
 // requires that every case of the suite is guarded by at least one violation
-// and that every violation is used, so no case can pass vacuously and no
-// violation is dead code.
+// and that every violation is used. It shows each case able to fail for the
+// reason it states; it does not prove the cases complete.
 func TestEveryCaseCatchesItsSeededViolation(t *testing.T) {
 	killed := map[string][]fake.Violation{}
 	used := map[fake.Violation]bool{}
@@ -141,6 +154,9 @@ func TestEveryCaseCatchesItsSeededViolation(t *testing.T) {
 				switch got {
 				case clustered.OutcomeFailed:
 					killed[id] = append(killed[id], m.violation)
+					if sub, ok := m.want[id]; ok {
+						assert.Contains(t, strings.Join(rec.Failures(), " "), sub, "case %s failed against %s, but not for the seeded reason", id, m.violation)
+					}
 				case clustered.OutcomeSkipped:
 					t.Errorf("case %s was skipped (%s), so it cannot catch %s", id, rec.SkipReason(), m.violation)
 				default:

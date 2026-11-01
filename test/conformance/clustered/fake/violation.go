@@ -154,6 +154,34 @@ const (
 	// GetHostInfoUnknownOK answers GetHostInfo for a host it does not front.
 	GetHostInfoUnknownOK Violation = "get-host-info-unknown-ok"
 
+	// TaskDoneWithoutEffect reports a task done without having applied its
+	// effect.
+	TaskDoneWithoutEffect Violation = "task-done-without-effect"
+	// NameMatchAuthorizes lets a request with no owner uid act on a VM whose
+	// stamp records the same namespace and name.
+	NameMatchAuthorizes Violation = "name-match-authorizes"
+	// UnreadableStampAuthorizes acts on a VM whose owner stamp is unreadable
+	// or ambiguous.
+	UnreadableStampAuthorizes Violation = "unreadable-stamp-authorizes"
+	// ForeignDescribeLeaksSize reports exists=false for a foreign VM but still
+	// fills in its size.
+	ForeignDescribeLeaksSize Violation = "foreign-describe-leaks-size"
+	// BlackholeStallsList lets one host that never answers stall ListVMs
+	// until the caller's deadline.
+	BlackholeStallsList Violation = "blackhole-stalls-list"
+	// BlackholeNoReason answers a call to a host that never answers with a
+	// bare deadline error.
+	BlackholeNoReason Violation = "blackhole-no-reason"
+	// OpFailedNoReason answers an operation that failed on its host with a
+	// plain Unavailable, without VM_OPERATION_FAILED.
+	OpFailedNoReason Violation = "op-failed-no-reason"
+	// ConnLostNoReason answers a lost host connection without
+	// HOST_CONNECTION_LOST.
+	ConnLostNoReason Violation = "conn-lost-no-reason"
+	// RemovedHostIsNotFound answers a call to a host removed from the
+	// registry NotFound, as if the VM were gone.
+	RemovedHostIsNotFound Violation = "removed-host-is-not-found"
+
 	// CreateIgnoresHost creates every VM on the first host.
 	CreateIgnoresHost Violation = "create-ignores-host"
 	// CreateIgnoresReachability creates a VM on an unreachable host.
@@ -182,6 +210,8 @@ func All() []Violation {
 		DescribeFlaps, PowerRepeatFails, DeleteTwiceFails,
 		ForgetsVMsOnRestart, RestoresDeletedOnRestart, RestartDropsDownHost,
 		InventoryDropsDownHost, InventoryDownIsReady, GetHostInfoUnknownOK,
+		TaskDoneWithoutEffect, NameMatchAuthorizes, UnreadableStampAuthorizes, ForeignDescribeLeaksSize, BlackholeStallsList,
+		BlackholeNoReason, OpFailedNoReason, ConnLostNoReason, RemovedHostIsNotFound,
 		CreateIgnoresHost, CreateIgnoresReachability, CreateNoOwnerStamp, CreateRebindsForeign, CreateDuplicates,
 	}
 }

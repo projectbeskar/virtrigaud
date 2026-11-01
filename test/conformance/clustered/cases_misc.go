@@ -18,6 +18,7 @@ package clustered
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -59,40 +60,61 @@ func capabilityCases() []Case {
 		},
 		{
 			ID:     "caps.advertised-rpcs-are-routed",
-			Rule:   "an RPC the provider advertises is served and requires a host: with no host id it answers InvalidArgument, never Unimplemented",
+			Rule:   "an RPC the provider advertises is served and requires a host: the same otherwise valid request is refused InvalidArgument about the host when it names none, and is not Unimplemented or refused for its host when it names one",
 			Source: "ADR-0007 D7 (capability-gated, honesty-first) and Addendum A, A1; proto/provider/v1/provider.proto: SnapshotCreateRequest, ExportDiskRequest, CloneRequest host fields",
 			Run: func(e *Env) {
 				ctx, cancel := e.Call()
 				defer cancel()
 				caps, err := e.Raw().GetCapabilities(ctx, &providerv1.GetCapabilitiesRequest{})
 				require.NoError(e.T, err)
-				checked := 0
-				expectRouted := func(what string, err error) {
-					checked++
-					w := requireCode(e, err, codes.InvalidArgument, what+" without a host")
-					assert.NotEqual(e.T, codes.Unimplemented, w.Code, what)
+				backend := "s3"
+				if len(caps.SupportedExportBackends) > 0 {
+					backend = caps.SupportedExportBackends[0]
 				}
+				type call func(host string) error
+				calls := map[string]call{}
 				if caps.SupportsSnapshots {
-					_, err := e.Raw().SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "x", NameHint: "s", Owner: OwnerA.Proto()})
-					expectRouted("SnapshotCreate", err)
-					_, err = e.Raw().SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "x", SnapshotId: "s", Owner: OwnerA.Proto()})
-					expectRouted("SnapshotDelete", err)
-					_, err = e.Raw().SnapshotRevert(ctx, &providerv1.SnapshotRevertRequest{VmId: "x", SnapshotId: "s", Owner: OwnerA.Proto()})
-					expectRouted("SnapshotRevert", err)
+					calls["SnapshotCreate"] = func(h string) error {
+						_, err := e.Raw().SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "x", NameHint: "s", TargetHostId: h, Owner: OwnerA.Proto()})
+						return err
+					}
+					calls["SnapshotDelete"] = func(h string) error {
+						_, err := e.Raw().SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "x", SnapshotId: "s", TargetHostId: h, Owner: OwnerA.Proto()})
+						return err
+					}
+					calls["SnapshotRevert"] = func(h string) error {
+						_, err := e.Raw().SnapshotRevert(ctx, &providerv1.SnapshotRevertRequest{VmId: "x", SnapshotId: "s", TargetHostId: h, Owner: OwnerA.Proto()})
+						return err
+					}
 				}
 				if caps.SupportsDiskExport {
-					backend := "s3"
-					if len(caps.SupportedExportBackends) > 0 {
-						backend = caps.SupportedExportBackends[0]
+					calls["ExportDisk"] = func(h string) error {
+						_, err := e.Raw().ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "x", Owner: OwnerA.Proto(), TargetHostId: h,
+							BackendType: backend, TransferMode: "relay", Format: "qcow2", DestinationUrl: "s3://bucket/key"})
+						return err
 					}
-					_, err := e.Raw().ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "x", Owner: OwnerA.Proto(), BackendType: backend, TransferMode: "relay"})
-					expectRouted("ExportDisk", err)
 				}
 				if caps.SupportsRoutedClone {
-					_, err := e.Raw().Clone(ctx, &providerv1.CloneRequest{SourceVmId: "x", TargetName: "y", SourceOwner: OwnerA.Proto()})
-					expectRouted("Clone", err)
+					calls["Clone"] = func(h string) error {
+						_, err := e.Raw().Clone(ctx, &providerv1.CloneRequest{SourceVmId: "x", TargetName: "y", SourceHostId: h, TargetHostId: h, SourceOwner: OwnerA.Proto()})
+						return err
+					}
 				}
-				e.T.Logf("capability-advertised RPCs checked: %d", checked)
+				if len(calls) == 0 {
+					e.T.Skipf("the provider advertises no routed per-VM capability, so there is nothing to check")
+				}
+				for name, do := range calls {
+					w := requireCode(e, do(""), codes.InvalidArgument, name+" without a host")
+					assert.Contains(e.T, strings.ToLower(w.Message), "host", "%s: the refusal must be about the missing host: %s", name, w)
+					if err := do(e.HostA()); err != nil {
+						w := WireOf(err)
+						assert.NotEqual(e.T, codes.Unimplemented, w.Code, "%s is advertised but not served: %s", name, w)
+						if w.Code == codes.InvalidArgument {
+							assert.NotContains(e.T, strings.ToLower(w.Message), "target_host_id", "%s with a host is still refused for its host: %s", name, w)
+						}
+					}
+				}
+				e.T.Logf("capability-advertised RPCs checked: %d", len(calls))
 			},
 		},
 	}
@@ -102,40 +124,50 @@ func errorMappingCases() []Case {
 	return []Case{
 		{
 			ID:     "errinfo.host-unavailable-wire-and-mapping",
-			Rule:   "the wire carries google.rpc.ErrorInfo{reason: HOST_UNAVAILABLE, domain: provider.virtrigaud.io, metadata.host}; the manager maps it to a retryable HostUnavailable that is not NotFound, and keeps the host id",
-			Source: "internal/providers/contracts/errors.go: HostUnavailableReason, ErrorInfoDomain; host_unavailable.go: UnreachableHost; internal/transport/grpc/client.go: mapGRPCStatus",
+			Rule:   "the wire carries google.rpc.ErrorInfo{reason: HOST_UNAVAILABLE, domain: provider.virtrigaud.io}, with metadata.host naming a known host that is unreachable; the manager maps it to a retryable HostUnavailable that is not NotFound, and keeps that host id",
+			Source: "internal/providers/contracts/errors.go: HostUnavailableReason, ErrorInfoDomain; internal/providers/contracts/host_unavailable.go: HostUnavailableHostKey, UnreachableHost",
 			Run: func(e *Env) {
 				vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "map-vm", Owner: OwnerA, Running: true})
-				e.HostDown(e.HostA())
+				ref := func(host string) contracts.VMRef {
+					return contracts.VMRef{ID: vm.ID, HostID: host, Owner: contracts.ObjectIdentity(OwnerA)}
+				}
+				check := func(what string, err error) {
+					require.Error(e.T, err, what)
+					assert.True(e.T, contracts.IsHostUnavailable(err), "%s: %v", what, err)
+					assert.True(e.T, contracts.IsRetryable(err), "%s: retryable", what)
+					assert.False(e.T, contracts.IsNotFound(err), "%s: an unreachable host never says the VM is gone", what)
+				}
+
+				// An unknown host: the reason and domain, as literals.
 				_, err := e.Describe(UnknownHost, vm.ID, OwnerA)
 				w := requireCode(e, err, codes.Unavailable, "unknown host")
 				r, ok := w.Reason(wireHostUnavailableReason)
 				require.True(e.T, ok, "%s", w)
 				assert.Equal(e.T, wireErrorInfoDomain, r.Domain)
-				assert.Equal(e.T, UnknownHost, r.Metadata["host"])
+				_, err = e.Manager().Describe(e.Ctx(), ref(UnknownHost))
+				check("Describe on an unknown host", err)
+				_, err = e.Manager().Delete(e.Ctx(), ref(UnknownHost))
+				check("Delete on an unknown host", err)
+				_, err = e.Manager().Power(e.Ctx(), ref(UnknownHost), contracts.PowerOpOn)
+				check("Power on an unknown host", err)
 
-				ref := func(host string) contracts.VMRef {
-					return contracts.VMRef{ID: vm.ID, HostID: host, Owner: contracts.ObjectIdentity(OwnerA)}
-				}
-				mapped := map[string]error{}
-				_, mapped["Describe"] = e.Manager().Describe(e.Ctx(), ref(UnknownHost))
-				_, mapped["Delete"] = e.Manager().Delete(e.Ctx(), ref(UnknownHost))
-				_, mapped["Power"] = e.Manager().Power(e.Ctx(), ref(UnknownHost), contracts.PowerOpOn)
-				_, mapped["Describe on a down host"] = e.Manager().Describe(e.Ctx(), ref(e.HostA()))
-				for name, err := range mapped {
-					require.Error(e.T, err, name)
-					assert.True(e.T, contracts.IsHostUnavailable(err), "%s: %v", name, err)
-					assert.True(e.T, contracts.IsRetryable(err), "%s: retryable", name)
-					assert.False(e.T, contracts.IsNotFound(err), "%s: an unreachable host never says the VM is gone", name)
-				}
-				assert.Equal(e.T, UnknownHost, contracts.UnreachableHost(mapped["Describe"]), "the host id survives the mapping")
-				assert.Equal(e.T, e.HostA(), contracts.UnreachableHost(mapped["Describe on a down host"]))
+				// A known host that is unreachable: also the host's id.
+				e.HostDown(e.HostA())
+				_, err = e.Describe(e.HostA(), vm.ID, OwnerA)
+				w = requireCode(e, err, codes.Unavailable, "unreachable host")
+				r, ok = w.Reason(wireHostUnavailableReason)
+				require.True(e.T, ok, "%s", w)
+				assert.Equal(e.T, wireErrorInfoDomain, r.Domain)
+				assert.Equal(e.T, e.HostA(), r.Metadata["host"], "the ErrorInfo names the unreachable host")
+				_, err = e.Manager().Describe(e.Ctx(), ref(e.HostA()))
+				check("Describe on an unreachable host", err)
+				assert.Equal(e.T, e.HostA(), contracts.UnreachableHost(err), "the host id survives the mapping")
 			},
 		},
 		{
 			ID:       "errinfo.provider-level-unavailable",
 			Rule:     "when the Provider itself cannot serve, its Unavailable is not host-scoped (no HOST_UNAVAILABLE), so the manager counts it as the Provider's failure",
-			Source:   "internal/transport/grpc/client.go: isInfraFailure (only a host-scoped Unavailable is exempt from the breaker)",
+			Source:   "internal/providers/contracts/errors.go: HostUnavailableReason (only an unavailability \"scoped to one host\" is kept out of the circuit breaker)",
 			Requires: []Feature{FeatureProviderNotReady},
 			Run: func(e *Env) {
 				vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "notready", Owner: OwnerA, Running: true})
@@ -184,17 +216,19 @@ func idempotencyCases() []Case {
 		{
 			ID:     "idempotency.power",
 			Rule:   "a power operation repeated for a state the VM is already in succeeds (the manager re-sends after a lost answer)",
-			Source: "docs/provider-call-outcomes.md (Power is safe to re-send); internal/providers/libvirt/power_idempotent_test.go",
+			Source: "docs/provider-call-outcomes.md (\"on, off and shutdown can be repeated: a second attempt finds the domain already in the state asked for\")",
 			Run: func(e *Env) {
 				vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "idem-power", Owner: OwnerA, Running: false})
 				for i := 0; i < 2; i++ {
-					_, err := e.Power(vm.Host, vm.ID, OwnerA, providerv1.PowerOp_POWER_OP_ON)
+					resp, err := e.Power(vm.Host, vm.ID, OwnerA, providerv1.PowerOp_POWER_OP_ON)
 					require.NoError(e.T, err, "power on, attempt %d", i+1)
+					e.Settle(resp)
 					assert.True(e.T, e.Observe(vm).Running)
 				}
 				for i := 0; i < 2; i++ {
-					_, err := e.Power(vm.Host, vm.ID, OwnerA, providerv1.PowerOp_POWER_OP_OFF)
+					resp, err := e.Power(vm.Host, vm.ID, OwnerA, providerv1.PowerOp_POWER_OP_OFF)
 					require.NoError(e.T, err, "power off, attempt %d", i+1)
+					e.Settle(resp)
 					assert.False(e.T, e.Observe(vm).Running)
 				}
 			},
@@ -202,19 +236,28 @@ func idempotencyCases() []Case {
 		{
 			ID:     "idempotency.delete",
 			Rule:   "a repeated Delete is a success or NotFound (the VM is gone), never another error; and it never deletes a different VM that has since taken the name",
-			Source: "internal/providers/libvirt/routing.go: deleteClustered (absent is NotFound, treated as gone); ADR-0007 Addendum A, A2",
+			Source: "proto/provider/v1/provider.proto: DeleteRequest.owner (a VM that is not there or not the requester's is NOT_FOUND); docs/provider-call-outcomes.md (a Delete can be repeated)",
 			Run: func(e *Env) {
 				vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "idem-delete", Owner: OwnerA, Running: false})
-				_, err := e.Delete(vm.Host, vm.ID, OwnerA)
+				resp, err := e.Delete(vm.Host, vm.ID, OwnerA)
 				require.NoError(e.T, err)
+				e.Settle(resp)
 				assert.False(e.T, e.Observe(vm).Exists)
-				_, err = e.Delete(vm.Host, vm.ID, OwnerA)
+				resp, err = e.Delete(vm.Host, vm.ID, OwnerA)
 				if err != nil {
 					requireCode(e, err, codes.NotFound, "second Delete")
 				}
+				e.Settle(resp)
 
-				// Another tenant now has a VM of that name on the host.
+				// Another tenant now has a VM of that name on the host. The check is
+				// only meaningful when that VM is addressed by the same id as the one
+				// deleted (ids derived from names); where the Target gives a new VM a
+				// new id, the repeated Delete cannot reach it and the check is skipped.
 				taken := e.Seed(SeedSpec{Host: e.HostA(), Name: "idem-delete", Owner: OwnerB, Running: true})
+				if taken.ID != vm.ID {
+					e.T.Logf("coverage reduced: the new VM has another id (%s), so the repeated Delete cannot address it", taken.ID)
+					return
+				}
 				before := e.Observe(taken)
 				_, err = e.Delete(vm.Host, vm.ID, OwnerA)
 				requireCode(e, err, codes.NotFound, "Delete after the name was taken by another tenant")
@@ -288,12 +331,13 @@ func restartCases() []Case {
 			Source: srcRestart + "; ADR-0007 Addendum A, A4",
 			Run: func(e *Env) {
 				vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "rs-gone", Owner: OwnerA, Running: false})
-				_, err := e.Delete(vm.Host, vm.ID, OwnerA)
+				resp, err := e.Delete(vm.Host, vm.ID, OwnerA)
 				require.NoError(e.T, err)
+				e.Settle(resp)
 				e.RestartProvider()
-				resp, err := e.Describe(vm.Host, vm.ID, OwnerA)
+				dresp, err := e.Describe(vm.Host, vm.ID, OwnerA)
 				require.NoError(e.T, err)
-				assert.False(e.T, resp.Exists)
+				assert.False(e.T, dresp.Exists)
 				list, err := e.ListVMs()
 				require.NoError(e.T, err)
 				assert.Zero(e.T, listedKeys(list.Vms)[listKey{vm.Host, vm.ID}])
@@ -315,6 +359,25 @@ func restartCases() []Case {
 				resp, err := e.Describe(onB.Host, onB.ID, OwnerA)
 				require.NoError(e.T, err)
 				assert.True(e.T, resp.Exists)
+			},
+		},
+		{
+			ID:     "restart.task-routing",
+			Rule:   "after a restart, task references are routed against the same host registry as before: a host it fronts that is unreachable is the host-scoped Unavailable, and a host it does not front is NotFound",
+			Source: srcRestart + "; " + srcTaskRefs,
+			Run: func(e *Env) {
+				e.HostDown(e.HostA())
+				down := HostTaskPrefix + e.HostA() + "/job-1"
+				unknown := HostTaskPrefix + UnknownHost + "/job-1"
+				answers := func(when string) {
+					_, err := e.TaskStatus(down)
+					requireHostUnavailable(e, err, e.HostA(), "task of an unreachable host "+when)
+					_, err = e.TaskStatus(unknown)
+					requireCode(e, err, codes.NotFound, "task of an unknown host "+when)
+				}
+				answers("before the restart")
+				e.RestartProvider()
+				answers("after the restart")
 			},
 		},
 		{
@@ -348,7 +411,7 @@ func providerDownCases() []Case {
 		{
 			ID:     "providerdown.outage-and-recovery",
 			Rule:   "while the Provider is down a call fails as a retryable Provider-level Unavailable (not host-scoped, not NotFound); when it is back, its VMs answer as before",
-			Source: "internal/transport/grpc/client.go: mapGRPCStatus, isInfraFailure; ADR-0007 D1 (a Provider failure cannot lose cluster state)",
+			Source: "ADR-0007 D1 (a Provider failure cannot lose cluster state); internal/providers/contracts/errors.go: HostUnavailableReason (only a host-scoped Unavailable carries it)",
 			Run: func(e *Env) {
 				vm := e.Seed(SeedSpec{Host: e.HostA(), Name: "pd-vm", Owner: OwnerA, Running: true})
 				before := e.Observe(vm)
@@ -360,7 +423,7 @@ func providerDownCases() []Case {
 				w := requireCode(e, err, codes.Unavailable, "a Provider that is down")
 				requireNoReason(e, w, contracts.HostUnavailableReason, "a Provider that is down")
 
-				short, cancel := contextWithTimeout(e, 1500*time.Millisecond)
+				short, cancel := contextWithTimeout(e, time.Second)
 				_, err = e.Manager().Describe(short, contracts.VMRef{ID: vm.ID, HostID: vm.Host, Owner: contracts.ObjectIdentity(OwnerA)})
 				cancel()
 				require.Error(e.T, err)
@@ -408,9 +471,18 @@ func hostInventoryCases() []Case {
 				}
 
 				e.HostDown(e.HostB())
-				got, health = ids()
+				// A provider may cache a host's health for a short while: NotReady
+				// has to show within a bound, not instantly.
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					got, health = ids()
+					if health[e.HostB()] == providerv1.HostHealth_HOST_HEALTH_NOT_READY || time.Now().After(deadline) {
+						break
+					}
+					time.Sleep(250 * time.Millisecond)
+				}
 				assert.Equal(e.T, sortedCopy(e.Hosts()), got, "an unreachable host is still reported")
-				assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_NOT_READY, health[e.HostB()])
+				assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_NOT_READY, health[e.HostB()], "NotReady within 3 s")
 				assert.Equal(e.T, providerv1.HostHealth_HOST_HEALTH_READY, health[e.HostA()])
 
 				ctx, cancel := e.Call()
@@ -432,12 +504,12 @@ func createCases() []Case {
 			Run: func(e *Env) {
 				ctx, cancel := e.Call()
 				defer cancel()
-				_, err := e.Raw().Create(ctx, createRequest("cr-none", "", OwnerA))
+				_, err := e.Raw().Create(ctx, e.CreateRequest("cr-none", "", OwnerA))
 				requireCode(e, err, codes.InvalidArgument, "Create without a host")
-				_, err = e.Raw().Create(ctx, createRequest("cr-none", UnknownHost, OwnerA))
+				_, err = e.Raw().Create(ctx, e.CreateRequest("cr-none", UnknownHost, OwnerA))
 				requireHostUnavailable(e, err, "", "Create on an unknown host")
 				e.HostDown(e.HostB())
-				_, err = e.Raw().Create(ctx, createRequest("cr-none", e.HostB(), OwnerA))
+				_, err = e.Raw().Create(ctx, e.CreateRequest("cr-none", e.HostB(), OwnerA))
 				requireHostUnavailable(e, err, "", "Create on an unreachable host")
 				e.HostUp(e.HostB())
 
@@ -446,23 +518,22 @@ func createCases() []Case {
 				for _, v := range list.Vms {
 					assert.NotContains(e.T, v.GetName()+v.GetId(), "cr-none", "a refused Create made a VM")
 				}
-				resp, err := e.Raw().Create(ctx, createRequest("cr-none", e.HostB(), OwnerA))
+				resp, err := e.Raw().Create(ctx, e.CreateRequest("cr-none", e.HostB(), OwnerA))
 				require.NoError(e.T, err, "Create works once the host is back")
 				assert.NotEmpty(e.T, resp.Id)
 			},
 		},
 		{
 			ID:       "create.unavailable-names-host",
-			Rule:     "the HOST_UNAVAILABLE answer of a Create names the unreachable target host in its ErrorInfo metadata, as every other routed call's does",
-			Source:   "internal/providers/contracts/host_unavailable.go: HostUnavailableHostKey (set when the host that could not be reached is the one the call was routed to)",
+			Level:    Recommended,
+			Rule:     "the HOST_UNAVAILABLE answer of a Create to a known host that is unreachable names that host in its ErrorInfo metadata, as the per-VM calls' answers do",
+			Source:   "internal/providers/contracts/host_unavailable.go: HostUnavailableHostKey (set when the host that could not be reached is the one the call was routed to); the manager reads the key only on the Delete path, so a Create answer without it loses nothing today",
 			Requires: []Feature{FeatureCreate},
 			Run: func(e *Env) {
 				ctx, cancel := e.Call()
 				defer cancel()
-				_, err := e.Raw().Create(ctx, createRequest("cr-names", UnknownHost, OwnerA))
-				requireHostUnavailable(e, err, UnknownHost, "Create on an unknown host")
 				e.HostDown(e.HostB())
-				_, err = e.Raw().Create(ctx, createRequest("cr-names", e.HostB(), OwnerA))
+				_, err := e.Raw().Create(ctx, e.CreateRequest("cr-names", e.HostB(), OwnerA))
 				requireHostUnavailable(e, err, e.HostB(), "Create on an unreachable host")
 			},
 		},
@@ -474,7 +545,7 @@ func createCases() []Case {
 			Run: func(e *Env) {
 				ctx, cancel := e.Call()
 				defer cancel()
-				resp, err := e.Raw().Create(ctx, createRequest("cr-routed", e.HostB(), OwnerA))
+				resp, err := e.Raw().Create(ctx, e.CreateRequest("cr-routed", e.HostB(), OwnerA))
 				require.NoError(e.T, err)
 				vm := VM{ID: resp.Id, Host: e.HostB(), Name: "cr-routed"}
 				obs := e.Observe(vm)
@@ -498,16 +569,16 @@ func createCases() []Case {
 			Run: func(e *Env) {
 				ctx, cancel := e.Call()
 				defer cancel()
-				first, err := e.Raw().Create(ctx, createRequest("cr-idem", e.HostA(), OwnerA))
+				first, err := e.Raw().Create(ctx, e.CreateRequest("cr-idem", e.HostA(), OwnerA))
 				require.NoError(e.T, err)
-				second, err := e.Raw().Create(ctx, createRequest("cr-idem", e.HostA(), OwnerA))
+				second, err := e.Raw().Create(ctx, e.CreateRequest("cr-idem", e.HostA(), OwnerA))
 				require.NoError(e.T, err, "the retry after a lost answer succeeds")
 				assert.Equal(e.T, first.Id, second.Id, "and binds the same VM")
 				list, err := e.ListVMs()
 				require.NoError(e.T, err)
 				assert.Equal(e.T, 1, listedKeys(list.Vms)[listKey{e.HostA(), first.Id}], "no second VM was made")
 
-				_, err = e.Raw().Create(ctx, createRequest("cr-idem", e.HostA(), OwnerB))
+				_, err = e.Raw().Create(ctx, e.CreateRequest("cr-idem", e.HostA(), OwnerB))
 				requireCode(e, err, codes.AlreadyExists, "Create of a taken name by another owner")
 				_, err = e.Manager().Create(e.Ctx(), contracts.CreateRequest{Name: "cr-idem", TargetHostID: e.HostA(), Owner: contracts.ObjectIdentity{UID: OwnerB.UID, Namespace: OwnerB.Namespace, Name: "cr-idem"}})
 				assert.True(e.T, contracts.IsConflict(err), "manager mapping: %v", err)
@@ -515,19 +586,5 @@ func createCases() []Case {
 				assert.Equal(e.T, OwnerA.UID, e.Observe(vm).OwnerUID, "the stamp is not overwritten")
 			},
 		},
-	}
-}
-
-// createRequest is a minimal CreateRequest for name on host.
-//
-// A VM's name is the name of its VirtualMachine, so the owner identity carries
-// the same name (a provider may refuse a request whose two names differ).
-func createRequest(name, host string, owner Identity) *providerv1.CreateRequest {
-	owner.Name = name
-	return &providerv1.CreateRequest{
-		Name:         name,
-		TargetHostId: host,
-		Owner:        owner.Proto(),
-		ClassJson:    `{"CPU":2,"MemoryMiB":1024}`,
 	}
 }

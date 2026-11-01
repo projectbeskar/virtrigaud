@@ -19,8 +19,8 @@ package libvirt
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -53,7 +53,10 @@ import (
 // fixture), so a power operation or a delete is visible to the next read,
 // and hands every other command to the shared ops fake (opsFakeVirsh, installed
 // next to it as virsh-ops). A host directory containing "dead" makes every
-// call die without an exit status, as a dropped SSH session does.
+// call die without an exit status, as a dropped SSH session does; "hang" makes
+// every call block (a host that accepts the connection and never answers);
+// "failops" makes the commands that change a domain fail cleanly, and
+// "dropops" makes the connection die while they run.
 const conformanceFakeVirsh = `#!/bin/sh
 bindir=$(dirname "$0")
 host=local
@@ -62,6 +65,12 @@ if [ "$1" = "-c" ]; then uri="$2"; host="${2##*/}"; shift 2; fi
 printf '%s %s\n' "$host" "$*" >> "$FAKE_VIRSH_DIR/calls.log"
 d="$FAKE_VIRSH_DIR/$host"
 if [ -f "$d/dead" ]; then kill -9 $$; fi
+if [ -f "$d/hang" ]; then exec sleep 30; fi
+case "$1" in
+  start|destroy|shutdown|undefine)
+    if [ -f "$d/dropops" ]; then kill -9 $$; fi
+    if [ -f "$d/failops" ]; then echo "error: operation failed: scripted failure" >&2; exit 1; fi ;;
+esac
 nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
 uuid_of() { sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$d/dom-$1.xml" | head -1; }
 name_of() { sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$d/dom-$1.xml" | head -1; }
@@ -111,6 +120,11 @@ case "$1" in
 esac
 `
 
+var (
+	vcpuRE      = regexp.MustCompile(`<vcpu[^>]*>(\d+)</vcpu>`)
+	memoryKiBRE = regexp.MustCompile(`<memory[^>]*>(\d+)</memory>`)
+)
+
 var ownerUIDAttrRE = regexp.MustCompile(ownerAttrUID + `='([^']*)'`)
 
 // libvirtConformanceTarget adapts the clustered libvirt Provider to
@@ -123,13 +137,19 @@ type libvirtConformanceTarget struct {
 
 	mu          sync.Mutex
 	unreachable map[string]bool
+	removed     map[string]bool
 	dialed      []string
 	disks       []string
+	reg         *hostconn.ClusterRegistry
 }
 
 var (
-	_ clustered.Target       = (*libvirtConformanceTarget)(nil)
-	_ clustered.DialObserver = (*libvirtConformanceTarget)(nil)
+	_ clustered.Target          = (*libvirtConformanceTarget)(nil)
+	_ clustered.DialObserver    = (*libvirtConformanceTarget)(nil)
+	_ clustered.CreateTemplater = (*libvirtConformanceTarget)(nil)
+	_ clustered.HostBlackholer  = (*libvirtConformanceTarget)(nil)
+	_ clustered.HostFaulter     = (*libvirtConformanceTarget)(nil)
+	_ clustered.HostRemover     = (*libvirtConformanceTarget)(nil)
 )
 
 // newLibvirtConformanceTarget builds the fake hosts and the clustered Provider
@@ -137,15 +157,18 @@ var (
 func newLibvirtConformanceTarget(t clustered.T) clustered.Target {
 	tt, ok := t.(*testing.T)
 	if !ok {
-		panic("the libvirt conformance adapter must run under *testing.T")
+		t.Errorf("the libvirt conformance adapter must run under *testing.T, not %T", t)
+		t.FailNow()
+		return nil
 	}
 	hosts := []string{"host-a", "host-b"}
 	fx := newOpsFixture(tt, map[string]map[string]string{"host-a": {}, "host-b": {}})
-	bin, err := exec.LookPath("virsh")
-	require.NoError(tt, err)
-	bindir := filepath.Dir(bin)
-	require.NoError(tt, os.Rename(bin, filepath.Join(bindir, "virsh-ops")))
-	require.NoError(tt, os.WriteFile(bin, []byte(conformanceFakeVirsh), 0o755)) //nolint:gosec // test shim must be executable
+	// The conformance virsh goes first on PATH; the ops fake it hands unknown
+	// commands to sits next to it.
+	bin := tt.TempDir()
+	require.NoError(tt, os.WriteFile(filepath.Join(bin, "virsh"), []byte(conformanceFakeVirsh), 0o755)) //nolint:gosec // test shim must be executable
+	require.NoError(tt, os.WriteFile(filepath.Join(bin, "virsh-ops"), []byte(opsFakeVirsh), 0o755))     //nolint:gosec // test shim must be executable
+	tt.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	for name, content := range map[string]string{
 		"hostinfo-nodeinfo.txt":        nodeInfoFixture,
 		"hostinfo-capabilities.txt":    capabilitiesFixture,
@@ -155,8 +178,10 @@ func newLibvirtConformanceTarget(t clustered.T) clustered.Target {
 		require.NoError(tt, os.WriteFile(filepath.Join(fx.dir, name), []byte(content), 0o600))
 	}
 
-	target := &libvirtConformanceTarget{t: tt, dir: fx.dir, hosts: hosts, unreachable: map[string]bool{}}
+	target := &libvirtConformanceTarget{t: tt, dir: fx.dir, hosts: hosts, unreachable: map[string]bool{}, removed: map[string]bool{}}
 	tt.Cleanup(func() {
+		target.mu.Lock()
+		defer target.mu.Unlock()
 		for _, d := range target.disks {
 			_ = os.Remove(d)
 		}
@@ -171,7 +196,8 @@ func (a *libvirtConformanceTarget) Name() string { return "libvirt-clustered" }
 // each optional behaviour it does not.
 func (a *libvirtConformanceTarget) Capabilities() clustered.Capabilities {
 	return clustered.Capabilities{
-		Features: []clustered.Feature{clustered.FeatureCreate, clustered.FeatureHostInventory},
+		Features: []clustered.Feature{clustered.FeatureCreate, clustered.FeatureHostInventory, clustered.FeatureHostBlackhole,
+			clustered.FeatureHostFaults, clustered.FeatureHostRemoval, clustered.FeatureUnreadableStamp},
 		Reasons: map[clustered.Feature]string{
 			clustered.FeatureAsyncTasks: "every routed libvirt call is synchronous and returns no task; " +
 				"the host-encoded task reference is in place for a future asynchronous call (hostTaskComplete, ADR-0007 Addendum A slice 3)",
@@ -187,13 +213,22 @@ func (a *libvirtConformanceTarget) Capabilities() clustered.Capabilities {
 // Hosts returns the fronted host ids.
 func (a *libvirtConformanceTarget) Hosts() []string { return append([]string(nil), a.hosts...) }
 
-// Server builds a clustered Provider over the hosts and returns its real gRPC
-// Server. Each call is a fresh Provider process over the same host state.
-func (a *libvirtConformanceTarget) Server() providerv1.ProviderServer {
+// inventory returns the hosts the Provider is configured with.
+func (a *libvirtConformanceTarget) inventory() hostsecret.Inventory {
 	inv := hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion}
 	for _, h := range a.hosts {
+		if a.removed[h] {
+			continue
+		}
 		inv.Hosts = append(inv.Hosts, hostsecret.Host{ID: h, Endpoint: "qemu+ssh://virt@" + h + "/system"})
 	}
+	return inv
+}
+
+// Server builds a clustered Provider over the hosts and returns its real gRPC
+// Server. Each call is a fresh Provider process over the same host state; the
+// registry of the previous one is closed.
+func (a *libvirtConformanceTarget) Server() providerv1.ProviderServer {
 	dial := func(_ context.Context, h hostsecret.Host) (hostconn.Conn, error) {
 		a.mu.Lock()
 		a.dialed = append(a.dialed, h.ID)
@@ -204,10 +239,31 @@ func (a *libvirtConformanceTarget) Server() providerv1.ProviderServer {
 		}
 		return newClusteredVirshConn(hostconn.HostID(h.ID), localHostVP(h.ID), func() {}), nil
 	}
-	p, _ := newClusteredProviderForTest(a.t, inv, dial)
+	a.mu.Lock()
+	inv := a.inventory()
+	old := a.reg
+	a.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	reg, err := hostconn.NewClusterRegistry(inv, dial, slog.Default())
+	if err != nil {
+		a.t.Errorf("build the cluster registry: %v", err)
+		return NewServer(nil)
+	}
+	a.t.Cleanup(func() { _ = reg.Close() })
+	a.mu.Lock()
+	a.reg = reg
+	a.mu.Unlock()
+	p := &Provider{registry: reg, clusterReg: reg, logger: slog.Default()}
 	p.virshProvider = newUnroutableVirshProvider()
 	p.createOnHostFn = a.createOnHost
 	return NewServer(p)
+}
+
+// CreateTemplate gives Create the class every libvirt create needs.
+func (a *libvirtConformanceTarget) CreateTemplate() *providerv1.CreateRequest {
+	return &providerv1.CreateRequest{ClassJson: `{"CPU":2,"MemoryMiB":1024}`}
 }
 
 // domainDir is a host's directory in the fake virsh state.
@@ -216,14 +272,14 @@ func (a *libvirtConformanceTarget) domainDir(host string) string { return filepa
 // SeedVM defines a domain on a host, stamped with spec.Owner when it has one.
 func (a *libvirtConformanceTarget) SeedVM(_ context.Context, spec clustered.SeedSpec) (clustered.VM, error) {
 	owner := contracts.ObjectIdentity(spec.Owner)
-	if err := a.writeDomain(spec.Host, spec.Name, owner, spec.Running); err != nil {
+	if err := a.writeDomain(spec.Host, spec.Name, owner, spec.Running, spec.Stamp); err != nil {
 		return clustered.VM{}, err
 	}
 	return clustered.VM{ID: spec.Name, Host: spec.Host, Name: spec.Name}, nil
 }
 
 // writeDomain stores the definition and state of domain name on host.
-func (a *libvirtConformanceTarget) writeDomain(host, name string, owner contracts.ObjectIdentity, running bool) error {
+func (a *libvirtConformanceTarget) writeDomain(host, name string, owner contracts.ObjectIdentity, running bool, stamp clustered.StampState) error {
 	a.mu.Lock()
 	a.seq++
 	n := a.seq
@@ -240,11 +296,24 @@ func (a *libvirtConformanceTarget) writeDomain(host, name string, owner contract
 	a.mu.Lock()
 	a.disks = append(a.disks, disk)
 	a.mu.Unlock()
+	meta := renderOwnerMetadataXML(owner)
+	switch stamp {
+	case clustered.StampAmbiguous:
+		// Two owner stamps: a hand-edited definition.
+		other := contracts.ObjectIdentity{UID: "ffffffff-0000-4000-8000-000000000000", Namespace: "other", Name: name}
+		meta = fmt.Sprintf("  <%s>\n    %s\n    %s\n  </%s>\n", domainXMLMetadataElement,
+			renderOwnerElementXML(owner), renderOwnerElementXML(other), domainXMLMetadataElement)
+	case clustered.StampUnreadable:
+		// A stamp element that is cut off: the definition cannot be parsed.
+		meta = fmt.Sprintf("  <%s>\n    <%s:%s xmlns:%s='%s' %s='%s'\n", domainXMLMetadataElement,
+			ownerMetadataPrefix, ownerMetadataElement, ownerMetadataPrefix, ownerMetadataNamespaceURI, ownerAttrUID, xmlEscape(owner.UID))
+	case clustered.StampNormal:
+	}
 	xml := fmt.Sprintf("<domain type='kvm'>\n  <name>%s</name>\n  <uuid>%s</uuid>\n%s"+
 		"  <memory unit='KiB'>2097152</memory>\n  <vcpu placement='static'>2</vcpu>\n"+
 		"  <devices>\n    <disk type='file' device='disk'>\n      <driver name='qemu' type='qcow2'/>\n"+
 		"      <source file='%s'/>\n      <target dev='vda' bus='virtio'/>\n    </disk>\n  </devices>\n</domain>\n",
-		name, uuid, renderOwnerMetadataXML(owner), disk)
+		name, uuid, meta, disk)
 	for _, f := range []string{"dom-" + name + ".xml", "dom-" + uuid + ".xml"} {
 		if err := os.WriteFile(filepath.Join(hd, f), []byte(xml), 0o600); err != nil {
 			return err
@@ -271,6 +340,14 @@ func (a *libvirtConformanceTarget) Observe(_ context.Context, vm clustered.VM) (
 	obs := clustered.Observation{Exists: true}
 	if m := ownerUIDAttrRE.FindSubmatch(xml); m != nil {
 		obs.OwnerUID = string(m[1])
+	}
+	if m := vcpuRE.FindSubmatch(xml); m != nil {
+		_, _ = fmt.Sscan(string(m[1]), &obs.CPU)
+	}
+	if m := memoryKiBRE.FindSubmatch(xml); m != nil {
+		var kib int64
+		_, _ = fmt.Sscan(string(m[1]), &kib)
+		obs.MemoryMiB = kib / 1024
 	}
 	if st, err := os.ReadFile(filepath.Join(hd, "state-"+vm.ID)); err == nil { //nolint:gosec // test reads its own fixture
 		obs.Running = strings.TrimSpace(string(st)) == "running"
@@ -304,8 +381,59 @@ func (a *libvirtConformanceTarget) SetHostReachable(host string, reachable bool)
 func (a *libvirtConformanceTarget) Restart() error {
 	a.mu.Lock()
 	a.dialed = nil
+	old := a.reg
+	a.reg = nil
 	a.mu.Unlock()
+	if old != nil {
+		return old.Close()
+	}
 	return nil
+}
+
+// marker creates or removes a flag file in a host's directory, which the fake
+// virsh reads.
+func (a *libvirtConformanceTarget) marker(host, name string, on bool) error {
+	hd := a.domainDir(host)
+	if err := os.MkdirAll(hd, 0o700); err != nil {
+		return err
+	}
+	f := filepath.Join(hd, name)
+	if on {
+		return os.WriteFile(f, nil, 0o600)
+	}
+	if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// SetHostBlackholed makes the host's virsh block until it is killed.
+func (a *libvirtConformanceTarget) SetHostBlackholed(host string, on bool) error {
+	return a.marker(host, "hang", on)
+}
+
+// FailHostOperations makes the commands that change a domain fail cleanly.
+func (a *libvirtConformanceTarget) FailHostOperations(host string, on bool) error {
+	return a.marker(host, "failops", on)
+}
+
+// DropHostDuringOperations makes the connection die while those commands run.
+func (a *libvirtConformanceTarget) DropHostDuringOperations(host string, on bool) error {
+	return a.marker(host, "dropops", on)
+}
+
+// RemoveHost reconfigures the Provider's registry without the host, as
+// deleting its Host would.
+func (a *libvirtConformanceTarget) RemoveHost(host string) error {
+	a.mu.Lock()
+	a.removed[host] = true
+	inv := a.inventory()
+	reg := a.reg
+	a.mu.Unlock()
+	if reg == nil {
+		return fmt.Errorf("no running provider registry")
+	}
+	return reg.Reconcile(inv)
 }
 
 // DialedHosts returns the host ids the Provider's registry dialed.
@@ -324,20 +452,35 @@ func (a *libvirtConformanceTarget) createOnHost(_ context.Context, lease hostcon
 	if err != nil {
 		return contracts.CreateResponse{}, err
 	}
-	if err := a.writeDomain(string(lease.HostID()), name, req.Owner, false); err != nil {
+	if err := a.writeDomain(string(lease.HostID()), name, req.Owner, false, clustered.StampNormal); err != nil {
 		return contracts.CreateResponse{}, err
 	}
 	return contracts.CreateResponse{ID: name}, nil
 }
 
 // libvirtExpectedFailures are the cases clustered libvirt is known to fail,
-// each with where the deviation is recorded. The suite requires them to keep
-// failing, so an entry cannot outlive its fix.
-var libvirtExpectedFailures = map[string]string{
-	"create.unavailable-names-host": "createRPCError answers a routed Create's HOST_UNAVAILABLE with hostUnavailableStatus(pe), " +
-		"which sets no metadata, where Describe, Delete, Power, Reconfigure and TaskStatus name the host through hostUnavailableStatusFor " +
-		"(contracts.HostUnavailableHostKey, host_unavailable.go). Only the manager's status text is affected: it names the host only " +
-		"when the key is present. Recorded, not fixed, by the conformance change.",
+// each with where the deviation is recorded and a substring of the failure
+// the suite must still see. The suite requires them to keep failing in that
+// way, so an entry cannot outlive its fix or hide another failure. The
+// Recommended cases that libvirt does not meet need no entry: they are
+// reported in the run's summary.
+var libvirtExpectedFailures = map[string]clustered.ExpectedFailure{
+	"create.unavailable-names-host": {
+		Pointer: "createRPCError answers a routed Create's HOST_UNAVAILABLE through hostUnavailableStatus, which sets no host metadata, " +
+			"where Describe, Delete, Power, Reconfigure and TaskStatus use hostUnavailableStatusFor (contracts.HostUnavailableHostKey). " +
+			"Nothing reads the key for a Create today (the manager reads it only on the Delete path), so nothing is lost. Recommended; recorded, not fixed.",
+		Contains: "names the host the call was routed to",
+	},
+	"tasks.forged-inner-ref": {
+		Pointer: "hostTaskComplete answers done for any host-local reference of a host the registry fronts: every routed libvirt call is " +
+			"synchronous, so the provider issues no task and keeps no table to check one against. Recommended; recorded, not fixed.",
+		Contains: "a task that was never issued must not be reported",
+	},
+	"hostdown.blackholed-per-vm": {
+		Pointer: "a per-VM call to a host whose virsh never answers ends with the caller's own DeadlineExceeded, without a HOST_UNAVAILABLE " +
+			"ErrorInfo, where ListVMs reports such a host unreachable inside the caller's deadline. Recommended; recorded, not fixed.",
+		Contains: "Describe on a host that never answers",
+	},
 }
 
 // TestClusteredLibvirt_Conformance runs the reusable clustered-provider
