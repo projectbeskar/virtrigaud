@@ -35,6 +35,7 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/tasks"
 )
 
 // Provider implements a mock provider for testing and demos.
@@ -567,12 +568,26 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 	p.mu.RUnlock()
 
 	if !exists {
+		// A task the mock does not know (a lost task table): no typed
+		// outcome — the mock cannot prove anything about it — and the
+		// historical answer, which the manager reads as an unknown task.
 		return &providerv1.TaskStatusResponse{
 			Done:  true,
 			Error: "task not found",
 		}, nil
 	}
 
+	// Typed outcome (ADR-0016 A7), with done and error filled from it: the
+	// mock knows only running, succeeded and failed. A failed mock task did
+	// nothing irreversible (it is simulated), so it is FAILED_CLEAN.
+	switch {
+	case !task.Done && task.Error == "":
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_RUNNING, "", ""), nil
+	case task.Done && task.Error == "":
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED, "", ""), nil
+	case task.Done:
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_FAILED_CLEAN, "", task.Error), nil
+	}
 	return &providerv1.TaskStatusResponse{
 		Done:  task.Done,
 		Error: task.Error,

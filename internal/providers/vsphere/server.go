@@ -51,6 +51,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/tasks"
 )
 
 const (
@@ -1646,15 +1647,13 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 // this method effectively converts an already-running vSphere task into a synchronous
 // call from the controller's perspective. Terminal states and their mapping:
 //
-//   - TaskInfoStateSuccess → Done: true, no error
-//   - TaskInfoStateError   → Done: true, Error: localised error message from vCenter
-//   - TaskInfoStateQueued  → Done: false
-//   - TaskInfoStateRunning → Done: false
-//   - any other state      → Done: true, Error: "unexpected task state: <state>"
+// see taskStatusResponse (each with its typed outcome, ADR-0016 A7).
 //
 // If WaitForResult itself returns an error (e.g. session expired, task not found) the
 // method returns Done: true with the error message rather than propagating a gRPC error,
-// so the controller can surface it cleanly.
+// so the controller can surface it cleanly. That answer has no typed outcome: it mixes
+// a failed task with a task vCenter no longer knows (which the manager tells apart by
+// its text), so nothing definite can be claimed about it.
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1686,39 +1685,44 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 		}, nil
 	}
 
-	// Check task state
-	isDone := false
-	errorMsg := ""
+	return taskStatusResponse(p, req.Task.Id, taskInfo), nil
+}
 
+// taskStatusResponse is the TaskStatus answer of a vCenter task's info, with
+// a typed outcome (ADR-0016 A7) and the legacy done and error filled from it:
+//
+//   - TaskInfoStateSuccess → SUCCEEDED (Done: true);
+//   - TaskInfoStateError   → FAILED_CLEAN (Done: true, Error: vCenter's
+//     localised error message);
+//   - TaskInfoStateQueued, TaskInfoStateRunning → RUNNING (Done: false);
+//   - any other state → no typed outcome, Done: true, Error: "unexpected
+//     task state: <state>" (unchanged: nothing is known about such a task).
+func taskStatusResponse(p *Provider, taskID string, taskInfo *types.TaskInfo) *providerv1.TaskStatusResponse {
 	switch taskInfo.State {
 	case types.TaskInfoStateSuccess:
-		isDone = true
-		p.logger.Debug("Task completed successfully", "task_id", req.Task.Id)
+		p.logger.Debug("Task completed successfully", "task_id", taskID)
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED, "", "")
 	case types.TaskInfoStateError:
-		isDone = true
+		errorMsg := "task failed with unknown error"
 		if taskInfo.Error != nil {
 			errorMsg = taskInfo.Error.LocalizedMessage
-		} else {
-			errorMsg = "task failed with unknown error"
 		}
-		p.logger.Error("Task completed with error", "task_id", req.Task.Id, "error", errorMsg)
+		p.logger.Error("Task completed with error", "task_id", taskID, "error", errorMsg)
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_FAILED_CLEAN, "", errorMsg)
 	case types.TaskInfoStateQueued:
-		isDone = false
-		p.logger.Debug("Task is queued", "task_id", req.Task.Id)
+		p.logger.Debug("Task is queued", "task_id", taskID)
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_RUNNING, "", "")
 	case types.TaskInfoStateRunning:
-		isDone = false
-		p.logger.Debug("Task is running", "task_id", req.Task.Id, "progress", taskInfo.Progress)
+		p.logger.Debug("Task is running", "task_id", taskID, "progress", taskInfo.Progress)
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_RUNNING, "", "")
 	default:
 		// Unknown state, consider it done to avoid hanging
-		isDone = true
-		errorMsg = fmt.Sprintf("unexpected task state: %s", taskInfo.State)
-		p.logger.Warn("Task in unexpected state", "task_id", req.Task.Id, "state", taskInfo.State)
+		p.logger.Warn("Task in unexpected state", "task_id", taskID, "state", taskInfo.State)
+		return &providerv1.TaskStatusResponse{
+			Done:  true,
+			Error: fmt.Sprintf("unexpected task state: %s", taskInfo.State),
+		}
 	}
-
-	return &providerv1.TaskStatusResponse{
-		Done:  isDone,
-		Error: errorMsg,
-	}, nil
 }
 
 // SnapshotCreate implements the ProviderServer interface. It creates a disk-only
