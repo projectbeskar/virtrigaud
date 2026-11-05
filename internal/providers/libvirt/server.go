@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -338,7 +339,7 @@ func (s *Server) routedTaskRef(hostID, taskRef string) string {
 	if !s.clusteredProvider() {
 		return taskRef
 	}
-	return encodeHostTaskRef(hostconn.HostID(strings.TrimSpace(hostID)), taskRef)
+	return clustered.EncodeHostTaskRef(hostconn.HostID(strings.TrimSpace(hostID)), taskRef)
 }
 
 // TaskStatus checks the status of an async task.
@@ -522,7 +523,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 					return err
 				}
 				if r.Task != nil {
-					r.Task.Id = encodeHostTaskRef(c.HostID(), r.Task.Id)
+					r.Task.Id = clustered.EncodeHostTaskRef(c.HostID(), r.Task.Id)
 				}
 				resp = r
 				return nil
@@ -980,7 +981,7 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 // response without a task is returned as is.
 func routedTaskResponse(host hostconn.HostID, r *providerv1.TaskResponse) *providerv1.TaskResponse {
 	if r != nil && r.Task != nil {
-		r.Task.Id = encodeHostTaskRef(host, r.Task.Id)
+		r.Task.Id = clustered.EncodeHostTaskRef(host, r.Task.Id)
 	}
 	return r
 }

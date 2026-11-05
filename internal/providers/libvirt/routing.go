@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
@@ -691,7 +692,7 @@ func routedTypedStatus(op string, err error) error {
 	if stderrors.As(err, &rh) {
 		return hostUnavailableStatusFor(rh.pe, rh.host)
 	}
-	var ut *unknownHostTaskError
+	var ut *clustered.UnknownHostTaskError
 	if stderrors.As(err, &ut) {
 		return unknownToAgentStatus(ut.Error())
 	}

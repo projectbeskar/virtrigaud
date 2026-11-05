@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -110,7 +111,7 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 		if err != nil {
 			return err
 		}
-		r.TaskRef = encodeHostTaskRef(c.HostID(), r.TaskRef)
+		r.TaskRef = clustered.EncodeHostTaskRef(c.HostID(), r.TaskRef)
 		resp = r
 		return nil
 	})

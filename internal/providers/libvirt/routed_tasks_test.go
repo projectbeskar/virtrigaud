@@ -19,7 +19,6 @@ package libvirt
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 
@@ -29,6 +28,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -36,42 +36,10 @@ import (
 )
 
 // These tests pin the host-encoded task references of a clustered provider
-// (ADR-0007 Addendum A, A1, slice 3): the format, the refusal of any reference
-// the provider did not issue, and that TaskStatus is routed to the encoded
-// host — and never dials anything else.
-
-func TestHostTaskRef_RoundTrip(t *testing.T) {
-	ref := encodeHostTaskRef("host-a.rack-1", "job/42:x")
-	assert.Equal(t, "host-task/v1/host-a.rack-1/job/42:x", ref)
-	host, inner, err := parseHostTaskRef(ref)
-	require.NoError(t, err)
-	assert.Equal(t, hostconn.HostID("host-a.rack-1"), host)
-	assert.Equal(t, "job/42:x", inner, "the host-local reference is kept verbatim, '/' included")
-
-	assert.Empty(t, encodeHostTaskRef("host-a", ""), "a synchronous call has no task, and no reference")
-}
-
-func TestHostTaskRef_ParseRefusesMalformed(t *testing.T) {
-	for name, ref := range map[string]string{
-		"empty":                    "",
-		"not host-encoded":         "task-123",
-		"other version":            "host-task/v2/host-a/t",
-		"no task":                  "host-task/v1/host-a",
-		"empty task":               "host-task/v1/host-a/",
-		"empty host":               "host-task/v1//t",
-		"uppercase host":           "host-task/v1/Host-A/t",
-		"host with a port":         "host-task/v1/host-a:22/t",
-		"host is a path":           "host-task/v1/../t",
-		"host is an endpoint":      "host-task/v1/qemu+ssh:/t",
-		"host with leading hyphen": "host-task/v1/-host/t",
-		"too long":                 "host-task/v1/host-a/" + strings.Repeat("x", hostTaskRefMaxLen),
-	} {
-		t.Run(name, func(t *testing.T) {
-			_, _, err := parseHostTaskRef(ref)
-			assert.Error(t, err)
-		})
-	}
-}
+// (ADR-0007 Addendum A, A1, slice 3): the refusal of any reference the
+// provider did not issue, and that TaskStatus is routed to the encoded host —
+// and never dials anything else. The format itself is pinned in
+// internal/clustered (taskref_test.go).
 
 // taskCluster is a clustered provider over host-a, host-b and host-down (whose
 // dial fails), recording every host it dials.
@@ -110,7 +78,7 @@ func taskCluster(t *testing.T) (*Provider, func() []string) {
 func TestClustered_TaskStatus_UnissuedTaskIsUnknownToAgent(t *testing.T) {
 	p, dialed := taskCluster(t)
 	resp, err := NewServer(p).TaskStatus(context.Background(), &providerv1.TaskStatusRequest{
-		Task: &providerv1.TaskRef{Id: encodeHostTaskRef("host-b", "job-secret-1")},
+		Task: &providerv1.TaskRef{Id: clustered.EncodeHostTaskRef("host-b", "job-secret-1")},
 	})
 	require.Error(t, err)
 	assert.Nil(t, resp, "never a task result")
@@ -153,7 +121,7 @@ func TestClustered_TaskStatus_TypedOutcome(t *testing.T) {
 		{false, providerv1.TaskOutcome_TASK_OUTCOME_RUNNING},
 	} {
 		resp, err := NewServer(&doneTaskBackend{Provider: p, done: tc.done}).TaskStatus(context.Background(),
-			&providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: encodeHostTaskRef("host-a", "job-1")}})
+			&providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: clustered.EncodeHostTaskRef("host-a", "job-1")}})
 		require.NoError(t, err)
 		assert.Equal(t, tc.outcome, resp.GetOutcome())
 		assert.Equal(t, tc.done, resp.GetDone())
@@ -194,7 +162,7 @@ func TestClustered_TaskStatus_RefusesForgedReferences(t *testing.T) {
 func TestClustered_TaskStatus_UnreachableHostIsHostScoped(t *testing.T) {
 	p, dialed := taskCluster(t)
 	_, err := NewServer(p).TaskStatus(context.Background(), &providerv1.TaskStatusRequest{
-		Task: &providerv1.TaskRef{Id: encodeHostTaskRef("host-down", "job-1")},
+		Task: &providerv1.TaskRef{Id: clustered.EncodeHostTaskRef("host-down", "job-1")},
 	})
 	st, ok := status.FromError(err)
 	require.True(t, ok)

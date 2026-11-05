@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -133,7 +134,7 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 			r, err = exportFlattenToS3(bctx, c, req, d.name, srcPath, srcFormat, guard)
 		}
 		if r != nil && r.Task != nil {
-			r.Task.Id = encodeHostTaskRef(c.HostID(), r.Task.Id)
+			r.Task.Id = clustered.EncodeHostTaskRef(c.HostID(), r.Task.Id)
 		}
 		resp = r
 		return err
