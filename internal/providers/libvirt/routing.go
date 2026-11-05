@@ -25,7 +25,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -138,7 +137,7 @@ func (p *Provider) withOwnedDomain(ctx context.Context, vm contracts.VMRef, op s
 // host, or one whose connection cannot be resolved). It is transparent — Error
 // and Unwrap are pe's, so contracts.IsHostUnavailable and every message are
 // unchanged — and only tells routedRPCError which host to name in the
-// answer's ErrorInfo (hostUnavailableStatusFor).
+// answer's ErrorInfo (clustered.HostUnavailableStatusFor).
 type routedHostUnavailableError struct {
 	host hostconn.HostID
 	pe   *contracts.ProviderError
@@ -301,97 +300,6 @@ func virshOf(c libvirtConn) (*VirshProvider, error) {
 // for the operator. The single-host path never goes through these and keeps
 // its historical errors.
 
-// hostUnavailableStatus renders a host-scoped unavailability as
-// codes.Unavailable carrying a google.rpc.ErrorInfo{Reason: HOST_UNAVAILABLE},
-// which the manager maps to contracts.ErrorTypeHostUnavailable and keeps out of
-// its circuit breaker. Only pe.Message (which names the host id) crosses the
-// wire; the cause is logged.
-func hostUnavailableStatus(pe *contracts.ProviderError) error {
-	return hostUnavailableStatusFor(pe, "")
-}
-
-// hostUnavailableStatusFor is hostUnavailableStatus for an unavailability of
-// the host the call was routed to, host (its target_host_id): the ErrorInfo
-// names it under contracts.HostUnavailableHostKey, so the manager can say in
-// the VM's status that its own host could not be reached. An empty host sets
-// no metadata (the host that could not be reached may be another one).
-func hostUnavailableStatusFor(pe *contracts.ProviderError, host hostconn.HostID) error {
-	if pe.Cause != nil {
-		log.Printf("WARN %s: %v", pe.Message, pe.Cause)
-	}
-	st := status.New(codes.Unavailable, pe.Message)
-	info := &errdetails.ErrorInfo{
-		Reason: contracts.HostUnavailableReason,
-		Domain: contracts.HostUnavailableErrorDomain,
-	}
-	if host != "" {
-		info.Metadata = map[string]string{contracts.HostUnavailableHostKey: string(host)}
-	}
-	withInfo, err := st.WithDetails(info)
-	if err != nil {
-		// Unreachable in practice (ErrorInfo always marshals); a plain
-		// Unavailable is still a correct, if breaker-counted, answer.
-		return st.Err()
-	}
-	return withInfo.Err()
-}
-
-// unknownToAgentStatus renders a task reference the host has no record of
-// as codes.NotFound with a google.rpc.ErrorInfo{Reason: UNKNOWN_TO_AGENT,
-// Domain: provider.virtrigaud.io} (ADR-0016 A7): never done, never "not
-// performed", and out of the manager's circuit breaker.
-func unknownToAgentStatus(msg string) error {
-	st := status.New(codes.NotFound, msg)
-	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
-		Reason: contracts.UnknownToAgentReason,
-		Domain: contracts.ErrorInfoDomain,
-	})
-	if err != nil {
-		// Unreachable in practice (ErrorInfo always marshals); a plain
-		// NotFound is still never done.
-		return st.Err()
-	}
-	return withInfo.Err()
-}
-
-// vmOperationStatus renders a failed per-VM operation that reached its host as
-// code (codes.Unknown for a failure, codes.Unavailable for one the caller
-// should retry, e.g. the same copy still running) with the categorized message
-// msg, plus a google.rpc.ErrorInfo{Reason: VM_OPERATION_FAILED}, which the
-// manager keeps out of its circuit breaker whatever the code (ADR-0007
-// Addendum A, slice 2).
-func vmOperationStatus(code codes.Code, msg string) error {
-	st := status.New(code, msg)
-	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
-		Reason: contracts.VMOperationFailedReason,
-		Domain: contracts.ErrorInfoDomain,
-	})
-	if err != nil {
-		return st.Err()
-	}
-	return withInfo.Err()
-}
-
-// outcomeUnknownRetryStatus renders a call that may have changed its host, whose
-// outcome is unknown and that is safe to repeat: codes.Unavailable with a
-// google.rpc.ErrorInfo{Reason: OUTCOME_UNKNOWN_RETRY} that the manager maps to a
-// retryable error that is NOT "nothing done" (contracts.IsOutcomeUnknownRetry),
-// plus VM_OPERATION_FAILED. The second reason is for a manager that predates
-// the first: it maps the answer as it always did (retryable, out of its circuit
-// breaker, and every consumer of these calls retries a retryable answer
-// first), never as a definite failure.
-func outcomeUnknownRetryStatus(msg string, extra ...string) error {
-	return statusWithReasons(codes.Unavailable, msg, append([]string{contracts.OutcomeUnknownRetryReason, contracts.VMOperationFailedReason}, extra...)...).Err()
-}
-
-// hostLostStatus renders the answer of a routed call whose host stopped
-// answering part-way: code and msg as hostOpRPCErrorFor chose them, with
-// VM_OPERATION_FAILED and HOST_CONNECTION_LOST, the reason the manager paces
-// its retries by (contracts.IsHostConnectionLost).
-func hostLostStatus(code codes.Code, msg string) error {
-	return statusWithReasons(code, msg, contracts.VMOperationFailedReason, contracts.HostConnectionLostReason).Err()
-}
-
 // routedOpError is a failure of a routed operation that carries its own
 // categorized, tenant-safe wire message and code: a time budget that ran out,
 // a copy of the same disk already running, a host tool missing
@@ -499,23 +407,23 @@ func hostOpRPCErrorFor(kind hostOpKind, op string, ho *hostOpError, err error) e
 		var gh *guardHostUnreachableError
 		switch {
 		case kind == hostOpRead || stderrors.As(err, &gh) || stage == hostDownNothingRan:
-			return hostUnavailableStatusFor(contracts.NewHostUnavailableError(
+			return clustered.HostUnavailableStatusFor(contracts.NewHostUnavailableError(
 				fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil), ho.host)
 		case stage == hostDownReadsOnly:
-			return hostLostStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
+			return clustered.HostLostStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
 		case kind == hostOpWriteRetry:
 			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
-			return outcomeUnknownRetryStatus(fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host), contracts.HostConnectionLostReason)
+			return clustered.OutcomeUnknownRetryStatus(fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host), contracts.HostConnectionLostReason)
 		default:
 			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
-			return hostLostStatus(codes.Unknown, fmt.Sprintf(wireHostUnknownFmt, op, ho.host))
+			return clustered.HostLostStatus(codes.Unknown, fmt.Sprintf(wireHostUnknownFmt, op, ho.host))
 		}
 	}
 	msg := fmt.Sprintf("failed to %s on host %q", op, ho.host)
 	if detail := requesterFacingMessage(err); detail != "" {
 		msg += ": " + detail
 	}
-	return vmOperationStatus(codes.Unknown, msg)
+	return clustered.VMOperationStatus(codes.Unknown, msg)
 }
 
 // requesterFacingMessage returns the message of the outermost provider error
@@ -653,48 +561,48 @@ func routedTypedStatus(op string, err error) error {
 	// (snapshot_readonly_disks.go): a definite, terminal answer.
 	var ru *snapshotRevertUnsafeError
 	if stderrors.As(err, &ru) {
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, ru.Error()))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, ru.Error()))
 	}
 	var rb *snapshotRevertBrokeDisksError
 	if stderrors.As(err, &rb) {
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rb.Error()))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rb.Error()))
 	}
 	// A snapshot delete refused because it would lose another snapshot of
 	// the VM, or because libvirt cannot delete a memory snapshot while the VM
 	// runs (snapshot_delete_guard.go): definite, nothing changed.
 	var dl *snapshotDeleteLosesSnapshotsError
 	if stderrors.As(err, &dl) {
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, dl.Error()))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, dl.Error()))
 	}
 	var ds *snapshotDeleteStaleInternalError
 	if stderrors.As(err, &ds) {
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, ds.Error()))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, ds.Error()))
 	}
 	var rm *snapshotRevertMediaError
 	if stderrors.As(err, &rm) {
 		log.Printf("WARN %s: %v: %v", op, rm, rm.cause)
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rm.Error()))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rm.Error()))
 	}
 	var cr *copyRefusedError
 	if stderrors.As(err, &cr) {
 		log.Printf("WARN %s refused: %v", op, cr)
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, cr.Error()))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, cr.Error()))
 	}
 	var roe *routedOpError
 	if stderrors.As(err, &roe) {
 		log.Printf("WARN %s failed: %s", op, redactCause(err))
 		if roe.outcomeUnknown {
-			return outcomeUnknownRetryStatus(roe.wire)
+			return clustered.OutcomeUnknownRetryStatus(roe.wire)
 		}
-		return vmOperationStatus(roe.code, roe.wire)
+		return clustered.VMOperationStatus(roe.code, roe.wire)
 	}
 	var rh *routedHostUnavailableError
 	if stderrors.As(err, &rh) {
-		return hostUnavailableStatusFor(rh.pe, rh.host)
+		return clustered.HostUnavailableStatusFor(rh.pe, rh.host)
 	}
 	var ut *clustered.UnknownHostTaskError
 	if stderrors.As(err, &ut) {
-		return unknownToAgentStatus(ut.Error())
+		return clustered.UnknownToAgentStatus(ut.Error())
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
@@ -702,7 +610,7 @@ func routedTypedStatus(op string, err error) error {
 		case contracts.ErrorTypeInvalidSpec:
 			return status.Error(codes.InvalidArgument, pe.Message)
 		case contracts.ErrorTypeHostUnavailable:
-			return hostUnavailableStatus(pe)
+			return clustered.HostUnavailableStatus(pe)
 		case contracts.ErrorTypeNotFound:
 			return status.Error(codes.NotFound, pe.Message)
 		case contracts.ErrorTypeConflict:

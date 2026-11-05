@@ -175,7 +175,7 @@ func createRPCError(err error) error {
 		case contracts.ErrorTypeInvalidSpec:
 			return status.Error(codes.InvalidArgument, pe.Message)
 		case contracts.ErrorTypeHostUnavailable:
-			return hostUnavailableStatus(pe)
+			return clustered.HostUnavailableStatus(pe)
 		}
 	}
 	var ho *hostOpError
@@ -255,7 +255,7 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 func singleHostReconfigureRPCError(err error) error {
 	var ho *hostOpError
 	if stderrors.As(err, &ho) && !isHostTransportFailure(err) {
-		return vmOperationStatus(codes.Unknown, fmt.Sprintf("failed to reconfigure VM: %v", err))
+		return clustered.VMOperationStatus(codes.Unknown, fmt.Sprintf("failed to reconfigure VM: %v", err))
 	}
 	return fmt.Errorf("failed to reconfigure VM: %w", err)
 }
@@ -1271,12 +1271,12 @@ func singleHostCloneRPCError(err error) error {
 	}
 	if isHostTransportFailure(err) {
 		log.Printf("WARN clone VM failed: the libvirt host could not be reached: %v", err)
-		return vmOperationStatus(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
+		return clustered.VMOperationStatus(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) && pe.IsRetryable() && pe.Type != contracts.ErrorTypeTimeout {
 		log.Printf("WARN clone VM failed (retryable): %v", err)
-		return vmOperationStatus(codes.Unavailable, "failed to clone VM: "+pe.Message)
+		return clustered.VMOperationStatus(codes.Unavailable, "failed to clone VM: "+pe.Message)
 	}
 	// A refusal made before anything was copied or defined carries its own
 	// status, as for a Create (createRPCError): a target name taken by a

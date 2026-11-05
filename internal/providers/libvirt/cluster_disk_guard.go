@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
@@ -974,7 +975,7 @@ func (e *clusterGuardIncompleteError) Unwrap() error {
 // keeps both out of its per-Provider circuit breaker.
 func (e *clusterGuardIncompleteError) GRPCStatus() *status.Status {
 	if e.unreachable {
-		return statusWithReasons(codes.Unavailable, e.Error(), contracts.HostUnavailableReason)
+		return clustered.StatusWithReasons(codes.Unavailable, e.Error(), contracts.HostUnavailableReason)
 	}
 	return diskCheckFailedStatus(e.Error(), true)
 }
@@ -1024,7 +1025,7 @@ func (e *domainBusyError) Unwrap() error { return contracts.NewRetryableError(e.
 // GRPCStatus renders the refusal as codes.Unavailable + VM_OPERATION_FAILED:
 // retried, and never counted by the manager's circuit breaker.
 func (e *domainBusyError) GRPCStatus() *status.Status {
-	return statusWithReasons(codes.Unavailable, e.Error(), contracts.VMOperationFailedReason)
+	return clustered.StatusWithReasons(codes.Unavailable, e.Error(), contracts.VMOperationFailedReason)
 }
 
 // clusterGuardStatus returns the wire form of a cluster-wide guard's answer in

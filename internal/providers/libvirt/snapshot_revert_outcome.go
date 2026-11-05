@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -201,13 +202,13 @@ func singleHostRevertFailure(ctx context.Context, conn libvirtConn, domain strin
 		return notPerformed(wireRevertNotRun, err)
 	case revertRefused:
 		log.Printf("ERROR libvirt snapshot revert refused: %v", err)
-		return vmOperationStatus(codes.FailedPrecondition, wireRevertRefusedForConfig)
+		return clustered.VMOperationStatus(codes.FailedPrecondition, wireRevertRefusedForConfig)
 	case revertFailed:
 		log.Printf("ERROR libvirt snapshot revert failed: %v", err)
-		return vmOperationStatus(codes.Unknown, wireRevertFailed)
+		return clustered.VMOperationStatus(codes.Unknown, wireRevertFailed)
 	case revertUnknown:
 		log.Printf("WARN libvirt snapshot revert outcome unknown: %v", err)
-		return outcomeUnknownRetryStatus(wireRevertOutcomeUnknown)
+		return clustered.OutcomeUnknownRetryStatus(wireRevertOutcomeUnknown)
 	case revertSnapshotNotFound:
 		return refusal(codes.NotFound, wireRevertSnapshotNotFound, err)
 	case revertDomainNotFound:
