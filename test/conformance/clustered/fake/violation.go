@@ -100,6 +100,9 @@ const (
 	TaskDialsUnknownHost Violation = "task-dials-unknown-host"
 	// TaskForgedInnerDone reports a task that was never issued done.
 	TaskForgedInnerDone Violation = "task-forged-inner-done"
+	// TaskForgedInnerNoReason refuses a task that was never issued with a
+	// plain NotFound, without the UNKNOWN_TO_AGENT ErrorInfo.
+	TaskForgedInnerNoReason Violation = "task-forged-inner-no-reason"
 	// TaskWrongHost ignores the host in a task reference and asks the first
 	// reachable host.
 	TaskWrongHost Violation = "task-wrong-host"
@@ -203,7 +206,7 @@ func All() []Violation {
 		NotOwnedReasonMissing, NotOwnedReasonOnAbsent,
 		HostDownAsNotFound, HostDownNoReason, HostUnavailableWrongDomain, HostUnavailableNoHost, HostDownBreaksPeers,
 		StickyUnreachable, HostDownMutatesAnyway,
-		TaskNotHostEncoded, TaskAcceptsMalformed, TaskUnknownHostDone, TaskDialsUnknownHost, TaskForgedInnerDone,
+		TaskNotHostEncoded, TaskAcceptsMalformed, TaskUnknownHostDone, TaskDialsUnknownHost, TaskForgedInnerDone, TaskForgedInnerNoReason,
 		TaskWrongHost, TasksInMemory, PowerNoEffect,
 		ListDropsUnreachable, ListFailsOnDownHost, ListNoHostID, ListDedupesByName,
 		CapsNoClustering, CapsUnstable, CapsAdvertiseUnrouted, NotReadyLooksHostScoped,

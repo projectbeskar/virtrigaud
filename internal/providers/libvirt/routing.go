@@ -335,6 +335,24 @@ func hostUnavailableStatusFor(pe *contracts.ProviderError, host hostconn.HostID)
 	return withInfo.Err()
 }
 
+// unknownToAgentStatus renders a task reference the host has no record of
+// as codes.NotFound with a google.rpc.ErrorInfo{Reason: UNKNOWN_TO_AGENT,
+// Domain: provider.virtrigaud.io} (ADR-0016 A7): never done, never "not
+// performed", and out of the manager's circuit breaker.
+func unknownToAgentStatus(msg string) error {
+	st := status.New(codes.NotFound, msg)
+	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: contracts.UnknownToAgentReason,
+		Domain: contracts.ErrorInfoDomain,
+	})
+	if err != nil {
+		// Unreachable in practice (ErrorInfo always marshals); a plain
+		// NotFound is still never done.
+		return st.Err()
+	}
+	return withInfo.Err()
+}
+
 // vmOperationStatus renders a failed per-VM operation that reached its host as
 // code (codes.Unknown for a failure, codes.Unavailable for one the caller
 // should retry, e.g. the same copy still running) with the categorized message
@@ -672,6 +690,10 @@ func routedTypedStatus(op string, err error) error {
 	var rh *routedHostUnavailableError
 	if stderrors.As(err, &rh) {
 		return hostUnavailableStatusFor(rh.pe, rh.host)
+	}
+	var ut *unknownHostTaskError
+	if stderrors.As(err, &ut) {
+		return unknownToAgentStatus(ut.Error())
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {

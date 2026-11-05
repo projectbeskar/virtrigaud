@@ -25,10 +25,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -100,16 +102,63 @@ func taskCluster(t *testing.T) (*Provider, func() []string) {
 	}
 }
 
-func TestClustered_TaskStatus_RoutedToTheEncodedHost(t *testing.T) {
+// TestClustered_TaskStatus_UnissuedTaskIsUnknownToAgent: a well-formed
+// reference to a host the registry fronts is routed to that host only, and —
+// because no routed libvirt call issues a task — answered NotFound with the
+// UNKNOWN_TO_AGENT ErrorInfo (ADR-0016 A7): never done, the reference never
+// echoed.
+func TestClustered_TaskStatus_UnissuedTaskIsUnknownToAgent(t *testing.T) {
 	p, dialed := taskCluster(t)
 	resp, err := NewServer(p).TaskStatus(context.Background(), &providerv1.TaskStatusRequest{
-		Task: &providerv1.TaskRef{Id: encodeHostTaskRef("host-b", "job-1")},
+		Task: &providerv1.TaskRef{Id: encodeHostTaskRef("host-b", "job-secret-1")},
 	})
-	require.NoError(t, err)
-	assert.True(t, resp.Done)
-	assert.Empty(t, resp.Error)
+	require.Error(t, err)
+	assert.Nil(t, resp, "never a task result")
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.NotFound, st.Code())
+	var reasons []string
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok {
+			assert.Equal(t, contracts.ErrorInfoDomain, info.GetDomain())
+			reasons = append(reasons, info.GetReason())
+		}
+	}
+	assert.Equal(t, []string{contracts.UnknownToAgentReason}, reasons)
+	assert.NotContains(t, st.Message(), "job-secret-1", "the host-local reference is not echoed")
 	assert.Equal(t, []string{"host-b"}, dialed(), "only the encoded host is leased")
 	assert.Zero(t, p.virshProvider.unroutableHits.Load())
+}
+
+// doneTaskBackend is a clustered provider whose IsTaskComplete answers done
+// (the seam a future host-side asynchronous operation fills).
+type doneTaskBackend struct {
+	*Provider
+	done bool
+}
+
+// IsTaskComplete answers b.done.
+func (b *doneTaskBackend) IsTaskComplete(context.Context, string) (bool, error) { return b.done, nil }
+
+// TestClustered_TaskStatus_TypedOutcome: a clustered task the host reports
+// done is SUCCEEDED, one still running RUNNING, each with the legacy done
+// filled from it.
+func TestClustered_TaskStatus_TypedOutcome(t *testing.T) {
+	p, _ := taskCluster(t)
+	for _, tc := range []struct {
+		done    bool
+		outcome providerv1.TaskOutcome
+	}{
+		{true, providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED},
+		{false, providerv1.TaskOutcome_TASK_OUTCOME_RUNNING},
+	} {
+		resp, err := NewServer(&doneTaskBackend{Provider: p, done: tc.done}).TaskStatus(context.Background(),
+			&providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: encodeHostTaskRef("host-a", "job-1")}})
+		require.NoError(t, err)
+		assert.Equal(t, tc.outcome, resp.GetOutcome())
+		assert.Equal(t, tc.done, resp.GetDone())
+		assert.Empty(t, resp.GetError())
+	}
 }
 
 // TestClustered_TaskStatus_RefusesForgedReferences: a reference the provider
@@ -151,6 +200,7 @@ func TestClustered_TaskStatus_UnreachableHostIsHostScoped(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, codes.Unavailable, st.Code())
 	assert.True(t, hasHostUnavailableInfo(st), "an unreachable task host is host-scoped")
+	assert.Equal(t, "host-down", contracts.UnreachableHost(err), "the ErrorInfo names the host the reference routed to")
 	assert.NotContains(t, st.Message(), "qemu+ssh", "the host's endpoint is never disclosed")
 	assert.Equal(t, []string{"host-down"}, dialed())
 }
@@ -164,5 +214,10 @@ func TestSingleHost_TaskStatus_ReferencesUnchanged(t *testing.T) {
 		done, err := p.IsTaskComplete(context.Background(), ref)
 		require.NoError(t, err)
 		assert.True(t, done, ref)
+		resp, err := NewServer(p).TaskStatus(context.Background(), &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: ref}})
+		require.NoError(t, err)
+		assert.True(t, resp.GetDone(), ref)
+		assert.Equal(t, providerv1.TaskOutcome_TASK_OUTCOME_UNSPECIFIED, resp.GetOutcome(),
+			"a single-host provider issues no task, so it types nothing about one")
 	}
 }

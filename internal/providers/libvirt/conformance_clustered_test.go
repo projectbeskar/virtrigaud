@@ -493,11 +493,6 @@ var libvirtExpectedFailures = map[string]clustered.ExpectedFailure{
 			"Nothing reads the key for a Create today (the manager reads it only on the Delete path), so nothing is lost. Recommended; recorded, not fixed.",
 		Contains: "names the host the call was routed to",
 	},
-	"tasks.forged-inner-ref": {
-		Pointer: "hostTaskComplete answers done for any host-local reference of a host the registry fronts: every routed libvirt call is " +
-			"synchronous, so the provider issues no task and keeps no table to check one against. Recommended; recorded, not fixed.",
-		Contains: "a task that was never issued must not be reported",
-	},
 }
 
 // TestClusteredLibvirt_Conformance runs the reusable clustered-provider

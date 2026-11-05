@@ -552,7 +552,10 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 		if p.v(TaskForgedInnerDone) {
 			return &providerv1.TaskStatusResponse{Done: true}, nil
 		}
-		return nil, status.Error(codes.NotFound, "no such task on the host")
+		if p.v(TaskForgedInnerNoReason) {
+			return nil, status.Error(codes.NotFound, "no such task on the host")
+		}
+		return nil, withInfo(codes.NotFound, "no such task on the host", contracts.UnknownToAgentReason, contracts.ErrorInfoDomain, nil)
 	}
 	return &providerv1.TaskStatusResponse{Done: t.done}, nil
 }
