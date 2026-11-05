@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-05 16:36] - Hypervisor-neutral clustered routing helpers move to internal/clustered
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/clustered/doc.go`: package doc for `internal/clustered`: what a clustered provider answers the same way whatever its hypervisor (host ids, host-encoded task references, routed wire answers), and what stays in the provider (dialers, registries, SSH, virsh, disk logic).
+- `internal/clustered/hosts.go`, `internal/clustered/taskref.go`: `HostID`, `HostSet`, `Fronts`, `EncodeHostTaskRef`, `ParseHostTaskRef` (and `HostTaskRefPrefix`, `HostTaskRefMaxLen`, `HostIDMaxLen`), `NewTaskHostNotFrontedError` and `UnknownHostTaskError`, moved from `internal/providers/libvirt/routed_tasks.go`. `hostconn.HostID` is now an alias of `clustered.HostID`. Format tests moved to `internal/clustered/taskref_test.go`.
+- `internal/clustered/status.go`: `StatusWithReasons`, `HostUnavailableStatus`, `HostUnavailableStatusFor`, `UnknownToAgentStatus`, `VMOperationStatus`, `OutcomeUnknownRetryStatus`, `HostLostStatus`, moved from `internal/providers/libvirt/routing.go` and `disk_dependents.go`.
+- `internal/clustered/outcome.go`: `OpKind`, `HostDownStage`, the host-down wire texts, `HostDownStatus`, `HostOpFailedStatus`, `HostUnavailableError`, `OpError`, `TypedStatus`, `ProviderFailureStatus`, moved from `internal/providers/libvirt/routing.go` and `host_progress.go`. libvirt keeps `hostOpError`, `hostProgress`, `isHostTransportFailure` and its own refusals, and hands the neutral facts to these helpers.
+- `internal/clustered/hostinfo.go`: `HostInfoToProto`, `HostHealthToProto`, moved from `internal/providers/libvirt/hosts.go`.
+- `internal/providers/libvirt`: calls the moved helpers. Same gRPC codes, ErrorInfo reasons and metadata, wire messages and log lines; the clustered conformance suite has the same pass, skip and expected-failure counts.
+
+### Why
+A second clustered provider that reaches its hosts through a per-host agent instead of SSH must answer host-encoded task references and host failures exactly as the clustered libvirt provider does. Moving the hypervisor-neutral parts lets it reuse them instead of copying them. No behaviour change.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-05 16:01] - Typed TaskStatus outcomes and per-host agent error reasons
 **Author:** @wrkode (William Rizzo)
 
