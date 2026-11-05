@@ -5,6 +5,36 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-05 16:01] - Typed TaskStatus outcomes and per-host agent error reasons
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/provider.proto`: enum `TaskOutcome` (`UNSPECIFIED`, `RUNNING`, `SUCCEEDED`, `FAILED_CLEAN`, `FAILED_DIRTY`, `UNKNOWN`, `RETIRED`, `CANCELLED`) and `TaskStatusResponse.outcome` (3) and `outcome_reason` (4), additive (ADR-0016 A7). A provider that sets `outcome` also fills `done` and `error` from it; a retired or cancelled task carries `error: "not performed: <OUTCOME>{<reason>}"`, so a manager that predates the field never reads it as a success. Bindings regenerated (`proto/rpc/provider/v1/provider.pb.go`).
+- `internal/providers/contracts/task_outcome.go`, `internal/providers/contracts/types.go`: `contracts.TaskOutcome` and `TaskStatus.Outcome` / `OutcomeReason`.
+- `internal/providers/contracts/errors.go`: `ErrorTypeNotPerformed` (`IsNotPerformed`, `NewNotPerformedError`; not retryable); the per-host agent ErrorInfo reasons `UNKNOWN_TO_AGENT`, `VM_BUSY`, `PROVIDER_MISMATCH`, `UNATTESTED`, `AGENT_LOST`, `DIGEST_MISMATCH`, `CANCEL_REFUSED`, `DEADLINE_EXCEEDED_NOT_PERFORMED`, each documented as breaker-exempt and as a definite not-performed or not; `PartAReasons`, `HasPartAReason`, `IsDefiniteNotPerformedReason`; `ErrUnknownToAgent` / `IsUnknownToAgent`.
+- `sdk/provider/tasks`: `Status`, `LegacyDone`, `LegacyError`, `OutcomeLabel` build a `TaskStatusResponse` from an outcome with the legacy fields filled.
+- `sdk/provider/errors/reasons.go`: `ErrorInfoDomain`, the same reasons (`ReasonUnknownToAgent` and the others) and `WithReason`; a manager-side test keeps them equal to the `contracts` constants.
+- `docs/task-status-outcomes.md`: the outcomes, the legacy mapping, how the manager reads each, what each provider reports, `UNKNOWN_TO_AGENT` and the reason table.
+
+### Changed
+- `internal/transport/grpc/client.go`: `IsTaskComplete` and `TaskStatus` read the typed outcome first (`readTaskStatus`). `RUNNING` and `UNKNOWN` are not done; `SUCCEEDED` is done only when `done` and `error` agree; `FAILED_*` is done with an error; `RETIRED` and `CANCELLED` are done with a non-empty error, and `IsTaskComplete` returns an `ErrorTypeNotPerformed` error. `UNSPECIFIED`, or an outcome this manager does not know, keeps the previous reading of `done` and `error` exactly.
+- `internal/transport/grpc/client.go`: a `NotFound` carrying `UNKNOWN_TO_AGENT` is mapped to a `NotFound` marked `ErrUnknownToAgent`; a status carrying any per-host agent reason (in VirtRigaud's ErrorInfo domain) never counts toward the per-Provider circuit breaker, whatever its code, like `HOST_UNAVAILABLE`.
+- `internal/providers/vsphere/server.go`, `internal/providers/proxmox/server.go`, `internal/providers/mock/provider.go`, `internal/providers/libvirt/server.go`: `TaskStatus` fills `outcome` with what each provider can prove (`RUNNING`, `SUCCEEDED`, `FAILED_CLEAN`); none reports `RETIRED`, `CANCELLED`, `UNKNOWN` or `FAILED_DIRTY`. Answers about a task the provider does not know, and every single-host libvirt answer, keep no typed outcome and their previous `done` and `error`.
+- `sdk/provider/client/client.go`: `WaitForTask` reads the typed outcome: `RETIRED` and `CANCELLED` end it with an error, `RUNNING` and `UNKNOWN` keep it polling.
+- `test/conformance/clustered/cases_tasks.go`: `tasks.forged-inner-ref` is Required and checks `NotFound` with `UNKNOWN_TO_AGENT` and the manager mapping; `tasks.host-down-ref` also checks the `host` metadata of `HOST_UNAVAILABLE`. New fake violation `TaskForgedInnerNoReason` (61 violations).
+- `docs/vm-status-phase.md`, `docs/clustered-provider-inventory.md`, `docs/README.md`, `sdk/README.md`, `test/conformance/README.md`: updated.
+
+### Fixed
+- `internal/providers/libvirt/routed_tasks.go`, `internal/providers/libvirt/routing.go`: a clustered task reference that is well formed and names a host the provider fronts, but a task that host never issued, is answered `NotFound` with the `UNKNOWN_TO_AGENT` ErrorInfo instead of `done` (no routed libvirt call issues a task). A host that cannot be reached is still `HOST_UNAVAILABLE`, naming the host. The `tasks.forged-inner-ref` expected failure is removed.
+- `internal/controller/virtualmachine_delete_task.go`: a `Delete` task reported `RETIRED` or `CANCELLED` never releases the finalizer: it is handled as a failed task and the `Delete` is sent again after the backoff. A typed `UNKNOWN` stays recorded and is polled. The "unknown task" text match applies only to answers without a typed outcome. Tests: `internal/controller/virtualmachine_delete_task_outcome_test.go`.
+
+### Why
+A `TaskStatus` answer of `done` plus `error` cannot say that a task never ran, so a provider had no safe way to report it, and a clustered libvirt provider reported a task reference its host never issued as done. The typed outcome lets a provider say what it can prove, and the manager never takes a task that was not performed (a retired `Delete` in particular) for a success.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+
 ## [2026-11-05 15:47] - Development-only cloudhypervisor Provider type behind a build-tag gate
 **Author:** @wrkode (William Rizzo)
 

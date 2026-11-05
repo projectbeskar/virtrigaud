@@ -275,14 +275,67 @@ message DescribeResponse {
 // to the manager. A clustered provider refuses a reference it did not issue:
 // one that is not host-encoded, or that names a host that is not in its own
 // host registry, is rejected with an error and its host is never contacted.
+// A clustered provider answers a well-formed reference to a host it fronts,
+// but to a task that host never issued, with codes.NotFound and the
+// google.rpc.ErrorInfo reason UNKNOWN_TO_AGENT (domain
+// provider.virtrigaud.io): never done, and never "not performed" (the
+// provider has no record of the task, which proves nothing about it).
 // The task references of single-host and thin-client providers are unchanged.
 message TaskStatusRequest {
   TaskRef task = 1;
 }
 
+// TaskOutcome is the typed result of an asynchronous task (ADR-0016 A7). A
+// provider that sets it MUST also fill TaskStatusResponse.done and .error as
+// the comment of each value says, so that a manager that predates this enum
+// reads the same answer and never takes a task that was not performed for a
+// success.
+enum TaskOutcome {
+  // The provider does not report a typed outcome (a provider that predates
+  // this enum): the manager reads done and error, as before.
+  TASK_OUTCOME_UNSPECIFIED = 0;
+  // Accepted and not terminal (accepted, pending, executing, cancelling).
+  // done=false, error="".
+  TASK_OUTCOME_RUNNING = 1;
+  // Every step is done and its effect was observed or recorded. It does not
+  // prove that the effect still exists. done=true, error="".
+  TASK_OUTCOME_SUCCEEDED = 2;
+  // A definite failure, before any irreversible step began. done=true,
+  // error=<message>.
+  TASK_OUTCOME_FAILED_CLEAN = 3;
+  // A definite failure after an irreversible step began: something may have
+  // happened, and the VM is held. done=true, error=<message>.
+  TASK_OUTCOME_FAILED_DIRTY = 4;
+  // The provider has too little evidence to tell what the task did. Not
+  // terminal: the VM is held, and the task is never read as done.
+  // done=false, error="".
+  TASK_OUTCOME_UNKNOWN = 5;
+  // The task provably never started and never will (outcome_reason says why,
+  // e.g. never_received, deadline, provider_changed, cancelled_before_start).
+  // It proves nothing about any other attempt. done=true,
+  // error="not performed: RETIRED{<outcome_reason>}".
+  TASK_OUTCOME_RETIRED = 6;
+  // Cancelled before any irreversible step; its compensations are done.
+  // done=true, error="not performed: CANCELLED{<outcome_reason>}".
+  TASK_OUTCOME_CANCELLED = 7;
+}
+
 message TaskStatusResponse {
   bool done = 1;
   string error = 2; // Error message if task failed
+
+  // outcome is the typed result of the task. TASK_OUTCOME_UNSPECIFIED (the
+  // zero value, and what a provider that predates the field sends) means the
+  // manager reads done and error alone. A manager that reads outcome never
+  // takes a RETIRED or CANCELLED task for a success: it did not happen.
+  // Additive and backward-compatible.
+  TaskOutcome outcome = 3;
+
+  // outcome_reason is the {reason} of a RETIRED, CANCELLED, UNKNOWN or
+  // FAILED_DIRTY outcome (for example never_received or provider_changed),
+  // for logs and operators. Empty otherwise. It is never a secret, an
+  // endpoint or a credential. Additive and backward-compatible.
+  string outcome_reason = 4;
 }
 
 // Snapshot operations

@@ -40,6 +40,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+	sdktasks "github.com/projectbeskar/virtrigaud/sdk/provider/tasks"
 )
 
 // Compile-time assertions that the gRPC Client satisfies the core Provider
@@ -369,7 +370,8 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 // Unavailable (HOST_UNAVAILABLE) and a per-VM operation that failed on its
 // host (VM_OPERATION_FAILED); neither does a per-VM operation a provider did
 // not perform because its disk dependency check could not run
-// (VM_DISK_CHECK_FAILED, single-host and clustered). An ImagePrepare answered with
+// (VM_DISK_CHECK_FAILED, single-host and clustered), nor an answer carrying
+// a Part A reason (contracts.PartAReasons). An ImagePrepare answered with
 // IMAGE_ARTIFACT_IN_PROGRESS or IMAGE_SOURCE_UNAVAILABLE is excluded by
 // countsTowardBreaker, which knows the method.
 func isInfraFailure(err error) bool {
@@ -403,6 +405,14 @@ func isInfraFailure(err error) bool {
 	// host stopped answering (OUTCOME_UNKNOWN_RETRY, R25): a host-scoped
 	// fact, retried by the manager.
 	if st, ok := status.FromError(err); ok && isOutcomeUnknownRetryStatus(st) {
+		return false
+	}
+	// Nor does an answer of a per-host agent carrying a Part A reason
+	// (contracts.PartAReasons: UNKNOWN_TO_AGENT, VM_BUSY, PROVIDER_MISMATCH,
+	// UNATTESTED, AGENT_LOST, DIGEST_MISMATCH, CANCEL_REFUSED,
+	// DEADLINE_EXCEEDED_NOT_PERFORMED, ADR-0016), whatever its code: the
+	// provider answered, and the fact is about one host, VM or operation.
+	if contracts.HasPartAReason(err) {
 		return false
 	}
 	switch status.Code(err) {
@@ -441,7 +451,8 @@ func isInfraFailure(err error) bool {
 //     counts too. ResourceExhausted never counts (rate limit: back off this
 //     call, see isInfraFailure).
 //  4. Single host failure on a clustered provider: HOST_UNAVAILABLE and
-//     OUTCOME_UNKNOWN_RETRY: NOT counted (isInfraFailure).
+//     OUTCOME_UNKNOWN_RETRY, and every Part A reason of a per-host agent
+//     (contracts.PartAReasons): NOT counted (isInfraFailure).
 //  5. Single VM backend failure: the provider answered, with Internal (sdk
 //     errors.NewInternal, ToGRPCError of a plain error) or Unknown (a
 //     handler's plain error, which grpc-go sends as Unknown: libvirt
@@ -1012,7 +1023,22 @@ func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contr
 	}, nil
 }
 
-// IsTaskComplete implements contracts.Provider
+// IsTaskComplete implements contracts.Provider. It reads the answer as
+// TaskStatus does (readTaskStatus) and returns:
+//
+//   - RUNNING, UNKNOWN: false, nil — not done; an UNKNOWN task is never done;
+//   - SUCCEEDED: true, nil;
+//   - FAILED_CLEAN, FAILED_DIRTY: true, "task failed: <message>";
+//   - RETIRED, CANCELLED: true and a contracts.ErrorTypeNotPerformed error
+//     (contracts.IsNotPerformed): the task is over and did not happen, which
+//     is never a success (ADR-0016 A7);
+//   - UNSPECIFIED (a provider without typed outcomes) or an outcome this
+//     manager does not know: done and error exactly as before — an error is
+//     true, "task failed: <error>", otherwise done.
+//
+// An RPC error is mapped by mapGRPCError (false, err): a host that has no
+// record of the task (UNKNOWN_TO_AGENT) is a NotFound
+// (contracts.IsUnknownToAgent), never done.
 func (c *Client) IsTaskComplete(ctx context.Context, taskRef string) (done bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -1024,20 +1050,28 @@ func (c *Client) IsTaskComplete(ctx context.Context, taskRef string) (done bool,
 		return false, c.mapGRPCError("taskStatus", err)
 	}
 
-	if resp.Error != "" {
+	st := readTaskStatus(resp)
+	if st.Outcome.NotPerformed() {
+		c.trackTaskDone(taskRef)
+		return true, contracts.NewNotPerformedError("task "+st.Error, nil)
+	}
+	if st.Error != "" {
 		// Terminal failure also counts as task-done — decrement the
 		// inflight gauge before returning (G7.3 / #129).
 		c.trackTaskDone(taskRef)
-		return true, fmt.Errorf("task failed: %s", resp.Error)
+		return true, fmt.Errorf("task failed: %s", st.Error)
 	}
 
-	if resp.Done {
+	if st.IsCompleted {
 		c.trackTaskDone(taskRef) // G7.3 (#129)
 	}
-	return resp.Done, nil
+	return st.IsCompleted, nil
 }
 
-// TaskStatus checks the status of an async task
+// TaskStatus checks the status of an async task. The answer is read by
+// readTaskStatus: a typed outcome is carried in Outcome and OutcomeReason and
+// decides IsCompleted and Error; without one, done and error are read as
+// before.
 func (c *Client) TaskStatus(ctx context.Context, taskRef string) (contracts.TaskStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -1049,18 +1083,69 @@ func (c *Client) TaskStatus(ctx context.Context, taskRef string) (contracts.Task
 		return contracts.TaskStatus{}, c.mapGRPCError("taskStatus", err)
 	}
 
+	st := readTaskStatus(resp)
 	// Both terminal-success (Done=true) and terminal-failure (Error != "")
 	// flip the task out of the inflight set (G7.3 / #129). Idempotent on
 	// unknown taskRef so double-poll / post-restart polls are safe.
-	if resp.Done || resp.Error != "" {
+	if st.IsCompleted || st.Error != "" {
 		c.trackTaskDone(taskRef)
 	}
+	return st, nil
+}
 
-	return contracts.TaskStatus{
-		IsCompleted: resp.Done,
-		Error:       resp.Error,
-		Message:     "", // Message field not in proto
-	}, nil
+// taskOutcomes maps the gRPC TaskOutcome enum to contracts.TaskOutcome. A
+// value missing here (UNSPECIFIED, or one added after this manager) maps to
+// contracts.TaskOutcomeUnspecified.
+var taskOutcomes = map[providerv1.TaskOutcome]contracts.TaskOutcome{
+	providerv1.TaskOutcome_TASK_OUTCOME_RUNNING:      contracts.TaskOutcomeRunning,
+	providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED:    contracts.TaskOutcomeSucceeded,
+	providerv1.TaskOutcome_TASK_OUTCOME_FAILED_CLEAN: contracts.TaskOutcomeFailedClean,
+	providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY: contracts.TaskOutcomeFailedDirty,
+	providerv1.TaskOutcome_TASK_OUTCOME_UNKNOWN:      contracts.TaskOutcomeUnknown,
+	providerv1.TaskOutcome_TASK_OUTCOME_RETIRED:      contracts.TaskOutcomeRetired,
+	providerv1.TaskOutcome_TASK_OUTCOME_CANCELLED:    contracts.TaskOutcomeCancelled,
+}
+
+// readTaskStatus reads a TaskStatus answer into a contracts.TaskStatus
+// (ADR-0016 A7). The typed outcome decides IsCompleted and Error:
+//
+//   - RUNNING, UNKNOWN: not completed, no error, whatever done says;
+//   - SUCCEEDED: completed, no error — only when done is set and error is
+//     empty; a SUCCEEDED the legacy fields contradict is read as UNSPECIFIED
+//     (the reading of a manager that predates typed outcomes, which is never
+//     more permissive);
+//   - FAILED_CLEAN, FAILED_DIRTY: completed with the provider's error (or
+//     "<OUTCOME>{<reason>}" when it sent none);
+//   - RETIRED, CANCELLED: completed with a non-empty error ("not performed:
+//     <OUTCOME>{<reason>}" when the provider sent none), so a caller that
+//     reads IsCompleted and Error alone sees a failure, never a success;
+//   - UNSPECIFIED, or a value this manager does not know: done and error
+//     unchanged, Outcome TaskOutcomeUnspecified.
+func readTaskStatus(resp *providerv1.TaskStatusResponse) contracts.TaskStatus {
+	legacy := contracts.TaskStatus{IsCompleted: resp.GetDone(), Error: resp.GetError()}
+	outcome, typed := taskOutcomes[resp.GetOutcome()]
+	if !typed {
+		return legacy
+	}
+	st := contracts.TaskStatus{Outcome: outcome, OutcomeReason: resp.GetOutcomeReason()}
+	switch outcome {
+	case contracts.TaskOutcomeRunning, contracts.TaskOutcomeUnknown:
+	case contracts.TaskOutcomeSucceeded:
+		if !resp.GetDone() || resp.GetError() != "" {
+			return legacy
+		}
+		st.IsCompleted = true
+	case contracts.TaskOutcomeFailedClean, contracts.TaskOutcomeFailedDirty:
+		st.IsCompleted = true
+		st.Error = sdktasks.LegacyError(resp.GetOutcome(), resp.GetOutcomeReason(), resp.GetError())
+	case contracts.TaskOutcomeRetired, contracts.TaskOutcomeCancelled:
+		st.IsCompleted = true
+		st.Error = resp.GetError()
+		if st.Error == "" {
+			st.Error = sdktasks.LegacyError(resp.GetOutcome(), resp.GetOutcomeReason(), "")
+		}
+	}
+	return st
 }
 
 // SnapshotCreate creates a VM snapshot
@@ -2000,6 +2085,14 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 		if statusHasReason(st, codes.NotFound, contracts.VMNotOwnedReason) {
 			return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMNotOwned, err))
+		}
+		// The host has no record of the task asked about (UNKNOWN_TO_AGENT,
+		// ADR-0016 A7): still NotFound — never done, and never "not
+		// performed" — marked so a caller can tell it apart
+		// (contracts.IsUnknownToAgent).
+		if statusHasReason(st, codes.NotFound, contracts.UnknownToAgentReason) {
+			return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrUnknownToAgent, err))
 		}
 		return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.InvalidArgument:

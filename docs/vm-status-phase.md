@@ -176,6 +176,12 @@ previous one stopped.
   to at most 1 minute.
 - **Completed without an error:** the finalizer is removed. The task's success is
   the provider's confirmation, exactly as a successful synchronous `Delete` is.
+- **Typed outcomes.** A provider may also report a typed outcome (see
+  [task-status-outcomes.md](task-status-outcomes.md)). `RETIRED` and `CANCELLED`
+  mean the `Delete` was not performed: it is never a success, the finalizer is kept,
+  and the task is handled as a failed one (below), so the `Delete` is sent again
+  after the backoff. `UNKNOWN` is never done: the task stays recorded and is polled
+  again, and the finalizer is kept.
 - **Status unknown:** a `TaskStatus` call that fails for a transient reason (a
   transport error or a timeout) is never taken for a deleted VM. `DeleteTask` stays
   `True` with reason `DeleteTaskStatusUnknown`, the task stays recorded, no
@@ -187,9 +193,11 @@ previous one stopped.
   not know the task: the mock provider's `task not found`; Proxmox VE's
   `does not report this task` and `invalid task ID format`; or vSphere's
   ManagedObjectNotFound fault for the Task object itself (a task vCenter has
-  purged, which names a `vim.Task` object). The task's status answer has no
-  typed "unknown task" signal yet, so these are recognised by their text; an
-  answer worded otherwise is taken as a failure. That is typically a
+  purged, which names a `vim.Task` object); or a clustered host answers it
+  `NotFound` with the `UNKNOWN_TO_AGENT` reason (a reference it never issued).
+  The bundled providers' terminal "unknown task" answers carry no typed outcome,
+  so they are recognised by their text, and only when the answer has no typed
+  outcome; an answer worded otherwise is taken as a failure. That is typically a
   provider that restarted and lost its task table, and the destroy may still be
   running. The answer is ambiguous, so `DeleteTask` becomes `Unknown` with reason
   `DeleteTaskOutcomeUnknown` (Warning event of the same name) and **no `Delete`

@@ -9,7 +9,8 @@ VirtRigaud provider: a gRPC server that implements the provider contract of
 | `provider/server` | gRPC server bootstrapping: TLS and mTLS, health checks, middleware |
 | `provider/middleware` | gRPC interceptors: logging, authentication, rate limiting, recovery, timeouts |
 | `provider/capabilities` | Building and reporting the provider's capabilities |
-| `provider/errors` | Typed errors mapped to gRPC status codes |
+| `provider/errors` | Typed errors mapped to gRPC status codes; the `google.rpc.ErrorInfo` domain and the per-host agent reasons (`ReasonUnknownToAgent` and the others), and `WithReason` to attach one |
+| `provider/tasks` | `TaskStatus` answers with a typed outcome and the legacy `done`/`error` filled from it (`Status`); see [`docs/task-status-outcomes.md`](../docs/task-status-outcomes.md) |
 | `provider/client` | gRPC client for the provider contract, with retries and typed error mapping |
 
 See the package documentation in [`provider/doc.go`](provider/doc.go) for usage.

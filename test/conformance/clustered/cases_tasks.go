@@ -103,27 +103,35 @@ func taskCases() []Case {
 			},
 		},
 		{
-			ID:     "tasks.forged-inner-ref",
-			Level:  Recommended,
-			Rule:   "a well-formed reference to a reachable host it fronts, but to a task it never issued, is refused (NotFound or InvalidArgument), not reported done",
-			Source: srcTaskRefs + " (\"refuses any reference it could not have issued\"); the contract does not say how a provider that issues no tasks can tell",
+			ID: "tasks.forged-inner-ref",
+			Rule: "a well-formed reference to a reachable host it fronts, but to a task that host never issued, is NotFound with the " +
+				"UNKNOWN_TO_AGENT ErrorInfo: never done, never \"not performed\"; the manager maps it to a NotFound marked UNKNOWN_TO_AGENT",
+			Source: srcTaskRefs + " (\"refuses any reference it could not have issued\"); proto/provider/v1/provider.proto TaskStatusRequest; " +
+				"ADR-0016 A7 (UNKNOWN_TO_AGENT is never treated as not performed); internal/providers/contracts/errors.go: UnknownToAgentReason",
 			Run: func(e *Env) {
-				resp, err := e.TaskStatus(HostTaskPrefix + e.HostA() + "/never-issued-0000")
+				ref := HostTaskPrefix + e.HostA() + "/never-issued-0000"
+				resp, err := e.TaskStatus(ref)
 				require.Error(e.T, err, "a task that was never issued must not be reported (got %v)", resp)
-				w := WireOf(err)
-				assert.Contains(e.T, []codes.Code{codes.NotFound, codes.InvalidArgument}, w.Code, w.String())
+				w := requireCode(e, err, codes.NotFound, "task never issued")
+				r, ok := w.Reason(contracts.UnknownToAgentReason)
+				require.True(e.T, ok, "a task the host never issued carries the %s ErrorInfo: %s", contracts.UnknownToAgentReason, w)
+				assert.Equal(e.T, contracts.ErrorInfoDomain, r.Domain, "ErrorInfo domain")
+				done, err := e.Manager().IsTaskComplete(e.Ctx(), ref)
+				assert.False(e.T, done, "never done")
+				assert.True(e.T, contracts.IsUnknownToAgent(err), "manager mapping: %v", err)
+				assert.False(e.T, contracts.IsNotPerformed(err), "UNKNOWN_TO_AGENT is never a not-performed")
 			},
 		},
 		{
 			ID:     "tasks.host-down-ref",
-			Rule:   "TaskStatus for a well-formed reference naming a host the provider fronts but cannot reach is the retryable, host-scoped Unavailable that names the host: not NotFound, not a task result",
-			Source: "ADR-0007 Addendum A, A1 (task references are routed by host) and A2 (an unreachable host is a retryable Unavailable); internal/providers/contracts/errors.go: HostUnavailableReason",
+			Rule:   "TaskStatus for a well-formed reference naming a host the provider fronts but cannot reach is the retryable, host-scoped Unavailable that names the host (ErrorInfo metadata host): not NotFound, not a task result",
+			Source: "ADR-0007 Addendum A, A1 (task references are routed by host) and A2 (an unreachable host is a retryable Unavailable); internal/providers/contracts/errors.go: HostUnavailableReason; internal/providers/contracts/host_unavailable.go: HostUnavailableHostKey",
 			Run: func(e *Env) {
 				e.HostDown(e.HostA())
 				ref := HostTaskPrefix + e.HostA() + "/job-1"
 				resp, err := e.TaskStatus(ref)
 				require.Error(e.T, err, "an unreachable host cannot say the task is done (got %v)", resp)
-				requireHostUnavailable(e, err, "", "task of an unreachable host")
+				requireHostUnavailable(e, err, e.HostA(), "task of an unreachable host")
 				_, err = e.Manager().IsTaskComplete(e.Ctx(), ref)
 				assert.True(e.T, contracts.IsHostUnavailable(err), "manager mapping: %v", err)
 				assert.False(e.T, contracts.IsNotFound(err))
@@ -166,7 +174,7 @@ func taskCases() []Case {
 				// A task is routed to the host in its reference.
 				e.HostDown(e.HostA())
 				_, err = e.TaskStatus(refA)
-				requireHostUnavailable(e, err, "", "task of an unreachable host")
+				requireHostUnavailable(e, err, e.HostA(), "task of an unreachable host")
 				resp, err = e.TaskStatus(refB)
 				require.NoError(e.T, err, "the task of a reachable host still answers")
 				assert.True(e.T, resp.Done)

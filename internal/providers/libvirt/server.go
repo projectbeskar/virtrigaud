@@ -35,6 +35,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/tasks"
 )
 
 // Server implements the providerv1.ProviderServer interface for Libvirt.
@@ -347,15 +348,27 @@ func (s *Server) routedTaskRef(hostID, taskRef string) string {
 // to that host (ADR-0007 Addendum A, slice 3). A refusal or an unreachable host
 // is a gRPC error (routedRPCError), never a task failure: a forged or foreign
 // reference must not be reported as a failed task, and a host-scoped
-// unavailability stays out of the manager's circuit breaker.
+// unavailability stays out of the manager's circuit breaker. A well-formed
+// reference to a host it fronts but to a task that host never issued is
+// codes.NotFound with the UNKNOWN_TO_AGENT ErrorInfo (hostTaskComplete),
+// never done.
 func (s *Server) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	if s.clusteredProvider() {
 		done, err := s.provider.IsTaskComplete(ctx, req.GetTask().GetId())
 		if err != nil {
 			return nil, routedReadRPCError("check task status", err)
 		}
-		return &providerv1.TaskStatusResponse{Done: done}, nil
+		// Typed outcome (ADR-0016 A7), with done filled from it. Today a
+		// clustered libvirt host issues no task, so every reference is
+		// answered UNKNOWN_TO_AGENT above (hostTaskComplete).
+		if done {
+			return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED, "", ""), nil
+		}
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_RUNNING, "", ""), nil
 	}
+	// The single-host provider issues no task either (every virsh operation
+	// is synchronous), so it knows nothing about the reference it is asked
+	// about: the answer keeps no typed outcome, and its historical done.
 	done, err := s.provider.IsTaskComplete(ctx, req.Task.Id)
 	if err != nil {
 		return &providerv1.TaskStatusResponse{

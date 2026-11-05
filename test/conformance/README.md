@@ -208,8 +208,8 @@ configuration the two `async-tasks` cases are skipped.
 | `hostdown.removed-host` | Required | a host removed from the Provider's registry while VMs are bound to it is an unavailable host, not a missing VM: calls to it are the host-scoped Unavailable, its VMs are untouched, the other hosts are unaffected, and a task naming it is NotFound | `host-removal` | pass | pass |
 | `tasks.malformed-ref` | Required | TaskStatus refuses a reference that is not host-encoded with InvalidArgument, and a host-encoded one with a malformed host id with InvalidArgument or NotFound: never a task result (done or failed), never a dial | - | pass | pass |
 | `tasks.unknown-host` | Required | TaskStatus for a well-formed reference naming a host outside the provider's registry is NotFound: never done, never an endpoint, never dialed | - | pass | pass |
-| `tasks.forged-inner-ref` | Recommended | a well-formed reference to a reachable host it fronts, but to a task it never issued, is refused (NotFound or InvalidArgument), not reported done | - | pass | **recommended fail** |
-| `tasks.host-down-ref` | Required | TaskStatus for a well-formed reference naming a host the provider fronts but cannot reach is the retryable, host-scoped Unavailable that names the host: not NotFound, not a task result | - | pass | pass |
+| `tasks.forged-inner-ref` | Required | a well-formed reference to a reachable host it fronts, but to a task that host never issued, is NotFound with the `UNKNOWN_TO_AGENT` ErrorInfo: never done, never "not performed"; the manager maps it to a NotFound marked `UNKNOWN_TO_AGENT` | - | pass | pass |
+| `tasks.host-down-ref` | Required | TaskStatus for a well-formed reference naming a host the provider fronts but cannot reach is the retryable, host-scoped Unavailable that names the host (ErrorInfo metadata `host`): not NotFound, not a task result | - | pass | pass |
 | `tasks.async-routing` | Required | an asynchronous call returns a host-encoded task reference naming the host it ran on; TaskStatus is routed to that host (done only when that host finished it) and a task of an unreachable host is host-scoped Unavailable while other hosts' tasks still answer | `async-tasks` | pass | skip |
 | `tasks.synchronous-effect` | Required | a routed call that returns no task has completed: its effect is already in place when the response arrives; a task it does return is host-encoded with the request's host | - | pass | pass |
 | `list.all-hosts` | Required | ListVMs answers for every host in one call; every VM is tagged with the host it is on, and a VM is identified by (host id, VM id): the same name on two hosts is two VMs | - | pass | pass |
@@ -237,10 +237,10 @@ configuration the two `async-tasks` cases are skipped.
 | `create.routed-to-target-host` | Required | Create lands the VM on the host named by target_host_id and stamps the requester as its owner; the VM is then found there by that owner and by no other | `create` | pass | pass |
 | `create.owner-rebind` | Required | a repeated Create by the same owner is an idempotent success (the same VM), and a Create by another owner for a taken name fails AlreadyExists and leaves the VM and its stamp alone | `create`, `create-owner-rebind` | pass | skip |
 
-Clustered libvirt: 40 Required cases pass and 5 are skipped, each with a reason (no asynchronous
+Clustered libvirt: 41 Required cases pass and 5 are skipped, each with a reason (no asynchronous
 calls; no `VM_NOT_OWNED` reason, which the contract does not require of a clustered provider;
 Create runs through a seam, so the owner rebind is left to the real-pipeline tests; no safe way to
-make the Provider itself unready). 4 Recommended cases: 2 pass and 2 fail (recorded below).
+make the Provider itself unready). 3 Recommended cases: 2 pass and 1 fails (recorded below).
 
 ## Optional features
 
@@ -279,7 +279,7 @@ that its coverage is reduced.
 ## The instrumented fake and the mutation test
 
 [`clustered/fake`](clustered/fake/) is an in-memory clustered Provider that obeys every rule above
-and can be told to break any one of them (`fake.WithViolations(...)`: 60 violations, such as
+and can be told to break any one of them (`fake.WithViolations(...)`: 61 violations, such as
 `AllowEmptyHost`, `IgnoreOwnerMutate`, `ListDropsUnreachable`, `TaskWrongHost`). In its
 asynchronous mode its effects happen when the host finishes the task, as a real asynchronous
 provider's do.
@@ -293,16 +293,13 @@ breaks its rule (`fake/violation.go`, `fake/provider.go`) and its entry in `clus
 
 ## Findings recorded against clustered libvirt
 
-Both are Recommended cases; neither is fixed by the change that added the suite. They are listed
-in `libvirtExpectedFailures` with a pointer and a pinned message.
+A Recommended case, not fixed by the change that added the suite. It is listed in
+`libvirtExpectedFailures` with a pointer and a pinned message.
 
 - `create.unavailable-names-host`: a routed `Create` answered `HOST_UNAVAILABLE` does not set the
   `host` metadata of its ErrorInfo (`contracts.HostUnavailableHostKey`), where `Describe`, `Delete`,
   `Power`, `Reconfigure` and `TaskStatus` do. The manager reads the key only on the Delete path, so
   nothing reads it for a Create today.
-- `tasks.forged-inner-ref`: `TaskStatus` for a well-formed reference to a host it fronts, naming a
-  task it never issued, answers `done`. Every routed libvirt call is synchronous, so it issues no
-  task and cannot tell.
 
 ## Not covered
 

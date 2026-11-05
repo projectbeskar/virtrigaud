@@ -162,12 +162,21 @@ type TaskRef struct {
 
 // TaskStatus represents the status of an async task
 type TaskStatus struct {
-	// IsCompleted indicates if the task is done
+	// IsCompleted indicates if the task is done. A task whose Outcome is
+	// TaskOutcomeRetired or TaskOutcomeCancelled is completed with a
+	// non-empty Error: it is over, and it did not happen.
 	IsCompleted bool
 	// Error contains error message if task failed
 	Error string
 	// Message contains status message
 	Message string
+	// Outcome is the provider's typed outcome of the task (ADR-0016 A7), or
+	// TaskOutcomeUnspecified when the provider reports none: then
+	// IsCompleted and Error are read as before.
+	Outcome TaskOutcome
+	// OutcomeReason is the {reason} of a retired, cancelled, unknown or
+	// dirty-failed outcome (for example never_received), for logs only.
+	OutcomeReason string
 }
 
 // SnapshotCreateRequest defines snapshot creation request

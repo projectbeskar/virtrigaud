@@ -401,6 +401,8 @@ func TestTaskStatus_UnknownTaskEndsTransientErrorsDoNot(t *testing.T) {
 				require.NoError(t, err)
 				assert.True(t, resp.Done)
 				assert.NotEmpty(t, resp.Error)
+				assert.Equal(t, providerv1.TaskOutcome_TASK_OUTCOME_UNSPECIFIED, resp.GetOutcome(),
+					"a task PVE does not report has no typed outcome: nothing is known about it")
 				return
 			}
 			require.Error(t, err)
@@ -503,4 +505,43 @@ func TestDiskStorage(t *testing.T) {
 	} {
 		assert.Equal(t, want, pveapi.DiskStorage(value), "value %q", value)
 	}
+}
+
+// TestTaskStatus_TypedOutcome (ADR-0016 A7): a running task is RUNNING, a
+// stopped one with exit status OK is SUCCEEDED and one with another exit
+// status FAILED_CLEAN, each with the legacy done and error filled from it; a
+// malformed task id keeps its historical, untyped answer.
+func TestTaskStatus_TypedOutcome(t *testing.T) {
+	provider, srv := ciProvider(t, "")
+	ctx := context.Background()
+	ask := func(id string) *providerv1.TaskStatusResponse {
+		t.Helper()
+		resp, err := provider.TaskStatus(ctx, &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: id}})
+		require.NoError(t, err)
+		return resp
+	}
+
+	ok := srv.StartTask("pve", "qmstop", "100", testTokenID)
+	resp := ask(ok)
+	assert.Equal(t, providerv1.TaskOutcome_TASK_OUTCOME_RUNNING, resp.GetOutcome())
+	assert.False(t, resp.GetDone())
+	assert.Empty(t, resp.GetError())
+	srv.CompleteTasks()
+	resp = ask(ok)
+	assert.Equal(t, providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED, resp.GetOutcome())
+	assert.True(t, resp.GetDone())
+	assert.Empty(t, resp.GetError())
+
+	failed := srv.StartTask("pve", "qmstart", "100", testTokenID)
+	srv.FailTasks("qmstart")
+	srv.CompleteTasks()
+	resp = ask(failed)
+	assert.Equal(t, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_CLEAN, resp.GetOutcome())
+	assert.True(t, resp.GetDone())
+	assert.Contains(t, resp.GetError(), "task failed with exit code")
+
+	resp = ask("not-a-upid")
+	assert.Equal(t, providerv1.TaskOutcome_TASK_OUTCOME_UNSPECIFIED, resp.GetOutcome())
+	assert.True(t, resp.GetDone())
+	assert.Contains(t, resp.GetError(), "invalid task ID format")
 }

@@ -134,12 +134,32 @@ func (p *Provider) fronts(host hostconn.HostID) bool {
 	return slices.Contains(p.clusterReg.Hosts(), host)
 }
 
+// unknownHostTaskError is the answer for a host-local task reference that
+// the host never issued (ADR-0016 A7, UNKNOWN_TO_AGENT): every routed libvirt
+// call is synchronous and returns no task, so no host-local reference is ever
+// issued, and one that reaches TaskStatus — well-formed, naming a host the
+// registry fronts — was forged or comes from elsewhere. routedTypedStatus
+// answers it codes.NotFound with the UNKNOWN_TO_AGENT ErrorInfo: never done,
+// and never "not performed". The message names the host only, never the
+// reference.
+type unknownHostTaskError struct {
+	host hostconn.HostID
+}
+
+// Error says the host has no record of the task.
+func (e *unknownHostTaskError) Error() string {
+	return fmt.Sprintf("host %q has no record of the task: the task reference was not issued by this provider", e.host)
+}
+
 // hostTaskComplete reports whether the host-local task inner, on the host
 // behind c, is complete. Every libvirt operation a routed call runs today is
 // synchronous — it has finished by the time the call returns, and returns no
-// task — so a task reference that reaches here is complete, exactly as the
-// single-host IsTaskComplete answers. A host-side asynchronous operation (the
-// ADR-0007 D5 MigrateVM job) checks its job on c here.
-func hostTaskComplete(_ context.Context, _ libvirtConn, _ string) (bool, error) {
-	return true, nil
+// task — so no host-local task reference is ever issued, and one that reaches
+// here was not issued by this provider: it is answered unknownHostTaskError,
+// never done (ADR-0016 A7; the clustered conformance case
+// tasks.forged-inner-ref). A host-side asynchronous operation (the ADR-0007
+// D5 MigrateVM job) must keep a record of the references it issues and check
+// inner against it here.
+func hostTaskComplete(_ context.Context, c libvirtConn, _ string) (bool, error) {
+	return false, &unknownHostTaskError{host: c.HostID()}
 }

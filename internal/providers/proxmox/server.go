@@ -44,6 +44,7 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/tasks"
 )
 
 // Provider implements the Proxmox VE provider
@@ -930,16 +931,17 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 		return nil, errors.NewUnavailable("Proxmox task status query", err)
 	}
 
-	done := task.Status == "stopped"
-	errorMsg := ""
-	if done && task.ExitCode != nil && *task.ExitCode != "OK" {
-		errorMsg = fmt.Sprintf("task failed with exit code: %s", *task.ExitCode)
+	// Typed outcome (ADR-0016 A7), with done and error filled from it. PVE
+	// reports running, or stopped with an exit status; a task it does not
+	// know (above) keeps no typed outcome and its historical answer.
+	if task.Status != "stopped" {
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_RUNNING, "", ""), nil
 	}
-
-	return &providerv1.TaskStatusResponse{
-		Done:  done,
-		Error: errorMsg,
-	}, nil
+	if task.ExitCode != nil && *task.ExitCode != "OK" {
+		return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_FAILED_CLEAN, "",
+			fmt.Sprintf("task failed with exit code: %s", *task.ExitCode)), nil
+	}
+	return tasks.Status(providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED, "", ""), nil
 }
 
 // SnapshotCreate creates a VM snapshot

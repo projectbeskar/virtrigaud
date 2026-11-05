@@ -1491,7 +1491,10 @@ slice 4 runs `ListVMs` on every host and adds `TransferOwner` for adoption.
   reference it could not have issued: one that is not host-encoded or is
   malformed is `InvalidArgument`, and one naming a host that is not in its own
   host registry is `NotFound` — the reference is never turned into an endpoint
-  and nothing is dialed. The reference is opaque to the operator. Single-host
+  and nothing is dialed. A well-formed reference to a host it fronts, naming a
+  task that host never issued, is `NotFound` with the `UNKNOWN_TO_AGENT`
+  ErrorInfo reason: never done (see
+  [task-status-outcomes.md](task-status-outcomes.md)). The reference is opaque to the operator. Single-host
   task references are unchanged. (libvirt calls are synchronous today, so no
   routed call returns a task yet; the encoding is in place for `MigrateVM`.)
 - Manager-side, every per-VM method takes a `contracts.VMRef{ID, HostID, Owner}`,

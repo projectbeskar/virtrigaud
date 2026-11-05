@@ -50,7 +50,8 @@ import (
 //     it runs; the next reconcile writes the record again before polling it.
 //   - Running (True): no Delete is sent; the task is polled with TaskStatus.
 //     Completed without an error: the provider confirmed the delete and the
-//     finalizer is removed. Still running: polled again (5 s, growing to
+//     finalizer is removed. Still running — or a typed UNKNOWN outcome, which
+//     is never done (ADR-0016 A7) — polled again (5 s, growing to
 //     1 min for a long task). A transient TaskStatus error: the task stays
 //     recorded and is asked again with a backoff (15 s doubling to 5 min).
 //   - Ambiguous answer (Unknown): the provider answered that it does not know
@@ -65,7 +66,9 @@ import (
 //     an event; still present, or not answered, holds it with a backoff
 //     counted from when the outcome became unknown, until an operator sets
 //     orphan-on-delete or force-delete.
-//   - Failed (False): an explicit terminal error from the provider. The
+//   - Failed (False): an explicit terminal error from the provider, or a
+//     typed RETIRED / CANCELLED outcome (the Delete was not performed, which
+//     is never a success: the finalizer is kept). The
 //     reference is cleared and the Delete is sent again after a backoff
 //     counted from when the task failed — the condition's
 //     LastTransitionTime, so a restart does not shorten it — the time already
@@ -419,11 +422,19 @@ const (
 
 // deleteTaskAnswerUnknown reports whether a TaskStatus answer says the
 // provider does not know the task (rather than that it ran and failed): an
-// RPC error that is not-found, invalid or unsupported, or a terminal error of
-// unknownTaskAnswers, or vSphere's not-found fault for the Task object.
+// RPC error that is not-found (a clustered host's UNKNOWN_TO_AGENT included),
+// invalid or unsupported, or — for an answer without a typed outcome only —
+// a terminal error of unknownTaskAnswers, or vSphere's not-found fault for
+// the Task object. A typed outcome is never matched by its text: a RETIRED or
+// CANCELLED Delete (not performed) is a failure, so the finalizer is kept and
+// the Delete is sent again after the backoff (deleteTaskFailed); an UNKNOWN
+// one is not done, so the task stays recorded and is polled again.
 func deleteTaskAnswerUnknown(st contracts.TaskStatus, err error) bool {
 	if err != nil {
 		return contracts.IsNotFound(err) || contracts.IsInvalidSpec(err) || contracts.IsNotSupported(err)
+	}
+	if st.Outcome.Typed() {
+		return false
 	}
 	msg := strings.ToLower(st.Error)
 	for _, s := range unknownTaskAnswers {
@@ -482,6 +493,9 @@ func (r *VirtualMachineReconciler) awaitDeleteTask(
 		}
 		return ctrl.Result{RequeueAfter: retry}, nil
 	case st.Error != "":
+		// A failed task, or one that was not performed (RETIRED or
+		// CANCELLED: completed with an error, ADR-0016 A7): never a
+		// success, so the finalizer is kept.
 		return r.deleteTaskFailed(ctx, vm, persisted, taskRef, force, st.Error)
 	case !st.IsCompleted:
 		r.deleteTaskStatusRetry.reset(key)
