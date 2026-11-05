@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -118,10 +119,10 @@ func TestDefiniteStatusError(t *testing.T) {
 	}
 	// Unavailable is definite only with a reason that says nothing was done.
 	for _, reason := range []string{contracts.VMOperationFailedReason, contracts.HostUnavailableReason, contracts.VMDiskCheckFailedReason} {
-		err := statusWithReasons(codes.Unavailable, "x", reason).Err()
+		err := clustered.StatusWithReasons(codes.Unavailable, "x", reason).Err()
 		assert.NotNil(t, definiteStatusError(err), reason)
 	}
-	assert.Nil(t, definiteStatusError(statusWithReasons(codes.Unavailable, "x", contracts.ImageArtifactInProgressReason).Err()))
+	assert.Nil(t, definiteStatusError(clustered.StatusWithReasons(codes.Unavailable, "x", contracts.ImageArtifactInProgressReason).Err()))
 }
 
 // TestNothingDone: a failure of a step that changed nothing is "not performed"

@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	obsmetrics "github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -310,7 +311,7 @@ func (p *Provider) importDiskRouted(ctx context.Context, req *providerv1.ImportD
 	if err != nil {
 		log.Printf("WARN routed disk import of %s on host %s: gave up waiting for other work on the landing disk: %v",
 			r.volumeName, r.host, err)
-		return nil, vmOperationStatus(codes.Unavailable, wireRoutedImportLandingBusy)
+		return nil, clustered.VMOperationStatus(codes.Unavailable, wireRoutedImportLandingBusy)
 	}
 	defer unlock()
 
@@ -379,7 +380,7 @@ func (p *Provider) importOnHost(ctx context.Context, c libvirtConn, r routedImpo
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < routedImportMinWriteBudget {
 		log.Printf("WARN Routed disk import of %s on host %s not started: %v of its budget left (less than %v)",
 			r.volumeName, c.HostID(), time.Until(deadline).Round(time.Second), routedImportMinWriteBudget)
-		return nil, vmOperationStatus(codes.Unavailable, wireRoutedImportBudgetShort)
+		return nil, clustered.VMOperationStatus(codes.Unavailable, wireRoutedImportBudgetShort)
 	}
 
 	// B2 step 3 + B3: from here every host command runs under flock(1) on the
@@ -426,7 +427,7 @@ func requireDefaultPoolDir(ctx context.Context, h hostCommandRunner, host hostco
 	}
 	log.Printf("ERROR The libvirt storage pool %q on host %s is at %q, not %s; the routed import refuses to land there",
 		defaultStoragePool, host, dir, defaultPoolRequiredDir)
-	return statusWithReasons(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportPoolMisplacedFmt, host),
+	return clustered.StatusWithReasons(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportPoolMisplacedFmt, host),
 		contracts.HostStorageMisconfiguredReason, contracts.VMOperationFailedReason).Err()
 }
 
@@ -699,7 +700,7 @@ func classifyRoutedImportFailure(host string, parent, budget context.Context, pr
 		obsmetrics.RecordHostGuardRefusal(libvirtProviderType, obsmetrics.HostGuardReasonTargetSymlink)
 		log.Printf("ERROR ALERT host guard refused disk import on host %q (%s): the landing name is a symbolic link; "+
 			"check the default pool on that host", host, obsmetrics.HostGuardReasonTargetSymlink)
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportLandingSymlinkFmt, host))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportLandingSymlinkFmt, host))
 	}
 	// The cluster-wide guard's answers: a previous incarnation, a host that
 	// could not be checked, the domain busy.
@@ -716,24 +717,24 @@ func classifyRoutedImportFailure(host string, parent, budget context.Context, pr
 	if !writes {
 		// Only reads ran on the landing host.
 		if contracts.IsHostUnavailable(err) || (!answered && isHostTransportFailure(err)) {
-			return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(wireRoutedImportHostDownFmt, host), nil))
+			return clustered.HostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(wireRoutedImportHostDownFmt, host), nil))
 		}
 		return notPerformed(wireImportNotPerformed, cause)
 	}
 	switch guardExitCode(err) {
 	case flockBusyExit:
-		return vmOperationStatus(codes.Unavailable, fmt.Sprintf(wireRoutedImportInProgressFmt, host))
+		return clustered.VMOperationStatus(codes.Unavailable, fmt.Sprintf(wireRoutedImportInProgressFmt, host))
 	case hostGuardRefusedExit:
 		reportHostGuardRefusal("disk import", host, err)
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportGuardRefusedFmt, host))
+		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportGuardRefusedFmt, host))
 	case commandNotFound, commandNotRunnable:
 		if !lost {
-			return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportToolsMissingFmt, host))
+			return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportToolsMissingFmt, host))
 		}
 	}
 	if lost || budgetRanOut(parent, budget) || parent.Err() != nil {
 		log.Printf("WARN routed disk import on host %s: outcome unknown (a host command may still run, or the budget ran out)", host)
-		return vmOperationStatus(codes.Unknown, fmt.Sprintf(wireRoutedImportUnknownFmt, host))
+		return clustered.VMOperationStatus(codes.Unknown, fmt.Sprintf(wireRoutedImportUnknownFmt, host))
 	}
 	// Every command ended with an exit status of its own: nothing is still
 	// running, and the only publishing step either did not run or ended

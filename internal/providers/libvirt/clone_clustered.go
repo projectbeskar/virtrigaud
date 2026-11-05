@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -110,7 +111,7 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 		if err != nil {
 			return err
 		}
-		r.TaskRef = encodeHostTaskRef(c.HostID(), r.TaskRef)
+		r.TaskRef = clustered.EncodeHostTaskRef(c.HostID(), r.TaskRef)
 		resp = r
 		return nil
 	})
@@ -143,7 +144,7 @@ func cloneBeforeCopyFailure(host string, err error) error {
 	if errors.As(err, &pe) && (!pe.IsRetryable() || pe.Type == contracts.ErrorTypeHostUnavailable) {
 		return err
 	}
-	return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+	return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 		"clone VM on host %q: a read on the host failed before anything was copied; the clone is retried", host)}
 }
 
@@ -153,7 +154,7 @@ func cloneBeforeCopyFailure(host string, err error) error {
 // host the guard could not reach, or a source that is not powered off.
 func isCategorizedRoutedAnswer(err error) bool {
 	var (
-		roe *routedOpError
+		roe *clustered.OpError
 		pi  *previousIncarnationError
 		gi  *clusterGuardIncompleteError
 		db  *domainBusyError
@@ -204,7 +205,7 @@ func createFullCopyGuarded(ctx context.Context, vp *VirshProvider, lock hostLock
 	defer wd.cleanupWithin(ctx, routedCleanupTimeout)
 	name := filepath.Base(targetDiskPath)
 	if res, err := fullCloneCopy(srcDiskPath, srcFormat, wd.file(name), targetDiskPath).run(ctx, vp, guardFor(ctx, lock)); err != nil {
-		var roe *routedOpError
+		var roe *clustered.OpError
 		if errors.As(err, &roe) {
 			return err
 		}

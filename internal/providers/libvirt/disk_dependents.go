@@ -22,11 +22,11 @@ import (
 	"log"
 	"strings"
 
-	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -144,7 +144,7 @@ func diskInUseStatus(msg string, routed bool) *status.Status {
 	if routed {
 		reasons = append(reasons, contracts.VMOperationFailedReason)
 	}
-	return statusWithReasons(codes.FailedPrecondition, msg, reasons...)
+	return clustered.StatusWithReasons(codes.FailedPrecondition, msg, reasons...)
 }
 
 // guardCheckFailed logs why the dependency guard could not run and returns the
@@ -278,23 +278,7 @@ func diskCheckFailedStatus(msg string, routed bool) *status.Status {
 	if routed {
 		reasons = append(reasons, contracts.VMOperationFailedReason)
 	}
-	return statusWithReasons(codes.Unavailable, msg, reasons...)
-}
-
-// statusWithReasons is a gRPC status with one VirtRigaud ErrorInfo per reason.
-func statusWithReasons(code codes.Code, msg string, reasons ...string) *status.Status {
-	st := status.New(code, msg)
-	withInfo := st
-	for _, r := range reasons {
-		next, err := withInfo.WithDetails(&errdetails.ErrorInfo{Reason: r, Domain: contracts.ErrorInfoDomain})
-		if err != nil {
-			// Unreachable in practice (ErrorInfo always marshals); the bare
-			// status is still a correct answer.
-			return st
-		}
-		withInfo = next
-	}
-	return withInfo
+	return clustered.StatusWithReasons(codes.Unavailable, msg, reasons...)
 }
 
 // otherDomains are the references of every domain on a host except one.

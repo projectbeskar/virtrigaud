@@ -51,11 +51,15 @@ import (
 	"time"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
+
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 )
 
-// HostID identifies one hypervisor host. Today exactly one exists, derived from
-// PROVIDER_ENDPOINT; under ADR-0007 it equals the Host CR name.
-type HostID string
+// HostID identifies one hypervisor host. In single-host mode exactly one
+// exists, derived from PROVIDER_ENDPOINT; under ADR-0007 it equals the Host CR
+// name. It is the hypervisor-neutral clustered.HostID, so the registry's host
+// set is a clustered.HostSet.
+type HostID = clustered.HostID
 
 // Result is the outcome of one command executed against a host. It is the
 // transport-neutral counterpart of the libvirt provider's internal virsh result

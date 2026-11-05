@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -195,7 +196,7 @@ func (e *notPerformedError) Unwrap() error { return e.cause }
 // marked contracts.ErrOperationNotPerformed (contracts.IsNothingDone) and
 // never counts it toward the Provider's circuit breaker.
 func (e *notPerformedError) GRPCStatus() *status.Status {
-	return statusWithReasons(codes.Unavailable, e.wire, contracts.VMOperationFailedReason)
+	return clustered.StatusWithReasons(codes.Unavailable, e.wire, contracts.VMOperationFailedReason)
 }
 
 // notPerformed logs cause (provider side only) and returns the failure the

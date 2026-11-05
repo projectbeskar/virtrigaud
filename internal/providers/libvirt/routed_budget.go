@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	obsmetrics "github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 )
 
@@ -243,8 +244,8 @@ func hostCommandTimeout(ctx context.Context) ([]string, error) {
 		secs = int64((time.Until(deadline) - hostCommandSlack) / time.Second)
 	}
 	if secs < 1 {
-		return nil, &routedOpError{code: codes.Unknown, wire: "the operation's time budget ran out before it could start",
-			cause: context.DeadlineExceeded}
+		return nil, &clustered.OpError{Code: codes.Unknown, Wire: "the operation's time budget ran out before it could start",
+			Cause: context.DeadlineExceeded}
 	}
 	return []string{"timeout", "--kill-after=" + hostCommandKillAfter, strconv.FormatInt(secs, 10) + "s"}, nil
 }
@@ -331,7 +332,7 @@ func classifyRoutedFailure(op, host string, parent, budget context.Context, err 
 		return nil
 	}
 	stopped := func() error {
-		return &routedOpError{code: codes.Unknown, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unknown, Cause: err, Wire: fmt.Sprintf(
 			"%s on host %q did not finish within its time budget and was stopped", op, host)}
 	}
 	if budgetRanOut(parent, budget) {
@@ -339,17 +340,17 @@ func classifyRoutedFailure(op, host string, parent, budget context.Context, err 
 	}
 	switch guardExitCode(err) {
 	case flockBusyExit:
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 			"%s on host %q: the same copy is still running from an earlier attempt; retry later", op, host)}
 	case hostGuardRefusedExit:
 		reportHostGuardRefusal(op, host, err)
-		return &routedOpError{code: codes.FailedPrecondition, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.FailedPrecondition, Cause: err, Wire: fmt.Sprintf(
 			"%s on host %q was refused: the provider's lock directory on the host is not a directory owned by "+
 				"its SSH user, or a lock or target file is a symbolic link", op, host)}
 	case timeoutExpiredExit, timeoutKilledExit:
 		return stopped()
 	case commandNotFound, commandNotRunnable:
-		return &routedOpError{code: codes.Unknown, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unknown, Cause: err, Wire: fmt.Sprintf(
 			"%s on host %q: a required host command is missing or not runnable (flock from util-linux, timeout from coreutils, qemu-img)", op, host)}
 	}
 	return err

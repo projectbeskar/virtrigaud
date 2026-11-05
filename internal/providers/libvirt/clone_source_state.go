@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -80,7 +81,7 @@ func sourceRunningStatus(msg string, routed bool) *status.Status {
 	if routed {
 		reasons = append(reasons, contracts.VMOperationFailedReason)
 	}
-	return statusWithReasons(codes.FailedPrecondition, msg, reasons...)
+	return clustered.StatusWithReasons(codes.FailedPrecondition, msg, reasons...)
 }
 
 // cloneSourceStateError returns the refusal of a clone whose source is in

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -90,75 +91,75 @@ func TestHostProgress_Stages(t *testing.T) {
 	libvirtdDown := &VirshError{ExitCode: 1, Stderr: "error: failed to connect to the hypervisor"}
 
 	t.Run("nothing recorded", func(t *testing.T) {
-		assert.Equal(t, hostDownNothingRan, (&hostProgress{}).stage())
+		assert.Equal(t, clustered.HostDownNothingRan, (&hostProgress{}).stage())
 	})
 	t.Run("a read answered", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"list", "--all"})(nil)
-		assert.Equal(t, hostDownReadsOnly, p.stage())
+		assert.Equal(t, clustered.HostDownReadsOnly, p.stage())
 	})
 	t.Run("a read that the host answered with an error is still an answer", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"dumpxml", "x"})(rejected)
-		assert.Equal(t, hostDownReadsOnly, p.stage())
+		assert.Equal(t, clustered.HostDownReadsOnly, p.stage())
 	})
 	t.Run("a read that dropped is not an answer", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"list", "--all"})(transport)
-		assert.Equal(t, hostDownNothingRan, p.stage())
+		assert.Equal(t, clustered.HostDownNothingRan, p.stage())
 	})
 	t.Run("libvirtd down is not an answer", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"list", "--all"})(libvirtdDown)
-		assert.Equal(t, hostDownNothingRan, p.stage())
+		assert.Equal(t, clustered.HostDownNothingRan, p.stage())
 	})
 	t.Run("a cancelled call is not an answer", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"list", "--all"})(&VirshError{ExitCode: -1, Cause: context.Canceled})
-		assert.Equal(t, hostDownNothingRan, p.stage())
+		assert.Equal(t, clustered.HostDownNothingRan, p.stage())
 	})
 	t.Run("a write is recorded once its session is open, before its result", func(t *testing.T) {
 		p := &hostProgress{}
 		done := p.begin([]string{"destroy", "web"})
-		assert.Equal(t, hostDownNothingRan, p.stage(), "nothing can run before a session is open")
+		assert.Equal(t, clustered.HostDownNothingRan, p.stage(), "nothing can run before a session is open")
 		p.opened()
-		assert.Equal(t, hostDownWriteSent, p.stage(), "the session may drop with the command still running")
+		assert.Equal(t, clustered.HostDownWriteSent, p.stage(), "the session may drop with the command still running")
 		done(transport)
-		assert.Equal(t, hostDownWriteSent, p.stage())
+		assert.Equal(t, clustered.HostDownWriteSent, p.stage())
 	})
 	t.Run("a write whose dial or session open failed ran nothing (L2)", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"destroy", "web"})(transport)
-		assert.Equal(t, hostDownNothingRan, p.stage())
+		assert.Equal(t, clustered.HostDownNothingRan, p.stage())
 	})
 	t.Run("an open session does not make a read a write", func(t *testing.T) {
 		p := &hostProgress{}
 		done := p.begin([]string{"list", "--all"})
 		p.opened()
 		done(nil)
-		assert.Equal(t, hostDownReadsOnly, p.stage())
+		assert.Equal(t, clustered.HostDownReadsOnly, p.stage())
 	})
 	t.Run("a write that ended with an answer was sent", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"destroy", "web"})(rejected)
-		assert.Equal(t, hostDownWriteSent, p.stage())
+		assert.Equal(t, clustered.HostDownWriteSent, p.stage())
 	})
 	t.Run("reads after a write stay a write stage", func(t *testing.T) {
 		p := &hostProgress{}
 		p.begin([]string{"destroy", "web"})(nil)
 		p.begin([]string{"domstate", "web"})(transport)
-		assert.Equal(t, hostDownWriteSent, p.stage())
+		assert.Equal(t, clustered.HostDownWriteSent, p.stage())
 	})
 	t.Run("a stream is a write", func(t *testing.T) {
 		p := &hostProgress{}
 		done := p.beginStream()
 		p.opened()
 		done(errors.New("broken pipe"))
-		assert.Equal(t, hostDownWriteSent, p.stage())
+		assert.Equal(t, clustered.HostDownWriteSent, p.stage())
 	})
 	t.Run("an untracked call assumes a write", func(t *testing.T) {
 		var p *hostProgress
-		assert.Equal(t, hostDownWriteSent, p.stage())
+		assert.Equal(t, clustered.HostDownWriteSent, p.stage())
 		assert.NotPanics(t, func() { p.begin([]string{"list"})(nil) })
 	})
 	t.Run("the context carries the record", func(t *testing.T) {

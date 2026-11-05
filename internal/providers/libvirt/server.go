@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -174,7 +175,7 @@ func createRPCError(err error) error {
 		case contracts.ErrorTypeInvalidSpec:
 			return status.Error(codes.InvalidArgument, pe.Message)
 		case contracts.ErrorTypeHostUnavailable:
-			return hostUnavailableStatus(pe)
+			return clustered.HostUnavailableStatus(pe)
 		}
 	}
 	var ho *hostOpError
@@ -254,7 +255,7 @@ func (s *Server) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 func singleHostReconfigureRPCError(err error) error {
 	var ho *hostOpError
 	if stderrors.As(err, &ho) && !isHostTransportFailure(err) {
-		return vmOperationStatus(codes.Unknown, fmt.Sprintf("failed to reconfigure VM: %v", err))
+		return clustered.VMOperationStatus(codes.Unknown, fmt.Sprintf("failed to reconfigure VM: %v", err))
 	}
 	return fmt.Errorf("failed to reconfigure VM: %w", err)
 }
@@ -338,7 +339,7 @@ func (s *Server) routedTaskRef(hostID, taskRef string) string {
 	if !s.clusteredProvider() {
 		return taskRef
 	}
-	return encodeHostTaskRef(hostconn.HostID(strings.TrimSpace(hostID)), taskRef)
+	return clustered.EncodeHostTaskRef(hostconn.HostID(strings.TrimSpace(hostID)), taskRef)
 }
 
 // TaskStatus checks the status of an async task.
@@ -522,7 +523,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 					return err
 				}
 				if r.Task != nil {
-					r.Task.Id = encodeHostTaskRef(c.HostID(), r.Task.Id)
+					r.Task.Id = clustered.EncodeHostTaskRef(c.HostID(), r.Task.Id)
 				}
 				resp = r
 				return nil
@@ -585,18 +586,18 @@ func classifySnapshotCreateFailure(host string, idempotent bool, parent, budget 
 		return nil
 	}
 	if budgetRanOut(parent, budget) && !idempotent {
-		return &routedOpError{code: codes.Unknown, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unknown, Cause: err, Wire: fmt.Sprintf(
 			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
 				"and it may still complete on the host", host)}
 	}
 	if budgetRanOut(parent, budget) {
-		return &routedOpError{code: codes.Unavailable, cause: err, outcomeUnknown: true, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, OutcomeUnknown: true, Wire: fmt.Sprintf(
 			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
 				"and it may still complete on the host: retry", host)}
 	}
 	var ve *VirshError
 	if stderrors.As(err, &ve) && strings.Contains(ve.Stderr, libvirtJobBusyMarker) {
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 			"create snapshot on host %q: another operation on this VM is still running on the host; retry", host)}
 	}
 	return err
@@ -980,7 +981,7 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 // response without a task is returned as is.
 func routedTaskResponse(host hostconn.HostID, r *providerv1.TaskResponse) *providerv1.TaskResponse {
 	if r != nil && r.Task != nil {
-		r.Task.Id = encodeHostTaskRef(host, r.Task.Id)
+		r.Task.Id = clustered.EncodeHostTaskRef(host, r.Task.Id)
 	}
 	return r
 }
@@ -1270,12 +1271,12 @@ func singleHostCloneRPCError(err error) error {
 	}
 	if isHostTransportFailure(err) {
 		log.Printf("WARN clone VM failed: the libvirt host could not be reached: %v", err)
-		return vmOperationStatus(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
+		return clustered.VMOperationStatus(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) && pe.IsRetryable() && pe.Type != contracts.ErrorTypeTimeout {
 		log.Printf("WARN clone VM failed (retryable): %v", err)
-		return vmOperationStatus(codes.Unavailable, "failed to clone VM: "+pe.Message)
+		return clustered.VMOperationStatus(codes.Unavailable, "failed to clone VM: "+pe.Message)
 	}
 	// A refusal made before anything was copied or defined carries its own
 	// status, as for a Create (createRPCError): a target name taken by a

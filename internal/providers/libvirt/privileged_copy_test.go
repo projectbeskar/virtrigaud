@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -491,7 +492,7 @@ func TestApplyPrivileged(t *testing.T) {
 	short, cancel2 := context.WithTimeout(context.Background(), time.Second)
 	defer cancel2()
 	_, err = guardFor(short, lock).applyPrivileged("", "", "true")
-	var roe *routedOpError
+	var roe *clustered.OpError
 	require.ErrorAs(t, err, &roe, "a budget too short to run anything is a budget failure")
 }
 

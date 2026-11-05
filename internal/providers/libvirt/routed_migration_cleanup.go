@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -127,7 +128,7 @@ func (p *Provider) deleteLandedDiskRouted(ctx context.Context, req *providerv1.D
 	unlock, err := landingLocks.lockUnlessImporting(bctx, routedLandingKey(volumeName))
 	if stderrors.Is(err, errLandingImportInFlight) {
 		// Retryable, and kept out of the manager's circuit breaker.
-		return nil, vmOperationStatus(codes.Unavailable, landedDiskImportInFlightMessage)
+		return nil, clustered.VMOperationStatus(codes.Unavailable, landedDiskImportInFlightMessage)
 	}
 	if err != nil {
 		return nil, routedLandedDiskFailed(host, nil, "wait for other work on the landing disk", err)
@@ -201,7 +202,7 @@ func (p *Provider) deleteLandedOnHost(ctx context.Context, c libvirtConn, path, 
 	if _, err := runHost(ctx, h, argv...); err != nil {
 		switch guardExitCode(err) {
 		case flockBusyExit:
-			return unspecified, vmOperationStatus(codes.Unavailable, landedDiskImportRunningMessage)
+			return unspecified, clustered.VMOperationStatus(codes.Unavailable, landedDiskImportRunningMessage)
 		case hostGuardRefusedExit:
 			reportHostGuardRefusal("landed disk delete", string(host), err)
 			return unspecified, status.Error(codes.FailedPrecondition, landedDiskGuardRefusedMessage)
@@ -262,13 +263,13 @@ func routedLandedDiskFailed(host hostconn.HostID, progress *hostProgress, step s
 	log.Printf("ERROR DeleteLandedDisk on host %s: %s: %v", host, step, err)
 	if isHostTransportFailure(err) {
 		switch progress.stage() {
-		case hostDownNothingRan:
-			return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), nil))
-		case hostDownWriteSent:
-			return outcomeUnknownRetryStatus(landedDiskRemovalUnknownMessage)
+		case clustered.HostDownNothingRan:
+			return clustered.HostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), nil))
+		case clustered.HostDownWriteSent:
+			return clustered.OutcomeUnknownRetryStatus(landedDiskRemovalUnknownMessage)
 		}
 	}
-	return vmOperationStatus(codes.Unavailable, landedDiskFailedMessage)
+	return clustered.VMOperationStatus(codes.Unavailable, landedDiskFailedMessage)
 }
 
 // routedLandedDiskError is the wire form of a routed landed-disk delete that
@@ -282,7 +283,7 @@ func routedLandedDiskError(host hostconn.HostID, err error) error {
 		return st.Err()
 	}
 	if contracts.IsHostUnavailable(err) {
-		return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), err))
+		return clustered.HostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), err))
 	}
 	var ho *hostOpError
 	if stderrors.As(err, &ho) {
@@ -342,7 +343,7 @@ func (p *Provider) deleteStagedDiskRouted(ctx context.Context, req *providerv1.D
 		// never passed on (#415).
 		log.Printf("WARN DeleteStagedDisk on host %s: the host could not be reached: %v", host,
 			redactLocations(err, stagedDiskLocations(disk)...))
-		return unspecified, hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(stagedDiskHostDownFmt, host), nil))
+		return unspecified, clustered.HostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(stagedDiskHostDownFmt, host), nil))
 	}
 	// The cause can quote the host command's output, which names the staged
 	// object: it is redacted (R28), as every StagedDiskError cause is.

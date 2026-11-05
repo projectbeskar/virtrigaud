@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -201,13 +202,13 @@ func singleHostRevertFailure(ctx context.Context, conn libvirtConn, domain strin
 		return notPerformed(wireRevertNotRun, err)
 	case revertRefused:
 		log.Printf("ERROR libvirt snapshot revert refused: %v", err)
-		return vmOperationStatus(codes.FailedPrecondition, wireRevertRefusedForConfig)
+		return clustered.VMOperationStatus(codes.FailedPrecondition, wireRevertRefusedForConfig)
 	case revertFailed:
 		log.Printf("ERROR libvirt snapshot revert failed: %v", err)
-		return vmOperationStatus(codes.Unknown, wireRevertFailed)
+		return clustered.VMOperationStatus(codes.Unknown, wireRevertFailed)
 	case revertUnknown:
 		log.Printf("WARN libvirt snapshot revert outcome unknown: %v", err)
-		return outcomeUnknownRetryStatus(wireRevertOutcomeUnknown)
+		return clustered.OutcomeUnknownRetryStatus(wireRevertOutcomeUnknown)
 	case revertSnapshotNotFound:
 		return refusal(codes.NotFound, wireRevertSnapshotNotFound, err)
 	case revertDomainNotFound:
@@ -231,16 +232,16 @@ func routedRevertFailure(ctx context.Context, conn libvirtConn, domain string, e
 	host := conn.HostID()
 	switch classifyRevertFailure(ctx, conn, domain, err) {
 	case revertNotPerformed:
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertNotPerformed)}
 	case revertNotRun:
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertNotRun)}
 	case revertRefused:
-		return &routedOpError{code: codes.FailedPrecondition, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.FailedPrecondition, Cause: err, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertRefusedForConfig)}
 	case revertUnknown:
-		return &routedOpError{code: codes.Unavailable, cause: err, outcomeUnknown: true, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, OutcomeUnknown: true, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertOutcomeUnknown)}
 	case revertSnapshotNotFound:
 		log.Printf("WARN revert to snapshot on host %s: %v", host, err)

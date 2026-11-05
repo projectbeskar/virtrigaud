@@ -19,6 +19,7 @@ package libvirt
 import (
 	"context"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -48,7 +49,7 @@ func (s *Server) ListHosts(ctx context.Context, req *providerv1.ListHostsRequest
 	}
 	protoHosts := make([]*providerv1.HostInfo, 0, len(hosts))
 	for i := range hosts {
-		protoHosts = append(protoHosts, hostInfoToProto(hosts[i]))
+		protoHosts = append(protoHosts, clustered.HostInfoToProto(hosts[i]))
 	}
 	return &providerv1.ListHostsResponse{Hosts: protoHosts}, nil
 }
@@ -67,7 +68,7 @@ func (s *Server) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoReq
 	if err != nil {
 		return nil, err
 	}
-	return hostInfoToProto(info), nil
+	return clustered.HostInfoToProto(info), nil
 }
 
 // ListHosts returns live inventory for every host the clustered libvirt
@@ -105,37 +106,4 @@ func (p *Provider) GetHostInfo(ctx context.Context, hostID string) (contracts.Ho
 		return contracts.HostInfo{}, errors.NewNotFound("host", hostID)
 	}
 	return p.collectOneHost(ctx, id), nil
-}
-
-// hostInfoToProto maps a manager-side contracts.HostInfo onto the wire
-// provider.v1 HostInfo, including the HostHealth enum. It is the inverse of the
-// transport client's hostInfoFromProto.
-func hostInfoToProto(h contracts.HostInfo) *providerv1.HostInfo {
-	return &providerv1.HostInfo{
-		Id:                 h.ID,
-		Address:            h.Address,
-		AllocatableCpu:     h.AllocatableCPU,
-		AllocatableMemMib:  h.AllocatableMemMiB,
-		AllocatableStorage: h.AllocatableStorage,
-		Health:             hostHealthToProto(h.Health),
-		Labels:             h.Labels,
-		CpuModel:           h.CPUModel,
-		CpuFeatures:        h.CPUFeatures,
-		MachineTypes:       h.MachineTypes,
-		EmulatorVersion:    h.EmulatorVersion,
-	}
-}
-
-// hostHealthToProto maps the transport-agnostic contracts.HostHealth onto the
-// provider.v1 HostHealth enum. An unrecognized/zero value maps to
-// HOST_HEALTH_UNSPECIFIED.
-func hostHealthToProto(h contracts.HostHealth) providerv1.HostHealth {
-	switch h {
-	case contracts.HostHealthReady:
-		return providerv1.HostHealth_HOST_HEALTH_READY
-	case contracts.HostHealthNotReady:
-		return providerv1.HostHealth_HOST_HEALTH_NOT_READY
-	default:
-		return providerv1.HostHealth_HOST_HEALTH_UNSPECIFIED
-	}
 }

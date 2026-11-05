@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -169,7 +170,7 @@ func existingRoutedSnapshot(ctx context.Context, c libvirtConn, domain string, r
 		}
 		if running {
 			log.Printf("INFO Snapshot %s on domain %s was made for this request but a job still runs on the domain; retry", name, domain)
-			return nil, &routedOpError{code: codes.Unavailable, cause: errSnapshotJobRunning, outcomeUnknown: true, wire: fmt.Sprintf(
+			return nil, &clustered.OpError{Code: codes.Unavailable, Cause: errSnapshotJobRunning, OutcomeUnknown: true, Wire: fmt.Sprintf(
 				"create snapshot: the snapshot %q made for this request is still being taken on the host; retry", name)}
 		}
 		log.Printf("INFO Snapshot %s on domain %s was made for this request; treating the create as done", name, domain)

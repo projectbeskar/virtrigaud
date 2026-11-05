@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -162,8 +163,8 @@ func TestClustered_Describe_HostNotAnsweringIsHostUnavailableBeforeTheDeadline(t
 
 func TestRoutedRPCError_HostUnavailableNamesTheRoutedHostOnly(t *testing.T) {
 	// The lease of the routed host failed: named.
-	leaseErr := &routedHostUnavailableError{host: "host-b",
-		pe: contracts.NewHostUnavailableError(`connect to host "host-b"`, fmt.Errorf("dial qemu+ssh://virt@host-b/system: refused"))}
+	leaseErr := &clustered.HostUnavailableError{Host: "host-b",
+		PE: contracts.NewHostUnavailableError(`connect to host "host-b"`, fmt.Errorf("dial qemu+ssh://virt@host-b/system: refused"))}
 	err := routedRPCError("delete VM", leaseErr)
 	assert.Equal(t, "host-b", contracts.UnreachableHost(err))
 	assert.True(t, contracts.IsHostUnavailable(leaseErr), "the wrapper is transparent")

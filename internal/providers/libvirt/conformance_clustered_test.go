@@ -488,8 +488,8 @@ func (a *libvirtConformanceTarget) createOnHost(_ context.Context, lease hostcon
 // reported in the run's summary.
 var libvirtExpectedFailures = map[string]clustered.ExpectedFailure{
 	"create.unavailable-names-host": {
-		Pointer: "createRPCError answers a routed Create's HOST_UNAVAILABLE through hostUnavailableStatus, which sets no host metadata, " +
-			"where Describe, Delete, Power, Reconfigure and TaskStatus use hostUnavailableStatusFor (contracts.HostUnavailableHostKey). " +
+		Pointer: "createRPCError answers a routed Create's HOST_UNAVAILABLE through clustered.HostUnavailableStatus, which sets no host metadata, " +
+			"where Describe, Delete, Power, Reconfigure and TaskStatus use clustered.HostUnavailableStatusFor (contracts.HostUnavailableHostKey). " +
 			"Nothing reads the key for a Create today (the manager reads it only on the Delete path), so nothing is lost. Recommended; recorded, not fixed.",
 		Contains: "names the host the call was routed to",
 	},
