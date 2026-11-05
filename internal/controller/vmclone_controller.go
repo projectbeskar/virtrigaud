@@ -994,13 +994,27 @@ func (r *VMCloneReconciler) finalizeReady(
 	return ctrl.Result{}, nil
 }
 
+// linkedCloneReadsSourceDisk reports whether a linked clone made by a provider
+// of type t is an overlay that keeps reading the source VM's disk: libvirt
+// (a qcow2 backing chain), and the development-only cloudhypervisor type,
+// whose host-local disk images would be layered the same way (refused the
+// same way until shown otherwise; the safe default).
+func linkedCloneReadsSourceDisk(t infrav1beta1.ProviderType) bool {
+	switch t {
+	case infrav1beta1.ProviderTypeLibvirt, infrav1beta1.ProviderTypeCloudHypervisor:
+		return true
+	}
+	return false
+}
+
 // gateLinkedClone decides whether a linked-clone request may be issued. It is
 // INTRINSIC clone correctness: it always runs before a linked clone is issued
 // (independent of the #176 enforcement flag), and it fails CLOSED — a linked
 // clone depends on its source disk for its whole life, so it is only sent to
 // a provider that says it can make one:
 //
-//   - a libvirt linked clone into ANOTHER namespace is refused: the clone
+//   - a libvirt (or cloudhypervisor, linkedCloneReadsSourceDisk) linked
+//     clone into ANOTHER namespace is refused: the clone
 //     would keep reading the source VM's disk for as long as it exists, while
 //     a cross-namespace grant (#340) covers a point-in-time copy, not ongoing
 //     access to another namespace's disk. A full clone is the supported way.
@@ -1018,11 +1032,11 @@ func (r *VMCloneReconciler) gateLinkedClone(
 	providerInstance contracts.Provider,
 	targetNamespace string,
 ) (blocked bool, result ctrl.Result) {
-	if provider.Spec.Type == infrav1beta1.ProviderTypeLibvirt && targetNamespace != clone.Namespace {
+	if linkedCloneReadsSourceDisk(provider.Spec.Type) && targetNamespace != clone.Namespace {
 		return true, r.markFailed(ctx, clone, cloneReasonLinkedCrossNamespace, fmt.Sprintf(
-			"a libvirt linked clone into another namespace (%s) is not allowed: the clone would keep reading the source VM's disk "+
+			"a %s linked clone into another namespace (%s) is not allowed: the clone would keep reading the source VM's disk "+
 				"in namespace %s for its whole life, and a cross-namespace grant covers a copy, not ongoing access; use a full clone",
-			targetNamespace, clone.Namespace))
+			provider.Spec.Type, targetNamespace, clone.Namespace))
 	}
 
 	reporter, ok := providerInstance.(contracts.CapabilityReporter)

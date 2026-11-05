@@ -77,6 +77,9 @@ func TestApplyNetworkBlocks_OnlyTheTargetsBlock(t *testing.T) {
 			contracts.NetworkAttachment{NetworkName: "lv-net", Bridge: "br0", Model: "e1000"}},
 		{"proxmox", infravirtrigaudiov1beta1.ProviderTypeProxmox,
 			contracts.NetworkAttachment{Bridge: "vmbr3", Model: "vmxnet3", VLAN: 30}},
+		// cloudhypervisor (development-only) has no block and reads none: no
+		// other hypervisor's settings leak into its NIC.
+		{"cloudhypervisor", infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor, contracts.NetworkAttachment{}},
 		// A type with no block of its own, or an unknown one, reads all of them in
 		// the old order: the later block wins a shared field.
 		{"qemu", infravirtrigaudiov1beta1.ProviderTypeQEMU,
