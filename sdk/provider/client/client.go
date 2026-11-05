@@ -30,6 +30,7 @@ import (
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/tasks"
 )
 
 // Config holds client configuration options.
@@ -479,7 +480,9 @@ func buildTLSCredentials(config *TLSConfig) (credentials.TransportCredentials, e
 	return credentials.NewTLS(tlsConfig), nil
 }
 
-// WaitForTask waits for a task to complete, polling for status.
+// WaitForTask waits for a task to complete, polling for status. A task whose
+// typed outcome is RETIRED or CANCELLED ends the wait with an error (it did
+// not happen); RUNNING and UNKNOWN keep it polling.
 func (c *Client) WaitForTask(ctx context.Context, taskRef *providerv1.TaskRef, pollInterval time.Duration) error {
 	if taskRef == nil || taskRef.Id == "" {
 		return nil // No task to wait for
@@ -504,13 +507,36 @@ func (c *Client) WaitForTask(ctx context.Context, taskRef *providerv1.TaskRef, p
 				return fmt.Errorf("failed to check task status: %w", err)
 			}
 
-			if resp.Done {
-				if resp.Error != "" {
-					return fmt.Errorf("task failed: %s", resp.Error)
-				}
-				return nil // Task completed successfully
+			done, err := taskResult(resp)
+			if done {
+				return err
 			}
 			// Continue polling
 		}
 	}
+}
+
+// taskResult reads a TaskStatus answer: whether the task is over and, if so,
+// its error. A typed outcome (ADR-0016 A7) is read first; UNSPECIFIED, or a
+// value this client does not know, falls back to done and error.
+func taskResult(resp *providerv1.TaskStatusResponse) (bool, error) {
+	switch resp.GetOutcome() {
+	case providerv1.TaskOutcome_TASK_OUTCOME_RUNNING, providerv1.TaskOutcome_TASK_OUTCOME_UNKNOWN:
+		return false, nil
+	case providerv1.TaskOutcome_TASK_OUTCOME_RETIRED, providerv1.TaskOutcome_TASK_OUTCOME_CANCELLED:
+		return true, fmt.Errorf("task %s", tasks.LegacyError(resp.GetOutcome(), resp.GetOutcomeReason(), ""))
+	case providerv1.TaskOutcome_TASK_OUTCOME_FAILED_CLEAN, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY:
+		return true, fmt.Errorf("task failed: %s", tasks.LegacyError(resp.GetOutcome(), resp.GetOutcomeReason(), resp.GetError()))
+	case providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED:
+		if resp.GetError() == "" {
+			return true, nil
+		}
+	}
+	if !resp.GetDone() {
+		return false, nil
+	}
+	if resp.GetError() != "" {
+		return true, fmt.Errorf("task failed: %s", resp.GetError())
+	}
+	return true, nil
 }
