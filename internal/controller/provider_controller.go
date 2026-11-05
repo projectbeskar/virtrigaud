@@ -152,6 +152,11 @@ const (
 	providerReasonDeploymentNotReady = "DeploymentNotReady"
 )
 
+// reasonDevProviderTypeNotEnabled is the reason of ProviderRuntimeReady and
+// ProviderAvailable on a Provider of a development-only type the manager's
+// development gate does not enable (refuseDisabledDevProviderType).
+const reasonDevProviderTypeNotEnabled = "DevProviderTypeNotEnabled"
+
 // ProviderReconciler reconciles a Provider object
 type ProviderReconciler struct {
 	client.Client
@@ -199,6 +204,13 @@ type ProviderReconciler struct {
 	// (or "none") is clamped to it with a Warning event, and the manager-wide
 	// and per-type defaults are capped at it.
 	TmpSizeLimitMax string
+
+	// EnabledDevProviderTypes are the development-only provider types
+	// (IsDevOnlyProviderType) the manager's development gate enables
+	// (--enable-dev-provider-types); always empty in a release build. The
+	// runtime of a Provider of a development-only type it does not enable is
+	// never deployed or updated (refuseDisabledDevProviderType). Read only.
+	EnabledDevProviderTypes map[infravirtrigaudiov1beta1.ProviderType]struct{}
 
 	// tmpLimitWarned records, per Provider, the annotation value last
 	// announced by a TmpSizeLimitClamped event, so a clamp is announced once,
@@ -385,6 +397,12 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 	}
 	provider.Status.ObservedGeneration = provider.Generation
 
+	// A development-only type the gate does not enable is never run: a
+	// release build refuses it even where the Provider webhook is not served.
+	if r.refuseDisabledDevProviderType(provider) {
+		return ctrl.Result{}, nil, nil
+	}
+
 	// Validate that runtime is configured (now required)
 	if provider.Spec.Runtime == nil {
 		err := fmt.Errorf("runtime configuration is required")
@@ -413,6 +431,33 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
 
 	return result, deployment, err
+}
+
+// refuseDisabledDevProviderType reports whether provider is of a
+// development-only type (IsDevOnlyProviderType) that r's development gate does
+// not enable. Such a Provider is reported not ready (ProviderRuntimeReady and
+// ProviderAvailable False, reason DevProviderTypeNotEnabled, Healthy false)
+// and its runtime is neither deployed nor updated; a runtime deployed while
+// the gate was on is left as it is (nothing is deleted). The type is
+// immutable and the gate changes only with a manager restart, which
+// reconciles every Provider again, so nothing is requeued.
+func (r *ProviderReconciler) refuseDisabledDevProviderType(provider *infravirtrigaudiov1beta1.Provider) bool {
+	t := provider.Spec.Type
+	if !infravirtrigaudiov1beta1.IsDevOnlyProviderType(t) {
+		return false
+	}
+	if _, enabled := r.EnabledDevProviderTypes[t]; enabled {
+		return false
+	}
+	msg := fmt.Sprintf("provider type %q is development-only and is not available in this build: "+
+		"its runtime is not deployed (only a development build of the manager started with --%s=%s runs it)",
+		t, infravirtrigaudiov1beta1.DevProviderTypesFlagName, t)
+	k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse,
+		reasonDevProviderTypeNotEnabled, msg, provider.Generation)
+	k8s.SetCondition(&provider.Status.Conditions, providerConditionAvailable, metav1.ConditionFalse,
+		reasonDevProviderTypeNotEnabled, msg, provider.Generation)
+	provider.Status.Healthy = false
+	return true
 }
 
 // reconcileReportedCapabilities best-effort fetches the provider's
