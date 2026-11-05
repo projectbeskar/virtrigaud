@@ -26,7 +26,6 @@ import (
 	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -93,14 +92,14 @@ func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(ctx 
 	}
 	lease, err := p.clusterReg.ConnFor(ctx, hostconn.HostID(id))
 	if err != nil {
-		return &routedHostUnavailableError{host: hostconn.HostID(id),
-			pe: contracts.NewHostUnavailableError(fmt.Sprintf("connect to host %q", id), err)}
+		return &clustered.HostUnavailableError{Host: hostconn.HostID(id),
+			PE: contracts.NewHostUnavailableError(fmt.Sprintf("connect to host %q", id), err)}
 	}
 	vc, err := virshConnFrom(lease)
 	if err != nil {
 		_ = lease.Close()
-		return &routedHostUnavailableError{host: hostconn.HostID(id),
-			pe: contracts.NewHostUnavailableError(fmt.Sprintf("resolve connection of host %q", id), err)}
+		return &clustered.HostUnavailableError{Host: hostconn.HostID(id),
+			PE: contracts.NewHostUnavailableError(fmt.Sprintf("resolve connection of host %q", id), err)}
 	}
 	h := newHostLease(vc, lease)
 	defer h.release()
@@ -131,23 +130,6 @@ func (p *Provider) withOwnedDomain(ctx context.Context, vm contracts.VMRef, op s
 		return fn(hctx, c, d)
 	})
 }
-
-// routedHostUnavailableError is the host-scoped unavailability of the very
-// host a routed call leases (withHostConn: an unknown, removed or draining
-// host, or one whose connection cannot be resolved). It is transparent — Error
-// and Unwrap are pe's, so contracts.IsHostUnavailable and every message are
-// unchanged — and only tells routedRPCError which host to name in the
-// answer's ErrorInfo (clustered.HostUnavailableStatusFor).
-type routedHostUnavailableError struct {
-	host hostconn.HostID
-	pe   *contracts.ProviderError
-}
-
-// Error returns pe's message.
-func (e *routedHostUnavailableError) Error() string { return e.pe.Error() }
-
-// Unwrap exposes pe.
-func (e *routedHostUnavailableError) Unwrap() error { return e.pe }
 
 // hostOpError marks an error as having arisen while a routed call ran on a
 // leased host — i.e. AFTER the provider itself resolved and leased the host,
@@ -300,75 +282,9 @@ func virshOf(c libvirtConn) (*VirshProvider, error) {
 // for the operator. The single-host path never goes through these and keeps
 // its historical errors.
 
-// routedOpError is a failure of a routed operation that carries its own
-// categorized, tenant-safe wire message and code: a time budget that ran out,
-// a copy of the same disk already running, a host tool missing
-// (routed_budget.go). routedRPCError puts wire (never the cause) on the wire.
-type routedOpError struct {
-	// code is the wire code: codes.Unknown (the operation failed) or
-	// codes.Unavailable (retry: the same operation is still in progress).
-	code codes.Code
-	// wire is the categorized message sent to the manager.
-	wire string
-	// cause is logged, never sent.
-	cause error
-	// outcomeUnknown marks a codes.Unavailable answer for a call that may have
-	// changed the host and whose outcome is unknown (the routed budget ran out
-	// while the host's job may still complete; the request's snapshot is still
-	// being taken): it is sent with OutcomeUnknownRetryReason, so that the
-	// manager retries it but never reads it as "nothing was done" (R25).
-	outcomeUnknown bool
-}
-
-// Error returns the wire message and the cause, for the provider's log.
-func (e *routedOpError) Error() string {
-	if e.cause != nil {
-		return e.wire + ": " + e.cause.Error()
-	}
-	return e.wire
-}
-
-// Unwrap exposes the cause.
-func (e *routedOpError) Unwrap() error { return e.cause }
-
-// hostOpKind says how a routed RPC answers a host that stops answering
-// (hostOpRPCErrorFor).
-type hostOpKind int
-
-const (
-	// hostOpWrite is an RPC that changes the host. A transport failure is
-	// HOST_UNAVAILABLE only while no command of the call was answered and none
-	// that may change the host was sent, "not performed" while only reads ran,
-	// and an unknown outcome (codes.Unknown) once a command that may change the
-	// host was sent.
-	hostOpWrite hostOpKind = iota
-	// hostOpRead is an RPC that only reads (Describe, GetDiskInfo, TaskStatus):
-	// it cannot half-do anything, so a host that stops answering at any point
-	// is HOST_UNAVAILABLE.
-	hostOpRead
-	// hostOpWriteRetry is a hostOpWrite whose unknown outcome is answered
-	// "retry" (codes.Unavailable with VM_OPERATION_FAILED, the text saying the
-	// outcome is unknown) instead of codes.Unknown: the RPC is idempotent per
-	// request and the manager retries it on the same host — a SnapshotCreate
-	// (adopted by request token) and a Clone (stamped, and its copy under
-	// flock). A codes.Unknown would fail the clone and remove its target.
-	hostOpWriteRetry
-)
-
-// Wire texts of a transport failure of a routed write RPC. They name the
-// operation and the host only.
-const (
-	wireHostNotPerformedFmt = "failed to %s on host %q: the host stopped answering before the operation changed " +
-		"anything; nothing was done"
-	wireHostUnknownFmt = "failed to %s on host %q: the host stopped answering while the operation ran; " +
-		"its outcome is unknown"
-	wireHostUnknownRetryFmt = "failed to %s on host %q: the host stopped answering while the operation ran; " +
-		"its outcome is unknown and it may still complete on the host: retry"
-)
-
 // hostOpRPCError is hostOpRPCErrorFor for an RPC that changes the host.
 func hostOpRPCError(op string, ho *hostOpError, err error) error {
-	return hostOpRPCErrorFor(hostOpWrite, op, ho, err)
+	return hostOpRPCErrorFor(clustered.OpWrite, op, ho, err)
 }
 
 // hostOpRPCErrorFor is the wire form of an error that arose on a leased host
@@ -381,49 +297,36 @@ func hostOpRPCError(op string, ho *hostOpError, err error) error {
 //
 //   - no command of the call was answered and none that may change the host
 //     was sent (the lease, the dial, or the very first command found the
-//     connection dead), or the RPC only reads (kind hostOpRead):
+//     connection dead), or the RPC only reads (kind clustered.OpRead):
 //     HOST_UNAVAILABLE;
 //   - only reads ran: "not performed" (codes.Unavailable, VM_OPERATION_FAILED);
 //   - a command that may change the host was sent (it may have completed, or
 //     still be running): an unknown outcome — codes.Unknown with
-//     VM_OPERATION_FAILED, or, for kind hostOpWriteRetry, the "retry" form of
-//     it.
+//     VM_OPERATION_FAILED, or, for kind clustered.OpWriteRetry, the "retry"
+//     form of it.
+//
+// The answer itself is chosen by clustered.HostDownStatus (a host that stopped
+// answering) and clustered.HostOpFailedStatus (a failure of the operation);
+// what is a transport failure, and how far the call got, is libvirt's to say.
 //
 // None counts toward the manager's per-Provider circuit breaker. Only
 // "<op> ... host <id>" crosses the wire — for a failure of the operation
 // itself followed by the provider's own requester-facing account of it when it
 // wrote one (requesterFacingMessage) — and the error is logged.
-func hostOpRPCErrorFor(kind hostOpKind, op string, ho *hostOpError, err error) error {
+func hostOpRPCErrorFor(kind clustered.OpKind, op string, ho *hostOpError, err error) error {
 	// Every URL but the libvirt connection URI is redacted (R28): a staged
 	// object's s3:// or nfs:// location, an S3 endpoint. A caller that knows
 	// the call's staged locations redacts them from err first
 	// (routedExportFailure).
 	log.Printf("WARN %s on host %s failed: %s", op, ho.host, redactCause(err))
 	if isHostTransportFailure(err) {
-		stage := ho.progress.stage()
 		// The dependency guard runs before anything is changed and says so
 		// (guardHostUnreachableError: "nothing was changed"): its host failure
 		// is the fail-closed HOST_UNAVAILABLE whatever the call read before.
 		var gh *guardHostUnreachableError
-		switch {
-		case kind == hostOpRead || stderrors.As(err, &gh) || stage == hostDownNothingRan:
-			return clustered.HostUnavailableStatusFor(contracts.NewHostUnavailableError(
-				fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil), ho.host)
-		case stage == hostDownReadsOnly:
-			return clustered.HostLostStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
-		case kind == hostOpWriteRetry:
-			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
-			return clustered.OutcomeUnknownRetryStatus(fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host), contracts.HostConnectionLostReason)
-		default:
-			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
-			return clustered.HostLostStatus(codes.Unknown, fmt.Sprintf(wireHostUnknownFmt, op, ho.host))
-		}
+		return clustered.HostDownStatus(kind, op, ho.host, ho.progress.stage(), stderrors.As(err, &gh))
 	}
-	msg := fmt.Sprintf("failed to %s on host %q", op, ho.host)
-	if detail := requesterFacingMessage(err); detail != "" {
-		msg += ": " + detail
-	}
-	return clustered.VMOperationStatus(codes.Unknown, msg)
+	return clustered.HostOpFailedStatus(op, ho.host, requesterFacingMessage(err))
 }
 
 // requesterFacingMessage returns the message of the outermost provider error
@@ -462,7 +365,7 @@ func requesterFacingMessage(err error) string {
 //     does not front);
 //   - Conflict -> AlreadyExists (a clone whose target domain name is taken on
 //     the host by a domain the target VirtualMachine does not own);
-//   - a routedOpError (a time budget that ran out, the same copy in progress,
+//   - a clustered.OpError (a time budget that ran out, the same copy in progress,
 //     a host tool missing) -> its own code and categorized message with a
 //     VM_OPERATION_FAILED ErrorInfo;
 //   - any other failure that arose on the leased host (hostOpError): a host
@@ -508,27 +411,27 @@ func requesterFacingMessage(err error) string {
 // Only the categorized message crosses the wire; causes are logged. It is
 // never used on the single-host path, whose wire errors are unchanged.
 func routedRPCError(op string, err error) error {
-	return routedRPCErrorFor(hostOpWrite, op, err)
+	return routedRPCErrorFor(clustered.OpWrite, op, err)
 }
 
 // routedReadRPCError is routedRPCError for an RPC that only reads (Describe,
 // GetDiskInfo, TaskStatus, ListVMs): a host that stops answering is always
 // HOST_UNAVAILABLE, because a read cannot half-do anything.
 func routedReadRPCError(op string, err error) error {
-	return routedRPCErrorFor(hostOpRead, op, err)
+	return routedRPCErrorFor(clustered.OpRead, op, err)
 }
 
 // routedIdempotentRPCError is routedRPCError for an RPC that is idempotent per
 // request and that the manager retries on the same host (SnapshotCreate,
-// Clone): its unknown outcome is answered "retry" (hostOpWriteRetry).
+// Clone): its unknown outcome is answered "retry" (clustered.OpWriteRetry).
 func routedIdempotentRPCError(op string, err error) error {
-	return routedRPCErrorFor(hostOpWriteRetry, op, err)
+	return routedRPCErrorFor(clustered.OpWriteRetry, op, err)
 }
 
 // routedRPCErrorFor is routedRPCError for an RPC of kind: the categorized
 // answers first (routedTypedStatus), then a failure on the leased host or of
 // the provider (routedHostFailureStatus).
-func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
+func routedRPCErrorFor(kind clustered.OpKind, op string, err error) error {
 	if st := routedTypedStatus(op, err); st != nil {
 		return st
 	}
@@ -537,9 +440,11 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 
 // routedTypedStatus returns the categorized answer of err from a routed call
 // (see routedRPCError: the cluster-wide guards, the disk guards, the typed
-// refusals, a routedOpError, a host that could not be leased, a typed
+// refusals, a clustered.OpError, a host that could not be leased, a typed
 // ProviderError), or nil when err is none of them: a failure on the leased
-// host or of the provider itself (routedHostFailureStatus).
+// host or of the provider itself (routedHostFailureStatus). The libvirt
+// refusals are checked first; the hypervisor-neutral classes last
+// (clustered.TypedStatus).
 func routedTypedStatus(op string, err error) error {
 	if st := clusterGuardStatus(err); st != nil {
 		return st.Err()
@@ -588,36 +493,15 @@ func routedTypedStatus(op string, err error) error {
 		log.Printf("WARN %s refused: %v", op, cr)
 		return clustered.VMOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, cr.Error()))
 	}
-	var roe *routedOpError
+	var roe *clustered.OpError
 	if stderrors.As(err, &roe) {
 		log.Printf("WARN %s failed: %s", op, redactCause(err))
-		if roe.outcomeUnknown {
-			return clustered.OutcomeUnknownRetryStatus(roe.wire)
+		if roe.OutcomeUnknown {
+			return clustered.OutcomeUnknownRetryStatus(roe.Wire)
 		}
-		return clustered.VMOperationStatus(roe.code, roe.wire)
+		return clustered.VMOperationStatus(roe.Code, roe.Wire)
 	}
-	var rh *routedHostUnavailableError
-	if stderrors.As(err, &rh) {
-		return clustered.HostUnavailableStatusFor(rh.pe, rh.host)
-	}
-	var ut *clustered.UnknownHostTaskError
-	if stderrors.As(err, &ut) {
-		return clustered.UnknownToAgentStatus(ut.Error())
-	}
-	var pe *contracts.ProviderError
-	if stderrors.As(err, &pe) {
-		switch pe.Type {
-		case contracts.ErrorTypeInvalidSpec:
-			return status.Error(codes.InvalidArgument, pe.Message)
-		case contracts.ErrorTypeHostUnavailable:
-			return clustered.HostUnavailableStatus(pe)
-		case contracts.ErrorTypeNotFound:
-			return status.Error(codes.NotFound, pe.Message)
-		case contracts.ErrorTypeConflict:
-			return status.Error(codes.AlreadyExists, pe.Message)
-		}
-	}
-	return nil
+	return clustered.TypedStatus(err)
 }
 
 // routedHostFailureStatus is the answer of a routed call's failure that is
@@ -625,15 +509,11 @@ func routedTypedStatus(op string, err error) error {
 // (hostOpError) is answered by hostOpRPCErrorFor, a provider-level
 // Unavailable is a plain Unavailable (which the manager's breaker counts),
 // anything else a plain "failed to <op>".
-func routedHostFailureStatus(kind hostOpKind, op string, err error) error {
+func routedHostFailureStatus(kind clustered.OpKind, op string, err error) error {
 	var ho *hostOpError
 	if stderrors.As(err, &ho) {
 		return hostOpRPCErrorFor(kind, op, ho, err)
 	}
 	log.Printf("WARN %s failed: %s", op, redactCause(err))
-	var pe *contracts.ProviderError
-	if stderrors.As(err, &pe) && pe.Type == contracts.ErrorTypeUnavailable {
-		return status.Error(codes.Unavailable, pe.Message)
-	}
-	return status.Errorf(codes.Unknown, "failed to %s", op)
+	return clustered.ProviderFailureStatus(op, err)
 }

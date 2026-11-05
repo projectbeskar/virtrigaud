@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -124,7 +125,7 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 		convert.privArgs = []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, rootURL}
 	}
 	if res, err := convert.run(ctx, h, guard); err != nil {
-		var roe *routedOpError
+		var roe *clustered.OpError
 		if errors.As(err, &roe) {
 			return nil, err
 		}

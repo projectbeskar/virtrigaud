@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -85,38 +86,21 @@ func hostProgressFrom(ctx context.Context) *hostProgress {
 	return p
 }
 
-// hostDownStage says how far a call got on its host when the host stopped
-// answering.
-type hostDownStage int
-
-const (
-	// hostDownNothingRan: no command of the call was answered and none that may
-	// change the host was sent — the lease, the dial, or the very first command
-	// found the connection dead. Nothing was done.
-	hostDownNothingRan hostDownStage = iota
-	// hostDownReadsOnly: the host answered at least one command, and no
-	// command that may change it was sent. Nothing was done.
-	hostDownReadsOnly
-	// hostDownWriteSent: a command that may change the host was sent. It may
-	// have completed, or still be running: the outcome is unknown.
-	hostDownWriteSent
-)
-
 // stage returns how far the call got. A nil hostProgress (a call that was not
 // tracked) is assumed to have sent a command that may change the host.
-func (p *hostProgress) stage() hostDownStage {
+func (p *hostProgress) stage() clustered.HostDownStage {
 	if p == nil {
-		return hostDownWriteSent
+		return clustered.HostDownWriteSent
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	switch {
 	case p.wrote:
-		return hostDownWriteSent
+		return clustered.HostDownWriteSent
 	case p.answered:
-		return hostDownReadsOnly
+		return clustered.HostDownReadsOnly
 	}
-	return hostDownNothingRan
+	return clustered.HostDownNothingRan
 }
 
 // begin records that the command args (as runVirshCommand takes them: a virsh

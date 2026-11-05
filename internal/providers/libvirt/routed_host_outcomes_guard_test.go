@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -53,7 +54,7 @@ func TestRoutedHostOutcomes_CreateGuardUnreachableAfterSetupWrites(t *testing.T)
 	_, err := NewServer(p).Create(context.Background(), &providerv1.CreateRequest{Name: "web", TargetHostId: "host-b"})
 	require.Error(t, err)
 	require.NotNil(t, progress)
-	assert.Equal(t, hostDownWriteSent, progress.stage(), "the setup write was sent")
+	assert.Equal(t, clustered.HostDownWriteSent, progress.stage(), "the setup write was sent")
 	st := status.Convert(err)
 	assert.Equal(t, codes.Unavailable, st.Code())
 	assert.True(t, hasHostUnavailableInfo(st), "fail closed, nothing created: %v", err)

@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -82,9 +83,9 @@ func TestRevertFailure_MediaNotRestoredIsUnknown(t *testing.T) {
 	conn := &fakeSeamConn{id: "host-a"}
 	assert.Equal(t, revertUnknown, classifyRevertFailure(context.Background(), conn, "d", err))
 	assertRevertUnknown(t, singleHostRevertFailure(context.Background(), conn, "d", err))
-	var roe *routedOpError
+	var roe *clustered.OpError
 	require.ErrorAs(t, routedRevertFailure(context.Background(), conn, "d", err), &roe)
-	assert.True(t, roe.outcomeUnknown)
+	assert.True(t, roe.OutcomeUnknown)
 }
 
 // TestRoutedRevertFailure_PassesTypedAndTransportFailures: typed refusals and

@@ -586,18 +586,18 @@ func classifySnapshotCreateFailure(host string, idempotent bool, parent, budget 
 		return nil
 	}
 	if budgetRanOut(parent, budget) && !idempotent {
-		return &routedOpError{code: codes.Unknown, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unknown, Cause: err, Wire: fmt.Sprintf(
 			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
 				"and it may still complete on the host", host)}
 	}
 	if budgetRanOut(parent, budget) {
-		return &routedOpError{code: codes.Unavailable, cause: err, outcomeUnknown: true, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, OutcomeUnknown: true, Wire: fmt.Sprintf(
 			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
 				"and it may still complete on the host: retry", host)}
 	}
 	var ve *VirshError
 	if stderrors.As(err, &ve) && strings.Contains(ve.Stderr, libvirtJobBusyMarker) {
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 			"create snapshot on host %q: another operation on this VM is still running on the host; retry", host)}
 	}
 	return err

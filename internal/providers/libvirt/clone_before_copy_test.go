@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 )
@@ -90,9 +91,9 @@ func TestCloneBeforeCopyFailure(t *testing.T) {
 	for name, err := range transient {
 		t.Run(name, func(t *testing.T) {
 			got := cloneBeforeCopyFailure(host, err)
-			var roe *routedOpError
+			var roe *clustered.OpError
 			require.ErrorAs(t, got, &roe)
-			assert.Equal(t, codes.Unavailable, roe.code)
+			assert.Equal(t, codes.Unavailable, roe.Code)
 			assert.ErrorIs(t, got, err, "the cause is kept for the log")
 		})
 	}
@@ -108,7 +109,7 @@ func TestCloneBeforeCopyFailure(t *testing.T) {
 		"previous":          &previousIncarnationError{op: guardOpClone, domain: cloneTargetDomain},
 		"guard incomplete":  &clusterGuardIncompleteError{op: guardOpClone, domain: cloneTargetDomain},
 		"disk check failed": &diskCheckFailedError{op: guardOpClone, domain: cloneTargetDomain},
-		"budget":            &routedOpError{code: codes.Unknown, wire: "stopped"},
+		"budget":            &clustered.OpError{Code: codes.Unknown, Wire: "stopped"},
 	}
 	for name, err := range unchanged {
 		t.Run(name, func(t *testing.T) {

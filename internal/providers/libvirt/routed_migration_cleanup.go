@@ -263,9 +263,9 @@ func routedLandedDiskFailed(host hostconn.HostID, progress *hostProgress, step s
 	log.Printf("ERROR DeleteLandedDisk on host %s: %s: %v", host, step, err)
 	if isHostTransportFailure(err) {
 		switch progress.stage() {
-		case hostDownNothingRan:
+		case clustered.HostDownNothingRan:
 			return clustered.HostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), nil))
-		case hostDownWriteSent:
+		case clustered.HostDownWriteSent:
 			return clustered.OutcomeUnknownRetryStatus(landedDiskRemovalUnknownMessage)
 		}
 	}

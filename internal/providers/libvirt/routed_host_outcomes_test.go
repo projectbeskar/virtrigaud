@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -379,36 +380,36 @@ func TestRoutedHostOutcomes_GetDiskInfoStaysHostUnavailable(t *testing.T) {
 func TestHostOpRPCErrorFor_Matrix(t *testing.T) {
 	transport := &VirshError{Command: "virsh x", ExitCode: -1, Stderr: "ssh: handshake failed"}
 	rejected := &VirshError{Command: "virsh x", ExitCode: 1, Stderr: "error: nope"}
-	progressAt := func(stage hostDownStage) *hostProgress {
+	progressAt := func(stage clustered.HostDownStage) *hostProgress {
 		p := &hostProgress{}
 		switch stage {
-		case hostDownReadsOnly:
+		case clustered.HostDownReadsOnly:
 			p.answered = true
-		case hostDownWriteSent:
+		case clustered.HostDownWriteSent:
 			p.answered, p.wrote = true, true
 		}
 		return p
 	}
 	for _, tc := range []struct {
 		name  string
-		kind  hostOpKind
-		stage hostDownStage
+		kind  clustered.OpKind
+		stage clustered.HostDownStage
 		err   error
 		want  hostOutcome
 	}{
-		{"write, nothing ran", hostOpWrite, hostDownNothingRan, transport, outcomeHostUnavailable},
-		{"write, reads answered", hostOpWrite, hostDownReadsOnly, transport, outcomeNotPerformed},
-		{"write, write sent", hostOpWrite, hostDownWriteSent, transport, outcomeUnknown},
-		{"retry, nothing ran", hostOpWriteRetry, hostDownNothingRan, transport, outcomeHostUnavailable},
-		{"retry, reads answered", hostOpWriteRetry, hostDownReadsOnly, transport, outcomeNotPerformed},
-		{"retry, write sent", hostOpWriteRetry, hostDownWriteSent, transport, outcomeUnknownRetry},
-		{"read, nothing ran", hostOpRead, hostDownNothingRan, transport, outcomeHostUnavailable},
-		{"read, reads answered", hostOpRead, hostDownReadsOnly, transport, outcomeHostUnavailable},
-		{"the dependency guard's host failure is fail-closed HOST_UNAVAILABLE", hostOpWrite, hostDownReadsOnly,
+		{"write, nothing ran", clustered.OpWrite, clustered.HostDownNothingRan, transport, outcomeHostUnavailable},
+		{"write, reads answered", clustered.OpWrite, clustered.HostDownReadsOnly, transport, outcomeNotPerformed},
+		{"write, write sent", clustered.OpWrite, clustered.HostDownWriteSent, transport, outcomeUnknown},
+		{"retry, nothing ran", clustered.OpWriteRetry, clustered.HostDownNothingRan, transport, outcomeHostUnavailable},
+		{"retry, reads answered", clustered.OpWriteRetry, clustered.HostDownReadsOnly, transport, outcomeNotPerformed},
+		{"retry, write sent", clustered.OpWriteRetry, clustered.HostDownWriteSent, transport, outcomeUnknownRetry},
+		{"read, nothing ran", clustered.OpRead, clustered.HostDownNothingRan, transport, outcomeHostUnavailable},
+		{"read, reads answered", clustered.OpRead, clustered.HostDownReadsOnly, transport, outcomeHostUnavailable},
+		{"the dependency guard's host failure is fail-closed HOST_UNAVAILABLE", clustered.OpWrite, clustered.HostDownReadsOnly,
 			&guardHostUnreachableError{op: guardOpDelete, domain: "d", cause: transport}, outcomeHostUnavailable},
-		{"a command the host rejected is the operation's failure", hostOpWrite, hostDownWriteSent, rejected, "other: Unknown " +
+		{"a command the host rejected is the operation's failure", clustered.OpWrite, clustered.HostDownWriteSent, rejected, "other: Unknown " +
 			`"failed to do it on host \"host-b\"" (reason "VM_OPERATION_FAILED")`},
-		{"a cancelled call is not a host failure", hostOpWrite, hostDownNothingRan,
+		{"a cancelled call is not a host failure", clustered.OpWrite, clustered.HostDownNothingRan,
 			&VirshError{ExitCode: -1, Cause: context.Canceled}, "other: Unknown " +
 				`"failed to do it on host \"host-b\"" (reason "VM_OPERATION_FAILED")`},
 	} {
@@ -420,20 +421,20 @@ func TestHostOpRPCErrorFor_Matrix(t *testing.T) {
 
 	t.Run("an untracked error assumes a write was sent", func(t *testing.T) {
 		ho := &hostOpError{host: "host-b", err: transport}
-		assert.Equal(t, outcomeUnknown, hostOutcomeOf(t, hostOpRPCErrorFor(hostOpWrite, "do it", ho, transport)))
+		assert.Equal(t, outcomeUnknown, hostOutcomeOf(t, hostOpRPCErrorFor(clustered.OpWrite, "do it", ho, transport)))
 	})
 	t.Run("the wire text names the operation and host only", func(t *testing.T) {
 		secret := &VirshError{Command: "virsh -c qemu+ssh://10.0.0.5/system x", ExitCode: -1, Stderr: "dial 10.0.0.5:22 /var/lib/x"}
-		for _, stage := range []hostDownStage{hostDownNothingRan, hostDownReadsOnly, hostDownWriteSent} {
+		for _, stage := range []clustered.HostDownStage{clustered.HostDownNothingRan, clustered.HostDownReadsOnly, clustered.HostDownWriteSent} {
 			ho := &hostOpError{host: "host-b", err: secret, progress: progressAt(stage)}
-			msg := status.Convert(hostOpRPCErrorFor(hostOpWrite, "do it", ho, secret)).Message()
+			msg := status.Convert(hostOpRPCErrorFor(clustered.OpWrite, "do it", ho, secret)).Message()
 			for _, leak := range []string{"10.0.0.5", "/var/lib", "virsh", "qemu+ssh"} {
 				assert.NotContains(t, msg, leak)
 			}
 		}
 	})
 	t.Run("routedRPCError variants choose the kind", func(t *testing.T) {
-		ho := &hostOpError{host: "host-b", err: transport, progress: progressAt(hostDownWriteSent)}
+		ho := &hostOpError{host: "host-b", err: transport, progress: progressAt(clustered.HostDownWriteSent)}
 		assert.Equal(t, outcomeUnknown, hostOutcomeOf(t, routedRPCError("do it", ho)))
 		assert.Equal(t, outcomeUnknownRetry, hostOutcomeOf(t, routedIdempotentRPCError("do it", ho)))
 		assert.Equal(t, outcomeHostUnavailable, hostOutcomeOf(t, routedReadRPCError("do it", ho)))

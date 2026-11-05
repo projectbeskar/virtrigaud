@@ -29,6 +29,7 @@ import (
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
@@ -293,7 +294,7 @@ func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, srcForm
 	}
 	if res, err := flatten.run(ctx, h, guard); err != nil {
 		cleanup()
-		var roe *routedOpError
+		var roe *clustered.OpError
 		if errors.As(err, &roe) {
 			return "", nil, err
 		}

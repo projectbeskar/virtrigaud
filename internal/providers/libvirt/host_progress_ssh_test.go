@@ -20,6 +20,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -43,7 +44,7 @@ func TestHostProgress_OverSSH(t *testing.T) {
 		_, err = v.runVirshCommand(ctx, "destroy", "web")
 		require.Error(t, err)
 		assert.True(t, isHostTransportFailure(err), "a dial failure is a lost connection: %v", err)
-		assert.Equal(t, hostDownNothingRan, p.stage(), "nothing could have run: HOST_UNAVAILABLE")
+		assert.Equal(t, clustered.HostDownNothingRan, p.stage(), "nothing could have run: HOST_UNAVAILABLE")
 	})
 
 	t.Run("a session is opened: a write was sent", func(t *testing.T) {
@@ -56,10 +57,10 @@ func TestHostProgress_OverSSH(t *testing.T) {
 		ctx, p := withHostProgress(t.Context())
 		_, err := v.runVirshCommand(ctx, "!", "test", "-e", "/")
 		require.NoError(t, err)
-		assert.Equal(t, hostDownReadsOnly, p.stage(), "a read over an open session is not a write")
+		assert.Equal(t, clustered.HostDownReadsOnly, p.stage(), "a read over an open session is not a write")
 
 		_, err = v.runVirshCommand(ctx, "!", "true")
 		require.NoError(t, err)
-		assert.Equal(t, hostDownWriteSent, p.stage())
+		assert.Equal(t, clustered.HostDownWriteSent, p.stage())
 	})
 }

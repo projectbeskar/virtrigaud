@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
@@ -140,7 +141,7 @@ func TestEnsureSSHClient_ClusteredCallsArrivingDuringALongDialAreAnsweredInTime(
 		assert.Less(t, r.took, deadline, "call %d", i)
 		// Answered as a Describe is: HOST_UNAVAILABLE, never codes.Unknown.
 		ho := &hostOpError{host: "h", progress: &hostProgress{}, err: r.err}
-		assert.Equal(t, outcomeHostUnavailable, hostOutcomeOf(t, hostOpRPCErrorFor(hostOpRead, "describe VM", ho, r.err)), "call %d", i)
+		assert.Equal(t, outcomeHostUnavailable, hostOutcomeOf(t, hostOpRPCErrorFor(clustered.OpRead, "describe VM", ho, r.err)), "call %d", i)
 	}
 	leaderCancel()
 	select {

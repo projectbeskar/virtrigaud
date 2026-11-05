@@ -190,7 +190,7 @@ func routedExportFailure(host string, parent, budget context.Context, err error,
 	if definite := routedExportDefiniteFailure(budget, err, cause); definite != nil {
 		return definite
 	}
-	return routedHostFailureStatus(hostOpWrite, routedExportOp, cause)
+	return routedHostFailureStatus(clustered.OpWrite, routedExportOp, cause)
 }
 
 // routedExportDefiniteFailure is the single-host classification of a failure

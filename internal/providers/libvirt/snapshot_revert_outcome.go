@@ -232,16 +232,16 @@ func routedRevertFailure(ctx context.Context, conn libvirtConn, domain string, e
 	host := conn.HostID()
 	switch classifyRevertFailure(ctx, conn, domain, err) {
 	case revertNotPerformed:
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertNotPerformed)}
 	case revertNotRun:
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertNotRun)}
 	case revertRefused:
-		return &routedOpError{code: codes.FailedPrecondition, cause: err, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.FailedPrecondition, Cause: err, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertRefusedForConfig)}
 	case revertUnknown:
-		return &routedOpError{code: codes.Unavailable, cause: err, outcomeUnknown: true, wire: fmt.Sprintf(
+		return &clustered.OpError{Code: codes.Unavailable, Cause: err, OutcomeUnknown: true, Wire: fmt.Sprintf(
 			wireRevertOnHostFmt, host, wireRevertOutcomeUnknown)}
 	case revertSnapshotNotFound:
 		log.Printf("WARN revert to snapshot on host %s: %v", host, err)
