@@ -104,15 +104,20 @@ func xnsLinkedClone(t *testing.T, providerType infrav1beta1.ProviderType, cloneT
 }
 
 func TestVMClone_LinkedCrossNamespace(t *testing.T) {
-	t.Run("libvirt is refused, even with the grant", func(t *testing.T) {
-		cp := &clonerProvider{caps: contracts.Capabilities{SupportsLinkedClones: true}, cloneResp: contracts.CloneResponse{TargetVmID: "x"}}
-		got := xnsLinkedClone(t, infrav1beta1.ProviderTypeLibvirt, infrav1beta1.CloneTypeLinkedClone, cp)
-		assert.Equal(t, infrav1beta1.ClonePhaseFailed, got.Status.Phase)
-		assert.Zero(t, cp.cloneCnt)
-		ready := readyCondition(got.Status.Conditions, infrav1beta1.VMCloneConditionReady)
-		require.NotNil(t, ready)
-		assert.Equal(t, cloneReasonLinkedCrossNamespace, ready.Reason)
-	})
+	// libvirt, and the development-only cloudhypervisor type (refused the
+	// same way: the safe default).
+	for _, typ := range []infrav1beta1.ProviderType{infrav1beta1.ProviderTypeLibvirt, infrav1beta1.ProviderTypeCloudHypervisor} {
+		t.Run(string(typ)+" is refused, even with the grant", func(t *testing.T) {
+			cp := &clonerProvider{caps: contracts.Capabilities{SupportsLinkedClones: true}, cloneResp: contracts.CloneResponse{TargetVmID: "x"}}
+			got := xnsLinkedClone(t, typ, infrav1beta1.CloneTypeLinkedClone, cp)
+			assert.Equal(t, infrav1beta1.ClonePhaseFailed, got.Status.Phase)
+			assert.Zero(t, cp.cloneCnt)
+			ready := readyCondition(got.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, cloneReasonLinkedCrossNamespace, ready.Reason)
+			assert.Contains(t, ready.Message, "a "+string(typ)+" linked clone into another namespace")
+		})
+	}
 	t.Run("vSphere proceeds", func(t *testing.T) {
 		cp := &clonerProvider{caps: contracts.Capabilities{SupportsLinkedClones: true}, cloneResp: contracts.CloneResponse{TargetVmID: "vm-1"}}
 		xnsLinkedClone(t, infrav1beta1.ProviderTypeVSphere, infrav1beta1.CloneTypeLinkedClone, cp)

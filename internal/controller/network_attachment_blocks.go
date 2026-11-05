@@ -37,8 +37,11 @@ func providerType(providerCR *infravirtrigaudiov1beta1.Provider) infravirtrigaud
 // Provider's type is read: a vSphere VLAN or a libvirt bridge in an attachment
 // that also has a Proxmox block must not become the Proxmox NIC's tag or
 // bridge (R36). A Proxmox target whose attachment has no proxmox block gets no
-// bridge, VLAN or model, so the provider's defaults apply. For a Provider type
-// with no block of its own (firecracker, qemu) or an unknown one (nil
+// bridge, VLAN or model, so the provider's defaults apply. A cloudhypervisor
+// target (development-only) has no block of its own yet, and none of the
+// others is read: another hypervisor's portgroup, bridge or VLAN must not
+// become its NIC's settings, so its provider's defaults apply. For a Provider
+// type with no block of its own (firecracker, qemu) or an unknown one (nil
 // Provider), every block is read, as before.
 func applyNetworkBlocks(attachment *contracts.NetworkAttachment, net *infravirtrigaudiov1beta1.VMNetworkAttachment, target infravirtrigaudiov1beta1.ProviderType) {
 	switch target {
@@ -48,6 +51,8 @@ func applyNetworkBlocks(attachment *contracts.NetworkAttachment, net *infravirtr
 		applyLibvirtBlock(attachment, net)
 	case infravirtrigaudiov1beta1.ProviderTypeProxmox:
 		applyProxmoxBlock(attachment, net)
+	case infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor:
+		// No block of its own: none is read (see above).
 	default:
 		applyVSphereBlock(attachment, net)
 		applyLibvirtBlock(attachment, net)

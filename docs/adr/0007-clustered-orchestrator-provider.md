@@ -45,6 +45,12 @@ Accepted 2026-10-22. Slices B.1–B.3 are implemented (#415, #416): a
 is accepted, and one whose Provider does not is still refused at `Validating`.
 B.4 (docs and the lab run) is recorded in [B9](#b9-implementation-status-and-recorded-deviations).
 
+**P4 amendment (maintainer decision, 2026-11-05):** the cloud-hypervisor P4
+design (SSH + systemd supervision, synthesized inventory) is superseded by a
+per-host agent execution model; see the
+[cloud-hypervisor-cluster (P4)](#cloud-hypervisor-cluster-p4) section and the
+capability matrix.
+
 `topology: cluster` remains **experimental**. The Slice 5 lab amendment
 recommends keeping it that way until a multi-host lab run covers the three
 paths above — a recommendation for the maintainer (William Rizzo) to decide,
@@ -3221,16 +3227,27 @@ connection reuses ADR-0004's per-host known_hosts material.
 
 CH is a per-VM VMM with **no daemon, no inventory, no scheduler** — which is
 exactly why VirtRigaud-as-orchestrator is the *only* clustering path for it (and
-the cleanest greenfield: nothing native to conflict with). **v1 supervision:
-SSH + systemd**, mirroring libvirt-over-SSH — the pod SSHes to the host, drives a
-`cloud-hypervisor@<vmid>.service` systemd template unit (or `systemd-run`) to
-start/stop CH, and runs `ch-remote --api-socket <sock> <verb>` over the same SSH
-channel. Reuses ADR-0004 host-key/known_hosts. (v2: a thin VirtRigaud host-agent
-exposing CH lifecycle + host metrics — cleaner real inventory, more to build and
-secure.)
+the cleanest greenfield: nothing native to conflict with).
 
-- **`ListHosts`** — **synthesized** (no daemon): SSH/agent aggregates per-process
-  `ch-remote info` + host-OS metrics.
+> **Superseded (maintainer decision, 2026-11-05):** the SSH + systemd
+> supervision and the synthesized inventory below are replaced by a **per-host
+> agent execution model**: one lightweight VirtRigaud agent runs on each host
+> and executes CH lifecycle and reports host inventory itself. There is no SSH
+> orchestration and there are no per-VM systemd units. The struck text is kept
+> for the record. The `cloudhypervisor` Provider type exists in the schema as a
+> development-only type, admitted only by a development build of the manager
+> (`--enable-dev-provider-types`); release builds refuse it.
+
+~~**v1 supervision: SSH + systemd**, mirroring libvirt-over-SSH — the pod SSHes
+to the host, drives a `cloud-hypervisor@<vmid>.service` systemd template unit
+(or `systemd-run`) to start/stop CH, and runs `ch-remote --api-socket <sock>
+<verb>` over the same SSH channel. Reuses ADR-0004 host-key/known_hosts. (v2: a
+thin VirtRigaud host-agent exposing CH lifecycle + host metrics — cleaner real
+inventory, more to build and secure.)~~
+
+- **`ListHosts`** — ~~**synthesized** (no daemon): SSH/agent aggregates
+  per-process `ch-remote info` + host-OS metrics.~~ *Superseded:* reported by
+  the per-host agent.
 - **`MigrateVM`** — dst pre-starts a receiver
   (`ch-remote --api-socket dst.sock receive-migration tcp:0.0.0.0:<port>`),
   src `ch-remote send-migration tcp:<dstHost>:<port>`. **Shared storage assumed**
@@ -3254,7 +3271,7 @@ never faked.
 | Requires shared storage for live | No (shared preferred; block covers non-shared) | **Yes** (RAM + device only, no block) |
 | Block / non-shared migration | **Yes** (`--copy-storage-all/inc`) | **No** |
 | Cold fallback (`stage_copy`) | **Yes** (ADR-0006, intra-cluster qcow2→qcow2, no conversion) | **Yes** (only option for CH local disk) |
-| Host health / inventory | **Yes** (`virsh nodeinfo`/`capabilities`/`pool-info`) | **Yes but synthesized** (no daemon; SSH/agent aggregates) |
+| Host health / inventory | **Yes** (`virsh nodeinfo`/`capabilities`/`pool-info`) | ~~**Yes but synthesized** (no daemon; SSH/agent aggregates)~~ *Superseded 2026-11-05:* **Yes**, reported by the per-host agent (P4 note above) |
 | Automatic HA / failover | **Deferred** (no fencing) | **Deferred** |
 
 *Honesty notes*: libvirt's migration engine is mature — the hard parts are
@@ -3377,7 +3394,8 @@ migration data path forces several explicit calls:
   Local-disk-must-stay-up (`--copy-storage-*`, with `--auto-converge`/bandwidth
   caps) and tolerate-downtime (`stage_copy` → ADR-0006 pipeline, no conversion).
 - **P4 — cloud-hypervisor-cluster executor.** `type: cloudhypervisor` +
-  `topology: cluster`; SSH + systemd template unit; experimental live migration
+  `topology: cluster`; ~~SSH + systemd template unit~~ (superseded 2026-11-05 by
+  the per-host agent execution model, see the P4 section); experimental live migration
   (shared storage only) with cold staging as the default fallback.
 - **P5 — DEFERRED, own ADR: automatic HA + fencing/STONITH.** Reliable
   dead-vs-partitioned detection + a fencing subsystem. Do not start until P1–P4

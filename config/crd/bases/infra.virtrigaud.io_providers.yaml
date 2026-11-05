@@ -2100,8 +2100,9 @@ spec:
                       pool's Host CRs into a Secret mounted into the provider pod; the
                       provider reads that mounted file, never the Kubernetes API.
                   Only meaningful for hypervisors with no native cluster manager: the
-                  validating webhook accepts "cluster" for type libvirt only and rejects it
-                  for the other types. An empty value is defaulted to "single".
+                  validating webhook accepts "cluster" for types libvirt and cloudhypervisor
+                  (development-only) and rejects it for the other types; cloudhypervisor
+                  requires "cluster". An empty value is defaulted to "single".
 
                   Topology is IMMUTABLE once set: VMs record where they
                   run (status.placement) under one topology, and every per-VM call is routed
@@ -2132,6 +2133,7 @@ spec:
                 - firecracker
                 - qemu
                 - proxmox
+                - cloudhypervisor
                 type: string
                 x-kubernetes-validations:
                 - message: spec.type is immutable; create a new Provider to change

@@ -448,9 +448,10 @@ meaningful for hypervisors with no native cluster manager (libvirt first).
 **This is now enforced at admission (ADR-0007 D2).** The `vprovider.kb.io`
 validating webhook (`api/infra.virtrigaud.io/v1beta1/provider_webhook.go`) rejects
 `spec.topology: cluster` on any provider type **except** the allow-listed ones.
-The allow-list is **`libvirt` only**. `topology: single` and the empty/unset value (which
-the apiserver defaults to `single`, D9) are accepted for **all** types, so today's
-providers are byte-for-byte unaffected. A rejected write returns a field-scoped
+The allow-list is **`libvirt`**, plus the development-only `cloudhypervisor` type
+(below), which *requires* `topology: cluster`. `topology: single` and the empty/unset
+value (which the apiserver defaults to `single`, D9) are accepted for every other
+type, so today's providers are byte-for-byte unaffected. A rejected write returns a field-scoped
 `spec.topology` invalid error that names the offending type and the allowed
 type(s), so an operator can self-correct. The webhook guards both `create` and
 `update` — including a patch that flips an existing `vsphere`/`proxmox` provider to
@@ -470,6 +471,31 @@ a clustered placement while its Provider is not clustered (an object edited befo
 this rule), the operator fails it closed: no provider call is made for it, it
 shows `Ready=False` (`PlacementTopologyMismatch`), and its finalizer is kept unless
 `virtrigaud.io/force-delete: "true"` is set.
+
+#### Development-only type `cloudhypervisor`
+
+`type: cloudhypervisor` is in the CRD schema, but it is a **development-only**
+type: it cannot be used with a release build, and VirtRigaud ships no Cloud
+Hypervisor provider. The ADR-0007 P4 design for it (SSH + systemd) is
+superseded by a per-host agent execution model.
+
+- **Release builds refuse it.** The webhook rejects a `cloudhypervisor`
+  `Provider` with a `spec.type` invalid error (`not available in this build`).
+  Setting `--enable-dev-provider-types` on a release manager stops it at
+  startup (`the development gate is not compiled into this build`). Where the
+  webhook is not served, the Provider controller still never deploys its
+  runtime: the `Provider` shows `ProviderRuntimeReady=False` and
+  `ProviderAvailable=False` with reason `DevProviderTypeNotEnabled`.
+- **Development builds** are built with the `virtrigaud_dev` Go build tag
+  (`go build -tags virtrigaud_dev ./cmd/manager`) and started with
+  `--enable-dev-provider-types=cloudhypervisor`. No Makefile target,
+  Dockerfile or CI workflow uses the tag, and no Helm value sets the flag.
+  The webhook then admits a `cloudhypervisor` `Provider` with `topology:
+  cluster` only, and returns an admission warning and writes a manager log
+  line on every admission.
+- An update that leaves `spec` as it is (a finalizer, a label, an
+  annotation) is admitted without the gate, with a warning, so a `Provider`
+  created by a development build can still be deleted.
 
 #### Enabling the webhook via Helm
 

@@ -36,41 +36,87 @@ import (
 // spec.topology="cluster" is meaningful and therefore permitted (ADR-0007 D2/D9).
 //
 // The clustered topology makes VirtRigaud itself the cluster manager, so it is
-// only valid for hypervisors that have NO native cluster manager. Today that is
-// libvirt/KVM only. vSphere (vCenter) and Proxmox (pve-cluster) already own
-// inventory/scheduling/migration, and firecracker/qemu are single-host provider
-// types — none may declare topology=cluster.
+// only valid for hypervisors that have NO native cluster manager: libvirt/KVM,
+// and the development-only cloudhypervisor type. vSphere (vCenter) and Proxmox
+// (pve-cluster) already own inventory/scheduling/migration, and
+// firecracker/qemu are single-host provider types — none may declare
+// topology=cluster.
 //
 // EXTENSION POINT: allowing another hypervisor type to use topology="cluster"
 // is a single edit here (add its ProviderType); nothing else in this file
 // hard-codes libvirt.
 var topologyClusterAllowedTypes = map[ProviderType]struct{}{
-	ProviderTypeLibvirt: {},
+	ProviderTypeLibvirt:         {},
+	ProviderTypeCloudHypervisor: {},
 }
+
+// topologyClusterRequiredTypes are the ProviderType values that are valid ONLY
+// with spec.topology="cluster". Cloud Hypervisor has no native cluster manager
+// and runs one agent per host, so a single-host Cloud Hypervisor Provider is
+// not a supported shape. Every entry must also be in
+// topologyClusterAllowedTypes.
+var topologyClusterRequiredTypes = map[ProviderType]struct{}{
+	ProviderTypeCloudHypervisor: {},
+}
+
+// DevProviderTypesFlagName is the name of the manager flag that enables
+// development-only provider types (IsDevOnlyProviderType). It is honoured only
+// by a manager built with the virtrigaud_dev build tag; a release build
+// refuses to start when it is set.
+const DevProviderTypesFlagName = "enable-dev-provider-types"
+
+// Admission operations named in the development-gate log line.
+const (
+	admissionOperationCreate = "create"
+	admissionOperationUpdate = "update"
+)
+
+// devProviderTypeAdmittedWarning is the admission warning returned on every
+// admission of a development-only provider type that the gate enables.
+const devProviderTypeAdmittedWarning = "provider type %q is development-only: it is admitted only because this manager " +
+	"was built with the development gate and started with --" + DevProviderTypesFlagName + "; it is not available in " +
+	"release builds and must not be used for production workloads"
+
+// devProviderTypeMetadataOnlyWarning is the admission warning returned when a
+// metadata-only update of a Provider of a development-only type that the gate
+// does not enable is admitted (so the Provider can still be deleted).
+const devProviderTypeMetadataOnlyWarning = "provider type %q is development-only and is not available in this build: " +
+	"only updates that leave spec unchanged (finalizers, labels, annotations) are admitted, so the Provider can be deleted"
 
 // +kubebuilder:webhook:path=/validate-infra-virtrigaud-io-v1beta1-provider,mutating=false,failurePolicy=fail,sideEffects=None,groups=infra.virtrigaud.io,resources=providers,verbs=create;update,versions=v1beta1,name=vprovider.kb.io,admissionReviewVersions=v1
 
 // ProviderCustomValidator is the admission-time validating webhook for Provider
 // (ADR-0007 D2). It enforces the topology×type rule: spec.topology="cluster" is
-// permitted only on the provider types in topologyClusterAllowedTypes. It never
-// mutates the object and never emits admission warnings.
+// permitted only on the provider types in topologyClusterAllowedTypes, and
+// required on those in topologyClusterRequiredTypes. A development-only
+// provider type (IsDevOnlyProviderType) is refused unless
+// EnabledDevProviderTypes names it; when it does, every admission of it is
+// allowed with a warning and a log line. It never mutates the object.
 //
-// It is a stateless helper, not an API object, so it is excluded from DeepCopy
+// It is a helper, not an API object, so it is excluded from DeepCopy
 // generation.
 // +kubebuilder:object:generate=false
-type ProviderCustomValidator struct{}
+type ProviderCustomValidator struct {
+	// EnabledDevProviderTypes are the development-only provider types the
+	// manager's development gate enables (--enable-dev-provider-types). It is
+	// always empty in a release build, which has no gate compiled in. Read
+	// only; nil enables none.
+	EnabledDevProviderTypes map[ProviderType]struct{}
+}
 
 // Compile-time assertion that ProviderCustomValidator satisfies the
 // controller-runtime CustomValidator contract.
 var _ webhook.CustomValidator = &ProviderCustomValidator{}
 
 // SetupProviderWebhookWithManager registers the Provider validating webhook with
-// the manager's webhook server. Callers gate this on webhook serving being
-// configured (certs available); see cmd/manager/main.go.
-func SetupProviderWebhookWithManager(mgr ctrl.Manager) error {
+// the manager's webhook server. enabledDevProviderTypes are the
+// development-only provider types the manager's development gate enables (nil
+// in a release build). Callers gate this on webhook serving being configured
+// (certs available); see cmd/manager/main.go.
+func SetupProviderWebhookWithManager(mgr ctrl.Manager, enabledDevProviderTypes map[ProviderType]struct{}) error {
 	return ctrl.NewWebhookManagedBy(mgr).
 		For(&Provider{}).
-		WithValidator(&ProviderCustomValidator{}).
+		WithValidator(&ProviderCustomValidator{EnabledDevProviderTypes: enabledDevProviderTypes}).
 		Complete()
 }
 
@@ -95,15 +141,22 @@ func forceDeleteWarnings(provider *Provider) admission.Warnings {
 	return nil
 }
 
-// ValidateCreate validates a Provider on creation. It enforces the ADR-0007 D2
-// topology×type rule, the /tmp size-limit and the disk-size limit annotations,
-// and warns when the force-delete annotation is set (forceDeleteWarnings).
-func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+// ValidateCreate validates a Provider on creation. It refuses a
+// development-only provider type the development gate does not enable, and
+// enforces the ADR-0007 D2 topology×type rule, the /tmp size-limit and the
+// disk-size limit annotations. It warns when the force-delete annotation is
+// set (forceDeleteWarnings) and on every admission of a development-only type.
+func (v *ProviderCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	provider, ok := obj.(*Provider)
 	if !ok {
 		return nil, fmt.Errorf("expected a Provider object but got %T", obj)
 	}
 	warnings := forceDeleteWarnings(provider)
+	devWarnings, err := v.validateDevProviderType(ctx, provider, admissionOperationCreate, true)
+	warnings = append(warnings, devWarnings...)
+	if err != nil {
+		return warnings, err
+	}
 	if err := validateTmpSizeLimitAnnotation(nil, provider); err != nil {
 		return warnings, err
 	}
@@ -115,9 +168,10 @@ func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.
 
 // ValidateUpdate validates a Provider on update. It rejects any change of
 // spec.type or spec.topology (both immutable; the CRD enforces the same rules
-// with CEL transition rules), and re-checks the D2 topology×type rule against
-// the new object. It returns no admission warnings.
-func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+// with CEL transition rules), refuses a spec change of a development-only
+// provider type the development gate does not enable, and re-checks the D2
+// topology×type rule against the new object. It warns as ValidateCreate does.
+func (v *ProviderCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	provider, ok := newObj.(*Provider)
 	if !ok {
 		return nil, fmt.Errorf("expected a Provider object but got %T", newObj)
@@ -133,6 +187,12 @@ func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newO
 	if err := validateTopologyUnchanged(old, provider); err != nil {
 		return warnings, err
 	}
+	specChanged := !equality.Semantic.DeepEqual(old.Spec, provider.Spec)
+	devWarnings, err := v.validateDevProviderType(ctx, provider, admissionOperationUpdate, specChanged)
+	warnings = append(warnings, devWarnings...)
+	if err != nil {
+		return warnings, err
+	}
 	if err := validateTmpSizeLimitAnnotation(old, provider); err != nil {
 		return warnings, err
 	}
@@ -143,10 +203,45 @@ func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newO
 	// annotation) cannot make the spec invalid. Admitting it means a Provider
 	// that predates the topology rule and breaks it can still take and lose
 	// its in-use finalizer, and so can still be deleted (ADR-0010 D7).
-	if equality.Semantic.DeepEqual(old.Spec, provider.Spec) {
+	if !specChanged {
 		return warnings, nil
 	}
 	return warnings, validateProviderTopology(provider)
+}
+
+// validateDevProviderType applies the development gate to provider
+// (IsDevOnlyProviderType). A type the gate enables is admitted with
+// devProviderTypeAdmittedWarning and a log line, on every admission. A type it
+// does not enable is refused on a create or a spec change (specChanged); an
+// update that leaves the spec as it is is admitted with
+// devProviderTypeMetadataOnlyWarning, so a Provider created while the gate was
+// on can still take and lose its finalizers and be deleted. Any other type is
+// not affected.
+func (v *ProviderCustomValidator) validateDevProviderType(ctx context.Context, provider *Provider,
+	operation string, specChanged bool) (admission.Warnings, error) {
+	t := provider.Spec.Type
+	if !IsDevOnlyProviderType(t) {
+		return nil, nil
+	}
+	if _, enabled := v.EnabledDevProviderTypes[t]; enabled {
+		ctrl.LoggerFrom(ctx).Info("WARNING: admitting a development-only provider type; not for production use",
+			"provider", provider.Namespace+"/"+provider.Name, "type", string(t), "operation", operation)
+		return admission.Warnings{fmt.Sprintf(devProviderTypeAdmittedWarning, t)}, nil
+	}
+	if !specChanged {
+		return admission.Warnings{fmt.Sprintf(devProviderTypeMetadataOnlyWarning, t)}, nil
+	}
+	fieldErr := field.Invalid(
+		field.NewPath("spec").Child("type"),
+		t,
+		fmt.Sprintf("provider type %q is development-only and is not available in this build: only a development build "+
+			"of the manager started with --%s=%s admits it", t, DevProviderTypesFlagName, t),
+	)
+	return nil, apierrors.NewInvalid(
+		GroupVersion.WithKind("Provider").GroupKind(),
+		provider.Name,
+		field.ErrorList{fieldErr},
+	)
 }
 
 // validateTypeUnchanged rejects an update that changes spec.type (the CRD
@@ -262,15 +357,30 @@ func (v *ProviderCustomValidator) ValidateDelete(_ context.Context, _ runtime.Ob
 }
 
 // validateProviderTopology enforces ADR-0007 D2/D9: spec.topology="cluster" is
-// only permitted on provider types in topologyClusterAllowedTypes. Any other
+// only permitted on provider types in topologyClusterAllowedTypes, and the
+// types in topologyClusterRequiredTypes permit nothing else. Any other
 // topology value — "single" or the empty string, which the apiserver defaults to
-// "single" (D9) — is allowed for every type. The returned error is an
+// "single" (D9) — is allowed for every other type. The returned error is an
 // apierrors.NewInvalid so the apiserver surfaces a clean, field-scoped message
 // pointing at spec.topology.
 func validateProviderTopology(provider *Provider) error {
-	// Only "cluster" is constrained. "single" and "" (defaulted to "single",
-	// ADR-0007 D9) are valid for all provider types, so today's providers are
-	// byte-for-byte unaffected.
+	if _, required := topologyClusterRequiredTypes[provider.Spec.Type]; required &&
+		effectiveTopology(provider) != ProviderTopologyCluster {
+		fieldErr := field.Invalid(
+			field.NewPath("spec").Child("topology"),
+			provider.Spec.Topology,
+			fmt.Sprintf("provider type %q requires topology %q: it has no native cluster manager and runs one agent per host, "+
+				"so a single-host Provider of this type is not supported", provider.Spec.Type, ProviderTopologyCluster),
+		)
+		return apierrors.NewInvalid(
+			GroupVersion.WithKind("Provider").GroupKind(),
+			provider.Name,
+			field.ErrorList{fieldErr},
+		)
+	}
+	// Otherwise only "cluster" is constrained. "single" and "" (defaulted to
+	// "single", ADR-0007 D9) are valid for the other provider types, so
+	// today's providers are byte-for-byte unaffected.
 	if provider.Spec.Topology != ProviderTopologyCluster {
 		return nil
 	}

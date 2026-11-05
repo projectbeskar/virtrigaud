@@ -42,6 +42,7 @@ import (
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
+	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
@@ -197,6 +198,11 @@ func main() {
 			"such as 500Gi (use binary units: 500G is about 465.7Gi), or empty (the default) for no ceiling beyond the "+
 			"CRD's bounds. A Provider's "+infrav1beta1.ProviderMaxDiskSizeAnnotation+" annotation can only lower it. "+
 			"Disks already larger are kept and never shrunk; only new disks and growth beyond it are refused.")
+	var devProviderTypes string
+	flag.StringVar(&devProviderTypes, infrav1beta1.DevProviderTypesFlagName, "",
+		"DEVELOPMENT ONLY. Comma-separated development-only provider types to admit and run (only "+
+			"'cloudhypervisor'). Empty (the default) enables none. Honoured only by a manager built with the "+
+			devgate.BuildTag+" build tag; a release build refuses to start when it is set.")
 	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
@@ -217,6 +223,19 @@ func main() {
 	}
 	if maxDiskSizeLimit != nil {
 		setupLog.Info("Disk-size ceiling set", "max-disk-size", maxDiskSizeLimit.String())
+	}
+
+	// The development gate, checked before anything else starts: a release
+	// build (no gate compiled in) refuses to start when the flag is set,
+	// rather than run without the refusal it promises.
+	enabledDevProviderTypes, err := devgate.Resolve(devProviderTypes)
+	if err != nil {
+		setupLog.Error(err, "invalid --"+infrav1beta1.DevProviderTypesFlagName)
+		os.Exit(1)
+	}
+	if len(enabledDevProviderTypes) > 0 {
+		setupLog.Info("WARNING: development-only provider types are enabled; this manager is not for production use",
+			"types", devgate.Names(enabledDevProviderTypes))
 	}
 
 	// The client rate limits, checked before the manager connects to the
@@ -409,13 +428,14 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.ProviderReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		APIReader:        mgr.GetAPIReader(),
-		CapabilityReader: remoteResolver,
-		TmpSizeLimit:     providerTmpSizeLimit,
-		TmpSizeLimitMax:  providerTmpSizeLimitMax,
-		Recorder:         mgr.GetEventRecorderFor("provider-controller"),
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		APIReader:               mgr.GetAPIReader(),
+		CapabilityReader:        remoteResolver,
+		TmpSizeLimit:            providerTmpSizeLimit,
+		TmpSizeLimitMax:         providerTmpSizeLimitMax,
+		Recorder:                mgr.GetEventRecorderFor("provider-controller"),
+		EnabledDevProviderTypes: enabledDevProviderTypes,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
@@ -557,7 +577,7 @@ func main() {
 	// is set, the webhook server serves with the operator-provided cert
 	// (GetCertificate wired above), so the default cert-dir path is never hit.
 	if len(webhookCertPath) > 0 {
-		if err := infrav1beta1.SetupProviderWebhookWithManager(mgr); err != nil {
+		if err := infrav1beta1.SetupProviderWebhookWithManager(mgr, enabledDevProviderTypes); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Provider")
 			os.Exit(1)
 		}

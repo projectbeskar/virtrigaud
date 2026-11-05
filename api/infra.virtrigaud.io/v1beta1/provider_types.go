@@ -22,7 +22,7 @@ import (
 )
 
 // ProviderType represents the type of virtualization provider
-// +kubebuilder:validation:Enum=vsphere;libvirt;firecracker;qemu;proxmox
+// +kubebuilder:validation:Enum=vsphere;libvirt;firecracker;qemu;proxmox;cloudhypervisor
 type ProviderType string
 
 const (
@@ -38,7 +38,30 @@ const (
 	ProviderTypeQEMU ProviderType = "qemu"
 	// ProviderTypeProxmox indicates a Proxmox VE provider
 	ProviderTypeProxmox ProviderType = "proxmox"
+	// ProviderTypeCloudHypervisor names a clustered Cloud Hypervisor provider
+	// (one lightweight agent per host). It is a DEVELOPMENT-ONLY type: the
+	// schema accepts it, but the Provider validating webhook admits it only
+	// with topology "cluster" and only in a manager built with the
+	// virtrigaud_dev build tag and started with
+	// --enable-dev-provider-types=cloudhypervisor. Release builds refuse it,
+	// and VirtRigaud ships no Cloud Hypervisor provider implementation.
+	ProviderTypeCloudHypervisor ProviderType = "cloudhypervisor"
 )
+
+// devOnlyProviderTypes are the ProviderType values that exist only for
+// development: the schema accepts them, but the Provider webhook refuses them
+// unless the manager's development gate enables them (IsDevOnlyProviderType).
+// Never mutated.
+var devOnlyProviderTypes = map[ProviderType]struct{}{
+	ProviderTypeCloudHypervisor: {},
+}
+
+// IsDevOnlyProviderType reports whether t is a development-only provider
+// type, which a release build of the manager never admits or runs.
+func IsDevOnlyProviderType(t ProviderType) bool {
+	_, ok := devOnlyProviderTypes[t]
+	return ok
+}
 
 // Provider deployment topologies (ProviderSpec.Topology). A string enum rather
 // than a bool, so that further modes can be added as enum values.
@@ -312,8 +335,9 @@ type ProviderSpec struct {
 	//     pool's Host CRs into a Secret mounted into the provider pod; the
 	//     provider reads that mounted file, never the Kubernetes API.
 	// Only meaningful for hypervisors with no native cluster manager: the
-	// validating webhook accepts "cluster" for type libvirt only and rejects it
-	// for the other types. An empty value is defaulted to "single".
+	// validating webhook accepts "cluster" for types libvirt and cloudhypervisor
+	// (development-only) and rejects it for the other types; cloudhypervisor
+	// requires "cluster". An empty value is defaulted to "single".
 	//
 	// Topology is IMMUTABLE once set: VMs record where they
 	// run (status.placement) under one topology, and every per-VM call is routed
