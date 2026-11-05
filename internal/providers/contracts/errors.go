@@ -58,7 +58,151 @@ const (
 	// like ErrorTypeHostUnavailable it says nothing about the provider's
 	// health: the provider answered.
 	ErrorTypeInProgress ErrorType = "InProgress"
+	// ErrorTypeNotPerformed indicates that an asynchronous task is over and
+	// definitely did not perform its operation: the provider reported the
+	// typed outcome TaskOutcomeRetired (it provably never started and never
+	// will) or TaskOutcomeCancelled (cancelled before any irreversible step,
+	// its compensations done) (ADR-0016 A7). It is never a success: a Delete
+	// that was not performed must never release a finalizer. It is not
+	// retryable as such (polling the task again changes nothing); the caller
+	// decides whether to send the operation again. It never comes from a
+	// transport error, and never from UnknownToAgentReason, which proves
+	// nothing about the task.
+	ErrorTypeNotPerformed ErrorType = "NotPerformed"
 )
+
+// Part A ErrorInfo reasons (ADR-0016). Each is a google.rpc.ErrorInfo reason
+// in ErrorInfoDomain that a provider attaches to a gRPC status for the answer
+// of a per-host agent. Every one of them is breaker-exempt: the provider
+// answered, and the fact is about one host, one VM or one operation, never
+// about the Provider's health, so the manager keeps it out of the per-Provider
+// circuit breaker whatever the status code (as it does HostUnavailableReason).
+// Each constant's comment says whether the reason is a definite not-performed:
+// the request was refused before it was accepted, so nothing it asks for was
+// or will be done by it. A reason that is not a definite not-performed proves
+// nothing about what the operation did, and must never be read as "nothing
+// was done".
+const (
+	// UnknownToAgentReason (codes.NotFound): the host has no record of the
+	// task or operation asked about, for example a task reference that it
+	// never issued. Breaker-exempt. NOT a definite not-performed: the absence
+	// of a record proves nothing about the operation, so a task answered with
+	// it is never done and never "not performed".
+	UnknownToAgentReason = "UNKNOWN_TO_AGENT"
+
+	// VMBusyReason: the host runs another, non-terminal operation for the
+	// same VM and refused this one. Retryable later with the same attempt.
+	// Breaker-exempt. NOT a definite not-performed: the refused request may
+	// be a re-delivery of an attempt that is already accepted.
+	VMBusyReason = "VM_BUSY"
+
+	// ProviderMismatchReason: the request came from a Provider other than the
+	// one the host is enrolled with, and was refused before any other check.
+	// Breaker-exempt. A definite not-performed of this request.
+	ProviderMismatchReason = "PROVIDER_MISMATCH"
+
+	// UnattestedReason: the host's agent has not yet proved the continuity of
+	// its store and refuses every mutation until it has. Breaker-exempt. NOT
+	// a definite not-performed: the agent cannot yet tell what an earlier
+	// delivery of the same attempt did.
+	UnattestedReason = "UNATTESTED"
+
+	// AgentLostReason: the host's agent lost or cannot trust its store and
+	// refuses mutations until it is re-enrolled. Breaker-exempt. NOT a
+	// definite not-performed: what earlier operations did is unknown.
+	AgentLostReason = "AGENT_LOST"
+
+	// DigestMismatchReason: the request bytes the host received do not match
+	// the digest the manager authorised, and the request was refused.
+	// Breaker-exempt. A definite not-performed of this request.
+	DigestMismatchReason = "DIGEST_MISMATCH"
+
+	// CancelRefusedReason: a cancellation was refused because the operation
+	// it names has passed an irreversible step (or its outcome is unknown);
+	// the operation goes on. Breaker-exempt. A definite not-performed of the
+	// cancellation only: it says nothing about the operation it names, which
+	// is NOT cancelled. IsDefiniteNotPerformedReason reports it false, so it
+	// is never taken for a not-performed of that operation.
+	CancelRefusedReason = "CANCEL_REFUSED"
+
+	// DeadlineExceededNotPerformedReason: the host refused to accept the
+	// operation because its acceptance deadline had passed; it never runs.
+	// Breaker-exempt whatever the code (also on codes.DeadlineExceeded). A
+	// definite not-performed. A plain DeadlineExceeded without this reason is
+	// never one.
+	DeadlineExceededNotPerformedReason = "DEADLINE_EXCEEDED_NOT_PERFORMED"
+)
+
+// PartAReasons returns every Part A ErrorInfo reason, in a stable order. The
+// manager keeps a status carrying any of them out of its circuit breaker.
+func PartAReasons() []string {
+	return []string{
+		UnknownToAgentReason,
+		VMBusyReason,
+		ProviderMismatchReason,
+		UnattestedReason,
+		AgentLostReason,
+		DigestMismatchReason,
+		CancelRefusedReason,
+		DeadlineExceededNotPerformedReason,
+	}
+}
+
+// IsDefiniteNotPerformedReason reports whether reason is a Part A reason
+// that proves the refused request was not performed (see each reason's
+// comment) and that names the request's own operation: ProviderMismatchReason,
+// DigestMismatchReason and DeadlineExceededNotPerformedReason. It is false for
+// every other reason: UnknownToAgentReason, and CancelRefusedReason (whose
+// not-performed is the cancellation's, not the operation's).
+func IsDefiniteNotPerformedReason(reason string) bool {
+	switch reason {
+	case ProviderMismatchReason, DigestMismatchReason, DeadlineExceededNotPerformedReason:
+		return true
+	}
+	return false
+}
+
+// HasPartAReason reports whether err carries a gRPC status with a
+// google.rpc.ErrorInfo of a Part A reason (PartAReasons) in ErrorInfoDomain.
+func HasPartAReason(err error) bool {
+	for _, r := range PartAReasons() {
+		if HasErrorInfoReason(err, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrUnknownToAgent marks (in an error's chain) a provider's NotFound
+// carrying UnknownToAgentReason. The transport client wraps it into the
+// NotFound it maps that answer to.
+var ErrUnknownToAgent = errors.New("the host has no record of the task")
+
+// IsUnknownToAgent reports whether err is a provider's UnknownToAgentReason
+// answer (a NotFound that says so), as opposed to a plain NotFound. It is
+// never a success and never a not-performed.
+func IsUnknownToAgent(err error) bool {
+	return IsNotFound(err) && errors.Is(err, ErrUnknownToAgent)
+}
+
+// IsNotPerformed reports whether err is, or wraps, an ErrorTypeNotPerformed
+// error: an asynchronous task that is over and definitely did not perform its
+// operation (TaskOutcomeRetired or TaskOutcomeCancelled).
+func IsNotPerformed(err error) bool {
+	var pe *ProviderError
+	return errors.As(err, &pe) && pe.Type == ErrorTypeNotPerformed
+}
+
+// NewNotPerformedError creates the non-retryable error of a task that was
+// definitely not performed (see ErrorTypeNotPerformed).
+func NewNotPerformedError(message string, cause error) *ProviderError {
+	return &ProviderError{
+		Type:      ErrorTypeNotPerformed,
+		Message:   message,
+		Cause:     cause,
+		Retryable: false,
+	}
+}
 
 // HostUnavailableReason is the google.rpc.ErrorInfo reason a clustered
 // provider attaches to a codes.Unavailable status when the unavailability is
