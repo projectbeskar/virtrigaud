@@ -168,7 +168,9 @@ source VM's disk for as long as the clone exists. A `VMClone` with
 `options.type: LinkedClone` on a libvirt Provider whose target is in another
 namespace is therefore refused before any provider call (`Failed`,
 `Ready=False` / `LinkedCloneCrossNamespace`); use a full clone. vSphere linked
-clones are not affected.
+clones are not affected. The development-only `cloudhypervisor` type (see
+[`clustered-provider-inventory.md`](clustered-provider-inventory.md#development-only-type-cloudhypervisor))
+is refused the same way.
 
 ### A clone carries the source's cloud-init seed
 
