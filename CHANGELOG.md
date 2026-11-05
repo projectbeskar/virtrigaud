@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-05 15:47] - Development-only cloudhypervisor Provider type behind a build-tag gate
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `ProviderTypeCloudHypervisor` (`cloudhypervisor`) in the `spec.type` enum, and `IsDevOnlyProviderType`. It is a development-only type: release builds refuse it, and no Cloud Hypervisor provider ships. `config/crd/bases/infra.virtrigaud.io_providers.yaml` regenerated.
+- `api/infra.virtrigaud.io/v1beta1/provider_webhook.go`: `cloudhypervisor` is allowed `topology: cluster` and requires it (a single-host Provider of the type is rejected on `spec.topology`). A `cloudhypervisor` Provider is rejected on `spec.type` ("not available in this build") unless the manager's development gate enables the type; with it, every create and update is admitted with an admission warning and a manager log line. An update that leaves `spec` unchanged is admitted without the gate, with a warning, so such a Provider can still be deleted. `ProviderCustomValidator` gains `EnabledDevProviderTypes`, and `SetupProviderWebhookWithManager` takes the enabled set.
+- `internal/devgate/`: the manager flag `--enable-dev-provider-types` (comma list; only `cloudhypervisor` is valid). The gate is compiled in only under the `virtrigaud_dev` build tag (`gate_dev.go` / `gate_release.go`). A build without the tag exits at startup when the flag is set ("the development gate is not compiled into this build"). No Makefile target, Dockerfile or CI workflow uses the tag, and a test checks that. No Helm value exposes the flag.
+- `cmd/manager/main.go`: parses the flag before connecting to the cluster, logs a warning when a type is enabled, and passes the enabled set to the Provider webhook and the Provider controller.
+- `internal/controller/provider_controller.go`: the runtime of a Provider of a development-only type the gate does not enable is never deployed or updated, even where the webhook is not served. The Provider shows `ProviderRuntimeReady=False` and `ProviderAvailable=False` with reason `DevProviderTypeNotEnabled`.
+- Tests: `provider_webhook_devgate_test.go` (rejected without the gate, admitted with a warning and a log line with it, `topology: single` rejected, metadata-only updates, type and topology immutability), `internal/devgate/*_test.go` (flag parsing, both build variants, no release build file names the tag), `cmd/manager/devgate_*_test.go` (startup refusal without the tag, startup with it), `internal/controller/provider_devgate_test.go`. Tagged tests: `go test -tags virtrigaud_dev ./internal/devgate/ ./cmd/manager/ ./api/... ./internal/controller/`.
+
+### Changed
+- `internal/controller/vmclone_controller.go`: a linked clone into another namespace through a `cloudhypervisor` Provider is refused, as for libvirt (`LinkedCloneCrossNamespace`). The refusal message names the provider type.
+- `internal/controller/network_attachment_blocks.go`: a `cloudhypervisor` NIC reads no `VMNetworkAttachment` block, so another hypervisor's portgroup, bridge or VLAN cannot become its settings.
+- `docs/adr/0007-clustered-orchestrator-provider.md`: the P4 cloud-hypervisor design (SSH + systemd supervision, synthesized inventory) is marked superseded by a per-host agent execution model (maintainer decision, 2026-11-05). The capability matrix row and the phasing entry are amended; the original text is kept, struck through.
+- `docs/clustered-provider-inventory.md`, `docs/cross-namespace-targets.md`: document the development-only type.
+
+### Why
+The clustered Cloud Hypervisor work needs a Provider type that the control plane knows, without making it usable in a release build. The build-tag gate keeps the type out of release builds, and the webhook and the controller both refuse it there.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-01 16:41] - Keep the VM finalizer until an asynchronous provider Delete task completes
 **Author:** @wrkode (William Rizzo)
 
