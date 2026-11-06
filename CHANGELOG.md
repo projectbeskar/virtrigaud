@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-06 17:45] - Manager-side operation grants (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/operation/kinds.go`: the `OperationKind` table (each kind to its RPC, request message type and fixed `PowerRequest.op`), `Rows`, `RowFor` and `KindFor`; a test pins it to the proto descriptors and the published table.
+- `internal/operation/grant.go`, `internal/operation/checks.go`: `MintOperationGrant` builds a version 1 `GRANT_KIND_OPERATION` `GrantBody` (counters from 1, 16-byte ids, 32-byte salt, `intent_digest = SHA-256(salt || request bytes)`, `expect_known` false, fields 20–29 unset, `not_after` 5 minutes by default and at most 1 hour), serialises it once and has a `Signer` sign the exact bytes; it refuses before signing what the verifier would refuse. `CheckMintRequest`, `NewRandomID`, `NewDigestSalt`, `IntentDigest`.
+- `internal/operation/verify.go`, `internal/operation/refusal.go`: a shared fail-closed `Verifier` (pinned anchors; chain of exactly a leaf and a path length 0 issuer; ECDSA P-256 only; signature over the exact body bytes; unknown fields refused in the envelope, grant, body, nested messages and the decoded request; `UNSPECIFIED` or unknown enums, `grant_version` other than 1, zero counters, placeholders 26/28/29, administrative fields, wrong installation/Provider/host/enrolment, wrong RPC or request type, wrong fixed `op`, inner envelope, digest mismatch and outer fields beside the envelope all refused). Refusals are typed (`Refusal`: reason `GRANT_UNAUTHENTICATED`, `GRANT_MISMATCH` or `IDENTITY_REQUIRED`, rule, `INVALID_ARGUMENT` flag) and never carry request bytes.
+- `internal/operation/signer.go`, `signer_dev.go`, `signer_release.go`: the `Signer` interface; `DevSigner`, a development stand-in compiled only with the `virtrigaud_dev` build tag (ECDSA P-256 anchor key and install id from a PEM key file, self-signed anchor stable per key, in-process issuer and one-hour leaf re-minted before expiry, authority generation 1). A release build has no signer: `SignerCompiled` is false and `LoadSigner` refuses any key file with `ErrNoSigner`.
+- `internal/providers/contracts/operation.go`: `OperationKind` (the seven lifecycle kinds), `OperationAttemptIdentity`, `OperationRequest`, `PreparedOperation` (formats with its bytes redacted), `OperationAnswer`, the `OperationSender` interface, `ErrOperationIdentityRequired` and `ErrOperationIdentityNotImplemented`.
+- `internal/transport/grpc/client_operation.go`: `NewOperationIdentityClient` (refused by a release build or with no signer), `BuildOperation` (serialises the same request the unsigned method sends, once) and `SendOperation` (fresh grant over the prepared bytes; only `operation_envelope` set on the outer request). In operation-identity mode the unsigned mutating methods refuse without sending. No controller builds such a client.
+- `cmd/manager/main.go`: `--dev-operation-signer-key-file` (development builds only): loads and validates the development signer at startup and logs a warning; a release build refuses to start when it is set. No controller uses the signer.
+- Tests: one verifier case per refusal rule (reason and rule asserted), chain-shape cases, fuzz tests that a mutated or arbitrary call is never accepted, minting refusals, signer load/restart/rotation/concurrency, the kind table against the descriptors, a gRPC round trip that the request bytes reach the Provider unchanged and pass the verifier, unsigned-call refusals, and release-build refusals in `internal/operation`, `internal/transport/grpc` and `cmd/manager`.
+- `docs/operation-grants-manager.md`: the manager-side behaviour, marked development-only.
+
+### Changed
+- `internal/providers/contracts/capabilities.go`, `internal/transport/grpc/client.go`: `contracts.Capabilities` gains `SupportsOperationIdentity`, `RequiresOperationIdentity`, `SupportsFencing` and `RequiresFencing`, read from `GetCapabilitiesResponse` fields 31–34. Unauthenticated hints; no controller reads them, and every built-in provider reports false.
+- `docs/operation-grants-wire-shape.md`, `docs/README.md`: point to the new page; the capability gates are now read into `contracts.Capabilities`.
+
+### Why
+Minting, sending and verifying operation grants (ADR-0016, Proposed) is built and tested first as a library and transport API behind the development build tag, with no controller change, so later work can use it against a test agent. Release builds and existing Providers behave exactly as before.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-06 12:15] - Operation-grant wire shape reserved in the provider contract (additive, not enforced)
 **Author:** @wrkode (William Rizzo)
 
