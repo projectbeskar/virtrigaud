@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -201,9 +202,10 @@ func (s staticIdentity) Sign(context.Context, []byte, time.Time) (Signature, err
 // counter, an identifier of the wrong length, an UNSPECIFIED or unknown kind,
 // and request bytes that do not decode as the kind's request type, carry
 // unknown fields or an envelope of their own, or disagree with the kind's
-// fixed field.
+// fixed field. A nil signer (or a typed nil pointer) is refused with
+// ErrNoSigner.
 func MintOperationGrant(ctx context.Context, s Signer, r MintRequest) (*providerv1.OperationGrant, error) {
-	if s == nil {
+	if isNilSigner(s) {
 		return nil, fmt.Errorf("mint operation grant: %w", ErrNoSigner)
 	}
 	body, err := buildOperationBody(s, r)
@@ -242,4 +244,18 @@ func DecodeRequest(kind providerv1.OperationKind, requestBytes []byte) (proto.Me
 		return nil, refusal
 	}
 	return m, nil
+}
+
+// isNilSigner reports whether s is nil, or a nil pointer, map, slice, func,
+// channel or interface wrapped in the Signer interface.
+func isNilSigner(s Signer) bool {
+	if s == nil {
+		return true
+	}
+	v := reflect.ValueOf(s)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
 }

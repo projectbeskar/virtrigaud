@@ -126,6 +126,11 @@ func TestMintOperationGrant_Refusals(t *testing.T) {
 		_, err := MintOperationGrant(context.Background(), nil, validMint(t, providerv1.OperationKind_OPERATION_KIND_POWER_ON))
 		assert.True(t, errors.Is(err, ErrNoSigner))
 	})
+	t.Run("typed nil signer", func(t *testing.T) {
+		var p *testPKI
+		_, err := MintOperationGrant(context.Background(), p, validMint(t, providerv1.OperationKind_OPERATION_KIND_POWER_ON))
+		assert.True(t, errors.Is(err, ErrNoSigner))
+	})
 	t.Run("valid request passes the check", func(t *testing.T) {
 		assert.NoError(t, CheckMintRequest(pki.installID, 1, validMint(t, providerv1.OperationKind_OPERATION_KIND_POWER_ON)))
 	})
