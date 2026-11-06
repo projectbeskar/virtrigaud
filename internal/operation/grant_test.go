@@ -150,3 +150,18 @@ func TestRandomIdentifiers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, s, SaltLen)
 }
+
+// TestDecodeRequest: a request decodes as its kind's type; an unknown kind,
+// another kind's fixed op and unknown fields are refused.
+func TestDecodeRequest(t *testing.T) {
+	b := mustMarshal(t, testRequest(providerv1.OperationKind_OPERATION_KIND_REBOOT))
+	m, err := DecodeRequest(providerv1.OperationKind_OPERATION_KIND_REBOOT, b)
+	require.NoError(t, err)
+	assert.True(t, proto.Equal(testRequest(providerv1.OperationKind_OPERATION_KIND_REBOOT), m))
+	_, err = DecodeRequest(providerv1.OperationKind_OPERATION_KIND_POWER_ON, b)
+	assert.Error(t, err)
+	_, err = DecodeRequest(99, b)
+	assert.Error(t, err)
+	_, err = DecodeRequest(providerv1.OperationKind_OPERATION_KIND_REBOOT, append(b, unknownField()...))
+	assert.Error(t, err)
+}

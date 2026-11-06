@@ -68,7 +68,11 @@ and a grant seen on the wire stays valid until its `not_after`.
    returned `PreparedOperation` before the first send. A routed request whose host is not
    the grant's host is refused.
 2. `SendOperation` mints a fresh grant over the prepared bytes and sends the envelope on
-   the kind's RPC, with **no other field of the outer request set**. A re-send of the same
+   the kind's RPC, with **no other field of the outer request set**. Before signing it
+   checks again that the bytes decode as the kind's request and that a routed request
+   targets the grant's host, because a prepared operation may have been stored and
+   reloaded since step 1. Whoever can write a stored prepared operation can therefore have
+   the manager sign that kind of request, so such a store is part of the signing boundary. A re-send of the same
    `PreparedOperation` sends the same bytes and `op_id` under a new grant.
 
 In that mode the unsigned mutating methods of `contracts.Provider` (`Create`, `Delete`,

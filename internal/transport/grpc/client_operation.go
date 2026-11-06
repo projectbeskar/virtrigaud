@@ -200,6 +200,19 @@ func (c *Client) SendOperation(ctx context.Context, p contracts.PreparedOperatio
 	if err != nil {
 		return contracts.OperationAnswer{}, fmt.Errorf("send operation: %w", err)
 	}
+	// Re-check what the prepared operation says before signing it: it may have
+	// been persisted and reloaded since BuildOperation. The bytes must decode
+	// as the kind's request, and a routed request must target the grant's
+	// host.
+	decoded, err := operation.DecodeRequest(spec.kind, p.RequestBytes)
+	if err != nil {
+		return contracts.OperationAnswer{}, fmt.Errorf("send %s operation: %w", p.Kind, err)
+	}
+	if host := requestTargetHost(decoded); host != "" && host != p.Identity.HostID {
+		return contracts.OperationAnswer{}, fmt.Errorf("send %s operation: the request targets host %q, the grant host %q",
+			p.Kind, host, p.Identity.HostID)
+	}
+	row, _ := operation.RowFor(spec.kind) // DecodeRequest refused a kind with no row
 	grant, err := operation.MintOperationGrant(ctx, c.opSigner, mintRequest(p, spec.kind, time.Now()))
 	if err != nil {
 		return contracts.OperationAnswer{}, fmt.Errorf("send %s operation: %w", p.Kind, err)
@@ -210,32 +223,36 @@ func (c *Client) SendOperation(ctx context.Context, p contracts.PreparedOperatio
 	ctx, cancel := context.WithTimeout(ctx, spec.timeout)
 	defer cancel()
 
+	// The RPC is the one the kind's table row names, so the call cannot go to
+	// another method than the grant's kind.
 	var task *providerv1.TaskRef
-	switch p.Kind {
-	case contracts.OperationKindCreate:
+	switch row.FullMethod {
+	case providerv1.Provider_Create_FullMethodName:
 		resp, err := c.client.Create(ctx, &providerv1.CreateRequest{OperationEnvelope: env})
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("create", err)
 		}
 		answer.ID, task = resp.GetId(), resp.GetTask()
-	case contracts.OperationKindDelete:
+	case providerv1.Provider_Delete_FullMethodName:
 		resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{OperationEnvelope: env})
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("delete", err)
 		}
 		task = resp.GetTask()
-	case contracts.OperationKindReconfigure:
+	case providerv1.Provider_Reconfigure_FullMethodName:
 		resp, err := c.client.Reconfigure(ctx, &providerv1.ReconfigureRequest{OperationEnvelope: env})
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("reconfigure", err)
 		}
 		answer.RestartRequired, answer.Honest, task = resp.GetRestartRequired(), resp.GetHonestResult(), resp.GetTask()
-	default: // the four Power kinds (specFor admitted p.Kind)
+	case providerv1.Provider_Power_FullMethodName:
 		resp, err := c.client.Power(ctx, &providerv1.PowerRequest{OperationEnvelope: env})
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("power", err)
 		}
 		task = resp.GetTask()
+	default:
+		return contracts.OperationAnswer{}, fmt.Errorf("send %s operation: %w", p.Kind, contracts.ErrOperationIdentityNotImplemented)
 	}
 	if task != nil {
 		answer.TaskRef = task.GetId()
@@ -276,6 +293,14 @@ func (c *Client) operationRequestMessage(req contracts.OperationRequest) (proto.
 		m.GracefulTimeoutSeconds = gracefulShutdownTimeoutSeconds
 	}
 	return m, vm.HostID, nil
+}
+
+// requestTargetHost is the target_host_id of a lifecycle request, or empty.
+func requestTargetHost(m proto.Message) string {
+	if r, ok := m.(interface{ GetTargetHostId() string }); ok {
+		return r.GetTargetHostId()
+	}
+	return ""
 }
 
 // mintRequest is the MintRequest of p for wire kind kind, issued at now.

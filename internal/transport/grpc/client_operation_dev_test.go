@@ -187,6 +187,12 @@ func TestSendOperation_Refusals(t *testing.T) {
 	_, err = cli.SendOperation(ctx, tampered)
 	assert.Error(t, err)
 
+	otherHost := p
+	otherHost.Identity = opTestIdentity()
+	otherHost.Identity.HostID = "host-b" // the bytes still target host-a
+	_, err = cli.SendOperation(ctx, otherHost)
+	assert.ErrorContains(t, err, "targets host")
+
 	wrongType := p
 	wrongType.Kind = contracts.OperationKindPowerOn // DeleteRequest bytes under a Power kind
 	_, err = cli.SendOperation(ctx, wrongType)

@@ -221,3 +221,19 @@ func MintOperationGrant(ctx context.Context, s Signer, r MintRequest) (*provider
 		SignerCertChain: sig.Chain,
 	}, nil
 }
+
+// DecodeRequest decodes requestBytes as the request type kind names and
+// applies the verifier's request rules (no unknown fields or enum values, no
+// envelope of its own, the kind's fixed field). The error never quotes the
+// request.
+func DecodeRequest(kind providerv1.OperationKind, requestBytes []byte) (proto.Message, error) {
+	row, ok := RowFor(kind)
+	if !ok {
+		return nil, mismatch(RuleUnknownEnum, "kind %d is not implemented", kind)
+	}
+	m, refusal := decodeRequest(row, requestBytes)
+	if refusal != nil {
+		return nil, refusal
+	}
+	return m, nil
+}
