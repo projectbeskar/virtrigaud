@@ -45,3 +45,47 @@ func TestWithReason(t *testing.T) {
 		t.Fatalf("ErrorInfo = %v", info)
 	}
 }
+
+// TestReasons_Literals pins every Part A and operation-grant reason to its
+// wire string and checks that no two reasons share a string: the strings are
+// part of the provider contract and must never change.
+func TestReasons_Literals(t *testing.T) {
+	cases := []struct{ got, want string }{
+		{ReasonUnknownToAgent, "UNKNOWN_TO_AGENT"},
+		{ReasonVMBusy, "VM_BUSY"},
+		{ReasonProviderMismatch, "PROVIDER_MISMATCH"},
+		{ReasonUnattested, "UNATTESTED"},
+		{ReasonAgentLost, "AGENT_LOST"},
+		{ReasonDigestMismatch, "DIGEST_MISMATCH"},
+		{ReasonCancelRefused, "CANCEL_REFUSED"},
+		{ReasonDeadlineExceededNotPerformed, "DEADLINE_EXCEEDED_NOT_PERFORMED"},
+		{ReasonGrantUnauthenticated, "GRANT_UNAUTHENTICATED"},
+		{ReasonGrantMismatch, "GRANT_MISMATCH"},
+		{ReasonNonceConsumed, "NONCE_CONSUMED"},
+		{ReasonRequestConsumed, "REQUEST_CONSUMED"},
+		{ReasonIdentityRequired, "IDENTITY_REQUIRED"},
+		{ReasonFencingRequired, "FENCING_REQUIRED"},
+		{ReasonStaleEpoch, "STALE_EPOCH"},
+		{ReasonStaleIssued, "STALE_ISSUED"},
+		{ReasonEpochNotActivated, "EPOCH_NOT_ACTIVATED"},
+		{ReasonJumpTooLarge, "JUMP_TOO_LARGE"},
+		{ReasonQuarantined, "QUARANTINED"},
+		{ReasonOpIDConflict, "OP_ID_CONFLICT"},
+		{ReasonBadNonce, "BAD_NONCE"},
+		{ReasonVMBindingStale, "VM_BINDING_STALE"},
+		{ReasonClockUncorroborated, "CLOCK_UNCORROBORATED"},
+	}
+	if len(cases) != 23 {
+		t.Fatalf("%d reasons, want 23 (8 Part A + 15 operation-grant)", len(cases))
+	}
+	seen := map[string]bool{}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("reason %q, want %q", c.got, c.want)
+		}
+		if seen[c.got] {
+			t.Errorf("reason %q is defined twice", c.got)
+		}
+		seen[c.got] = true
+	}
+}

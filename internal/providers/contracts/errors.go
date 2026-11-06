@@ -133,8 +133,87 @@ const (
 	DeadlineExceededNotPerformedReason = "DEADLINE_EXCEEDED_NOT_PERFORMED"
 )
 
-// PartAReasons returns every Part A ErrorInfo reason, in a stable order. The
-// manager keeps a status carrying any of them out of its circuit breaker.
+// Operation-grant ErrorInfo reasons (ADR-0016). Each is a google.rpc.ErrorInfo
+// reason in ErrorInfoDomain for the answer of a per-host agent that verifies
+// operation grants (see OperationEnvelope in provider.proto). No built-in
+// provider emits them yet. Like the Part A reasons, every one of them is
+// breaker-exempt, and each constant's comment says whether the reason is a
+// definite not-performed. A reason that is not one proves nothing about what
+// the operation did.
+const (
+	// GrantUnauthenticatedReason: the operation grant's signature, certificate
+	// chain, certificate validity or authority generation did not verify, and the
+	// request was refused. Breaker-exempt. A definite not-performed of this
+	// request.
+	GrantUnauthenticatedReason = "GRANT_UNAUTHENTICATED"
+
+	// GrantMismatchReason: the operation grant is authentic but does not fit
+	// this call (installation, Provider, host, enrolment, grant kind, operation
+	// kind, RPC, request type, grant version, or a field that the grant version
+	// does not define), and the request was refused. Breaker-exempt. A definite
+	// not-performed of this request.
+	GrantMismatchReason = "GRANT_MISMATCH"
+
+	// NonceConsumedReason: the grant's single-use nonce was already used, and this
+	// delivery was refused. Breaker-exempt. A definite not-performed of this
+	// delivery only; it says nothing about the earlier use of the nonce.
+	NonceConsumedReason = "NONCE_CONSUMED"
+
+	// RequestConsumedReason: the approved request that the grant executes was
+	// already executed under this enrolment, and this delivery was refused.
+	// Breaker-exempt. A definite not-performed of this delivery only; it says
+	// nothing about the earlier execution.
+	RequestConsumedReason = "REQUEST_CONSUMED"
+
+	// IdentityRequiredReason: the Provider or host requires an operation grant and
+	// the call carried none. Breaker-exempt. NOT a definite not-performed.
+	IdentityRequiredReason = "IDENTITY_REQUIRED"
+
+	// FencingRequiredReason: the Provider or host requires an operation grant
+	// issued under fencing. Breaker-exempt. NOT a definite not-performed.
+	FencingRequiredReason = "FENCING_REQUIRED"
+
+	// StaleEpochReason: the grant's epoch is older than the epoch the host has
+	// activated. Breaker-exempt. NOT a definite not-performed.
+	StaleEpochReason = "STALE_EPOCH"
+
+	// StaleIssuedReason: the grant was issued below the floor that the host has
+	// recorded for the Provider. Breaker-exempt. NOT a definite not-performed.
+	StaleIssuedReason = "STALE_ISSUED"
+
+	// EpochNotActivatedReason: the grant's epoch has not been activated on the
+	// host. Breaker-exempt. NOT a definite not-performed.
+	EpochNotActivatedReason = "EPOCH_NOT_ACTIVATED"
+
+	// JumpTooLargeReason: an activation would raise the host's epoch by more than
+	// its bound. Breaker-exempt. NOT a definite not-performed.
+	JumpTooLargeReason = "JUMP_TOO_LARGE"
+
+	// QuarantinedReason: the host is quarantined for this Provider and refuses
+	// mutations. Breaker-exempt. NOT a definite not-performed.
+	QuarantinedReason = "QUARANTINED"
+
+	// OpIDConflictReason: the host knows the grant's op_id with different identity
+	// fields. Breaker-exempt. NOT a definite not-performed.
+	OpIDConflictReason = "OP_ID_CONFLICT"
+
+	// BadNonceReason: the nonce is not one the host issued, or it has expired.
+	// Breaker-exempt. NOT a definite not-performed.
+	BadNonceReason = "BAD_NONCE"
+
+	// VMBindingStaleReason: the grant's binding is not the VM's current placement
+	// on the host. Breaker-exempt. NOT a definite not-performed.
+	VMBindingStaleReason = "VM_BINDING_STALE"
+
+	// ClockUncorroboratedReason: the host refused an attestation because it could
+	// not corroborate its clock. Breaker-exempt. NOT a definite not-performed.
+	ClockUncorroboratedReason = "CLOCK_UNCORROBORATED"
+)
+
+// PartAReasons returns every Part A ErrorInfo reason followed by every
+// operation-grant ErrorInfo reason, in a stable order (new reasons are only
+// appended). The manager keeps a status carrying any of them out of its
+// circuit breaker.
 func PartAReasons() []string {
 	return []string{
 		UnknownToAgentReason,
@@ -145,18 +224,38 @@ func PartAReasons() []string {
 		DigestMismatchReason,
 		CancelRefusedReason,
 		DeadlineExceededNotPerformedReason,
+		GrantUnauthenticatedReason,
+		GrantMismatchReason,
+		NonceConsumedReason,
+		RequestConsumedReason,
+		IdentityRequiredReason,
+		FencingRequiredReason,
+		StaleEpochReason,
+		StaleIssuedReason,
+		EpochNotActivatedReason,
+		JumpTooLargeReason,
+		QuarantinedReason,
+		OpIDConflictReason,
+		BadNonceReason,
+		VMBindingStaleReason,
+		ClockUncorroboratedReason,
 	}
 }
 
-// IsDefiniteNotPerformedReason reports whether reason is a Part A reason
-// that proves the refused request was not performed (see each reason's
-// comment) and that names the request's own operation: ProviderMismatchReason,
-// DigestMismatchReason and DeadlineExceededNotPerformedReason. It is false for
-// every other reason: UnknownToAgentReason, and CancelRefusedReason (whose
-// not-performed is the cancellation's, not the operation's).
+// IsDefiniteNotPerformedReason reports whether reason is a Part A or
+// operation-grant reason that proves the refused request was not performed
+// (see each reason's comment) and that names the request's own operation:
+// ProviderMismatchReason, DigestMismatchReason,
+// DeadlineExceededNotPerformedReason, GrantUnauthenticatedReason,
+// GrantMismatchReason, NonceConsumedReason and RequestConsumedReason (the
+// last two of this delivery only). It is false for every other reason:
+// UnknownToAgentReason, CancelRefusedReason (whose not-performed is the
+// cancellation's, not the operation's), and every other operation-grant
+// reason.
 func IsDefiniteNotPerformedReason(reason string) bool {
 	switch reason {
-	case ProviderMismatchReason, DigestMismatchReason, DeadlineExceededNotPerformedReason:
+	case ProviderMismatchReason, DigestMismatchReason, DeadlineExceededNotPerformedReason,
+		GrantUnauthenticatedReason, GrantMismatchReason, NonceConsumedReason, RequestConsumedReason:
 		return true
 	}
 	return false
