@@ -168,3 +168,9 @@ it. No controller reads them yet, and every bundled provider reports `false`.
   it is only checked to be at least 1, and a verifier refuses a configured minimum above 1
   until that binding exists.
 - No durable attempt state: nothing records an attempt before it is sent.
+- The outer-request rule is about decoded presence: an outer field encoded on the wire with
+  its default value (for example an empty string) is not seen. This is harmless because a
+  verifier's caller acts only on the decoded request the verifier returns.
+- The development signer's anchor certificate gets a fresh validity on each load and always
+  serial 1. Pinning still works (the subject and key are stable), but the certificate
+  bytes are not.
