@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -123,8 +124,13 @@ func NewDevSigner(anchorKey *ecdsa.PrivateKey, installID []byte, now func() time
 // LoadDevSignerKeyFile reads a development signer key file (EncodeDevSignerKey)
 // and returns its signer. The file must hold exactly one DevSignerKeyPEMType
 // block (PKCS#8 ECDSA P-256) and one DevSignerInstallIDPEMType block (16
-// bytes), and nothing else.
+// bytes), and nothing else. On Unix it must not be readable or writable by
+// group or others (mode&0o077 == 0); mount a Kubernetes Secret holding it
+// with defaultMode 0400.
 func LoadDevSignerKeyFile(path string) (*DevSigner, error) {
+	if err := checkKeyFileMode(path); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(path) // #nosec G304 -- an administrator-chosen development key file
 	if err != nil {
 		return nil, fmt.Errorf("read development signer key file: %w", err)
@@ -134,6 +140,24 @@ func LoadDevSignerKeyFile(path string) (*DevSigner, error) {
 		return nil, fmt.Errorf("development signer key file %s: %w", path, err)
 	}
 	return NewDevSigner(key, installID, nil)
+}
+
+// checkKeyFileMode refuses a key file whose permissions give group or others
+// any access. It follows symbolic links (Secret volumes use them). The check
+// is skipped on Windows, which has no such mode bits.
+func checkKeyFileMode(path string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat development signer key file: %w", err)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("development signer key file %s has mode %#o: group and others must have no access (use 0600 or 0400)",
+			path, perm)
+	}
+	return nil
 }
 
 // LoadSigner loads the development signer from the key file at path. With an

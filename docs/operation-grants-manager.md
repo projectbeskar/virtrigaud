@@ -141,7 +141,9 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 > signer.pem
   echo '-----END VIRTRIGAUD DEV INSTALL ID-----'; } >> signer.pem
 ```
 
-A development manager started with the flag loads the file, refuses a malformed one at
+The file must not be accessible to group or others (mode `0600` or `0400`); a Kubernetes
+Secret holding it is mounted with `defaultMode: 0400`. A development manager started with
+the flag loads the file, refuses a malformed one at
 startup (without quoting it), and logs a warning that it is not for production use. It does
 not use the signer for anything else yet.
 

@@ -27,6 +27,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -264,5 +265,28 @@ func TestDevSigner_LowS(t *testing.T) {
 		sig, err := s.Sign(context.Background(), []byte{byte(i)}, time.Now().Add(time.Minute))
 		require.NoError(t, err)
 		assert.True(t, isLowS(sig.Signature, elliptic.P256()))
+	}
+}
+
+// TestDevSigner_RefusesOpenKeyFileModes: a key file that group or others can
+// access is refused before it is read; 0600 and 0400 load.
+func TestDevSigner_RefusesOpenKeyFileModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix mode bits")
+	}
+	data, err := GenerateDevSignerKey()
+	require.NoError(t, err)
+	for mode, ok := range map[os.FileMode]bool{0o600: true, 0o400: true, 0o640: false, 0o644: false, 0o604: false, 0o660: false} {
+		t.Run(mode.String(), func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "signer.pem")
+			require.NoError(t, os.WriteFile(p, data, 0o600))
+			require.NoError(t, os.Chmod(p, mode))
+			_, err := LoadSigner(p)
+			if ok {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, "group and others must have no access")
+			}
+		})
 	}
 }
