@@ -160,4 +160,7 @@ it. No controller reads them yet, and every bundled provider reports `false`.
 - Every Provider answer, including a typed task outcome or a grant refusal reason, is the
   Provider's unsigned claim.
 - No fencing: the epoch fields carry identity only, with no ordering.
+- `authority_generation` is not yet bound to the generation the issuer certificate names;
+  it is only checked to be at least 1, and a verifier refuses a configured minimum above 1
+  until that binding exists.
 - No durable attempt state: nothing records an attempt before it is sent.

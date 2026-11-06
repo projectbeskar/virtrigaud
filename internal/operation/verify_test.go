@@ -330,7 +330,6 @@ func TestVerify_Refusals(t *testing.T) {
 		{name: "not_after before issued_at", edit: setBody(func(b *providerv1.GrantBody) { b.NotAfter = timestamppb.New(testEpoch.Add(-time.Second)) }),
 			reason: mm, rule: RuleMalformedField},
 		// Generation and validity.
-		{name: "generation below minimum", edit: func(c *call) {}, reason: un, rule: RuleAuthorityGeneration},
 		{name: "expired", edit: setBody(func(b *providerv1.GrantBody) {
 			b.IssuedAt = timestamppb.New(testEpoch.Add(-10 * time.Minute))
 			b.NotAfter = timestamppb.New(testEpoch)
@@ -399,15 +398,7 @@ func TestVerify_Refusals(t *testing.T) {
 			}
 			c := newCall(t, pki, kind)
 			tt.edit(c)
-			verifier := v
-			if tt.rule == RuleAuthorityGeneration {
-				var err error
-				verifier, err = NewVerifier(VerifierConfig{Anchors: []*x509.Certificate{pki.anchor}, InstallID: pki.installID,
-					ProviderUID: testProviderUID, HostID: testHostID, EnrolmentID: testEnrolment,
-					MinAuthorityGeneration: 2, Now: func() time.Time { return testEpoch }})
-				require.NoError(t, err)
-			}
-			got, err := verifier.Verify(c.method, c.outer(t, pki))
+			got, err := v.Verify(c.method, c.outer(t, pki))
 			require.Error(t, err)
 			assert.Nil(t, got)
 			r, ok := AsRefusal(err)
@@ -531,6 +522,10 @@ func TestNewVerifier_RefusesBadConfig(t *testing.T) {
 		ProviderUID: testProviderUID, HostID: testHostID, EnrolmentID: testEnrolment}
 	_, err := NewVerifier(good)
 	require.NoError(t, err)
+	good1 := good
+	good1.MinAuthorityGeneration = 1
+	_, err = NewVerifier(good1)
+	require.NoError(t, err)
 	for name, edit := range map[string]func(c *VerifierConfig){
 		"no anchors":         func(c *VerifierConfig) { c.Anchors = nil },
 		"anchor not a CA":    func(c *VerifierConfig) { c.Anchors = []*x509.Certificate{pki.leaf} },
@@ -539,6 +534,8 @@ func TestNewVerifier_RefusesBadConfig(t *testing.T) {
 		"short enrolment id": func(c *VerifierConfig) { c.EnrolmentID = nil },
 		"no provider uid":    func(c *VerifierConfig) { c.ProviderUID = "" },
 		"no host id":         func(c *VerifierConfig) { c.HostID = "" },
+		// authority_generation is not bound to the issuer certificate yet.
+		"min generation 2": func(c *VerifierConfig) { c.MinAuthorityGeneration = 2 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := good

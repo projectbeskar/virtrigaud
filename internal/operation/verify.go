@@ -38,6 +38,12 @@ import (
 // signer_cert_chain: the leaf and its path length 0 issuer.
 const chainLen = 2
 
+// maxEnforceableGeneration is the highest MinAuthorityGeneration a verifier
+// accepts. authority_generation is not yet bound to the generation the issuer
+// certificate names, so a higher floor would be a promise the verifier cannot
+// keep (a leaf from an older issuer could claim the current generation).
+const maxEnforceableGeneration = 1
+
 // DefaultMaxClockSkew is how far in the future issued_at may be by the
 // verifier's clock when VerifierConfig.MaxClockSkew is 0.
 const DefaultMaxClockSkew = 5 * time.Minute
@@ -57,7 +63,8 @@ type VerifierConfig struct {
 	// EnrolmentID is the expected 16-byte enrolment_id.
 	EnrolmentID []byte
 	// MinAuthorityGeneration is the lowest authority_generation accepted; 0
-	// means 1.
+	// means 1. Values above 1 are refused by NewVerifier until the generation
+	// is bound to the issuer certificate.
 	MinAuthorityGeneration uint64
 	// MaxClockSkew bounds how far in the future issued_at may be; 0 means
 	// DefaultMaxClockSkew.
@@ -113,6 +120,10 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 	if cfg.ProviderUID == "" || cfg.HostID == "" {
 		return nil, errors.New("new operation-grant verifier: provider uid and host id are required")
 	}
+	if cfg.MinAuthorityGeneration > maxEnforceableGeneration {
+		return nil, fmt.Errorf("new operation-grant verifier: a minimum authority generation above %d is not supported: "+
+			"authority_generation is not yet bound to the issuer certificate", maxEnforceableGeneration)
+	}
 	v := &Verifier{
 		anchors:       pool,
 		installID:     append([]byte(nil), cfg.InstallID...),
@@ -147,6 +158,10 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 // bytes). Signatures are accepted in low-S form only, so a signature has one
 // encoding. A caller acts only on Verified.Request, never on its own decoding
 // of the outer request.
+//
+// authority_generation is checked against the configured minimum only; it is
+// not yet bound to the generation the issuer certificate names, which is why
+// NewVerifier refuses a minimum above 1.
 //
 // The rules, in order:
 //
