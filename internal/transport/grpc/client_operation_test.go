@@ -256,7 +256,7 @@ func TestPreparedOperation_StringRedacts(t *testing.T) {
 	cli := newTestClientForVMOps(t, &opRecorderServer{}, "cloudhypervisor", "identity")
 	p, err := cli.BuildOperation(context.Background(), opTestIdentity(), opTestRequest(contracts.OperationKindCreate))
 	require.NoError(t, err)
-	for _, s := range []string{fmt.Sprint(p), fmt.Sprintf("%v", p), fmt.Sprintf("%+v", p), fmt.Sprintf("%#v", p), fmt.Sprintf("%s", p)} {
+	for _, s := range []string{fmt.Sprint(p), fmt.Sprintf("%v", p), fmt.Sprintf("%+v", p), fmt.Sprintf("%#v", p), p.String()} {
 		assert.NotContains(t, s, "op-secret")
 		assert.Contains(t, s, "redacted")
 	}

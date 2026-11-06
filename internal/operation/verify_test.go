@@ -221,10 +221,18 @@ func TestVerify_Refusals(t *testing.T) {
 	cases := []tc{
 		// Outer request (OQ-15 attachment rule).
 		{name: "no envelope", edit: func(c *call) {
-			c.outerEdit = func(m proto.Message) { m.(*providerv1.DeleteRequest).OperationEnvelope = nil }
+			c.outerEdit = func(m proto.Message) {
+				if r, ok := m.(*providerv1.DeleteRequest); ok {
+					r.OperationEnvelope = nil
+				}
+			}
 		}, reason: contracts.IdentityRequiredReason, rule: RuleEnvelopeMissing},
 		{name: "outer field beside envelope", edit: func(c *call) {
-			c.outerEdit = func(m proto.Message) { m.(*providerv1.DeleteRequest).Id = "other-vm" }
+			c.outerEdit = func(m proto.Message) {
+				if r, ok := m.(*providerv1.DeleteRequest); ok {
+					r.Id = "other-vm"
+				}
+			}
 		}, reason: mm, rule: RuleOuterFieldSet, badArg: true},
 		{name: "outer unknown field beside envelope", edit: func(c *call) {
 			c.outerEdit = func(m proto.Message) { m.ProtoReflect().SetUnknown(raw) }
@@ -254,9 +262,10 @@ func TestVerify_Refusals(t *testing.T) {
 		{name: "inner request unknown field", edit: func(c *call) { c.request = append(c.request, raw...) }, reason: mm, rule: RuleUnknownField},
 		{name: "inner request nested unknown field", kind: providerv1.OperationKind_OPERATION_KIND_DELETE,
 			edit: setRequest(func(m proto.Message) {
-				r := m.(*providerv1.DeleteRequest)
-				r.Owner = &providerv1.ObjectIdentity{Uid: "u"}
-				r.Owner.ProtoReflect().SetUnknown(raw)
+				if r, ok := m.(*providerv1.DeleteRequest); ok {
+					r.Owner = &providerv1.ObjectIdentity{Uid: "u"}
+					r.Owner.ProtoReflect().SetUnknown(raw)
+				}
 			}), reason: mm, rule: RuleUnknownField},
 		// Enums (B-1 rule 3).
 		{name: "grant_kind unspecified", edit: setBody(func(b *providerv1.GrantBody) { b.GrantKind = providerv1.GrantKind_GRANT_KIND_UNSPECIFIED }),
@@ -268,7 +277,11 @@ func TestVerify_Refusals(t *testing.T) {
 			reason: mm, rule: RuleUnspecifiedEnum},
 		{name: "kind unknown number", edit: setBody(func(b *providerv1.GrantBody) { b.Kind = 99 }), reason: mm, rule: RuleUnknownEnum},
 		{name: "inner request unknown enum", kind: providerv1.OperationKind_OPERATION_KIND_POWER_ON,
-			edit: setRequest(func(m proto.Message) { m.(*providerv1.PowerRequest).Op = 99 }), reason: mm, rule: RuleUnknownEnum},
+			edit: setRequest(func(m proto.Message) {
+				if r, ok := m.(*providerv1.PowerRequest); ok {
+					r.Op = 99
+				}
+			}), reason: mm, rule: RuleUnknownEnum},
 		// Version (B-1 rule 1).
 		{name: "grant_version 0", edit: setBody(func(b *providerv1.GrantBody) { b.GrantVersion = 0 }), reason: mm, rule: RuleGrantVersion},
 		{name: "grant_version 2", edit: setBody(func(b *providerv1.GrantBody) { b.GrantVersion = 2 }), reason: mm, rule: RuleGrantVersion},
@@ -323,16 +336,30 @@ func TestVerify_Refusals(t *testing.T) {
 		// B-2: kind bound to the RPC, the request type and the fixed field.
 		{name: "delete grant on Power", edit: func(c *call) { c.method = providerv1.Provider_Power_FullMethodName }, reason: mm, rule: RuleWrongRPC},
 		{name: "power-on grant for a reboot", kind: providerv1.OperationKind_OPERATION_KIND_POWER_ON,
-			edit:   setRequest(func(m proto.Message) { m.(*providerv1.PowerRequest).Op = providerv1.PowerOp_POWER_OP_REBOOT }),
+			edit: setRequest(func(m proto.Message) {
+				if r, ok := m.(*providerv1.PowerRequest); ok {
+					r.Op = providerv1.PowerOp_POWER_OP_REBOOT
+				}
+			}),
 			reason: mm, rule: RuleFixedField},
 		{name: "reboot grant with op unset", kind: providerv1.OperationKind_OPERATION_KIND_REBOOT,
-			edit:   setRequest(func(m proto.Message) { m.(*providerv1.PowerRequest).Op = providerv1.PowerOp_POWER_OP_UNSPECIFIED }),
+			edit: setRequest(func(m proto.Message) {
+				if r, ok := m.(*providerv1.PowerRequest); ok {
+					r.Op = providerv1.PowerOp_POWER_OP_UNSPECIFIED
+				}
+			}),
 			reason: mm, rule: RuleFixedField},
 		{name: "graceful shutdown grant for power off", kind: providerv1.OperationKind_OPERATION_KIND_SHUTDOWN_GRACEFUL,
-			edit:   setRequest(func(m proto.Message) { m.(*providerv1.PowerRequest).Op = providerv1.PowerOp_POWER_OP_OFF }),
+			edit: setRequest(func(m proto.Message) {
+				if r, ok := m.(*providerv1.PowerRequest); ok {
+					r.Op = providerv1.PowerOp_POWER_OP_OFF
+				}
+			}),
 			reason: mm, rule: RuleFixedField},
 		{name: "inner envelope", edit: setRequest(func(m proto.Message) {
-			m.(*providerv1.DeleteRequest).OperationEnvelope = &providerv1.OperationEnvelope{Request: []byte{1}}
+			if r, ok := m.(*providerv1.DeleteRequest); ok {
+				r.OperationEnvelope = &providerv1.OperationEnvelope{Request: []byte{1}}
+			}
 		}), reason: mm, rule: RuleInnerEnvelope},
 		{name: "request does not decode", edit: func(c *call) { c.request = []byte{0xFF, 0xFF, 0xFF} }, reason: mm, rule: RuleMalformedRequest},
 		// Intent digest over the exact bytes.
@@ -343,7 +370,7 @@ func TestVerify_Refusals(t *testing.T) {
 		{name: "request swapped after signing", edit: func(c *call) {
 			c.keepDigest = true
 			c.body.IntentDigest = IntentDigest(c.body.GetDigestSalt(), c.request)
-			r := testRequest(providerv1.OperationKind_OPERATION_KIND_DELETE).(*providerv1.DeleteRequest)
+			r := mustAs[*providerv1.DeleteRequest](t, testRequest(providerv1.OperationKind_OPERATION_KIND_DELETE))
 			r.Id = "another-vm"
 			b, err := proto.Marshal(r)
 			require.NoError(t, err)
@@ -446,7 +473,7 @@ func TestVerify_RefusalCarriesNoRequestBytes(t *testing.T) {
 	pki := validPKI(t)
 	c := newCall(t, pki, providerv1.OperationKind_OPERATION_KIND_CREATE)
 	row, _ := RowFor(c.kind)
-	m := row.NewRequest().(*providerv1.CreateRequest)
+	m := mustAs[*providerv1.CreateRequest](t, row.NewRequest())
 	require.NoError(t, proto.Unmarshal(c.request, m))
 	m.UserData = []byte("#cloud-config\npassword: s3cret-value")
 	b, err := proto.Marshal(m)

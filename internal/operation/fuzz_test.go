@@ -52,7 +52,7 @@ func FuzzVerify_MutatedGrant(f *testing.F) {
 		if flip == 0 {
 			return
 		}
-		g := proto.Clone(grant).(*providerv1.OperationGrant)
+		g := mustAs[*providerv1.OperationGrant](t, proto.Clone(grant))
 		req := append([]byte(nil), r.Request...)
 		var buf []byte
 		switch target % 5 {

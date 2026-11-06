@@ -124,9 +124,11 @@ func TestSendOperation_BytesForwardedUnchanged(t *testing.T) {
 				require.NoError(t, err)
 				got := srv.last(t, kindMethod(kind))
 				require.True(t, onlyEnvelopeSet(got), "%s: an outer field is set beside the envelope", kind)
-				env := got.(interface {
+				carrier, ok := got.(interface {
 					GetOperationEnvelope() *providerv1.OperationEnvelope
-				}).GetOperationEnvelope()
+				})
+				require.True(t, ok)
+				env := carrier.GetOperationEnvelope()
 				assert.True(t, bytes.Equal(p.RequestBytes, env.GetRequest()), "%s: the request bytes changed", kind)
 				verified, err := v.Verify(kindMethod(kind), got)
 				require.NoError(t, err, "%s", kind)

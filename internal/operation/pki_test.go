@@ -159,3 +159,13 @@ func bytesOf(b byte, n int) []byte {
 	}
 	return out
 }
+
+// mustAs asserts v's type, failing the test otherwise.
+func mustAs[T any](t testing.TB, v any) T {
+	t.Helper()
+	out, ok := v.(T)
+	if !ok {
+		t.Fatalf("got %T, want %T", v, out)
+	}
+	return out
+}

@@ -85,7 +85,7 @@ func TestDevSigner_LoadMintVerify(t *testing.T) {
 	require.NoError(t, err)
 	s, err := LoadSigner(writeKeyFile(t, data))
 	require.NoError(t, err)
-	ds := s.(*DevSigner)
+	ds := mustAs[*DevSigner](t, s)
 	assert.Equal(t, uint64(1), ds.AuthorityGeneration())
 	assert.Len(t, ds.InstallID(), IDLen)
 	now := time.Now()
