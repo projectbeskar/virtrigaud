@@ -120,3 +120,34 @@ func TestClient_GetCapabilities_OwnerRebind(t *testing.T) {
 		})
 	}
 }
+
+// TestClient_GetCapabilities_OperationIdentityGates verifies the four
+// ADR-0016 capability gates (31-34) round-trip each on its own, and are all
+// false from a provider that does not set them (every built-in provider).
+func TestClient_GetCapabilities_OperationIdentityGates(t *testing.T) {
+	for name, tc := range map[string]struct {
+		resp *providerv1.GetCapabilitiesResponse
+		want [4]bool
+	}{
+		"absent (every built-in provider)": {&providerv1.GetCapabilitiesResponse{}, [4]bool{}},
+		"supports_operation_identity":      {&providerv1.GetCapabilitiesResponse{SupportsOperationIdentity: true}, [4]bool{true, false, false, false}},
+		"requires_operation_identity":      {&providerv1.GetCapabilitiesResponse{RequiresOperationIdentity: true}, [4]bool{false, true, false, false}},
+		"supports_fencing":                 {&providerv1.GetCapabilitiesResponse{SupportsFencing: true}, [4]bool{false, false, true, false}},
+		"requires_fencing":                 {&providerv1.GetCapabilitiesResponse{RequiresFencing: true}, [4]bool{false, false, false, true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dialer, cleanup := startBufconnServer(t, &fakeProviderServer{
+				GetCapabilitiesFn: func(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+					return tc.resp, nil
+				},
+			})
+			defer cleanup()
+			cli := newTestClient(t, dialer, "test-caps-operation-identity")
+
+			caps, err := cli.GetCapabilities(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, [4]bool{caps.SupportsOperationIdentity, caps.RequiresOperationIdentity,
+				caps.SupportsFencing, caps.RequiresFencing})
+		})
+	}
+}

@@ -722,6 +722,14 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		// ADR-0007 Addendum B: false from single-host and thin-client
 		// providers and from a clustered provider that predates it.
 		SupportsRoutedImport: resp.GetSupportsRoutedImport(),
+		// ADR-0016 capability gates 31-34: unauthenticated hints, false from
+		// every built-in provider and from a provider that predates them. No
+		// controller reads them yet; they never lower the protection a
+		// Provider's type requires.
+		SupportsOperationIdentity: resp.GetSupportsOperationIdentity(),
+		RequiresOperationIdentity: resp.GetRequiresOperationIdentity(),
+		SupportsFencing:           resp.GetSupportsFencing(),
+		RequiresFencing:           resp.GetRequiresFencing(),
 	}, nil
 }
 

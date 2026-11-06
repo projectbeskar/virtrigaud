@@ -156,6 +156,27 @@ type Capabilities struct {
 	// migration target only when it is reported; false from single-host and
 	// thin-client providers and from a clustered provider that predates it.
 	SupportsRoutedImport bool
+	// SupportsOperationIdentity mirrors
+	// GetCapabilitiesResponse.supports_operation_identity: the Provider accepts
+	// an operation_envelope and forwards it to a per-host agent that verifies
+	// the grant (ADR-0016). The answer is unauthenticated: it is a hint that
+	// must match what the Provider's type requires, and it never lowers the
+	// protection the manager requires. No built-in provider reports it, and no
+	// controller reads it yet.
+	SupportsOperationIdentity bool
+	// RequiresOperationIdentity mirrors
+	// GetCapabilitiesResponse.requires_operation_identity: the Provider refuses
+	// a mutating call that carries no valid grant. Unauthenticated, like
+	// SupportsOperationIdentity; no built-in provider reports it.
+	RequiresOperationIdentity bool
+	// SupportsFencing mirrors GetCapabilitiesResponse.supports_fencing: the
+	// Provider's agents also enforce host-scoped fencing. Unauthenticated; no
+	// built-in provider reports it, and the manager implements no fencing.
+	SupportsFencing bool
+	// RequiresFencing mirrors GetCapabilitiesResponse.requires_fencing: the
+	// Provider refuses a grant not issued under fencing. Unauthenticated; no
+	// built-in provider reports it.
+	RequiresFencing bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the
