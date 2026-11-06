@@ -101,13 +101,18 @@ func sampleEnvelope(t *testing.T) *OperationEnvelope {
 	}
 }
 
-func roundTrip(t *testing.T, m proto.Message) proto.Message {
+// roundTrip marshals m, unmarshals the bytes into a new message of the same
+// type, checks that the two are equal and returns the new message.
+func roundTrip[M proto.Message](t *testing.T, m M) M {
 	t.Helper()
 	b, err := proto.Marshal(m)
 	if err != nil {
 		t.Fatalf("marshal %T: %v", m, err)
 	}
-	out := m.ProtoReflect().New().Interface()
+	out, ok := m.ProtoReflect().New().Interface().(M)
+	if !ok {
+		t.Fatalf("new message of %T has another type", m)
+	}
 	if err := proto.Unmarshal(b, out); err != nil {
 		t.Fatalf("unmarshal %T: %v", m, err)
 	}
@@ -183,11 +188,11 @@ func TestOperationIdentity_RequestsCarryEnvelope(t *testing.T) {
 			if empty.GetOperationEnvelope() != nil {
 				t.Fatalf("GetOperationEnvelope() = %v on an unset request, want nil", empty.GetOperationEnvelope())
 			}
-			if out := roundTrip(t, empty).(envelopeCarrier); out.GetOperationEnvelope() != nil {
+			if out := roundTrip(t, empty); out.GetOperationEnvelope() != nil {
 				t.Fatalf("GetOperationEnvelope() = %v after round trip of an unset request, want nil", out.GetOperationEnvelope())
 			}
 			env := sampleEnvelope(t)
-			out := roundTrip(t, rq.make(env)).(envelopeCarrier)
+			out := roundTrip(t, rq.make(env))
 			got := out.GetOperationEnvelope()
 			if got == nil {
 				t.Fatal("GetOperationEnvelope() = nil after round trip, want the envelope")
@@ -213,7 +218,7 @@ func TestOperationIdentity_OpaqueBytesSurvive(t *testing.T) {
 		Request: notAMessage,
 		Grant:   &OperationGrant{Body: notAMessage},
 	}}
-	out := roundTrip(t, req).(*PowerRequest)
+	out := roundTrip(t, req)
 	if !bytes.Equal(out.GetOperationEnvelope().GetRequest(), notAMessage) {
 		t.Errorf("envelope request changed: %x", out.GetOperationEnvelope().GetRequest())
 	}
