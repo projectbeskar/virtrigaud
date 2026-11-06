@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -85,6 +86,13 @@ type Client struct {
 	// the gauge measures "tasks THIS instance is tracking", not "tasks
 	// the provider thinks are in-flight").
 	inflightTasks map[string]struct{}
+
+	// opSigner is set only on a client built by NewOperationIdentityClient
+	// (development builds only): the Provider requires operation identity,
+	// every mutating call goes through BuildOperation and SendOperation, and
+	// the unsigned mutating methods refuse (refuseUnsignedCall). nil for every
+	// other client, whose behaviour it does not change.
+	opSigner operation.Signer
 }
 
 // NewClient creates a new gRPC provider client.
@@ -722,6 +730,14 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		// ADR-0007 Addendum B: false from single-host and thin-client
 		// providers and from a clustered provider that predates it.
 		SupportsRoutedImport: resp.GetSupportsRoutedImport(),
+		// ADR-0016 capability gates 31-34: unauthenticated hints, false from
+		// every built-in provider and from a provider that predates them. No
+		// controller reads them yet; they never lower the protection a
+		// Provider's type requires.
+		SupportsOperationIdentity: resp.GetSupportsOperationIdentity(),
+		RequiresOperationIdentity: resp.GetRequiresOperationIdentity(),
+		SupportsFencing:           resp.GetSupportsFencing(),
+		RequiresFencing:           resp.GetRequiresFencing(),
 	}, nil
 }
 
@@ -731,6 +747,9 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 // contracts.Provider), mirroring GetCapabilities, so providers that do not
 // support cloning are unaffected.
 func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
+	if refusal := c.refuseUnsignedCall("clone", false); refusal != nil {
+		return contracts.CloneResponse{}, refusal
+	}
 	// Clone can be a long-running provider operation; use the same generous
 	// timeout as Create. The returned TaskRef lets the caller poll for
 	// completion regardless.
@@ -778,6 +797,9 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 // provider reports a TaskRef the caller polls it via IsTaskComplete; an empty
 // TaskRef means the operation completed synchronously.
 func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
+	if refusal := c.refuseUnsignedCall("image prepare", false); refusal != nil {
+		return contracts.ImagePrepareResponse{}, refusal
+	}
 	if err := validateImagePrepareIdentity(req); err != nil {
 		return contracts.ImagePrepareResponse{}, err
 	}
@@ -826,6 +848,9 @@ func (c *Client) PrepareImage(ctx context.Context, req contracts.ImagePrepareReq
 // Records virtrigaud_vm_operations_total{operation="Create",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
 func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (result contracts.CreateResponse, retErr error) {
+	if refusal := c.refuseUnsignedCall("create", true); refusal != nil {
+		return contracts.CreateResponse{}, refusal
+	}
 	defer c.recordVMOp(metrics.OpCreate, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -865,6 +890,9 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (resul
 // Records virtrigaud_vm_operations_total{operation="Delete",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
 func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string, retErr error) {
+	if refusal := c.refuseUnsignedCall("delete", true); refusal != nil {
+		return "", refusal
+	}
 	defer c.recordVMOp(metrics.OpDelete, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -895,6 +923,9 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string
 // Records virtrigaud_vm_operations_total{operation="Power",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
 func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.PowerOp) (taskRef string, retErr error) {
+	if refusal := c.refuseUnsignedCall("power", true); refusal != nil {
+		return "", refusal
+	}
 	defer c.recordVMOp(metrics.OpPower, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -943,6 +974,9 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 // via deferred recordVMOp using the named retErr return value (G7.1 /
 // #124).
 func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired contracts.CreateRequest) (result contracts.ReconfigureResult, retErr error) {
+	if refusal := c.refuseUnsignedCall("reconfigure", true); refusal != nil {
+		return contracts.ReconfigureResult{}, refusal
+	}
 	defer c.recordVMOp(metrics.OpReconfigure, &retErr)
 
 	ctx, cancel := context.WithTimeout(ctx, contracts.ReconfigureCallTimeout)
@@ -1150,6 +1184,9 @@ func readTaskStatus(resp *providerv1.TaskStatusResponse) contracts.TaskStatus {
 
 // SnapshotCreate creates a VM snapshot
 func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreateRequest) (contracts.SnapshotCreateResponse, error) {
+	if refusal := c.refuseUnsignedCall("snapshot create", false); refusal != nil {
+		return contracts.SnapshotCreateResponse{}, refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -1185,6 +1222,9 @@ func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreat
 
 // SnapshotDelete deletes a VM snapshot
 func (c *Client) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snapshotID string) (taskRef string, err error) {
+	if refusal := c.refuseUnsignedCall("snapshot delete", false); refusal != nil {
+		return "", refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -1210,6 +1250,9 @@ func (c *Client) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snapsho
 
 // SnapshotRevert reverts a VM to a snapshot
 func (c *Client) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapshotID string) (taskRef string, err error) {
+	if refusal := c.refuseUnsignedCall("snapshot revert", false); refusal != nil {
+		return "", refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -1235,6 +1278,9 @@ func (c *Client) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapsho
 
 // ExportDisk exports a VM disk for migration
 func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
+	if refusal := c.refuseUnsignedCall("export disk", false); refusal != nil {
+		return contracts.ExportDiskResponse{}, refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // Long timeout for disk export
 	defer cancel()
 
@@ -1274,6 +1320,9 @@ func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest
 
 // ImportDisk imports a disk from an external source
 func (c *Client) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
+	if refusal := c.refuseUnsignedCall("import disk", false); refusal != nil {
+		return contracts.ImportDiskResponse{}, refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // Long timeout for disk import
 	defer cancel()
 
@@ -1470,6 +1519,9 @@ const transferOwnerCallTimeout = 2 * time.Minute
 // reporting neither supports_routed_adoption nor supports_owner_transfer)
 // answers Unimplemented, which maps to a NotSupported error.
 func (c *Client) TransferOwner(ctx context.Context, req contracts.TransferOwnerRequest) error {
+	if refusal := c.refuseUnsignedCall("transfer owner", false); refusal != nil {
+		return refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, transferOwnerCallTimeout)
 	defer cancel()
 
@@ -1496,6 +1548,9 @@ const stagedDiskDeleteCallTimeout = 2 * time.Minute
 // answers Unimplemented, which maps to a NotSupported error. An answer without
 // an outcome is an error: the caller must not assume the object is gone.
 func (c *Client) DeleteStagedDisk(ctx context.Context, req contracts.StagedDiskDeleteRequest) (contracts.StagedDiskDeleteOutcome, error) {
+	if refusal := c.refuseUnsignedCall("delete staged disk", false); refusal != nil {
+		return "", refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, stagedDiskDeleteCallTimeout)
 	defer cancel()
 
@@ -1540,6 +1595,9 @@ const landedDiskDeleteCallTimeout = 3 * time.Minute
 // Conflict marked contracts.ErrVMDiskInUse. An answer without an outcome is an
 // error: the caller must not assume the disk is gone.
 func (c *Client) DeleteLandedDisk(ctx context.Context, req contracts.LandedDiskDeleteRequest) (contracts.LandedDiskDeleteOutcome, error) {
+	if refusal := c.refuseUnsignedCall("delete landed disk", false); refusal != nil {
+		return "", refusal
+	}
 	ctx, cancel := context.WithTimeout(ctx, landedDiskDeleteCallTimeout)
 	defer cancel()
 

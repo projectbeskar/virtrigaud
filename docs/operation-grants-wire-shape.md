@@ -4,12 +4,14 @@ The provider contract ([`proto/provider/v1/provider.proto`](../proto/provider/v1
 defines how a manager can authorise one mutating call that a per-host agent behind a
 Provider executes: an **operation grant**. This page describes that shape.
 
-**It is shape only, and it is not enforced.** No bundled provider reads, checks,
-forwards or refuses an operation grant, the manager never sends one, and every
-capability gate below defaults to `false` and is `false` on every bundled provider
-(vSphere, libvirt single-host and clustered, Proxmox, mock). The messages, field
-numbers and reason strings are reserved now so that later work can use them without a
-breaking change to the contract.
+**It is not enforced.** No bundled provider reads, checks, forwards or refuses an
+operation grant, the manager never sends one, and every capability gate below defaults
+to `false` and is `false` on every bundled provider (vSphere, libvirt single-host and
+clustered, Proxmox, mock). The messages, field numbers and reason strings are reserved
+so that later work can use them without a breaking change to the contract. The
+manager-side code that mints, sends and verifies grants exists in development builds
+only and is used by no controller; see
+[`operation-grants-manager.md`](operation-grants-manager.md).
 
 ## Messages and enums
 
@@ -69,8 +71,11 @@ forwards `request` and `grant` byte for byte.
 
 ## Capability gates
 
-`GetCapabilitiesResponse` has four gates. All default to `false`, no bundled provider
-reports any of them, and the manager does not read them yet:
+`GetCapabilitiesResponse` has four gates. All default to `false`, and no bundled
+provider reports any of them. The manager's transport client reads them into
+`contracts.Capabilities` (`SupportsOperationIdentity`, `RequiresOperationIdentity`,
+`SupportsFencing`, `RequiresFencing`), but no controller acts on them yet. They are
+unauthenticated claims and never lower the protection a Provider's type requires:
 
 | Field | No. | Means when `true` |
 |---|---|---|
@@ -99,6 +104,6 @@ others).
 - The messages live in `provider.proto`. The contract's breaking-change check
   (`make proto-breaking`, buf category `FILE`) treats moving a message to another file
   as breaking, so they stay there.
-- `contracts.Capabilities` and the SDK's `sdk/provider/capabilities` have no field or
-  constant for the gates yet. A provider author leaves the four fields `false`: no
-  manager implements the protocol they advertise.
+- `contracts.Capabilities` carries the four gates; the SDK's `sdk/provider/capabilities`
+  has no constant for them. A provider author leaves the four fields `false`: no
+  release build of the manager implements the protocol they advertise.

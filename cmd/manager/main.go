@@ -44,6 +44,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/controller"
 	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -203,6 +204,12 @@ func main() {
 		"DEVELOPMENT ONLY. Comma-separated development-only provider types to admit and run (only "+
 			"'cloudhypervisor'). Empty (the default) enables none. Honoured only by a manager built with the "+
 			devgate.BuildTag+" build tag; a release build refuses to start when it is set.")
+	var devOperationSignerKeyFile string
+	flag.StringVar(&devOperationSignerKeyFile, operation.DevSignerKeyFileFlagName, "",
+		"DEVELOPMENT ONLY. Path to a development operation-grant signer key file (a PEM file holding an ECDSA "+
+			"P-256 private key and an install id). Empty (the default) loads none. Honoured only by a manager built "+
+			"with the "+devgate.BuildTag+" build tag; a release build refuses to start when it is set. No "+
+			"controller uses the signer yet.")
 	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
@@ -236,6 +243,20 @@ func main() {
 	if len(enabledDevProviderTypes) > 0 {
 		setupLog.Info("WARNING: development-only provider types are enabled; this manager is not for production use",
 			"types", devgate.Names(enabledDevProviderTypes))
+	}
+
+	// The development operation-grant signer, checked before anything else
+	// starts: a release build (no signer compiled in) refuses to start when
+	// the flag is set, and a development build refuses an unreadable or
+	// malformed key file. The signer is loaded only to fail fast; no
+	// controller sends signed operations yet. Key material is never logged.
+	devOperationSigner, err := operation.LoadSigner(devOperationSignerKeyFile)
+	if err != nil {
+		setupLog.Error(err, "invalid --"+operation.DevSignerKeyFileFlagName)
+		os.Exit(1)
+	}
+	if devOperationSigner != nil {
+		setupLog.Info("WARNING: a development operation-grant signer is loaded; this manager is not for production use")
 	}
 
 	// The client rate limits, checked before the manager connects to the
