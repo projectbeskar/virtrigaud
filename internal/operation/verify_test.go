@@ -219,7 +219,7 @@ func TestVerify_Refusals(t *testing.T) {
 		mm = contracts.GrantMismatchReason
 	)
 	cases := []tc{
-		// Outer request (OQ-15 attachment rule).
+		// Outer request: the envelope is the only field set.
 		{name: "no envelope", edit: func(c *call) {
 			c.outerEdit = func(m proto.Message) {
 				if r, ok := m.(*providerv1.DeleteRequest); ok {
@@ -249,7 +249,7 @@ func TestVerify_Refusals(t *testing.T) {
 			c.sigMutate = func(s []byte) []byte { s[len(s)-1] ^= 0xFF; return s }
 		}, reason: un, rule: RuleSignature},
 		{name: "signature empty", edit: func(c *call) { c.sigMutate = func([]byte) []byte { return nil } }, reason: un, rule: RuleSignature},
-		// Unknown fields everywhere on the envelope path (MD-21 rule 2).
+		// Unknown fields everywhere on the envelope path.
 		{name: "envelope unknown field", edit: func(c *call) { c.envExtra = raw }, reason: mm, rule: RuleUnknownField},
 		{name: "grant unknown field", edit: func(c *call) { c.grantExtra = raw }, reason: mm, rule: RuleUnknownField},
 		{name: "body unknown field", edit: func(c *call) { c.bodyExtra = raw }, reason: mm, rule: RuleUnknownField},
@@ -267,7 +267,7 @@ func TestVerify_Refusals(t *testing.T) {
 					r.Owner.ProtoReflect().SetUnknown(raw)
 				}
 			}), reason: mm, rule: RuleUnknownField},
-		// Enums (B-1 rule 3).
+		// Enums: UNSPECIFIED and unknown values.
 		{name: "grant_kind unspecified", edit: setBody(func(b *providerv1.GrantBody) { b.GrantKind = providerv1.GrantKind_GRANT_KIND_UNSPECIFIED }),
 			reason: mm, rule: RuleUnspecifiedEnum},
 		{name: "grant_kind unknown number", edit: setBody(func(b *providerv1.GrantBody) { b.GrantKind = 99 }), reason: mm, rule: RuleUnknownEnum},
@@ -282,10 +282,10 @@ func TestVerify_Refusals(t *testing.T) {
 					r.Op = 99
 				}
 			}), reason: mm, rule: RuleUnknownEnum},
-		// Version (B-1 rule 1).
+		// Grant version.
 		{name: "grant_version 0", edit: setBody(func(b *providerv1.GrantBody) { b.GrantVersion = 0 }), reason: mm, rule: RuleGrantVersion},
 		{name: "grant_version 2", edit: setBody(func(b *providerv1.GrantBody) { b.GrantVersion = 2 }), reason: mm, rule: RuleGrantVersion},
-		// Placeholders (B-1 rule 4 / S-0 rule 6).
+		// Fields set aside at version 1 (26, 28, 29).
 		{name: "eal_seq set", edit: setBody(func(b *providerv1.GrantBody) { b.EalSeq = 1 }), reason: mm, rule: RulePlaceholderSet},
 		{name: "reset_floor set", edit: setBody(func(b *providerv1.GrantBody) { b.ResetFloor = timestamppb.New(testEpoch) }),
 			reason: mm, rule: RulePlaceholderSet},
@@ -299,7 +299,7 @@ func TestVerify_Refusals(t *testing.T) {
 		{name: "single_use_nonce set", edit: setBody(func(b *providerv1.GrantBody) { b.SingleUseNonce = []byte{1} }), reason: mm, rule: RuleFieldNotForKind},
 		{name: "precondition set", edit: setBody(func(b *providerv1.GrantBody) { b.Precondition = &providerv1.GrantPrecondition{Seq: 1} }),
 			reason: mm, rule: RuleFieldNotForKind},
-		// Counters count from 1 (MD-21 rule 1).
+		// Counters count from 1.
 		{name: "authority_generation 0", edit: setBody(func(b *providerv1.GrantBody) { b.AuthorityGeneration = 0 }), reason: mm, rule: RuleCounterZero},
 		{name: "attempt 0", edit: setBody(func(b *providerv1.GrantBody) { b.Attempt = 0 }), reason: mm, rule: RuleCounterZero},
 		{name: "epoch counter 0", edit: setBody(func(b *providerv1.GrantBody) { b.Epoch.Counter = 0 }), reason: mm, rule: RuleCounterZero},
@@ -333,7 +333,7 @@ func TestVerify_Refusals(t *testing.T) {
 		{name: "other provider", edit: setBody(func(b *providerv1.GrantBody) { b.ProviderUid = "other" }), reason: mm, rule: RuleBinding},
 		{name: "other host", edit: setBody(func(b *providerv1.GrantBody) { b.HostId = "host-b" }), reason: mm, rule: RuleBinding},
 		{name: "other enrolment", edit: setBody(func(b *providerv1.GrantBody) { b.EnrolmentId = bytesOf(0xFF, IDLen) }), reason: mm, rule: RuleBinding},
-		// B-2: kind bound to the RPC, the request type and the fixed field.
+		// The kind is bound to the RPC, the request type and the fixed field.
 		{name: "delete grant on Power", edit: func(c *call) { c.method = providerv1.Provider_Power_FullMethodName }, reason: mm, rule: RuleWrongRPC},
 		{name: "power-on grant for a reboot", kind: providerv1.OperationKind_OPERATION_KIND_POWER_ON,
 			edit: setRequest(func(m proto.Message) {
