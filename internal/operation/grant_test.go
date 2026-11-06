@@ -106,6 +106,7 @@ func TestMintOperationGrant_Refusals(t *testing.T) {
 		},
 		"request unknown field": func(r *MintRequest) { r.Request = append(r.Request, unknownField()...) },
 		"request garbage":       func(r *MintRequest) { r.Request = []byte{0xFF, 0xFF} },
+		"request too large":     func(r *MintRequest) { r.Request = make([]byte, MaxRequestBytes+1) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := validMint(t, providerv1.OperationKind_OPERATION_KIND_POWER_ON)

@@ -139,6 +139,9 @@ func buildOperationBody(s Signer, r MintRequest) (*providerv1.GrantBody, error) 
 	if r.IssuedAt.IsZero() {
 		return nil, errors.New("grant issued_at is not set")
 	}
+	if len(r.Request) > MaxRequestBytes {
+		return nil, fmt.Errorf("request is larger than %d bytes", MaxRequestBytes)
+	}
 	id := r.Identity
 	body := &providerv1.GrantBody{
 		GrantVersion:        GrantVersion,
@@ -210,6 +213,9 @@ func MintOperationGrant(ctx context.Context, s Signer, r MintRequest) (*provider
 	bodyBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("mint operation grant: serialise body: %w", err)
+	}
+	if len(bodyBytes) > MaxGrantBodyBytes {
+		return nil, fmt.Errorf("mint operation grant: body is larger than %d bytes", MaxGrantBodyBytes)
 	}
 	sig, err := s.Sign(ctx, bodyBytes, body.GetNotAfter().AsTime())
 	if err != nil {

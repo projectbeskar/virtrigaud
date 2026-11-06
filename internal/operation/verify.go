@@ -192,6 +192,9 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 	if grant == nil {
 		return nil, unauthenticated(RuleGrantMissing, "the envelope carries no grant")
 	}
+	if refusal := checkSizes(env); refusal != nil {
+		return nil, refusal
+	}
 	now := v.now()
 	if refusal := v.authenticate(grant, now); refusal != nil {
 		return nil, refusal
@@ -237,6 +240,31 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 		return nil, mismatch(RuleIntentDigest, "intent_digest does not match the request")
 	}
 	return &Verified{Body: body, Kind: body.GetKind(), Request: req, RequestBytes: env.GetRequest()}, nil
+}
+
+// checkSizes applies the size caps before anything is parsed: the grant's
+// parts are refused as GRANT_UNAUTHENTICATED (they were not authenticated),
+// the request as GRANT_MISMATCH.
+func checkSizes(env *providerv1.OperationEnvelope) *Refusal {
+	g := env.GetGrant()
+	if len(g.GetBody()) > MaxGrantBodyBytes {
+		return unauthenticated(RuleSizeLimit, "the grant body is larger than %d bytes", MaxGrantBodyBytes)
+	}
+	if len(g.GetSignature()) > MaxSignatureBytes {
+		return unauthenticated(RuleSizeLimit, "the signature is larger than %d bytes", MaxSignatureBytes)
+	}
+	if len(g.GetSignerCertChain()) > chainLen {
+		return unauthenticated(RuleChain, "the chain has %d certificates, not %d", len(g.GetSignerCertChain()), chainLen)
+	}
+	for i, c := range g.GetSignerCertChain() {
+		if len(c) > MaxCertBytes {
+			return unauthenticated(RuleSizeLimit, "certificate %d is larger than %d bytes", i, MaxCertBytes)
+		}
+	}
+	if len(env.GetRequest()) > MaxRequestBytes {
+		return mismatch(RuleSizeLimit, "the request is larger than %d bytes", MaxRequestBytes)
+	}
+	return nil
 }
 
 // envelopeOf returns outer's operation_envelope after the outer-request

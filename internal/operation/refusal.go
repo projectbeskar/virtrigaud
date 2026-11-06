@@ -87,6 +87,9 @@ const (
 	RuleFixedField Rule = "fixed_field"
 	// RuleIntentDigest: intent_digest is not SHA-256(digest_salt || request).
 	RuleIntentDigest Rule = "intent_digest"
+	// RuleSizeLimit: the body, the signature, a certificate or the request
+	// is larger than the verifier parses.
+	RuleSizeLimit Rule = "size_limit"
 )
 
 // Refusal is a verifier's refusal of one call: the call is not performed.

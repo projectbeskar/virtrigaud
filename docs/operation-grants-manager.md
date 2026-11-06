@@ -92,6 +92,8 @@ the rule:
 |---|---|
 | No `operation_envelope` on the call | `IDENTITY_REQUIRED` |
 | Another field of the outer request set beside the envelope, or unknown fields on it | `GRANT_MISMATCH`, answered as `INVALID_ARGUMENT` |
+| A grant body over 64 KiB, a signature over 160 bytes or a certificate over 8 KiB (checked before anything is parsed) | `GRANT_UNAUTHENTICATED` |
+| A request over 4 MiB | `GRANT_MISMATCH` |
 | No grant; a chain that is not exactly a leaf and a path length 0 issuer chaining to a pinned anchor; a leaf without the grant-signing profile (below); an issuer without `keyCertSign`; a certificate that is not valid now; a key that is not ECDSA P-256; a signature that does not verify | `GRANT_UNAUTHENTICATED` |
 | `authority_generation` below the verifier's minimum; an expired grant, one issued in the future, or one valid for more than one hour | `GRANT_UNAUTHENTICATED` |
 | Unknown fields in the envelope, the grant, the body, any message nested in it, or the decoded request | `GRANT_MISMATCH` |

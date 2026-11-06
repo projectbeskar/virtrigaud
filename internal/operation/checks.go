@@ -40,6 +40,21 @@ const (
 	DigestLen = 32
 )
 
+// Size caps, checked before anything is parsed, so a refused call costs
+// bounded work.
+const (
+	// MaxGrantBodyBytes is the largest serialised GrantBody accepted.
+	MaxGrantBodyBytes = 64 << 10
+	// MaxCertBytes is the largest DER certificate accepted in the chain.
+	MaxCertBytes = 8 << 10
+	// MaxSignatureBytes is the largest signature accepted (a DER ECDSA P-256
+	// signature is at most 72 bytes).
+	MaxSignatureBytes = 160
+	// MaxRequestBytes is the largest serialised request accepted; it equals
+	// the default gRPC receive limit.
+	MaxRequestBytes = 4 << 20
+)
+
 // envelopeFieldName is the name of the operation_envelope field on every
 // mutating request message.
 const envelopeFieldName protoreflect.Name = "operation_envelope"

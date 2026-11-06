@@ -246,6 +246,14 @@ func TestVerify_Refusals(t *testing.T) {
 		{name: "chain of one", edit: func(c *call) { c.chain = [][]byte{pki.leaf.Raw} }, reason: un, rule: RuleChain},
 		{name: "chain of three", edit: func(c *call) { c.chain = [][]byte{pki.leaf.Raw, pki.issuer.Raw, pki.anchor.Raw} },
 			reason: un, rule: RuleChain},
+		{name: "body too large", edit: func(c *call) { c.bodyExtra = sizedUnknown(MaxGrantBodyBytes) }, reason: un, rule: RuleSizeLimit},
+		{name: "signature too large", edit: func(c *call) {
+			c.sigMutate = func([]byte) []byte { return make([]byte, MaxSignatureBytes+1) }
+		}, reason: un, rule: RuleSizeLimit},
+		{name: "certificate too large", edit: func(c *call) { c.chain = [][]byte{make([]byte, MaxCertBytes+1), pki.issuer.Raw} },
+			reason: un, rule: RuleSizeLimit},
+		{name: "request too large", edit: func(c *call) { c.request = append(c.request, sizedUnknown(MaxRequestBytes)...) },
+			reason: mm, rule: RuleSizeLimit},
 		{name: "chain garbage", edit: func(c *call) { c.chain = [][]byte{{1, 2, 3}, pki.issuer.Raw} }, reason: un, rule: RuleChain},
 		{name: "chain from another anchor", edit: func(c *call) { c.chain = [][]byte{pki.leaf.Raw, other.issuer.Raw} },
 			reason: un, rule: RuleChain},
@@ -573,4 +581,11 @@ func TestVerify_HighSIsAValidSignatureButRefused(t *testing.T) {
 	r, ok := AsRefusal(err)
 	require.True(t, ok, "%v", err)
 	assert.Equal(t, RuleSignature, r.Rule)
+}
+
+// sizedUnknown is an unknown length-delimited field (number 99) of at least n
+// bytes.
+func sizedUnknown(n int) []byte {
+	b := protowire.AppendTag(nil, 99, protowire.BytesType)
+	return protowire.AppendBytes(b, make([]byte, n))
 }
