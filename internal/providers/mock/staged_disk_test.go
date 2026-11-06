@@ -61,6 +61,11 @@ func TestDeleteLandedDisk_UnimplementedAndNotAdvertised(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, caps.GetSupportsLandedDiskDelete())
 	assert.False(t, caps.GetSupportsRoutedImport(), "the mock routes no import (ADR-0007 Addendum B)")
+	// The operation-grant gates are reserved wire shape only.
+	assert.False(t, caps.GetSupportsOperationIdentity(), "the mock verifies no operation grant")
+	assert.False(t, caps.GetRequiresOperationIdentity(), "the mock verifies no operation grant")
+	assert.False(t, caps.GetSupportsFencing(), "the mock verifies no operation grant")
+	assert.False(t, caps.GetRequiresFencing(), "the mock verifies no operation grant")
 
 	_, err = p.DeleteLandedDisk(context.Background(), &providerv1.DeleteLandedDiskRequest{
 		TargetVm: &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"},

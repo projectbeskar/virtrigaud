@@ -644,6 +644,17 @@ func TestClustered_GetCapabilities_HidesUnroutedPerVMCapabilities(t *testing.T) 
 	assert.False(t, single.SupportsRoutedImport, "a single-host provider never routes its import")
 	assert.False(t, caps.SupportsImageArtifactIdentity)
 	assert.True(t, caps.SupportsRoutedClone, "Clone is routed to the source's host (slice 3)")
+
+	// The operation-grant gates are reserved wire shape only: no built-in
+	// provider reports them, clustered or single-host.
+	assert.False(t, caps.GetSupportsOperationIdentity(), "the clustered provider verifies no operation grant")
+	assert.False(t, caps.GetRequiresOperationIdentity(), "the clustered provider verifies no operation grant")
+	assert.False(t, caps.GetSupportsFencing(), "the clustered provider verifies no operation grant")
+	assert.False(t, caps.GetRequiresFencing(), "the clustered provider verifies no operation grant")
+	assert.False(t, single.GetSupportsOperationIdentity(), "the single-host provider verifies no operation grant")
+	assert.False(t, single.GetRequiresOperationIdentity(), "the single-host provider verifies no operation grant")
+	assert.False(t, single.GetSupportsFencing(), "the single-host provider verifies no operation grant")
+	assert.False(t, single.GetRequiresFencing(), "the single-host provider verifies no operation grant")
 }
 
 // TestSingleHost_GetCapabilities_Unchanged pins that slice 3 changes only the

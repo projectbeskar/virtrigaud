@@ -140,6 +140,13 @@ func wireRouting(t *testing.T, srv *routingRecorderServer) map[string][2]string 
 		"SnapshotDelete", "SnapshotRevert", "Clone", "ExportDisk", "GetDiskInfo"} {
 		m := srv.got(name)
 		require.NotNil(t, m, "%s never reached the server", name)
+		// The manager never sets the (reserved, not yet enforced) operation
+		// envelope on a mutating call.
+		if env, ok := m.(interface {
+			GetOperationEnvelope() *providerv1.OperationEnvelope
+		}); ok {
+			require.Nil(t, env.GetOperationEnvelope(), "%s carries an operation_envelope", name)
+		}
 		var id, host string
 		switch r := m.(type) {
 		case *providerv1.DeleteRequest:
