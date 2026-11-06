@@ -151,6 +151,11 @@ func (p *testPKI) Sign(_ context.Context, body []byte, _ time.Time) (Signature, 
 	if err != nil {
 		return Signature{}, err
 	}
+	if pub, ok := p.leafKey.Public().(*ecdsa.PublicKey); ok {
+		if sig, err = normalizeLowS(sig, pub.Curve); err != nil {
+			return Signature{}, err
+		}
+	}
 	chain := p.chain
 	if chain == nil {
 		chain = [][]byte{p.leaf.Raw, p.issuer.Raw}

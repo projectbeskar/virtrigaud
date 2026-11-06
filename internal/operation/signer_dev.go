@@ -249,7 +249,7 @@ func (s *DevSigner) InstallID() []byte { return append([]byte(nil), s.installID.
 // AuthorityGeneration implements Signer: always 1 (a stand-in).
 func (s *DevSigner) AuthorityGeneration() uint64 { return devAuthorityGeneration }
 
-// Sign implements Signer: ECDSA P-256 over SHA-256 of body (ASN.1 DER), with
+// Sign implements Signer: ECDSA P-256 over SHA-256 of body (ASN.1 DER, low-S), with
 // the chain leaf, issuer. It re-mints the leaf (and the issuer) when the
 // current one would expire before notAfter.
 func (s *DevSigner) Sign(ctx context.Context, body []byte, notAfter time.Time) (Signature, error) {
@@ -268,6 +268,10 @@ func (s *DevSigner) Sign(ctx context.Context, body []byte, notAfter time.Time) (
 	digest := sha256.Sum256(body)
 	sig, err := ecdsa.SignASN1(rand.Reader, s.leafKey, digest[:])
 	if err != nil {
+		return Signature{}, fmt.Errorf("development signer: sign: %w", err)
+	}
+	// Verifiers accept the low-S form only.
+	if sig, err = normalizeLowS(sig, s.leafKey.Curve); err != nil {
 		return Signature{}, fmt.Errorf("development signer: sign: %w", err)
 	}
 	return Signature{Signature: sig, Chain: [][]byte{s.leafCert.Raw, s.issuerCert.Raw}}, nil

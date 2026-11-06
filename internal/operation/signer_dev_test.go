@@ -252,3 +252,17 @@ func TestDevSigner_LeafProfile(t *testing.T) {
 	assert.True(t, issuer.IsCA && issuer.MaxPathLenZero && issuer.MaxPathLen == 0)
 	assert.Equal(t, x509.KeyUsageCertSign, issuer.KeyUsage)
 }
+
+// TestDevSigner_LowS: every signature the development signer emits is in
+// low-S form.
+func TestDevSigner_LowS(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	s, err := NewDevSigner(key, bytesOf(7, IDLen), nil)
+	require.NoError(t, err)
+	for i := 0; i < 64; i++ {
+		sig, err := s.Sign(context.Background(), []byte{byte(i)}, time.Now().Add(time.Minute))
+		require.NoError(t, err)
+		assert.True(t, isLowS(sig.Signature, elliptic.P256()))
+	}
+}

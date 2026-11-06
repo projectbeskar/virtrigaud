@@ -18,9 +18,12 @@ package operation
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
+	"math/big"
 	"testing"
 	"time"
 
@@ -248,6 +251,16 @@ func TestVerify_Refusals(t *testing.T) {
 			reason: un, rule: RuleChain},
 		{name: "signature flipped", edit: func(c *call) {
 			c.sigMutate = func(s []byte) []byte { s[len(s)-1] ^= 0xFF; return s }
+		}, reason: un, rule: RuleSignature},
+		{name: "signature high-S (r, n-s)", edit: func(c *call) {
+			c.sigMutate = func(sig []byte) []byte {
+				parsed, err := parseECDSASignature(sig)
+				require.NoError(t, err)
+				parsed.S = new(big.Int).Sub(elliptic.P256().Params().N, parsed.S)
+				out, err := asn1.Marshal(parsed)
+				require.NoError(t, err)
+				return out
+			}
 		}, reason: un, rule: RuleSignature},
 		{name: "signature empty", edit: func(c *call) { c.sigMutate = func([]byte) []byte { return nil } }, reason: un, rule: RuleSignature},
 		// Unknown fields everywhere on the envelope path.
@@ -534,4 +547,33 @@ func TestNewVerifier_RefusesBadConfig(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+// TestVerify_HighSIsAValidSignatureButRefused: (r, n-s) verifies as ECDSA, so
+// only the low-S rule refuses it, and the verifier is stateless: the same
+// envelope verifies twice (callers dedupe on op_id and attempt).
+func TestVerify_HighSIsAValidSignatureButRefused(t *testing.T) {
+	pki := validPKI(t)
+	v := testVerifier(t, pki)
+	c := newCall(t, pki, providerv1.OperationKind_OPERATION_KIND_DELETE)
+	outer := c.outer(t, pki)
+	_, err := v.Verify(c.method, outer)
+	require.NoError(t, err)
+	_, err = v.Verify(c.method, outer)
+	require.NoError(t, err, "Verify is stateless")
+
+	g := mustAs[*providerv1.DeleteRequest](t, outer).GetOperationEnvelope().GetGrant()
+	parsed, err := parseECDSASignature(g.GetSignature())
+	require.NoError(t, err)
+	parsed.S = new(big.Int).Sub(elliptic.P256().Params().N, parsed.S)
+	high, err := asn1.Marshal(parsed)
+	require.NoError(t, err)
+	digest := sha256.Sum256(g.GetBody())
+	pub := mustAs[*ecdsa.PublicKey](t, pki.leaf.PublicKey)
+	require.True(t, ecdsa.VerifyASN1(pub, digest[:], high), "(r, n-s) is a valid ECDSA signature")
+	g.Signature = high
+	_, err = v.Verify(c.method, outer)
+	r, ok := AsRefusal(err)
+	require.True(t, ok, "%v", err)
+	assert.Equal(t, RuleSignature, r.Rule)
 }

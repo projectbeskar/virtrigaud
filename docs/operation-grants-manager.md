@@ -95,6 +95,14 @@ the rule:
 
 The signature is checked before the body is decoded, and the body is never re-encoded.
 
+**Replay and single execution.** The verifier is stateless: a verified envelope verifies
+again until its `not_after`. Whoever executes operations must enforce single execution
+itself, keyed on the grant's (`op_id`, `attempt`), never on the signature or the grant
+bytes (a re-send of the same attempt carries a new grant). Signatures are accepted in
+low-S form only (`s` at most half the curve order), so a signature has one encoding; the
+development signer always emits that form. The caller acts only on the decoded request the
+verifier returns.
+
 **Grant-signing leaf profile.** The leaf must not be a CA, its key usage must be exactly
 `digitalSignature` (no `keyEncipherment`, no `keyCertSign`), and it must carry **no
 extended key usage at all**: a leaf with `serverAuth`, `clientAuth`, `anyExtendedKeyUsage`

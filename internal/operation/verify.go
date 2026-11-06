@@ -138,7 +138,17 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 // Verify checks one call that arrived on fullMethod with the outer request
 // message outer. On success it returns the decoded grant body and inner
 // request; otherwise the error is a *Refusal (AsRefusal) and the call must not
-// be performed. The rules, in order:
+// be performed.
+//
+// Verify is stateless: the same envelope verifies again until its not_after.
+// A caller that executes operations must enforce single execution itself,
+// keyed on the grant's (op_id, attempt), and never on the signature or the
+// grant or envelope bytes (a new grant for the same attempt has different
+// bytes). Signatures are accepted in low-S form only, so a signature has one
+// encoding. A caller acts only on Verified.Request, never on its own decoding
+// of the outer request.
+//
+// The rules, in order:
 //
 //  1. outer has operation_envelope set (else IDENTITY_REQUIRED), no other
 //     field set and no unknown fields (else INVALID_ARGUMENT,
@@ -299,6 +309,9 @@ func (v *Verifier) authenticate(g *providerv1.OperationGrant, now time.Time) *Re
 	digest := sha256.Sum256(g.GetBody())
 	if !ecdsa.VerifyASN1(pub, digest[:], g.GetSignature()) {
 		return unauthenticated(RuleSignature, "the signature over the body does not verify")
+	}
+	if !isLowS(g.GetSignature(), pub.Curve) {
+		return unauthenticated(RuleSignature, "the signature is not in low-S form")
 	}
 	return nil
 }
