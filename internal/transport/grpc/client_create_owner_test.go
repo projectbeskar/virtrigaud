@@ -53,11 +53,13 @@ func TestConvertCreateRequest_ThreadsOwner(t *testing.T) {
 type ownerEchoServer struct {
 	providerv1.UnimplementedProviderServer
 	gotOwner *providerv1.ObjectIdentity
+	gotEnv   *providerv1.OperationEnvelope
 	err      error
 }
 
 func (s *ownerEchoServer) Create(_ context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
 	s.gotOwner = req.GetOwner()
+	s.gotEnv = req.GetOperationEnvelope()
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -74,6 +76,7 @@ func TestCreate_OwnerOnTheWireAndRejectionMapping(t *testing.T) {
 	_, err := c.Create(context.Background(), contracts.CreateRequest{Name: "web", Owner: testOwner})
 	require.NoError(t, err)
 	require.NotNil(t, srv.gotOwner)
+	assert.Nil(t, srv.gotEnv, "the manager never sets the operation envelope")
 	assert.Equal(t, testOwner.UID, srv.gotOwner.GetUid())
 	assert.Equal(t, testOwner.Namespace, srv.gotOwner.GetNamespace())
 	assert.Equal(t, testOwner.Name, srv.gotOwner.GetName())

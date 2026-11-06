@@ -73,6 +73,71 @@ const (
 	ReasonDeadlineExceededNotPerformed = "DEADLINE_EXCEEDED_NOT_PERFORMED"
 )
 
+// Operation-grant ErrorInfo reasons (ADR-0016), for the answers of a
+// per-host agent that verifies operation grants (see OperationEnvelope in
+// provider.proto). The reason arrives in an unsigned ErrorInfo that the
+// Provider relays, so on its own it is the Provider's claim: a caller treats
+// one as a definite not-performed only for an answer that the host signed and
+// bound to this request. No built-in provider emits them yet. Like the Part A
+// reasons, every one of them is breaker-exempt, and each comment says whether
+// the reason is a definite not-performed. A reason that is not one proves
+// nothing about what the operation did.
+const (
+	// ReasonGrantUnauthenticated: the operation grant's signature, certificate
+	// chain, certificate validity or authority generation did not verify, and the
+	// request was refused. Breaker-exempt. A definite not-performed of this
+	// request.
+	ReasonGrantUnauthenticated = "GRANT_UNAUTHENTICATED"
+	// ReasonGrantMismatch: the operation grant is authentic but does not fit
+	// this call (installation, Provider, host, enrolment, grant kind, operation
+	// kind, RPC, request type, grant version, or a field that the grant version
+	// does not define), and the request was refused. Breaker-exempt. A definite
+	// not-performed of this request.
+	ReasonGrantMismatch = "GRANT_MISMATCH"
+	// ReasonNonceConsumed: the grant's single-use nonce was already used, and this
+	// delivery was refused. Breaker-exempt. A definite not-performed of this
+	// delivery only; it says nothing about the earlier use of the nonce.
+	ReasonNonceConsumed = "NONCE_CONSUMED"
+	// ReasonRequestConsumed: the approved request that the grant executes was
+	// already executed under this enrolment, and this delivery was refused.
+	// Breaker-exempt. A definite not-performed of this delivery only; it says
+	// nothing about the earlier execution.
+	ReasonRequestConsumed = "REQUEST_CONSUMED"
+	// ReasonIdentityRequired: the Provider or host requires an operation grant and
+	// the call carried none. Breaker-exempt. NOT a definite not-performed.
+	ReasonIdentityRequired = "IDENTITY_REQUIRED"
+	// ReasonFencingRequired: the Provider or host requires an operation grant
+	// issued under fencing. Breaker-exempt. NOT a definite not-performed.
+	ReasonFencingRequired = "FENCING_REQUIRED"
+	// ReasonStaleEpoch: the grant's epoch is older than the epoch the host has
+	// activated. Breaker-exempt. NOT a definite not-performed.
+	ReasonStaleEpoch = "STALE_EPOCH"
+	// ReasonStaleIssued: the grant was issued below the floor that the host has
+	// recorded for the Provider. Breaker-exempt. NOT a definite not-performed.
+	ReasonStaleIssued = "STALE_ISSUED"
+	// ReasonEpochNotActivated: the grant's epoch has not been activated on the
+	// host. Breaker-exempt. NOT a definite not-performed.
+	ReasonEpochNotActivated = "EPOCH_NOT_ACTIVATED"
+	// ReasonJumpTooLarge: an activation would raise the host's epoch by more than
+	// its bound. Breaker-exempt. NOT a definite not-performed.
+	ReasonJumpTooLarge = "JUMP_TOO_LARGE"
+	// ReasonQuarantined: the host is quarantined for this Provider and refuses
+	// mutations. Breaker-exempt. NOT a definite not-performed.
+	ReasonQuarantined = "QUARANTINED"
+	// ReasonOpIDConflict: the host knows the grant's op_id with different identity
+	// fields. Breaker-exempt. NOT a definite not-performed.
+	ReasonOpIDConflict = "OP_ID_CONFLICT"
+	// ReasonBadNonce: the nonce is not one the host issued, or it has expired.
+	// Breaker-exempt. NOT a definite not-performed.
+	ReasonBadNonce = "BAD_NONCE"
+	// ReasonVMBindingStale: the grant's binding is not the VM's current placement
+	// on the host. Breaker-exempt. NOT a definite not-performed.
+	ReasonVMBindingStale = "VM_BINDING_STALE"
+	// ReasonClockUncorroborated: the host refused an attestation because it could
+	// not corroborate its clock. Breaker-exempt. NOT a definite not-performed.
+	ReasonClockUncorroborated = "CLOCK_UNCORROBORATED"
+)
+
 // WithReason returns a gRPC status error of code and message carrying a
 // google.rpc.ErrorInfo of reason in ErrorInfoDomain, with metadata (may be
 // nil). Metadata must never hold a secret, an endpoint, a URI or an address.

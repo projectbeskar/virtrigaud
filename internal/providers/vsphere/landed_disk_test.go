@@ -168,6 +168,11 @@ func TestCapabilities_LandedDiskDelete(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, caps.GetSupportsLandedDiskDelete())
 	assert.False(t, caps.GetSupportsRoutedImport(), "vSphere is never a clustered provider (ADR-0007 Addendum B)")
+	// The operation-grant gates are reserved wire shape only.
+	assert.False(t, caps.GetSupportsOperationIdentity(), "vSphere verifies no operation grant")
+	assert.False(t, caps.GetRequiresOperationIdentity(), "vSphere verifies no operation grant")
+	assert.False(t, caps.GetSupportsFencing(), "vSphere verifies no operation grant")
+	assert.False(t, caps.GetRequiresFencing(), "vSphere verifies no operation grant")
 }
 
 // --- transient import VM stubs (Part B) ---------------------------------------

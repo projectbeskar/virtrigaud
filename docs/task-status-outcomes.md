@@ -134,6 +134,34 @@ SDK's `sdk/provider/errors` (`ReasonUnknownToAgent` and the others, and
 the breaker exemption and `UNKNOWN_TO_AGENT`'s `NotFound` marking, no controller acts
 on them yet.
 
+### Operation-grant error reasons
+
+These reasons are defined for a per-host agent's refusal of an operation grant (see
+[`docs/operation-grants-wire-shape.md`](operation-grants-wire-shape.md)). They are
+**not emitted by any built-in provider**. Like the reasons above, every one of them is
+breaker-exempt, and `PartAReasons` lists them after the eight above.
+
+| Reason | Means | Definite not-performed |
+|---|---|---|
+| `GRANT_UNAUTHENTICATED` | The operation grant's signature, certificate chain, certificate validity or authority generation did not verify. | Yes |
+| `GRANT_MISMATCH` | The grant is authentic but does not fit this call: installation, Provider, host, enrolment, grant kind, operation kind, RPC, request type, grant version, or a field the version does not define. | Yes |
+| `NONCE_CONSUMED` | The grant's single-use nonce was already used. | Yes, of this delivery; says nothing about the earlier use of the nonce |
+| `REQUEST_CONSUMED` | The approved request was already executed under this enrolment. | Yes, of this delivery; says nothing about the earlier execution |
+| `IDENTITY_REQUIRED` | The Provider or host requires an operation grant and the call carried none. | No |
+| `FENCING_REQUIRED` | The Provider or host requires a grant issued under fencing. | No |
+| `STALE_EPOCH` | The grant's epoch is older than the epoch the host has activated. | No |
+| `STALE_ISSUED` | The grant was issued below the floor that the host has recorded for the Provider. | No |
+| `EPOCH_NOT_ACTIVATED` | The grant's epoch has not been activated on the host. | No |
+| `JUMP_TOO_LARGE` | An activation would raise the host's epoch by more than its bound. | No |
+| `QUARANTINED` | The host is quarantined for this Provider and refuses mutations. | No |
+| `OP_ID_CONFLICT` | The host knows the grant's `op_id` with different identity fields. | No |
+| `BAD_NONCE` | The nonce is not one the host issued, or it has expired. | No |
+| `VM_BINDING_STALE` | The grant's binding is not the VM's current placement on the host. | No |
+| `CLOCK_UNCORROBORATED` | The host refused an attestation because it could not corroborate its clock. | No |
+
+In code: `GrantUnauthenticatedReason` and the others in `internal/providers/contracts`,
+`ReasonGrantUnauthenticated` and the others in `sdk/provider/errors`.
+
 ## For provider authors
 
 The SDK's `sdk/provider/tasks` package builds a `TaskStatusResponse` from an outcome,

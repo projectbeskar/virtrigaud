@@ -178,4 +178,9 @@ func TestCapabilities_LandedDiskDelete(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, resp.GetSupportsLandedDiskDelete())
 	assert.False(t, resp.GetSupportsRoutedImport(), "Proxmox is never a clustered provider (ADR-0007 Addendum B)")
+	// The operation-grant gates are reserved wire shape only.
+	assert.False(t, resp.GetSupportsOperationIdentity(), "Proxmox verifies no operation grant")
+	assert.False(t, resp.GetRequiresOperationIdentity(), "Proxmox verifies no operation grant")
+	assert.False(t, resp.GetSupportsFencing(), "Proxmox verifies no operation grant")
+	assert.False(t, resp.GetRequiresFencing(), "Proxmox verifies no operation grant")
 }

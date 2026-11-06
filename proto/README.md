@@ -12,6 +12,12 @@ The module depends on no other VirtRigaud module. A provider written in Go
 usually uses it together with the SDK,
 [`github.com/projectbeskar/virtrigaud/sdk`](../sdk/README.md).
 
+The contract also reserves the operation-grant messages (`OperationEnvelope` and
+the others), an `operation_envelope` field on each mutating request and four
+capability gates. They are shape only: no bundled provider uses them and the
+manager never sets them
+([`docs/operation-grants-wire-shape.md`](../docs/operation-grants-wire-shape.md)).
+
 ## Versions
 
 From v0.4.1 on, each VirtRigaud release `vX.Y.Z` publishes this module as

@@ -77,6 +77,10 @@ func TestPartAReasons_NotPerformedClassification(t *testing.T) {
 		ProviderMismatchReason:             true,
 		DigestMismatchReason:               true,
 		DeadlineExceededNotPerformedReason: true,
+		GrantUnauthenticatedReason:         true,
+		GrantMismatchReason:                true,
+		NonceConsumedReason:                true,
+		RequestConsumedReason:              true,
 	}
 	seen := map[string]bool{}
 	for _, r := range PartAReasons() {
@@ -88,10 +92,18 @@ func TestPartAReasons_NotPerformedClassification(t *testing.T) {
 			t.Errorf("IsDefiniteNotPerformedReason(%s) = %v", r, got)
 		}
 	}
-	if len(seen) != 8 {
-		t.Fatalf("PartAReasons() has %d reasons, want 8", len(seen))
+	if len(seen) != 23 {
+		t.Fatalf("PartAReasons() has %d reasons, want 23 (8 Part A + 15 operation-grant)", len(seen))
 	}
-	for _, r := range []string{UnknownToAgentReason, CancelRefusedReason, HostUnavailableReason, ""} {
+	if got := PartAReasons()[7]; got != DeadlineExceededNotPerformedReason {
+		t.Fatalf("PartAReasons()[7] = %s: the Part A reasons must keep their order, new ones are appended", got)
+	}
+	for _, r := range []string{
+		UnknownToAgentReason, CancelRefusedReason, HostUnavailableReason, "",
+		IdentityRequiredReason, FencingRequiredReason, StaleEpochReason, StaleIssuedReason,
+		EpochNotActivatedReason, JumpTooLargeReason, QuarantinedReason, OpIDConflictReason,
+		BadNonceReason, VMBindingStaleReason, ClockUncorroboratedReason,
+	} {
 		if IsDefiniteNotPerformedReason(r) {
 			t.Errorf("%q must not be a definite not-performed", r)
 		}
@@ -134,6 +146,21 @@ func TestPartAReasons_MatchSDK(t *testing.T) {
 		sdkerrors.ReasonDigestMismatch:               DigestMismatchReason,
 		sdkerrors.ReasonCancelRefused:                CancelRefusedReason,
 		sdkerrors.ReasonDeadlineExceededNotPerformed: DeadlineExceededNotPerformedReason,
+		sdkerrors.ReasonGrantUnauthenticated:         GrantUnauthenticatedReason,
+		sdkerrors.ReasonGrantMismatch:                GrantMismatchReason,
+		sdkerrors.ReasonNonceConsumed:                NonceConsumedReason,
+		sdkerrors.ReasonRequestConsumed:              RequestConsumedReason,
+		sdkerrors.ReasonIdentityRequired:             IdentityRequiredReason,
+		sdkerrors.ReasonFencingRequired:              FencingRequiredReason,
+		sdkerrors.ReasonStaleEpoch:                   StaleEpochReason,
+		sdkerrors.ReasonStaleIssued:                  StaleIssuedReason,
+		sdkerrors.ReasonEpochNotActivated:            EpochNotActivatedReason,
+		sdkerrors.ReasonJumpTooLarge:                 JumpTooLargeReason,
+		sdkerrors.ReasonQuarantined:                  QuarantinedReason,
+		sdkerrors.ReasonOpIDConflict:                 OpIDConflictReason,
+		sdkerrors.ReasonBadNonce:                     BadNonceReason,
+		sdkerrors.ReasonVMBindingStale:               VMBindingStaleReason,
+		sdkerrors.ReasonClockUncorroborated:          ClockUncorroboratedReason,
 	}
 	if len(pairs) != len(PartAReasons()) {
 		t.Fatalf("the SDK has %d Part A reasons, the manager %d", len(pairs), len(PartAReasons()))
