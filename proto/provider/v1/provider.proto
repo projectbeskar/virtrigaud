@@ -1,5 +1,6 @@
 syntax = "proto3";
 package provider.v1;
+import "google/protobuf/timestamp.proto";
 option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1;providerv1";
 
 // Power operations enum
@@ -63,6 +64,10 @@ message CreateRequest {
   // every create from the VirtualMachine's uid, namespace and name. Additive
   // and backward-compatible.
   ObjectIdentity owner = 11;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 12;
 }
 
 message CreateResponse {
@@ -94,6 +99,10 @@ message DeleteRequest {
   // owner stamps existed stays deletable. The manager sets it on every delete
   // of a VirtualMachine that has a uid. Additive and backward-compatible.
   ObjectIdentity owner = 3;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 4;
 }
 
 // Power control operations
@@ -126,6 +135,10 @@ message PowerRequest {
   // every request for a VirtualMachine that has a uid, single-host included.
   // Additive and backward-compatible.
   ObjectIdentity owner = 5;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 6;
 }
 
 // Reconfigure virtual machine resources
@@ -152,6 +165,10 @@ message ReconfigureRequest {
   // it. The manager sets it on every request for a VirtualMachine that has a
   // uid, single-host included. Additive and backward-compatible.
   ObjectIdentity owner = 4;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 5;
 }
 
 // Upgrade VM hardware version. Only the vSphere provider implements this RPC;
@@ -165,6 +182,10 @@ message HardwareUpgradeRequest {
   // HardwareUpgrade and the clustered libvirt provider answers it with
   // Unimplemented. Single-host and thin-client providers ignore it.
   string target_host_id = 3;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 4;
 }
 
 // Generic task response for async operations
@@ -376,6 +397,10 @@ message SnapshotCreateRequest {
   // name as this request's only when it records the same token; any other is
   // ALREADY_EXISTS. Additive and backward-compatible.
   string request_token = 7;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 8;
 }
 
 message SnapshotCreateResponse {
@@ -402,6 +427,10 @@ message SnapshotDeleteRequest {
   // reported NOT_FOUND and none of its snapshots is touched. Sent and checked
   // on single-host requests as described for SnapshotCreateRequest.owner.
   ObjectIdentity owner = 4;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 5;
 }
 
 message SnapshotRevertRequest {
@@ -423,6 +452,10 @@ message SnapshotRevertRequest {
   // NOT_FOUND and is never reverted. Sent and checked on single-host requests
   // as described for SnapshotCreateRequest.owner.
   ObjectIdentity owner = 4;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 5;
 }
 
 // Clone operations
@@ -494,6 +527,10 @@ message CloneRequest {
   // sets it on every clone of a source VirtualMachine that has a uid,
   // single-host included. Additive and backward-compatible.
   ObjectIdentity source_owner = 10;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 11;
 }
 
 message CloneResponse {
@@ -547,6 +584,10 @@ message ImagePrepareRequest {
   // only: it is recorded in the stamp as preparedBy and is never part of the
   // reuse rule.
   ObjectIdentity provider = 6;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 7;
 }
 
 // ImagePrepareResponse reports where the provider placed the prepared image so
@@ -653,6 +694,10 @@ message ExportDiskRequest {
   // requests as described for SnapshotCreateRequest.owner, before any disk is
   // read or copied.
   ObjectIdentity owner = 12;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 13;
 }
 
 message ExportDiskResponse {
@@ -716,6 +761,10 @@ message ImportDiskRequest {
   // runs. Sent only to a provider that reports supports_routed_import.
   // Additive.
   string target_host_id = 13;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 14;
 }
 
 message ImportDiskResponse {
@@ -1053,6 +1102,25 @@ message GetCapabilitiesResponse {
   // thin-client providers (their import is not routed) and on an older
   // clustered provider. Additive.
   bool supports_routed_import = 30;
+  // supports_operation_identity reports that the Provider accepts
+  // operation_envelope on its mutating calls and forwards it to a per-host
+  // agent that verifies the grant. No built-in provider reports it.
+  bool supports_operation_identity = 31;
+  // requires_operation_identity reports that the Provider refuses a mutating
+  // call that carries no valid operation grant (ErrorInfo reason
+  // IDENTITY_REQUIRED). Reported only together with
+  // supports_operation_identity. No built-in provider reports it.
+  bool requires_operation_identity = 32;
+  // supports_fencing reports that the Provider's agents also enforce
+  // host-scoped fencing: they accept a grant only under an epoch that the
+  // host has activated. Invalid without supports_operation_identity. No
+  // built-in provider reports it.
+  bool supports_fencing = 33;
+  // requires_fencing reports that the Provider refuses a grant that was not
+  // issued under fencing (ErrorInfo reason FENCING_REQUIRED). It implies
+  // requires_operation_identity and supports_fencing. No built-in provider
+  // reports it.
+  bool requires_fencing = 34;
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote
@@ -1115,6 +1183,10 @@ message DeleteStagedDiskRequest {
   // removed from the provider pod and ignore it. Single-host and thin-client
   // providers ignore it. Additive.
   string target_host_id = 8;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 9;
 }
 
 // StagedDiskDeleteOutcome is what DeleteStagedDisk did.
@@ -1182,6 +1254,10 @@ message DeleteLandedDiskRequest {
   // (the pool may be shared), failing closed when a host cannot be scanned.
   // Single-host and thin-client providers ignore it. Additive.
   string target_host_id = 4;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 5;
 }
 
 // LandedDiskDeleteOutcome is what DeleteLandedDisk did.
@@ -1250,6 +1326,10 @@ message TransferOwnerRequest {
   // none, requires instead that the VM's PVE name is the owner's (as an
   // unstamped VM's Delete does), so a reused VMID is never stamped.
   string expected_uuid = 5;
+  // operation_envelope carries this call as an authorised operation (see
+  // OperationEnvelope). The manager sets it only for a Provider that reports
+  // supports_operation_identity, and then sets no other field.
+  OperationEnvelope operation_envelope = 6;
 }
 
 message TransferOwnerResponse {}
@@ -1268,6 +1348,275 @@ message ObjectIdentity {
   string uid = 1;
   string namespace = 2;
   string name = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Operation grants
+//
+// These messages define how a manager authorises one mutating call that a
+// per-host agent behind a Provider executes. The manager serialises the
+// request message, signs a grant that binds those exact bytes, and sends both
+// in an OperationEnvelope. The Provider forwards the envelope unchanged, and
+// the agent verifies the grant before it acts. The manager sets
+// operation_envelope only for a Provider that reports
+// supports_operation_identity; other Providers do not read it. No built-in
+// provider reports it.
+// ---------------------------------------------------------------------------
+
+// OperationEnvelope carries one authorised mutating request.
+//
+// request holds the exact bytes of the request message that the grant's
+// operation kind names (see OperationKind), serialised by the manager with
+// its own operation_envelope field unset. The grant binds those bytes through
+// GrantBody.intent_digest, and nothing re-encodes them. A Provider may decode
+// a copy of request to route the call, but it forwards request and grant
+// byte for byte.
+//
+// When operation_envelope is set on a request message, no other field of that
+// message is set. A Provider that reports supports_operation_identity refuses
+// a request that has operation_envelope and any other field set, and a
+// request whose decoded copy of request itself has operation_envelope set
+// (INVALID_ARGUMENT; the request is not performed). It routes only from its
+// decoded copy of request. The agent reads only request.
+message OperationEnvelope {
+  // request is the exact serialised request message that grant authorises.
+  bytes request = 1;
+  // grant authorises request.
+  OperationGrant grant = 2;
+}
+
+// OperationGrant is a signed GrantBody.
+message OperationGrant {
+  // body is a serialised GrantBody. The signature covers these exact bytes.
+  // A verifier checks the signature before it decodes body, and never
+  // re-encodes it.
+  bytes body = 1;
+  // signature is the signature over body by the key of the first certificate
+  // in signer_cert_chain.
+  bytes signature = 2;
+  // signer_cert_chain holds DER-encoded X.509 certificates, leaf first: the
+  // short-lived grant-signing certificate, then the certificate of its
+  // issuer. The chain is exactly these two certificates. The issuer has a
+  // path length constraint of 0 and chains to a trust anchor that the agent
+  // pinned at enrolment. The anchor is never sent.
+  repeated bytes signer_cert_chain = 3;
+}
+
+// GrantKind says what a grant authorises.
+enum GrantKind {
+  // GRANT_KIND_UNSPECIFIED is never valid; a verifier refuses it.
+  GRANT_KIND_UNSPECIFIED = 0;
+  // GRANT_KIND_OPERATION authorises one mutating Provider call, named by
+  // GrantBody.kind.
+  GRANT_KIND_OPERATION = 1;
+  // GRANT_KIND_ACTIVATE raises the epoch that a host accepts for the
+  // Provider.
+  GRANT_KIND_ACTIVATE = 2;
+  // GRANT_KIND_ATTEST accepts a host's proof, given in answer to a challenge,
+  // that its operation store is continuous.
+  GRANT_KIND_ATTEST = 3;
+  // GRANT_KIND_LEDGER_MARK tells a host up to which receipt the manager has
+  // recorded its receipts durably.
+  GRANT_KIND_LEDGER_MARK = 4;
+  // GRANT_KIND_RELEASE releases a host's record of a terminal operation.
+  GRANT_KIND_RELEASE = 5;
+  // GRANT_KIND_RETIRE_IF_UNKNOWN retires an operation that the host has no
+  // record of, so that the host never accepts it later.
+  GRANT_KIND_RETIRE_IF_UNKNOWN = 6;
+  // GRANT_KIND_CANCEL cancels an operation that has not passed an
+  // irreversible step.
+  GRANT_KIND_CANCEL = 7;
+  // GRANT_KIND_ADMIN carries one approved administrative action
+  // (GrantBody.action).
+  GRANT_KIND_ADMIN = 8;
+  // GRANT_KIND_ENROL enrols a host's agent with a Provider.
+  GRANT_KIND_ENROL = 9;
+  // GRANT_KIND_RETIRE_PROVIDER retires one Provider incarnation
+  // (GrantBody.provider_uid) at a host.
+  GRANT_KIND_RETIRE_PROVIDER = 10;
+  // GRANT_KIND_TIME_SYNC corroborates a host's clock in answer to a
+  // challenge.
+  GRANT_KIND_TIME_SYNC = 11;
+}
+
+// OperationKind names the operation that a GRANT_KIND_OPERATION grant
+// authorises. Each value maps to exactly one RPC of the Provider service and
+// its request message type, and some values also fix one request field. The
+// agent decodes OperationEnvelope.request only as the request message type
+// that the kind names. It refuses the call without performing it when the
+// call arrived on another RPC, or when the decoded request disagrees with the
+// kind (for example an OPERATION_KIND_POWER_ON grant for a PowerRequest whose
+// op is not POWER_OP_ON). A value is added only together with its mapping.
+enum OperationKind {
+  // OPERATION_KIND_UNSPECIFIED is never valid in a GRANT_KIND_OPERATION
+  // grant, and is the value in every other grant kind.
+  OPERATION_KIND_UNSPECIFIED = 0;
+  // OPERATION_KIND_CREATE: Create, CreateRequest.
+  OPERATION_KIND_CREATE = 1;
+  // OPERATION_KIND_DELETE: Delete, DeleteRequest.
+  OPERATION_KIND_DELETE = 2;
+  // OPERATION_KIND_POWER_ON: Power, PowerRequest with op POWER_OP_ON.
+  OPERATION_KIND_POWER_ON = 3;
+  // OPERATION_KIND_POWER_OFF: Power, PowerRequest with op POWER_OP_OFF.
+  OPERATION_KIND_POWER_OFF = 4;
+  // OPERATION_KIND_REBOOT: Power, PowerRequest with op POWER_OP_REBOOT.
+  OPERATION_KIND_REBOOT = 5;
+  // OPERATION_KIND_SHUTDOWN_GRACEFUL: Power, PowerRequest with op
+  // POWER_OP_SHUTDOWN_GRACEFUL.
+  OPERATION_KIND_SHUTDOWN_GRACEFUL = 6;
+  // OPERATION_KIND_RECONFIGURE: Reconfigure, ReconfigureRequest.
+  OPERATION_KIND_RECONFIGURE = 7;
+  // OPERATION_KIND_HARDWARE_UPGRADE: HardwareUpgrade, HardwareUpgradeRequest.
+  OPERATION_KIND_HARDWARE_UPGRADE = 8;
+  // OPERATION_KIND_SNAPSHOT_CREATE: SnapshotCreate, SnapshotCreateRequest.
+  OPERATION_KIND_SNAPSHOT_CREATE = 9;
+  // OPERATION_KIND_SNAPSHOT_DELETE: SnapshotDelete, SnapshotDeleteRequest.
+  OPERATION_KIND_SNAPSHOT_DELETE = 10;
+  // OPERATION_KIND_SNAPSHOT_REVERT: SnapshotRevert, SnapshotRevertRequest.
+  OPERATION_KIND_SNAPSHOT_REVERT = 11;
+  // OPERATION_KIND_CLONE: Clone, CloneRequest.
+  OPERATION_KIND_CLONE = 12;
+  // OPERATION_KIND_IMAGE_PREPARE: ImagePrepare, ImagePrepareRequest.
+  OPERATION_KIND_IMAGE_PREPARE = 13;
+  // OPERATION_KIND_EXPORT: ExportDisk, ExportDiskRequest.
+  OPERATION_KIND_EXPORT = 14;
+  // OPERATION_KIND_IMPORT: ImportDisk, ImportDiskRequest.
+  OPERATION_KIND_IMPORT = 15;
+  // OPERATION_KIND_DELETE_STAGED_DISK: DeleteStagedDisk,
+  // DeleteStagedDiskRequest.
+  OPERATION_KIND_DELETE_STAGED_DISK = 16;
+  // OPERATION_KIND_DELETE_LANDED_DISK: DeleteLandedDisk,
+  // DeleteLandedDiskRequest.
+  OPERATION_KIND_DELETE_LANDED_DISK = 17;
+  // OPERATION_KIND_ADOPT: TransferOwner, TransferOwnerRequest.
+  OPERATION_KIND_ADOPT = 18;
+}
+
+// Epoch is a manager epoch: a monotone counter and the random identity of the
+// manager term that holds it.
+message Epoch {
+  // counter is the monotone epoch counter.
+  uint64 counter = 1;
+  // holder is a random 16-byte value drawn for each acquisition of the epoch.
+  bytes holder = 2;
+}
+
+// GrantPrecondition is host state that must hold for a grant to be accepted.
+// The fields an administrative action requires are defined with the action;
+// a verifier refuses a grant that lacks a field its action requires.
+message GrantPrecondition {
+  // store_id is the random 16-byte identifier of the host's operation store.
+  bytes store_id = 1;
+  // seq is the expected sequence number of the host's operation store.
+  uint64 seq = 2;
+  // head is the expected chain head of the host's operation store at seq.
+  bytes head = 3;
+  // quarantine_id identifies the quarantine that the grant acts on.
+  bytes quarantine_id = 4;
+  // clock_floor is the host's current clock floor, as the host reported it.
+  google.protobuf.Timestamp clock_floor = 5;
+}
+
+// GrantBody is the signed content of an OperationGrant. Every field is covered
+// by the signature. Fields are grouped by the grant kinds that use them; a
+// field that the grant's kind does not use is unset.
+//
+// A verifier refuses a body whose grant_version it does not implement; a body,
+// or a message nested in it, that carries a field the verifier does not know;
+// an enum value that is UNSPECIFIED where the grant kind needs a value, or
+// that the verifier does not implement; and an action outside the set it
+// implements. A field that restricts what a grant permits is only ever added
+// together with a new grant_version, and a manager never sends a
+// grant_version above the highest one that the host has reported in a signed
+// answer. A grant kind can be issued at a grant_version only when every field
+// it needs is defined at that version.
+message GrantBody {
+  // grant_version is the version of the grant semantics. Version 1 is the
+  // field set of this message as first published. 0 is never valid.
+  uint32 grant_version = 1;
+  // grant_kind says what the grant authorises.
+  GrantKind grant_kind = 2;
+  // install_id is the random 16-byte identifier of the installation.
+  bytes install_id = 3;
+  // provider_uid is the metadata.uid of the Provider object.
+  string provider_uid = 4;
+  // host_id is the identity of the Host the grant is for.
+  string host_id = 5;
+  // enrolment_id is the random 16-byte identifier of the host's current
+  // enrolment with the Provider.
+  bytes enrolment_id = 6;
+  // authority_generation is the generation of the signing authority, a
+  // monotone counter. It equals the generation that the issuer certificate
+  // names.
+  uint64 authority_generation = 7;
+  // epoch is the manager epoch under which the grant is issued.
+  Epoch epoch = 8;
+
+  // Fields 10 to 18 are used by GRANT_KIND_OPERATION.
+
+  // vm_uid is the metadata.uid of the VirtualMachine the operation acts on.
+  string vm_uid = 10;
+  // binding_id is the random 16-byte identifier of the VM's current
+  // placement on the host.
+  bytes binding_id = 11;
+  // op_id is the random 16-byte identifier of this operation attempt. A new
+  // attempt always has a new op_id.
+  bytes op_id = 12;
+  // kind names the operation and, with it, the RPC and request message type
+  // of OperationEnvelope.request (see OperationKind).
+  OperationKind kind = 13;
+  // attempt is the attempt number for this VM and kind. It only increases.
+  uint64 attempt = 14;
+  // intent_digest is SHA-256(digest_salt || OperationEnvelope.request), over
+  // the exact request bytes.
+  bytes intent_digest = 15;
+  // digest_salt is a random salt drawn for each attempt.
+  bytes digest_salt = 16;
+  // mint_epoch is the epoch at which op_id was minted. It never changes for
+  // an op_id.
+  Epoch mint_epoch = 17;
+  // expect_known is set when the call re-sends an operation that the host
+  // has already acknowledged.
+  bool expect_known = 18;
+
+  // Fields 20 to 25 are used by GRANT_KIND_ADMIN and GRANT_KIND_ENROL.
+
+  // target_namespace is the namespace of the target Provider.
+  string target_namespace = 20;
+  // request_uid is the metadata.uid of the approved request that this grant
+  // executes.
+  string request_uid = 21;
+  // action is the administrative action: lower-case words joined by
+  // underscores, from a closed set.
+  string action = 22;
+  // spec_digest is the digest of the approved request's spec.
+  bytes spec_digest = 23;
+  // single_use_nonce is accepted at most once by the host.
+  bytes single_use_nonce = 24;
+  // precondition is the host state that the grant requires.
+  GrantPrecondition precondition = 25;
+
+  // Fields 26, 28 and 29 are reserved for the authority-history protocol.
+  // They are unset at grant_version 1, and a verifier refuses a version 1
+  // body that sets any of them.
+
+  // eal_seq is the position in the authority's append-only log against which
+  // the grant is issued. Positions are ordered by
+  // (authority_generation, eal_seq).
+  uint64 eal_seq = 26;
+  reserved 27;
+  reserved "ceremony_index";
+  // reset_floor is the new clock floor that a clock-floor reset sets.
+  google.protobuf.Timestamp reset_floor = 28;
+  // ceremony_record_digest is the SHA-256 digest of the signed record of the
+  // ceremony that this grant executes.
+  bytes ceremony_record_digest = 29;
+
+  // not_after ends the grant's validity. It is defence in depth only and is
+  // never used to raise a clock floor.
+  google.protobuf.Timestamp not_after = 30;
+  // issued_at is the manager's clock when it signed the grant.
+  google.protobuf.Timestamp issued_at = 31;
 }
 
 // Provider service definition.
