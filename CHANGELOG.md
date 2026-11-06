@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-06 12:15] - Operation-grant wire shape reserved in the provider contract (additive, not enforced)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/provider.proto`: messages `OperationEnvelope`, `OperationGrant`, `GrantBody`, `Epoch`, `GrantPrecondition` and enums `GrantKind` (0–11) and `OperationKind` (0–18, each value mapped to one mutating RPC) for an operation grant that a per-host agent verifies before it executes a mutating call. `GrantBody` reserves field 27 and the name `ceremony_index`. Imports `google/protobuf/timestamp.proto`. Bindings regenerated (`proto/rpc/provider/v1/provider.pb.go`).
+- `proto/provider/v1/provider.proto`: `OperationEnvelope operation_envelope` as the highest field of the 15 mutating request messages (`CreateRequest` 12, `DeleteRequest` 4, `PowerRequest` 6, `ReconfigureRequest` 5, `HardwareUpgradeRequest` 4, `SnapshotCreateRequest` 8, `SnapshotDeleteRequest` 5, `SnapshotRevertRequest` 5, `CloneRequest` 11, `ImagePrepareRequest` 7, `ExportDiskRequest` 13, `ImportDiskRequest` 14, `DeleteStagedDiskRequest` 9, `DeleteLandedDiskRequest` 5, `TransferOwnerRequest` 6).
+- `proto/provider/v1/provider.proto`: `GetCapabilitiesResponse.supports_operation_identity` (31), `requires_operation_identity` (32), `supports_fencing` (33), `requires_fencing` (34); default false.
+- `proto/rpc/provider/v1/operation_identity_test.go`: round-trip, byte-for-byte, unknown-field, field-number, reserved-number, enum-value and `OperationKind`-to-RPC coverage tests that pin the shape.
+- `sdk/provider/errors/reasons.go`, `internal/providers/contracts/errors.go`: 15 breaker-exempt operation-grant ErrorInfo reasons (`GRANT_UNAUTHENTICATED`, `GRANT_MISMATCH`, `NONCE_CONSUMED`, `REQUEST_CONSUMED`, `IDENTITY_REQUIRED`, `FENCING_REQUIRED`, `STALE_EPOCH`, `STALE_ISSUED`, `EPOCH_NOT_ACTIVATED`, `JUMP_TOO_LARGE`, `QUARANTINED`, `OP_ID_CONFLICT`, `BAD_NONCE`, `VM_BINDING_STALE`, `CLOCK_UNCORROBORATED`); no built-in provider emits them. Tests pin each literal and the SDK/contracts equality.
+- `docs/operation-grants-wire-shape.md`: the reserved shape, where the envelope attaches, the capability gates and the reasons; `docs/task-status-outcomes.md`, `docs/README.md`, `proto/README.md`, `sdk/README.md` updated.
+
+### Changed
+- `internal/providers/contracts/errors.go`: `PartAReasons` appends the 15 operation-grant reasons after the eight Part A reasons (order kept); `IsDefiniteNotPerformedReason` also returns true for `GRANT_UNAUTHENTICATED`, `GRANT_MISMATCH`, `NONCE_CONSUMED` and `REQUEST_CONSUMED`. Inert: nothing emits them.
+- Provider capability tests (vSphere, libvirt single-host and clustered, Proxmox, mock) assert the four gates are false; transport client tests assert no mutating call carries `operation_envelope`.
+
+### Why
+Reserving the operation-grant messages, field numbers and reason strings now lets later work add grant verification without a breaking change to the provider contract. No behaviour change: no provider reads the envelope, the manager never sets it and never reads the gates, and `contracts.Capabilities` and the SDK capabilities get no new field.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-05 16:36] - Hypervisor-neutral clustered routing helpers move to internal/clustered
 **Author:** @wrkode (William Rizzo)
 
