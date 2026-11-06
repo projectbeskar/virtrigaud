@@ -24,6 +24,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"testing"
 
@@ -91,9 +92,18 @@ func onlyEnvelopeSet(m proto.Message) bool {
 // with a signer, and refuses a nil signer.
 func TestNewOperationIdentityClient_DevBuild(t *testing.T) {
 	require.True(t, operation.SignerCompiled)
-	_, err := NewOperationIdentityClient(context.Background(), "localhost:1", "cloudhypervisor", "p", nil, nil, nil)
+	_, err := NewOperationIdentityClient(context.Background(), "localhost:1", "cloudhypervisor", "p", nil, testVerifiedTLS(), nil)
 	assert.ErrorIs(t, err, operation.ErrNoSigner)
-	cli, err := NewOperationIdentityClient(context.Background(), "localhost:1", "cloudhypervisor", "p", nil, nil, newDevSigner(t))
+	signer := newDevSigner(t)
+	for name, cfg := range map[string]*TLSConfig{
+		"plaintext (nil)":      nil,
+		"insecure":             {Insecure: true},
+		"skip verify prebuilt": {PrebuiltConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}}, // #nosec G402 -- the refused case under test
+	} {
+		_, err := NewOperationIdentityClient(context.Background(), "localhost:1", "cloudhypervisor", "p", nil, cfg, signer)
+		assert.ErrorIs(t, err, ErrOperationIdentityNeedsTLS, name)
+	}
+	cli, err := NewOperationIdentityClient(context.Background(), "localhost:1", "cloudhypervisor", "p", nil, testVerifiedTLS(), signer)
 	require.NoError(t, err)
 	require.NotNil(t, cli.opSigner)
 	require.NoError(t, cli.Close())

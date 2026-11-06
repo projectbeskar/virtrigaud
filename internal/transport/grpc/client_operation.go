@@ -19,6 +19,7 @@ package grpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -77,7 +78,11 @@ func specFor(kind contracts.OperationKind) (operationKindSpec, error) {
 // SendOperation, signed by signer, and the unsigned mutating methods refuse
 // without sending (contracts.ErrOperationIdentityRequired, or
 // contracts.ErrOperationIdentityNotImplemented for a call with no signed
-// path). Development builds only: a release build has no signer
+// path). It requires TLS with a verified server certificate: a nil tlsConfig
+// (plaintext), TLSConfig.Insecure and a prebuilt config with
+// InsecureSkipVerify are refused with ErrOperationIdentityNeedsTLS, because
+// the request bytes carry secrets and a grant seen on the wire stays valid
+// until its not_after. Development builds only: a release build has no signer
 // (operation.SignerCompiled is false) and this returns operation.ErrNoSigner,
 // as it does for a nil signer. No controller builds one yet.
 func NewOperationIdentityClient(ctx context.Context, endpoint, providerType, providerName string,
@@ -85,12 +90,34 @@ func NewOperationIdentityClient(ctx context.Context, endpoint, providerType, pro
 	if !operation.SignerCompiled || signer == nil {
 		return nil, fmt.Errorf("new operation-identity client for Provider %s: %w", providerName, operation.ErrNoSigner)
 	}
+	if err := requireVerifiedTLS(tlsConfig); err != nil {
+		return nil, fmt.Errorf("new operation-identity client for Provider %s: %w", providerName, err)
+	}
 	c, err := NewClient(ctx, endpoint, providerType, providerName, cb, tlsConfig)
 	if err != nil {
 		return nil, err
 	}
 	c.opSigner = signer
 	return c, nil
+}
+
+// ErrOperationIdentityNeedsTLS is returned by NewOperationIdentityClient for a
+// TLS configuration that would send signed operations in plaintext or without
+// verifying the Provider's certificate.
+var ErrOperationIdentityNeedsTLS = errors.New("an operation-identity client needs TLS with a verified server certificate")
+
+// requireVerifiedTLS refuses a nil config (plaintext), Insecure, and a
+// prebuilt config that skips server verification.
+func requireVerifiedTLS(cfg *TLSConfig) error {
+	switch {
+	case cfg == nil:
+		return fmt.Errorf("no TLS configuration (plaintext): %w", ErrOperationIdentityNeedsTLS)
+	case cfg.Insecure:
+		return fmt.Errorf("TLS configured as insecure: %w", ErrOperationIdentityNeedsTLS)
+	case cfg.PrebuiltConfig != nil && cfg.PrebuiltConfig.InsecureSkipVerify:
+		return fmt.Errorf("TLS configured to skip server verification: %w", ErrOperationIdentityNeedsTLS)
+	}
+	return nil
 }
 
 // refuseUnsignedCall is nil for a client that is not in operation-identity

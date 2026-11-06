@@ -35,7 +35,7 @@ import (
 // a client forced into operation-identity mode.
 func TestReleaseBuild_RefusesToSendSignedOperations(t *testing.T) {
 	require.False(t, operation.SignerCompiled)
-	cli, err := NewOperationIdentityClient(context.Background(), "localhost:1", "cloudhypervisor", "p", nil, nil, stubSigner{})
+	cli, err := NewOperationIdentityClient(context.Background(), "localhost:1", "cloudhypervisor", "p", nil, testVerifiedTLS(), stubSigner{})
 	assert.Nil(t, cli)
 	assert.ErrorIs(t, err, operation.ErrNoSigner)
 

@@ -57,7 +57,10 @@ path length 0 issuer. The trust anchor is never sent.
 ## Sending: two phases
 
 A client in operation-identity mode (`grpc.NewOperationIdentityClient`, development builds
-only) implements `contracts.OperationSender`:
+only) implements `contracts.OperationSender`. It requires TLS with a verified server
+certificate: a missing TLS configuration (plaintext), `Insecure`, or a prebuilt
+configuration with `InsecureSkipVerify` is refused, because request bytes can carry secrets
+and a grant seen on the wire stays valid until its `not_after`.
 
 1. `BuildOperation` builds the request message of the kind (the same fields the unsigned
    method sends, with `operation_envelope` unset), serialises it once, draws the digest

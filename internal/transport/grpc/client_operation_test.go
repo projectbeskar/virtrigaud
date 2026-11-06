@@ -18,6 +18,7 @@ package grpc
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"sync"
@@ -95,6 +96,12 @@ func (stubSigner) InstallID() []byte           { return make([]byte, operation.I
 func (stubSigner) AuthorityGeneration() uint64 { return 1 }
 func (stubSigner) Sign(context.Context, []byte, time.Time) (operation.Signature, error) {
 	return operation.Signature{}, errors.New("stubSigner does not sign")
+}
+
+// testVerifiedTLS is a TLS configuration that verifies the server (the
+// connection is lazy; these tests never dial it).
+func testVerifiedTLS() *TLSConfig {
+	return &TLSConfig{PrebuiltConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "provider.test"}}
 }
 
 // opTestVM is the routed VM of these tests.
