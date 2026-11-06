@@ -78,7 +78,8 @@ and a grant seen on the wire stays valid until its `not_after`.
 In that mode the unsigned mutating methods of `contracts.Provider` (`Create`, `Delete`,
 `Power`, `Reconfigure`) refuse with `contracts.ErrOperationIdentityRequired` and send
 nothing. Request bytes can carry cloud-init user data: they are never logged, and
-`PreparedOperation` formats with the bytes redacted.
+`PreparedOperation` renders without the bytes or the salt through `fmt` (`String`,
+`GoString`), `encoding/json` (`MarshalJSON`) and `log/slog` (`LogValue`).
 
 ## Verifying a grant
 

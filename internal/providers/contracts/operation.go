@@ -18,8 +18,10 @@ package contracts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 )
 
 // OperationKind names one of the operations the manager can send as a signed
@@ -105,7 +107,8 @@ type OperationRequest struct {
 // re-sent: the exact request bytes the grant covers and the attempt's digest
 // salt. A caller that persists it and re-sends it after a restart sends the
 // same bytes. RequestBytes can carry secrets (cloud-init user data); a
-// PreparedOperation is never logged, and String redacts it.
+// PreparedOperation is never logged; String, GoString, MarshalJSON and
+// LogValue all render it without the bytes or the salt.
 type PreparedOperation struct {
 	// Kind is the operation.
 	Kind OperationKind
@@ -125,6 +128,42 @@ func (p PreparedOperation) String() string {
 
 // GoString implements fmt.GoStringer the same way as String.
 func (p PreparedOperation) GoString() string { return p.String() }
+
+// preparedOperationRedacted is the only form in which a PreparedOperation is
+// rendered as JSON or logged: the kind, the attempt and sizes, never the
+// request bytes or the salt.
+type preparedOperationRedacted struct {
+	Kind         OperationKind `json:"kind"`
+	Attempt      uint64        `json:"attempt"`
+	RequestBytes int           `json:"requestBytes"`
+	Redacted     bool          `json:"redacted"`
+}
+
+// redacted is p without its secrets.
+func (p PreparedOperation) redacted() preparedOperationRedacted {
+	return preparedOperationRedacted{Kind: p.Kind, Attempt: p.Identity.Attempt, RequestBytes: len(p.RequestBytes), Redacted: true}
+}
+
+// MarshalJSON implements json.Marshaler with the redacted form: the request
+// bytes and the salt are never encoded. A PreparedOperation that must be
+// stored is stored through an explicit encoder, not encoding/json.
+func (p PreparedOperation) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(p.redacted())
+	if err != nil {
+		return nil, fmt.Errorf("marshal redacted prepared operation: %w", err)
+	}
+	return b, nil
+}
+
+// LogValue implements slog.LogValuer with the redacted form.
+func (p PreparedOperation) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("kind", string(p.Kind)),
+		slog.Uint64("attempt", p.Identity.Attempt),
+		slog.Int("requestBytes", len(p.RequestBytes)),
+		slog.Bool("redacted", true),
+	)
+}
 
 // OperationAnswer is the Provider's answer to a signed operation. Like every
 // Provider answer it is an unsigned claim.
