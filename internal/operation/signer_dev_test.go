@@ -199,7 +199,12 @@ func TestDevSigner_RefusesBadKeyFiles(t *testing.T) {
 		"two install ids":  join(keyBlock(p256), idBlock(IDLen), idBlock(IDLen)),
 		"other block":      join(keyBlock(p256), idBlock(IDLen), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1}})),
 		"trailing data":    join(keyBlock(p256), idBlock(IDLen), []byte("secret-trailer")),
-		"key not PKCS8":    join(pem.EncodeToMemory(&pem.Block{Type: DevSignerKeyPEMType, Bytes: []byte("secret-junk")}), idBlock(IDLen)),
+		"leading text":     join([]byte("secret-preamble\n"), keyBlock(p256), idBlock(IDLen)),
+		"text between":     join(keyBlock(p256), []byte("secret-between\n"), idBlock(IDLen)),
+		"broken block":     join(keyBlock(p256), idBlock(IDLen), []byte("-----BEGIN VIRTRIGAUD DEV INSTALL ID-----\nsecret-x\n")),
+		"block headers": join(keyBlock(p256), pem.EncodeToMemory(&pem.Block{Type: DevSignerInstallIDPEMType,
+			Headers: map[string]string{"Proc-Type": "4,secret-hdr"}, Bytes: bytesOf(3, IDLen)})),
+		"key not PKCS8": join(pem.EncodeToMemory(&pem.Block{Type: DevSignerKeyPEMType, Bytes: []byte("secret-junk")}), idBlock(IDLen)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := LoadSigner(writeKeyFile(t, data))
@@ -208,6 +213,9 @@ func TestDevSigner_RefusesBadKeyFiles(t *testing.T) {
 			assert.Contains(t, err.Error(), DevSignerKeyFileFlagName)
 		})
 	}
+	// Surrounding whitespace is fine.
+	_, err = LoadSigner(writeKeyFile(t, join([]byte("\n\n"), keyBlock(p256), []byte("\n"), idBlock(IDLen), []byte("\n\n"))))
+	require.NoError(t, err)
 	_, err = LoadSigner(filepath.Join(t.TempDir(), "missing.pem"))
 	assert.Error(t, err)
 

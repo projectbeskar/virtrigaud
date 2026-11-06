@@ -19,6 +19,7 @@ limitations under the License.
 package operation
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -122,9 +123,9 @@ func NewDevSigner(anchorKey *ecdsa.PrivateKey, installID []byte, now func() time
 }
 
 // LoadDevSignerKeyFile reads a development signer key file (EncodeDevSignerKey)
-// and returns its signer. The file must hold exactly one DevSignerKeyPEMType
-// block (PKCS#8 ECDSA P-256) and one DevSignerInstallIDPEMType block (16
-// bytes), and nothing else. On Unix it must not be readable or writable by
+// and returns its signer. The file must hold exactly two PEM blocks, one
+// DevSignerKeyPEMType (PKCS#8 ECDSA P-256) and one DevSignerInstallIDPEMType
+// (16 bytes), without headers, with nothing but whitespace around them. On Unix it must not be readable or writable by
 // group or others (mode&0o077 == 0); mount a Kubernetes Secret holding it
 // with defaultMode 0400.
 func LoadDevSignerKeyFile(path string) (*DevSigner, error) {
@@ -205,6 +206,9 @@ func GenerateDevSignerKey() ([]byte, error) {
 	return EncodeDevSignerKey(key, installID)
 }
 
+// pemBegin starts every PEM block.
+var pemBegin = []byte("-----BEGIN ")
+
 // decodeDevSignerKey parses a development signer key file. Errors never quote
 // the file's content.
 func decodeDevSignerKey(data []byte) (*ecdsa.PrivateKey, []byte, error) {
@@ -212,10 +216,22 @@ func decodeDevSignerKey(data []byte) (*ecdsa.PrivateKey, []byte, error) {
 	var installID []byte
 	rest := data
 	for {
+		// pem.Decode skips any text before a BEGIN line; only whitespace may
+		// stand between or around the blocks.
+		begin := bytes.Index(rest, pemBegin)
+		if begin < 0 {
+			break
+		}
+		if len(bytesTrimSpace(rest[:begin])) > 0 {
+			return nil, nil, errors.New("text outside the PEM blocks")
+		}
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
 		if block == nil {
-			break
+			return nil, nil, errors.New("a PEM block does not decode")
+		}
+		if len(block.Headers) > 0 {
+			return nil, nil, errors.New("a PEM block carries headers")
 		}
 		switch block.Type {
 		case DevSignerKeyPEMType:
