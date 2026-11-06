@@ -84,7 +84,7 @@ the rule:
 |---|---|
 | No `operation_envelope` on the call | `IDENTITY_REQUIRED` |
 | Another field of the outer request set beside the envelope, or unknown fields on it | `GRANT_MISMATCH`, answered as `INVALID_ARGUMENT` |
-| No grant; a chain that is not exactly a leaf and a path length 0 issuer chaining to a pinned anchor; a certificate that is not valid now; a key that is not ECDSA P-256; a signature that does not verify | `GRANT_UNAUTHENTICATED` |
+| No grant; a chain that is not exactly a leaf and a path length 0 issuer chaining to a pinned anchor; a leaf without the grant-signing profile (below); an issuer without `keyCertSign`; a certificate that is not valid now; a key that is not ECDSA P-256; a signature that does not verify | `GRANT_UNAUTHENTICATED` |
 | `authority_generation` below the verifier's minimum; an expired grant, one issued in the future, or one valid for more than one hour | `GRANT_UNAUTHENTICATED` |
 | Unknown fields in the envelope, the grant, the body, any message nested in it, or the decoded request | `GRANT_MISMATCH` |
 | An `UNSPECIFIED` or unknown `grant_kind` or `kind`; an unknown enum value anywhere in the body or the request; a grant kind other than `OPERATION` | `GRANT_MISMATCH` |
@@ -94,6 +94,14 @@ the rule:
 | A kind that names another RPC or request type than the call; a request that does not decode as that type, carries an envelope of its own, or disagrees with the kind's fixed `op`; an `intent_digest` that does not match the request bytes | `GRANT_MISMATCH` |
 
 The signature is checked before the body is decoded, and the body is never re-encoded.
+
+**Grant-signing leaf profile.** The leaf must not be a CA, its key usage must be exactly
+`digitalSignature` (no `keyEncipherment`, no `keyCertSign`), and it must carry **no
+extended key usage at all**: a leaf with `serverAuth`, `clientAuth`, `anyExtendedKeyUsage`
+or any other EKU OID is refused. A TLS certificate issued under the same anchor therefore
+cannot sign grants. The issuer must be a CA with path length 0 and `keyCertSign`. A
+dedicated grant-signing EKU OID may replace the "no EKU" rule later. The anchor should
+still be dedicated to grant signing.
 
 ## The development signer
 

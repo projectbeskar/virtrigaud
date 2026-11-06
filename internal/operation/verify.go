@@ -262,13 +262,17 @@ func (v *Verifier) authenticate(g *providerv1.OperationGrant, now time.Time) *Re
 	if err != nil {
 		return unauthenticated(RuleChain, "the issuer certificate does not parse")
 	}
-	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 || !isP256(leaf.PublicKey) {
-		return unauthenticated(RuleChain, "the leaf is not a signing certificate with an ECDSA P-256 key")
+	if !isGrantSigningLeaf(leaf) {
+		return unauthenticated(RuleChain, "the leaf is not a grant-signing certificate (profile: not a CA, key usage "+
+			"digitalSignature only, no extended key usage, ECDSA P-256 key)")
 	}
 	if !issuer.IsCA || !issuer.BasicConstraintsValid || issuer.MaxPathLen != 0 || !issuer.MaxPathLenZero ||
 		issuer.KeyUsage&x509.KeyUsageCertSign == 0 || !isP256(issuer.PublicKey) {
 		return unauthenticated(RuleChain, "the issuer is not a path length 0 CA with an ECDSA P-256 key")
 	}
+	// The leaf has no extended key usage (isGrantSigningLeaf), so
+	// ExtKeyUsageAny only stops x509.Verify from demanding serverAuth; it
+	// admits no certificate with an EKU.
 	intermediates := x509.NewCertPool()
 	intermediates.AddCert(issuer)
 	chains, err := leaf.Verify(x509.VerifyOptions{
@@ -297,6 +301,17 @@ func (v *Verifier) authenticate(g *providerv1.OperationGrant, now time.Time) *Re
 		return unauthenticated(RuleSignature, "the signature over the body does not verify")
 	}
 	return nil
+}
+
+// isGrantSigningLeaf reports whether c has the grant-signing leaf profile:
+// not a CA, key usage exactly digitalSignature, no extended key usage of any
+// kind (known or unknown OID), and an ECDSA P-256 key. A certificate issued
+// for another purpose under the same anchor, such as a TLS server or client
+// certificate, does not have it and cannot sign grants. A dedicated
+// grant-signing extended key usage OID may replace the "no EKU" rule later.
+func isGrantSigningLeaf(c *x509.Certificate) bool {
+	return !c.IsCA && c.KeyUsage == x509.KeyUsageDigitalSignature &&
+		len(c.ExtKeyUsage) == 0 && len(c.UnknownExtKeyUsage) == 0 && isP256(c.PublicKey)
 }
 
 // isP256 reports whether key is an ECDSA public key on P-256, the only key

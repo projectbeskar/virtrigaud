@@ -25,6 +25,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"math/big"
 	"testing"
 	"time"
@@ -60,6 +61,9 @@ type certOpts struct {
 	maxPathLen     int
 	maxPathLenZero bool
 	keyUsage       x509.KeyUsage
+	extKeyUsage    []x509.ExtKeyUsage
+	unknownEKU     []asn1.ObjectIdentifier
+	dnsNames       []string
 }
 
 // mustKey draws an ECDSA key on curve.
@@ -85,6 +89,9 @@ func mustCert(t testing.TB, cn string, o certOpts, pub any, parent *x509.Certifi
 		IsCA:                  o.isCA,
 		MaxPathLen:            o.maxPathLen,
 		MaxPathLenZero:        o.maxPathLenZero,
+		ExtKeyUsage:           o.extKeyUsage,
+		UnknownExtKeyUsage:    o.unknownEKU,
+		DNSNames:              o.dnsNames,
 	}
 	if parent == nil {
 		parent = tmpl

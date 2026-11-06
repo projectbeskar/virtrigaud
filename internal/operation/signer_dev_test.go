@@ -231,3 +231,24 @@ func TestDevSigner_SignRefusals(t *testing.T) {
 	_, err = s.Sign(ctx, []byte("body"), time.Now().Add(time.Minute))
 	assert.Error(t, err)
 }
+
+// TestDevSigner_LeafProfile: the development signer's leaf has the
+// grant-signing profile (not a CA, digitalSignature only, no EKU) and its
+// issuer is a path length 0 CA that may only sign certificates.
+func TestDevSigner_LeafProfile(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	s, err := NewDevSigner(key, bytesOf(7, IDLen), nil)
+	require.NoError(t, err)
+	sig, err := s.Sign(context.Background(), []byte("body"), time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	leaf, err := x509.ParseCertificate(sig.Chain[0])
+	require.NoError(t, err)
+	issuer, err := x509.ParseCertificate(sig.Chain[1])
+	require.NoError(t, err)
+	assert.True(t, isGrantSigningLeaf(leaf))
+	assert.Empty(t, leaf.ExtKeyUsage)
+	assert.Equal(t, x509.KeyUsageDigitalSignature, leaf.KeyUsage)
+	assert.True(t, issuer.IsCA && issuer.MaxPathLenZero && issuer.MaxPathLen == 0)
+	assert.Equal(t, x509.KeyUsageCertSign, issuer.KeyUsage)
+}

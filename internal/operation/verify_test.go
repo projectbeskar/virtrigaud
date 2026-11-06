@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/elliptic"
 	"crypto/x509"
+	"encoding/asn1"
 	"testing"
 	"time"
 
@@ -422,14 +423,39 @@ func TestVerify_ChainShapes(t *testing.T) {
 	leafExpired.notAfter = testEpoch.Add(-time.Minute)
 	leafNotYet := defaultLeaf()
 	leafNotYet.notBefore = testEpoch.Add(time.Minute)
+	leafServerAuth := defaultLeaf()
+	leafServerAuth.extKeyUsage, leafServerAuth.dnsNames = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{"agent.example"}
+	leafServerAuth.keyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+	leafServerAuthDS := defaultLeaf()
+	leafServerAuthDS.extKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	leafClientAuth := defaultLeaf()
+	leafClientAuth.extKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+	leafAnyEKU := defaultLeaf()
+	leafAnyEKU.extKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageAny}
+	leafUnknownEKU := defaultLeaf()
+	leafUnknownEKU.unknownEKU = []asn1.ObjectIdentifier{{1, 3, 6, 1, 4, 1, 99999, 1}}
+	leafKeyEncipherment := defaultLeaf()
+	leafKeyEncipherment.keyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+	leafCertSign := defaultLeaf()
+	leafCertSign.keyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign
+	issuerNoCertSign := defaultIssuer()
+	issuerNoCertSign.keyUsage = x509.KeyUsageDigitalSignature
 	for name, p := range map[string]struct{ issuer, leaf certOpts }{
-		"issuer path length 1": {issuerPathLen1, defaultLeaf()},
-		"issuer P-384":         {issuerP384, defaultLeaf()},
-		"leaf P-384":           {defaultIssuer(), leafP384},
-		"leaf is a CA":         {defaultIssuer(), leafCA},
-		"leaf cannot sign":     {defaultIssuer(), leafNoSign},
-		"leaf expired":         {defaultIssuer(), leafExpired},
-		"leaf not yet valid":   {defaultIssuer(), leafNotYet},
+		"TLS server certificate":           {defaultIssuer(), leafServerAuth},
+		"serverAuth EKU, digitalSignature": {defaultIssuer(), leafServerAuthDS},
+		"clientAuth EKU":                   {defaultIssuer(), leafClientAuth},
+		"any EKU":                          {defaultIssuer(), leafAnyEKU},
+		"unknown EKU OID":                  {defaultIssuer(), leafUnknownEKU},
+		"leaf keyEncipherment too":         {defaultIssuer(), leafKeyEncipherment},
+		"leaf certSign too":                {defaultIssuer(), leafCertSign},
+		"issuer without certSign":          {issuerNoCertSign, defaultLeaf()},
+		"issuer path length 1":             {issuerPathLen1, defaultLeaf()},
+		"issuer P-384":                     {issuerP384, defaultLeaf()},
+		"leaf P-384":                       {defaultIssuer(), leafP384},
+		"leaf is a CA":                     {defaultIssuer(), leafCA},
+		"leaf cannot sign":                 {defaultIssuer(), leafNoSign},
+		"leaf expired":                     {defaultIssuer(), leafExpired},
+		"leaf not yet valid":               {defaultIssuer(), leafNotYet},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pki := newTestPKI(t, p.issuer, p.leaf)
