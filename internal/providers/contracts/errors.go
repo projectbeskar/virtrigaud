@@ -135,7 +135,10 @@ const (
 
 // Operation-grant ErrorInfo reasons (ADR-0016). Each is a google.rpc.ErrorInfo
 // reason in ErrorInfoDomain for the answer of a per-host agent that verifies
-// operation grants (see OperationEnvelope in provider.proto). No built-in
+// operation grants (see OperationEnvelope in provider.proto). The reason
+// arrives in an unsigned ErrorInfo that the Provider relays, so on its own it
+// is the Provider's claim: a caller treats one as a definite not-performed
+// only for an answer that the host signed and bound to this request. No built-in
 // provider emits them yet. Like the Part A reasons, every one of them is
 // breaker-exempt, and each constant's comment says whether the reason is a
 // definite not-performed. A reason that is not one proves nothing about what
@@ -251,7 +254,9 @@ func PartAReasons() []string {
 // last two of this delivery only). It is false for every other reason:
 // UnknownToAgentReason, CancelRefusedReason (whose not-performed is the
 // cancellation's, not the operation's), and every other operation-grant
-// reason.
+// reason. For an operation-grant reason the classification holds only for an
+// answer that the host signed and bound to the request; an unsigned ErrorInfo
+// relayed by a Provider is that Provider's claim.
 func IsDefiniteNotPerformedReason(reason string) bool {
 	switch reason {
 	case ProviderMismatchReason, DigestMismatchReason, DeadlineExceededNotPerformedReason,

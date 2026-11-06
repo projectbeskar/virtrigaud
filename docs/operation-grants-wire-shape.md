@@ -17,7 +17,7 @@ breaking change to the contract.
 |---|---|---|
 | `OperationEnvelope` | message | One authorised mutating request: `request` (1, the exact serialised request message) and `grant` (2). |
 | `OperationGrant` | message | A signed `GrantBody`: `body` (1, the serialised `GrantBody`), `signature` (2) over those exact bytes, `signer_cert_chain` (3, DER certificates, leaf first). |
-| `GrantBody` | message | The signed content of a grant: version, grant kind, installation, Provider, host, enrolment, authority generation and epoch (1–8); operation fields (10–18); administrative fields (20–25); fields 26, 28, 29 reserved for the authority-history protocol; validity `not_after` (30) and `issued_at` (31). |
+| `GrantBody` | message | The signed content of a grant: version, grant kind, installation, Provider, host, enrolment, authority generation and epoch (1–8); operation fields (10–18); administrative fields (20–25); fields 26, 28, 29 set aside for the authority-history protocol (defined, unset at grant version 1; field 27 is a proto `reserved` number); validity `not_after` (30) and `issued_at` (31). |
 | `Epoch` | message | A manager epoch: `counter` (1) and the random `holder` (2) of the term that holds it. |
 | `GrantPrecondition` | message | Host state a grant requires: `store_id`, `seq`, `head`, `quarantine_id`, `clock_floor` (1–5). |
 | `GrantKind` | enum | What a grant authorises: `GRANT_KIND_OPERATION` and eleven other kinds (values 0–11, 0 is `UNSPECIFIED`). |
@@ -50,7 +50,7 @@ The read RPCs (`Validate`, `Describe`, `TaskStatus`, `GetCapabilities`, `GetDisk
 ## Where the envelope attaches
 
 Each of the 15 mutating request messages has an `OperationEnvelope operation_envelope`
-field, always its highest field number:
+field, at these field numbers:
 
 | Request message | Field | Request message | Field |
 |---|---|---|---|

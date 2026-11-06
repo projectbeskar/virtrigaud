@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `internal/providers/contracts/errors.go`: `PartAReasons` appends the 15 operation-grant reasons after the eight Part A reasons (order kept); `IsDefiniteNotPerformedReason` also returns true for `GRANT_UNAUTHENTICATED`, `GRANT_MISMATCH`, `NONCE_CONSUMED` and `REQUEST_CONSUMED`. Inert: nothing emits them.
-- Provider capability tests (vSphere, libvirt single-host and clustered, Proxmox, mock) assert the four gates are false; transport client tests assert no mutating call carries `operation_envelope`.
+- Provider capability tests (vSphere, libvirt single-host and clustered, Proxmox, mock) assert the four gates are false; transport client tests assert that Create and eight other mutating calls carry no `operation_envelope` (the other six are checked by code search only).
 
 ### Why
 Reserving the operation-grant messages, field numbers and reason strings now lets later work add grant verification without a breaking change to the provider contract. No behaviour change: no provider reads the envelope, the manager never sets it and never reads the gates, and `contracts.Capabilities` and the SDK capabilities get no new field.

@@ -773,8 +773,8 @@ type CreateRequest struct {
 	// and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,11,opt,name=owner,proto3" json:"owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,12,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -976,8 +976,8 @@ type DeleteRequest struct {
 	// of a VirtualMachine that has a uid. Additive and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,4,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -1074,8 +1074,8 @@ type PowerRequest struct {
 	// Additive and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,5,opt,name=owner,proto3" json:"owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,6,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -1180,8 +1180,8 @@ type ReconfigureRequest struct {
 	// uid, single-host included. Additive and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,5,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -1267,8 +1267,8 @@ type HardwareUpgradeRequest struct {
 	// Unimplemented. Single-host and thin-client providers ignore it.
 	TargetHostId string `protobuf:"bytes,3,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,4,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -1806,8 +1806,8 @@ type SnapshotCreateRequest struct {
 	// ALREADY_EXISTS. Additive and backward-compatible.
 	RequestToken string `protobuf:"bytes,7,opt,name=request_token,json=requestToken,proto3" json:"request_token,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,8,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -1976,8 +1976,8 @@ type SnapshotDeleteRequest struct {
 	// on single-host requests as described for SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,5,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -2070,8 +2070,8 @@ type SnapshotRevertRequest struct {
 	// as described for SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,5,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -2211,8 +2211,8 @@ type CloneRequest struct {
 	// single-host included. Additive and backward-compatible.
 	SourceOwner *ObjectIdentity `protobuf:"bytes,10,opt,name=source_owner,json=sourceOwner,proto3" json:"source_owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,11,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -2428,8 +2428,8 @@ type ImagePrepareRequest struct {
 	// reuse rule.
 	Provider *ObjectIdentity `protobuf:"bytes,6,opt,name=provider,proto3" json:"provider,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,7,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -2749,8 +2749,8 @@ type ExportDiskRequest struct {
 	// read or copied.
 	Owner *ObjectIdentity `protobuf:"bytes,12,opt,name=owner,proto3" json:"owner,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,13,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -3004,8 +3004,8 @@ type ImportDiskRequest struct {
 	// Additive.
 	TargetHostId string `protobuf:"bytes,13,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,14,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -4377,6 +4377,10 @@ type GetCapabilitiesResponse struct {
 	// thin-client providers (their import is not routed) and on an older
 	// clustered provider. Additive.
 	SupportsRoutedImport bool `protobuf:"varint,30,opt,name=supports_routed_import,json=supportsRoutedImport,proto3" json:"supports_routed_import,omitempty"`
+	// Fields 31 to 34 are the Provider's own, unauthenticated report. A manager
+	// uses them only to learn whether it can send operation_envelope, never to
+	// lower the protection it requires for a Provider.
+	//
 	// supports_operation_identity reports that the Provider accepts
 	// operation_envelope on its mutating calls and forwards it to a per-host
 	// agent that verifies the grant. No built-in provider reports it.
@@ -4733,8 +4737,8 @@ type DeleteStagedDiskRequest struct {
 	// providers ignore it. Additive.
 	TargetHostId string `protobuf:"bytes,8,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,9,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -4933,8 +4937,8 @@ type DeleteLandedDiskRequest struct {
 	// Single-host and thin-client providers ignore it. Additive.
 	TargetHostId string `protobuf:"bytes,4,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,5,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -5111,8 +5115,8 @@ type TransferOwnerRequest struct {
 	// unstamped VM's Delete does), so a reused VMID is never stamped.
 	ExpectedUuid string `protobuf:"bytes,5,opt,name=expected_uuid,json=expectedUuid,proto3" json:"expected_uuid,omitempty"`
 	// operation_envelope carries this call as an authorised operation (see
-	// OperationEnvelope). The manager sets it only for a Provider that reports
-	// supports_operation_identity, and then sets no other field.
+	// OperationEnvelope). When the manager sets it, it sets no other field. A
+	// Provider that does not report supports_operation_identity ignores it.
 	OperationEnvelope *OperationEnvelope `protobuf:"bytes,6,opt,name=operation_envelope,json=operationEnvelope,proto3" json:"operation_envelope,omitempty"`
 }
 
@@ -5316,6 +5320,11 @@ func (x *ObjectIdentity) GetName() string {
 // request whose decoded copy of request itself has operation_envelope set
 // (INVALID_ARGUMENT; the request is not performed). It routes only from its
 // decoded copy of request. The agent reads only request.
+//
+// A verifier refuses an OperationEnvelope or an OperationGrant that carries a
+// field it does not know, and a decoded request message that carries a field
+// it does not know; the request is not performed. request can carry secrets
+// (for example cloud-init user data) and is never logged.
 type OperationEnvelope struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -5390,7 +5399,9 @@ type OperationGrant struct {
 	// short-lived grant-signing certificate, then the certificate of its
 	// issuer. The chain is exactly these two certificates. The issuer has a
 	// path length constraint of 0 and chains to a trust anchor that the agent
-	// pinned at enrolment. The anchor is never sent.
+	// pinned at enrolment. The anchor is never sent. The signature algorithm
+	// is fixed by the key type of the leaf certificate, from a closed set that
+	// the verifier implements; nothing in the message selects it.
 	SignerCertChain [][]byte `protobuf:"bytes,3,rep,name=signer_cert_chain,json=signerCertChain,proto3" json:"signer_cert_chain,omitempty"`
 }
 
@@ -5606,6 +5617,10 @@ func (x *GrantPrecondition) GetClockFloor() *timestamppb.Timestamp {
 // grant_version above the highest one that the host has reported in a signed
 // answer. A grant kind can be issued at a grant_version only when every field
 // it needs is defined at that version.
+//
+// Every counter in a grant (authority_generation, Epoch.counter, attempt,
+// GrantPrecondition.seq, eal_seq) counts from 1, so 0 always means unset. A
+// verifier refuses a grant whose kind needs a counter that is 0.
 type GrantBody struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache

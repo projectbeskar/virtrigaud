@@ -65,8 +65,8 @@ message CreateRequest {
   // and backward-compatible.
   ObjectIdentity owner = 11;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 12;
 }
 
@@ -100,8 +100,8 @@ message DeleteRequest {
   // of a VirtualMachine that has a uid. Additive and backward-compatible.
   ObjectIdentity owner = 3;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 4;
 }
 
@@ -136,8 +136,8 @@ message PowerRequest {
   // Additive and backward-compatible.
   ObjectIdentity owner = 5;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 6;
 }
 
@@ -166,8 +166,8 @@ message ReconfigureRequest {
   // uid, single-host included. Additive and backward-compatible.
   ObjectIdentity owner = 4;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 5;
 }
 
@@ -183,8 +183,8 @@ message HardwareUpgradeRequest {
   // Unimplemented. Single-host and thin-client providers ignore it.
   string target_host_id = 3;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 4;
 }
 
@@ -398,8 +398,8 @@ message SnapshotCreateRequest {
   // ALREADY_EXISTS. Additive and backward-compatible.
   string request_token = 7;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 8;
 }
 
@@ -428,8 +428,8 @@ message SnapshotDeleteRequest {
   // on single-host requests as described for SnapshotCreateRequest.owner.
   ObjectIdentity owner = 4;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 5;
 }
 
@@ -453,8 +453,8 @@ message SnapshotRevertRequest {
   // as described for SnapshotCreateRequest.owner.
   ObjectIdentity owner = 4;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 5;
 }
 
@@ -528,8 +528,8 @@ message CloneRequest {
   // single-host included. Additive and backward-compatible.
   ObjectIdentity source_owner = 10;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 11;
 }
 
@@ -585,8 +585,8 @@ message ImagePrepareRequest {
   // reuse rule.
   ObjectIdentity provider = 6;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 7;
 }
 
@@ -695,8 +695,8 @@ message ExportDiskRequest {
   // read or copied.
   ObjectIdentity owner = 12;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 13;
 }
 
@@ -762,8 +762,8 @@ message ImportDiskRequest {
   // Additive.
   string target_host_id = 13;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 14;
 }
 
@@ -1102,6 +1102,10 @@ message GetCapabilitiesResponse {
   // thin-client providers (their import is not routed) and on an older
   // clustered provider. Additive.
   bool supports_routed_import = 30;
+  // Fields 31 to 34 are the Provider's own, unauthenticated report. A manager
+  // uses them only to learn whether it can send operation_envelope, never to
+  // lower the protection it requires for a Provider.
+  //
   // supports_operation_identity reports that the Provider accepts
   // operation_envelope on its mutating calls and forwards it to a per-host
   // agent that verifies the grant. No built-in provider reports it.
@@ -1184,8 +1188,8 @@ message DeleteStagedDiskRequest {
   // providers ignore it. Additive.
   string target_host_id = 8;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 9;
 }
 
@@ -1255,8 +1259,8 @@ message DeleteLandedDiskRequest {
   // Single-host and thin-client providers ignore it. Additive.
   string target_host_id = 4;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 5;
 }
 
@@ -1327,8 +1331,8 @@ message TransferOwnerRequest {
   // unstamped VM's Delete does), so a reused VMID is never stamped.
   string expected_uuid = 5;
   // operation_envelope carries this call as an authorised operation (see
-  // OperationEnvelope). The manager sets it only for a Provider that reports
-  // supports_operation_identity, and then sets no other field.
+  // OperationEnvelope). When the manager sets it, it sets no other field. A
+  // Provider that does not report supports_operation_identity ignores it.
   OperationEnvelope operation_envelope = 6;
 }
 
@@ -1378,6 +1382,11 @@ message ObjectIdentity {
 // request whose decoded copy of request itself has operation_envelope set
 // (INVALID_ARGUMENT; the request is not performed). It routes only from its
 // decoded copy of request. The agent reads only request.
+//
+// A verifier refuses an OperationEnvelope or an OperationGrant that carries a
+// field it does not know, and a decoded request message that carries a field
+// it does not know; the request is not performed. request can carry secrets
+// (for example cloud-init user data) and is never logged.
 message OperationEnvelope {
   // request is the exact serialised request message that grant authorises.
   bytes request = 1;
@@ -1398,7 +1407,9 @@ message OperationGrant {
   // short-lived grant-signing certificate, then the certificate of its
   // issuer. The chain is exactly these two certificates. The issuer has a
   // path length constraint of 0 and chains to a trust anchor that the agent
-  // pinned at enrolment. The anchor is never sent.
+  // pinned at enrolment. The anchor is never sent. The signature algorithm
+  // is fixed by the key type of the leaf certificate, from a closed set that
+  // the verifier implements; nothing in the message selects it.
   repeated bytes signer_cert_chain = 3;
 }
 
@@ -1530,6 +1541,10 @@ message GrantPrecondition {
 // grant_version above the highest one that the host has reported in a signed
 // answer. A grant kind can be issued at a grant_version only when every field
 // it needs is defined at that version.
+//
+// Every counter in a grant (authority_generation, Epoch.counter, attempt,
+// GrantPrecondition.seq, eal_seq) counts from 1, so 0 always means unset. A
+// verifier refuses a grant whose kind needs a counter that is 0.
 message GrantBody {
   // grant_version is the version of the grant semantics. Version 1 is the
   // field set of this message as first published. 0 is never valid.
@@ -1596,7 +1611,7 @@ message GrantBody {
   // precondition is the host state that the grant requires.
   GrantPrecondition precondition = 25;
 
-  // Fields 26, 28 and 29 are reserved for the authority-history protocol.
+  // Fields 26, 28 and 29 are set aside for the authority-history protocol.
   // They are unset at grant_version 1, and a verifier refuses a version 1
   // body that sets any of them.
 

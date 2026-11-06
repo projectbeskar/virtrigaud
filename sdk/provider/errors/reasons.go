@@ -75,7 +75,10 @@ const (
 
 // Operation-grant ErrorInfo reasons (ADR-0016), for the answers of a
 // per-host agent that verifies operation grants (see OperationEnvelope in
-// provider.proto). No built-in provider emits them yet. Like the Part A
+// provider.proto). The reason arrives in an unsigned ErrorInfo that the
+// Provider relays, so on its own it is the Provider's claim: a caller treats
+// one as a definite not-performed only for an answer that the host signed and
+// bound to this request. No built-in provider emits them yet. Like the Part A
 // reasons, every one of them is breaker-exempt, and each comment says whether
 // the reason is a definite not-performed. A reason that is not one proves
 // nothing about what the operation did.
