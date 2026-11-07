@@ -69,6 +69,8 @@ var holdPhaseReasons = map[string]bool{
 	k8s.ReasonOperationOutcomeUnknown:       true,
 	k8s.ReasonOperationUnknownToAgent:       true,
 	k8s.ReasonOperationProviderMismatch:     true,
+	k8s.ReasonOperationDeleteUnconfirmed:    true,
+	k8s.ReasonOperationIdentityUnsupported:  true,
 }
 
 // restoreHoldPhaseReasons are the reasons of the clustered restore guards'

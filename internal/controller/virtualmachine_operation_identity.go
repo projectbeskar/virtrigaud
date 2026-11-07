@@ -901,6 +901,10 @@ func (r *VirtualMachineReconciler) sendFailed(ctx context.Context, vm *infravirt
 	switch {
 	case contracts.HasErrorInfoReason(err, contracts.ProviderMismatchReason):
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationProviderMismatch, msgOperationProviderMismatch, operationHoldRecheckInterval), nil
+	case a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete && contracts.IsNotFound(err):
+		// The host reports no such VM (or one it does not own): that does
+		// not confirm the Delete (deleteAbsentHolds).
+		return r.deleteAbsent(ctx, vm, ia, a)
 	case definiteRejection(err) && first:
 		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeRejected, rejectionReason(err), "")
 	case redeliveryRefusal(err) != "":

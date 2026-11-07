@@ -703,4 +703,14 @@ const (
 	// ReasonOperationProviderMismatch: the host refused the operation as
 	// coming from another Provider than the one it is enrolled with. Held.
 	ReasonOperationProviderMismatch = "OperationProviderMismatch"
+	// ReasonOperationDeleteUnconfirmed: the VM is being deleted and the host
+	// (or a Describe) reports no such VM, or its Provider is gone. That does
+	// not confirm a Delete, so the finalizer is kept: it is released only by
+	// a confirmed Delete, orphan-on-delete or force-delete.
+	ReasonOperationDeleteUnconfirmed = "OperationDeleteUnconfirmed"
+	// ReasonOperationIdentityUnsupported: the operation (a snapshot, clone,
+	// disk export or import, image prepare, adoption, ...) has no signed
+	// path, and its Provider requires operation identity. It is refused
+	// locally: nothing is sent, signed or unsigned.
+	ReasonOperationIdentityUnsupported = "OperationIdentityUnsupported"
 )

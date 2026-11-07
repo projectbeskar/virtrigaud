@@ -299,3 +299,57 @@ func decodePrepared(p *contracts.PreparedOperation) (proto.Message, error) {
 	}
 	return m, nil
 }
+
+// The Delete of a VM of a Provider that requires operation identity, and an
+// answer that finds no VM. For every other Provider a Describe or a Delete
+// that finds no VM releases the finalizer (virtualmachine_delete_task.go,
+// handleDeletion); here it never does. "No such VM" is an unsigned claim that
+// a misrouted, restored or lying host can make about a VM that still runs, so
+// it does not confirm the Delete, and neither does UNKNOWN_TO_AGENT (no
+// record of the task proves nothing). The finalizer is released only by:
+//   - a confirmed Delete: a bound task of this Delete attempt Succeeded, or a
+//     re-send of the same op_id was answered with success (releaseAfterDelete,
+//     confirmDeleteRelease);
+//   - no Create ever performed (nothingCreated);
+//   - orphan-on-delete or force-delete;
+//   - later, an authenticated host answer that the VM is deleted
+//     (authenticatedHostDeleted), which does not exist yet.
+
+// msgOperationDeleteUnconfirmed is the hold of a Delete whose VM is reported
+// absent, or whose Provider is gone.
+var msgOperationDeleteUnconfirmed = "the VM is being deleted, and its host reports no such VM (or its Provider is gone); " +
+	"for a Provider that requires operation identity that does not confirm a Delete, so the finalizer is kept; " + operationHoldRecovery
+
+// authenticatedHostDeleted is the extension point for an authenticated answer
+// from the VM's host that the VM is deleted: bound to the VM's UID and its
+// placement binding, and signed by (or otherwise bound to) the host's
+// enrolment, for example a host-signed tombstone. Such an answer would let
+// the finalizer of a VM whose Delete is unconfirmed be released. No wire
+// shape for it exists yet, so this always answers false and nothing is
+// released on an absence.
+func (r *VirtualMachineReconciler) authenticatedHostDeleted(context.Context, *infravirtrigaudiov1beta1.VirtualMachine,
+	identityAttempt, *infravirtrigaudiov1beta1.OperationAttempt) bool {
+	return false
+}
+
+// deleteAbsent handles a Delete attempt a whose send the host answered with
+// "no such VM": the VM is held (OperationDeleteUnconfirmed), the attempt stays
+// as it is and is re-sent with the same op_id when the hold is re-checked.
+// Only authenticatedHostDeleted (not implemented) could release it.
+func (r *VirtualMachineReconciler) deleteAbsent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (attemptStep, ctrl.Result, error) {
+	if r.authenticatedHostDeleted(ctx, vm, ia, a) {
+		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, "", "")
+	}
+	return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationDeleteUnconfirmed, msgOperationDeleteUnconfirmed,
+		operationHoldRecheckInterval), nil
+}
+
+// identityDeleteUnconfirmed reports whether vm records operation attempts
+// (only a Provider that requires operation identity has them) of which a
+// Create was, or may have been, performed: its finalizer is not released
+// because its Provider is gone (handleDeletion), since nothing can confirm
+// its Delete.
+func identityDeleteUnconfirmed(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return len(vm.Status.OperationAttempts) > 0 && !nothingCreated(vm)
+}

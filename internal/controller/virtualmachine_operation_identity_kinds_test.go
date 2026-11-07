@@ -170,7 +170,9 @@ func TestIdentityPower_AsyncThenRepeatAfterGap(t *testing.T) {
 	}
 	stub.onTask = func(string) (contracts.TaskStatus, error) { return contracts.TaskStatus{Outcome: outcome}, nil }
 	stub.describeResp.PowerState = "Off"
-	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+	})
 	reconcileN(t, r, req, 2)
 	a := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
 	require.NotNil(t, a)
@@ -212,7 +214,9 @@ func TestIdentityPower_OutcomeTable(t *testing.T) {
 			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedClean, IsCompleted: true, Error: "x"}, nil
 		}
 		stub.describeResp.PowerState = "Off"
-		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		})
 		reconcileN(t, r, req, 3)
 		assert.Equal(t, k8s.ReasonOperationRetryBackoff, readyReason(idVM(t, r)))
 		assert.Len(t, stub.sent(), 2, "no new attempt during the backoff")
@@ -231,7 +235,9 @@ func TestIdentityPower_OutcomeTable(t *testing.T) {
 			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedDirty, IsCompleted: true, Error: "x"}, nil
 		}
 		stub.describeResp.PowerState = "Off"
-		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		})
 		reconcileN(t, r, req, 3)
 		r.clock = func() time.Time { return time.Now().Add(blockedRetryMax) }
 		reconcileN(t, r, req, 2)
@@ -248,7 +254,9 @@ func TestIdentityPower_OutcomeTable(t *testing.T) {
 			return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
 		}
 		stub.describeResp.PowerState = "Off"
-		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		})
 		reconcileN(t, r, req, 3)
 		assert.Equal(t, k8s.ReasonOperationUnknownToAgent, readyReason(idVM(t, r)))
 		assert.Len(t, stub.sent(), 2)
@@ -265,7 +273,9 @@ func TestIdentityPower_OutcomeTable(t *testing.T) {
 			return contracts.OperationAnswer{}, nil
 		}
 		stub.describeResp.PowerState = "Off"
-		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		})
 		reconcileN(t, r, req, 2)
 		sends := stub.sent()
 		require.Len(t, sends, 3)
@@ -311,7 +321,9 @@ func TestIdentityPower_TamperedIntentHeld(t *testing.T) {
 				return contracts.OperationAnswer{}, nil
 			}
 			stub.describeResp.PowerState = "Off"
-			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+				vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+			})
 			reconcileN(t, r, req, 1)
 			secrets := intentSecrets(t, r)
 			require.Len(t, secrets, 1)
@@ -516,7 +528,9 @@ func TestIdentity_SerialisesAcrossKinds(t *testing.T) {
 		})
 		reconcileN(t, r, req, 1)
 		stub.describeResp.PowerState = "Off"
-		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		})
 		markDeleted(t, r, nil)
 		reconcileN(t, r, req, 2)
 		assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindReconfigure}, sentKinds(stub),
@@ -575,4 +589,104 @@ func TestNonIdentityProviders_PowerAndResizeUnchanged(t *testing.T) {
 			assert.Empty(t, intentSecrets(t, r))
 		})
 	}
+}
+
+// For a Provider that requires operation identity, an answer that finds no VM
+// never releases the Delete finalizer: the VM is held, the same Delete attempt
+// is re-sent when the hold is re-checked, and no Describe is consulted.
+// Force-delete still releases it.
+func TestIdentityDelete_AbsentNeverReleases(t *testing.T) {
+	for name, absent := range map[string]error{
+		"not found":    contracts.NewNotFoundError("no such VM", nil),
+		"VM not owned": contracts.NewNotFoundError("not this VM's", contracts.ErrVMNotOwned),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newIdentityStub()
+			r, req := createdIdentityVM(t, stub)
+			stub.describeResp = contracts.DescribeResponse{Exists: false}
+			stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+				return contracts.OperationAnswer{}, absent
+			}
+			describes := len(stub.describeRefs)
+			markDeleted(t, r, nil)
+			reconcileN(t, r, req, 3)
+			require.False(t, vmGone(t, r), "an absent VM does not confirm the Delete")
+			vm := idVM(t, r)
+			assert.Equal(t, k8s.ReasonOperationDeleteUnconfirmed, readyReason(vm))
+			d := findAttempt(vm, contracts.OperationKindDelete)
+			require.NotNil(t, d)
+			assert.Equal(t, int64(1), d.Attempt, "no new Delete attempt")
+			assert.NotEqual(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, d.Phase)
+			sends := stub.sent()
+			require.Len(t, sends, 4)
+			for _, p := range sends[1:] {
+				assert.Equal(t, sends[1].Identity.OpID, p.Identity.OpID, "the same op_id is re-sent")
+			}
+			assert.Equal(t, describes, len(stub.describeRefs), "no Describe decides a release")
+			assert.Zero(t, stub.deletes, "no unsigned Delete")
+			assert.False(t, r.authenticatedHostDeleted(context.Background(), vm, identityAttempt{}, d))
+
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+				vm.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+			})
+			reconcileN(t, r, req, 1)
+			assert.True(t, vmGone(t, r), "force-delete releases it")
+		})
+	}
+}
+
+// A Delete task the host has no record of (UNKNOWN_TO_AGENT) holds; it is
+// never read as "deleted".
+func TestIdentityDelete_UnknownToAgentHolds(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	stub.describeResp = contracts.DescribeResponse{Exists: false}
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "del-task"}, nil
+	}
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
+	}
+	markDeleted(t, r, nil)
+	reconcileN(t, r, req, 4)
+	require.False(t, vmGone(t, r))
+	assert.Equal(t, k8s.ReasonOperationUnknownToAgent, readyReason(idVM(t, r)))
+	assert.Len(t, stub.sent(), 2, "no new Delete attempt")
+}
+
+// A VM whose Create was performed keeps its finalizer when its Provider is
+// gone (nothing can confirm its Delete); one whose Create was never performed
+// is released as before.
+func TestIdentityDelete_ProviderGone(t *testing.T) {
+	removeProvider := func(t *testing.T, r *VirtualMachineReconciler) {
+		t.Helper()
+		p := &infravirtrigaudiov1beta1.Provider{}
+		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, p))
+		p.Finalizers = nil
+		require.NoError(t, r.Update(context.Background(), p))
+		require.NoError(t, r.Delete(context.Background(), p))
+	}
+	t.Run("created: held", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		removeProvider(t, r)
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 2)
+		require.False(t, vmGone(t, r))
+		assert.Equal(t, k8s.ReasonOperationDeleteUnconfirmed, readyReason(idVM(t, r)))
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+		})
+		reconcileN(t, r, req, 1)
+		assert.True(t, vmGone(t, r))
+	})
+	t.Run("never created: released", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := identityFixture(t, stub)
+		assert.False(t, identityDeleteUnconfirmed(idVM(t, r)))
+		removeProvider(t, r)
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 1)
+		assert.True(t, vmGone(t, r))
+	})
 }

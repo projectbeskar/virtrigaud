@@ -1203,6 +1203,16 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				}
 				// force-delete: released without any provider call.
 				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
+			case errors.IsNotFound(err) && identityDeleteUnconfirmed(vm):
+				// A VM of a Provider that required operation identity, whose
+				// Create was (or may have been) performed: with its Provider
+				// gone nothing can confirm its Delete, so the finalizer is
+				// kept (identityDeleteUnconfirmed).
+				if force {
+					return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOperationHeld)
+				}
+				return r.holdOperation(ctx, vm, k8s.ReasonOperationDeleteUnconfirmed, msgOperationDeleteUnconfirmed,
+					operationHoldRecheckInterval), nil
 			case errors.IsNotFound(err) && r.hasUnresolvedDeleteTask(vm):
 				// A Delete task is recorded whose outcome only the gone
 				// Provider could tell: kept, unlike a VM with no task.
