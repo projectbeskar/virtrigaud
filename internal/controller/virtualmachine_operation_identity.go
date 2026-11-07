@@ -542,7 +542,13 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if prev := findAttempt(vm, opReq.Kind); prev != nil {
 		switch {
 		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedDirty:
-			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationFailedDirty, msgOperationFailedDirty, operationHoldRecheckInterval), nil
+			acked, err := r.consumeAcknowledgement(ctx, vm, prev)
+			if err != nil {
+				return stepWaiting, ctrl.Result{}, err
+			}
+			if !acked {
+				return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationFailedDirty, msgOperationFailedDirty, operationHoldRecheckInterval), nil
+			}
 		case notPerformed(prev.Outcome):
 			if wait := attemptRetryWait(prev, r.now()); wait > 0 {
 				msg := fmt.Sprintf("%s attempt %d was not performed (%s); attempt %d is sent in %s",

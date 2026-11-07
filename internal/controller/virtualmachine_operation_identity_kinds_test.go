@@ -716,7 +716,9 @@ func TestIdentityDelete_SupersedesHeldPowerAttempt(t *testing.T) {
 		return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
 	}
 	stub.describeResp.PowerState = "Off"
-	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+	})
 	reconcileN(t, r, req, 2)
 	require.Equal(t, k8s.ReasonOperationUnknownToAgent, readyReason(idVM(t, r)), "the PowerOn is held")
 	held := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
@@ -793,10 +795,14 @@ func TestIdentityPower_HeldPowerOnNotSupersededByPowerOff(t *testing.T) {
 		return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
 	}
 	stub.describeResp.PowerState = "Off"
-	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+	})
 	reconcileN(t, r, req, 2)
 	stub.describeResp.PowerState = "On"
-	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff })
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff
+	})
 	reconcileN(t, r, req, 3)
 	assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindPowerOn}, sentKinds(stub))
 	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(idVM(t, r), contracts.OperationKindPowerOn).Phase)
@@ -853,5 +859,77 @@ func TestIdentityReconfigure_AsyncFlagsKeptUnderTaskTag(t *testing.T) {
 		vm = idVM(t, r)
 		assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(vm))
 		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(vm, contracts.OperationKindReconfigure).Phase)
+	})
+}
+
+// A FailedDirty power hold ends only with an acknowledgement naming that
+// attempt's exact op_id; it is consumed (removed) with an event. It does
+// nothing for another op_id, nor for a Create.
+func TestIdentity_AcknowledgeFailedDirty(t *testing.T) {
+	setAnnotation := func(t *testing.T, r *VirtualMachineReconciler, v string) {
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Annotations = map[string]string{acknowledgeOperationAnnotation: v}
+		})
+	}
+	t.Run("power", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		rec := record.NewFakeRecorder(20)
+		r.Recorder = rec
+		dirty := true
+		stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "task-" + string(rune('0'+p.Identity.Attempt))}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			if dirty {
+				return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedDirty, IsCompleted: true, Error: "x"}, nil
+			}
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded}, nil
+		}
+		stub.describeResp.PowerState = "Off"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		reconcileN(t, r, req, 3)
+		require.Equal(t, k8s.ReasonOperationFailedDirty, readyReason(idVM(t, r)))
+		first := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
+
+		setAnnotation(t, r, "00000000000000000000000000000000")
+		reconcileN(t, r, req, 2)
+		assert.Equal(t, k8s.ReasonOperationFailedDirty, readyReason(idVM(t, r)), "another op_id does nothing")
+		assert.Len(t, stub.sent(), 2)
+		assert.Equal(t, "00000000000000000000000000000000", idVM(t, r).Annotations[acknowledgeOperationAnnotation])
+
+		dirty = false
+		setAnnotation(t, r, first.OpID)
+		reconcileN(t, r, req, 2)
+		vm := idVM(t, r)
+		assert.NotContains(t, vm.Annotations, acknowledgeOperationAnnotation, "consumed")
+		require.Len(t, stub.sent(), 3)
+		second := findAttempt(vm, contracts.OperationKindPowerOn)
+		assert.Equal(t, int64(2), second.Attempt)
+		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, second.Outcome)
+		found := false
+		for _, e := range drainEvents(rec) {
+			found = found || strings.Contains(e, eventReasonOperationAcknowledged)
+		}
+		assert.True(t, found, "the acknowledgement is recorded")
+	})
+	t.Run("a Create is not acknowledged", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := identityFixture(t, stub)
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{ID: "vm-1", TaskRef: "task-create"}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedDirty, IsCompleted: true, Error: "x"}, nil
+		}
+		reconcileN(t, r, req, 2)
+		c := findAttempt(idVM(t, r), contracts.OperationKindCreate)
+		require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedDirty, c.Outcome)
+		setAnnotation(t, r, c.OpID)
+		reconcileN(t, r, req, 2)
+		vm := idVM(t, r)
+		assert.Equal(t, k8s.ReasonOperationFailedDirty, readyReason(vm))
+		assert.Equal(t, c.OpID, vm.Annotations[acknowledgeOperationAnnotation], "not consumed")
+		assert.Len(t, stub.sent(), 1)
 	})
 }

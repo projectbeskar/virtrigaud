@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -445,4 +446,38 @@ func (r *VirtualMachineReconciler) supersedeForDelete(ctx context.Context, vm *i
 // attempt a Delete superseded.
 func intentKeptAsEvidence(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) bool {
 	return deleteAwaitingRelease(vm, a) || a.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded
+}
+
+// acknowledgeOperationAnnotation, set on a VirtualMachine to the op_id of its
+// power or Reconfigure attempt that ended FailedDirty, acknowledges that an
+// operator checked the VM: the hold on that kind ends and, after the next
+// Describe, a new attempt of it may follow. It names one attempt exactly:
+// any other value (another op_id, a Create's or a Delete's) does nothing. The
+// manager removes it once consumed and records an event.
+const acknowledgeOperationAnnotation = "virtrigaud.io/acknowledge-operation"
+
+// eventReasonOperationAcknowledged is the event of a consumed acknowledgement.
+const eventReasonOperationAcknowledged = "OperationAcknowledged"
+
+// consumeAcknowledgement reports whether vm carries an acknowledgement of the
+// FailedDirty attempt prev (a power or Reconfigure attempt, whose op_id the
+// annotation names exactly) and, if so, removes the annotation and records an
+// event. A Create or Delete attempt is never acknowledged this way.
+func (r *VirtualMachineReconciler) consumeAcknowledgement(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	prev *infravirtrigaudiov1beta1.OperationAttempt) (bool, error) {
+	if !repeatableKind(contracts.OperationKind(prev.Kind)) || prev.OpID == "" ||
+		vm.Annotations[acknowledgeOperationAnnotation] != prev.OpID {
+		return false, nil
+	}
+	patched := vm.DeepCopy()
+	delete(patched.Annotations, acknowledgeOperationAnnotation)
+	if err := r.Patch(ctx, patched, client.MergeFromWithOptions(vm, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, fmt.Errorf("remove the operation acknowledgement of VirtualMachine %s/%s: %w", vm.Namespace, vm.Name, err)
+	}
+	vm.Annotations, vm.ResourceVersion = patched.Annotations, patched.ResourceVersion
+	log.FromContext(ctx).Info("A FailedDirty attempt was acknowledged", "kind", prev.Kind, "attempt", prev.Attempt, "opID", prev.OpID)
+	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonOperationAcknowledged, fmt.Sprintf(
+		"The FailedDirty hold of %s attempt %d (op_id %s) was acknowledged with %s; a new attempt of that kind may follow",
+		prev.Kind, prev.Attempt, prev.OpID, acknowledgeOperationAnnotation))
+	return true, nil
 }
