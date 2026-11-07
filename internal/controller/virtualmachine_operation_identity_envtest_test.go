@@ -72,6 +72,7 @@ type identityEnv struct {
 	target   *fake.Target
 	client   contracts.Provider
 	enrol    operation.StaticEnrolments
+	auth     operation.IntentAuthenticator
 	// deliveries counts the signed calls per full method, and opIDs records
 	// the op_id of every signed Create delivered.
 	deliveries sync.Map
@@ -188,6 +189,7 @@ func newIdentityEnv(ctx context.Context) *identityEnv {
 		ProviderUID: string(prov.UID)})
 	Expect(err).NotTo(HaveOccurred())
 	e.target = target
+	e.auth = operation.IntentAuthenticatorOf(signer)
 	cfg := target.OperationIdentity()
 	e.enrol = operation.StaticEnrolments{Epoch: cfg.Epoch, Hosts: map[string]map[string][]byte{ns.Name + "/" + prov.Name: cfg.Enrolments}}
 
@@ -275,7 +277,7 @@ func (e *identityEnv) startManager(ctx context.Context, hook func(context.Contex
 	Expect((&VirtualMachineReconciler{
 		Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(),
 		RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(1000),
-		OperationEnrolments: e.enrol, operationCrashHook: hook,
+		OperationEnrolments: e.enrol, OperationIntentAuth: e.auth, operationCrashHook: hook,
 	}).SetupWithManager(mgr)).To(Succeed())
 	done := make(chan struct{})
 	go func() {
@@ -436,6 +438,42 @@ var _ = Describe("Operation identity: attempt markers against the instrumented f
 		Expect(getIdentityVM(ctx, Default, key).Status.OperationAttempts).To(BeEmpty())
 	})
 
+	It("holds a Create whose intent Secret was tampered with after Prepared, and sends nothing", func() {
+		e := newIdentityEnv(ctx)
+		crashed := make(chan struct{})
+		stop := e.startManager(ctx, crashAt(crashAfterPrepared, contracts.OperationKindCreate, crashed))
+		key := e.createVM(ctx, "tamper")
+		Eventually(crashed, "30s").Should(BeClosed())
+		stop()
+
+		a := findAttempt(getIdentityVM(ctx, Default, key), contracts.OperationKindCreate)
+		Expect(a).NotTo(BeNil())
+		By("replacing the immutable intent Secret with one carrying other request bytes (delete and re-create)")
+		secret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: e.ns, Name: intentSecretName(a.OpID)}, secret)).To(Succeed())
+		forged := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secret.Name, Namespace: secret.Namespace, Labels: secret.Labels,
+			Annotations: secret.Annotations, OwnerReferences: secret.OwnerReferences}, Type: secret.Type, Data: map[string][]byte{}}
+		for k, v := range secret.Data {
+			forged.Data[k] = append([]byte(nil), v...)
+		}
+		forged.Data[intentKeyRequest] = append(forged.Data[intentKeyRequest], 0x01)
+		Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+		Expect(k8sClient.Create(ctx, forged)).To(Succeed())
+
+		e.startManager(ctx, nil)
+		Eventually(func(g Gomega) {
+			c := meta.FindStatusCondition(getIdentityVM(ctx, g, key).Status.Conditions, k8s.ConditionReady)
+			g.Expect(c).NotTo(BeNil())
+			g.Expect(c.Reason).To(Equal(k8s.ReasonOperationIntentTampered))
+		}, "30s", "100ms").Should(Succeed())
+		Consistently(func() int64 {
+			return e.delivered(providerv1.Provider_Create_FullMethodName)
+		}, "1s", "100ms").Should(BeZero(), "nothing is sent")
+		Expect(e.target.AcceptedOperations(providerv1.OperationKind_OPERATION_KIND_CREATE)).To(BeZero())
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: e.ns, Name: forged.Name}, &corev1.Secret{})).To(Succeed(),
+			"the Secret is kept as evidence")
+	})
+
 	It("re-sends a restored in-flight Create from its restored intent Secret, answered from the host's record (one effect)", func() {
 		e := newIdentityEnv(ctx)
 		crashed := make(chan struct{})
@@ -520,7 +558,8 @@ var _ = Describe("Operation identity: attempt markers against the instrumented f
 		Expect(mgr.GetCache().WaitForCacheSync(mgrCtx)).To(BeTrue())
 		reconciler := func(enrol operation.EnrolmentSource) *VirtualMachineReconciler {
 			r := &VirtualMachineReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(),
-				RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(1000), OperationEnrolments: enrol}
+				RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(1000), OperationEnrolments: enrol,
+				OperationIntentAuth: e.auth}
 			r.placementIndex = indexer
 			return r
 		}

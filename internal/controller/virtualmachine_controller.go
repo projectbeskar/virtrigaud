@@ -381,6 +381,11 @@ type VirtualMachineReconciler struct {
 	// --dev-operation-enrolment-file stand-in). nil: no host has one, and
 	// nothing is sent to such a Provider. Every other Provider ignores it.
 	OperationEnrolments operation.EnrolmentSource
+	// OperationIntentAuth authenticates the intent Secrets of operation
+	// identity (operation.IntentAuthenticatorOf the manager's signer). nil:
+	// no intent is stored or loaded, and nothing is sent to a Provider that
+	// requires operation identity (OperationSignerUnavailable).
+	OperationIntentAuth operation.IntentAuthenticator
 	// operationCrashHook, set by tests only, stops a reconcile at an
 	// operation-identity crash point when it returns true, as if the
 	// manager died there (virtualmachine_operation_identity.go).

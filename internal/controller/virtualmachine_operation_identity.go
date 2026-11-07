@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -34,6 +36,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // Operation identity on the VirtualMachine controller (development builds
@@ -103,6 +106,10 @@ var (
 	msgOperationFailedDirty    = "the Provider reported that the operation failed after an irreversible step began; " + operationHoldRecovery
 	msgOperationUnknownToAgent = "the host has no record of the operation's task, which proves nothing about the operation; " +
 		operationHoldRecovery
+	msgOperationIntentTampered = "the stored intent of an attempt in flight failed its authenticity or consistency checks; " +
+		"nothing is sent and the Secret is kept as evidence; " + operationHoldRecovery
+	msgOperationRequestTooLarge = "the operation's request is larger than an operation-intent Secret may hold " +
+		"(reduce the cloud-init user data); nothing is sent"
 	msgOperationProviderMismatch = "the host refused the operation as coming from another Provider than the one it is enrolled with; " +
 		"the same attempt is re-sent periodically; " + operationHoldRecovery
 )
@@ -182,8 +189,42 @@ func bindingIDOf(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
 // stateLost reports whether vm records a binding or an id but no Create
 // marker: its status was edited or restored, and a new attempt must not be
 // minted in the gap.
+//
+// It also reports a VM that records a provider id, a confirmed host or a
+// Bound placement while its Create marker is not Succeeded: the operator
+// records those only in the write that makes the Create Succeeded, so the
+// status was edited (for example a Succeeded marker rewritten as not
+// performed, which would otherwise start a new Create).
 func stateLost(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
-	return findAttempt(vm, contracts.OperationKindCreate) == nil && (vm.Status.ID != "" || bindingIDOf(vm) != "")
+	c := findAttempt(vm, contracts.OperationKindCreate)
+	if c == nil {
+		return vm.Status.ID != "" || bindingIDOf(vm) != "" || boundHost(vm) != ""
+	}
+	if c.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
+		return false
+	}
+	placed := k8s.GetCondition(vm.Status.Conditions, k8s.ConditionPlaced)
+	return vm.Status.ID != "" || boundHost(vm) != "" ||
+		(placed != nil && placed.Status == metav1.ConditionTrue && placed.Reason == k8s.ReasonBound)
+}
+
+// deleteAwaitingRelease reports whether a is a Delete recorded Succeeded
+// whose VM still holds its finalizer: its intent Secret is kept until the
+// finalizer is released, as the evidence the release is checked against.
+func deleteAwaitingRelease(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) bool {
+	return a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete && a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal &&
+		a.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded &&
+		controllerutilContains(vm.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+}
+
+// controllerutilContains reports whether list holds v.
+func controllerutilContains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // attemptRetryWait is how long after a not-performed attempt a's terminal
@@ -370,6 +411,9 @@ type identityAttempt struct {
 	instance   contracts.Provider
 	sender     contracts.OperationSender
 	vmClass    *infravirtrigaudiov1beta1.VMClass
+	// deleteRef is the VM reference a Delete attempt must name (set by
+	// identityDelete); a stored Delete intent naming another is tampered.
+	deleteRef *contracts.VMRef
 }
 
 // identityAttemptFor checks the Provider's client and advertised capabilities
@@ -378,7 +422,7 @@ type identityAttempt struct {
 func (r *VirtualMachineReconciler) identityAttemptFor(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	providerCR *infravirtrigaudiov1beta1.Provider, instance contracts.Provider) (identityAttempt, ctrl.Result, bool) {
 	sender, ok := instance.(contracts.OperationSender)
-	if !ok {
+	if !ok || r.OperationIntentAuth == nil {
 		return identityAttempt{}, r.holdOperation(ctx, vm, k8s.ReasonOperationSignerUnavailable, msgOperationSignerUnavailable,
 			operationHoldRecheckInterval), false
 	}
@@ -534,12 +578,19 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if err != nil {
 		logger.Error(err, "Cannot build the operation; nothing is sent", "kind", opReq.Kind)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
-			fmt.Sprintf("Cannot build the %s operation: %s", opReq.Kind, providerErrorMessage(err)), vm.Generation)
+			fmt.Sprintf("Cannot build the %s operation from the VM's specification; nothing is sent (see the manager log)", opReq.Kind),
+			vm.Generation)
 		r.updateStatus(ctx, vm)
 		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
+	if len(prepared.RequestBytes) > maxIntentRequestBytes {
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationRequestTooLarge, msgOperationRequestTooLarge, operationHoldRecheckInterval), nil
+	}
 	if err := r.storeIntent(ctx, ia.providerCR, vm, prepared); err != nil {
 		logger.Error(err, "Cannot store the operation's intent; nothing is sent", "kind", opReq.Kind)
+		if errors.Is(err, errIntentTooLarge) {
+			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationRequestTooLarge, msgOperationRequestTooLarge, operationHoldRecheckInterval), nil
+		}
 		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
 	opIDHex := hex.EncodeToString(opID)
@@ -569,37 +620,144 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if r.operationCrashed(ctx, crashAfterPrepared) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
-	return r.sendAttempt(ctx, vm, ia, &marker, prepared, "", true)
+	return r.sendAttempt(ctx, vm, ia, &marker, prepared, true)
 }
 
 // driveAttempt is step 3 or 4 for the attempt a in flight: a Sent attempt
 // with a task is polled; any other is re-sent from its intent Secret with
-// the same bytes and op_id.
+// the same bytes and op_id, once the Secret authenticates and matches a, vm
+// and the Provider (loadVerifiedIntent).
 func (r *VirtualMachineReconciler) driveAttempt(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (attemptStep, ctrl.Result, error) {
-	prepared, answerID, found, err := r.loadIntent(ctx, ia.providerCR.Namespace, a.OpID, vm.UID)
-	switch {
-	case err != nil && errors.Is(err, errIntentNotOurs):
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), nil
-	case err != nil:
-		log.FromContext(ctx).Info("Cannot read the operation-intent Secret; retrying", "error", err.Error())
-		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
-	case !found:
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), nil
-	case attemptKindOf(prepared.Kind) != a.Kind || prepared.Identity.Attempt != uint64(a.Attempt): // #nosec G115 -- CRD minimum 1
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), nil
+	prepared, step, res, ok := r.loadVerifiedIntent(ctx, vm, ia, a)
+	if !ok {
+		return step, res, nil
 	}
 	if a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent && a.TaskRef != "" {
-		return r.pollAttempt(ctx, vm, ia, a, answerID)
+		return r.pollAttempt(ctx, vm, ia, a)
 	}
-	return r.sendAttempt(ctx, vm, ia, a, prepared, answerID, false)
+	return r.sendAttempt(ctx, vm, ia, a, prepared, false)
+}
+
+// loadVerifiedIntent loads the intent of attempt a and checks it: it must
+// authenticate (OperationIntentAuth), and its identity must name vm's UID,
+// the Provider's UID, a's op_id, kind, attempt, host and binding, and the
+// host's current enrolment; a Delete's request must name the VM a Delete is
+// routed to now (ia.deleteRef), and a Create's request a's host and vm as
+// owner. ok is false when it does not, with the hold to return: a missing
+// Secret is OperationIntentLost; anything else is OperationIntentTampered
+// (with a Warning event), the Secret is kept as evidence, and nothing is
+// sent.
+func (r *VirtualMachineReconciler) loadVerifiedIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (contracts.PreparedOperation, attemptStep, ctrl.Result, bool) {
+	prepared, found, err := r.loadIntent(ctx, vm, a.OpID, ia.providerCR.Namespace)
+	switch {
+	case err != nil && errors.Is(err, operation.ErrNoIntentAuthenticator):
+		return prepared, stepHeld, r.holdOperationSignerUnavailable(ctx, vm), false
+	case err != nil && errors.Is(err, errIntentTampered):
+		return prepared, stepHeld, r.holdIntentTampered(ctx, vm, a, err), false
+	case err != nil:
+		log.FromContext(ctx).Info("Cannot read the operation-intent Secret; retrying", "error", err.Error())
+		return prepared, stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, false
+	case !found:
+		return prepared, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), false
+	}
+	if err := r.checkIntent(vm, ia, a, prepared); err != nil {
+		return prepared, stepHeld, r.holdIntentTampered(ctx, vm, a, err), false
+	}
+	return prepared, stepWaiting, ctrl.Result{}, true
+}
+
+// checkIntent cross-checks an authenticated intent against the state the
+// manager holds now (see loadVerifiedIntent).
+func (r *VirtualMachineReconciler) checkIntent(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
+	a *infravirtrigaudiov1beta1.OperationAttempt, p contracts.PreparedOperation) error {
+	id := p.Identity
+	switch {
+	case attemptKindOf(p.Kind) != a.Kind:
+		return fmt.Errorf("kind: %w", errIntentTampered)
+	case id.Attempt != uint64(a.Attempt): // #nosec G115 -- CRD minimum 1
+		return fmt.Errorf("attempt: %w", errIntentTampered)
+	case hex.EncodeToString(id.OpID) != a.OpID:
+		return fmt.Errorf("op_id: %w", errIntentTampered)
+	case id.VMUID != string(vm.UID):
+		return fmt.Errorf("VM uid: %w", errIntentTampered)
+	case id.ProviderUID != string(ia.providerCR.UID):
+		return fmt.Errorf("Provider uid: %w", errIntentTampered)
+	case id.HostID != a.HostID:
+		return fmt.Errorf("host: %w", errIntentTampered)
+	case hex.EncodeToString(id.BindingID) != a.BindingID:
+		return fmt.Errorf("binding: %w", errIntentTampered)
+	}
+	if r.OperationEnrolments != nil {
+		enrol, err := r.OperationEnrolments.Enrolment(ia.providerCR.Namespace, ia.providerCR.Name, a.HostID)
+		if err != nil || !bytes.Equal(enrol.EnrolmentID, id.EnrolmentID) || enrol.Epoch.Counter != id.Epoch.Counter ||
+			!bytes.Equal(enrol.Epoch.Holder, id.Epoch.Holder) {
+			return fmt.Errorf("enrolment: %w", errIntentTampered)
+		}
+	}
+	return checkIntentRequest(vm, ia, a, p)
+}
+
+// checkIntentRequest decodes the stored request as its kind's message and
+// checks what it targets: a Delete names ia.deleteRef (its id, host and
+// owner), a Create targets a's host with vm as owner.
+func checkIntentRequest(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
+	a *infravirtrigaudiov1beta1.OperationAttempt, p contracts.PreparedOperation) error {
+	wire, ok := wireKinds[p.Kind]
+	if !ok {
+		return fmt.Errorf("kind: %w", errIntentTampered)
+	}
+	msg, err := operation.DecodeRequest(wire, p.RequestBytes)
+	if err != nil {
+		return fmt.Errorf("request: %w", errIntentTampered)
+	}
+	switch req := msg.(type) {
+	case *providerv1.DeleteRequest:
+		if ia.deleteRef == nil {
+			return fmt.Errorf("a Delete outside a deletion: %w", errIntentTampered)
+		}
+		ref := ia.deleteRef
+		if req.GetId() != ref.ID || req.GetTargetHostId() != ref.HostID || req.GetTargetHostId() != a.HostID ||
+			req.GetOwner().GetUid() != string(vm.UID) {
+			return fmt.Errorf("Delete target: %w", errIntentTampered)
+		}
+	case *providerv1.CreateRequest:
+		if req.GetTargetHostId() != a.HostID || req.GetOwner().GetUid() != string(vm.UID) {
+			return fmt.Errorf("Create target: %w", errIntentTampered)
+		}
+	default:
+		return fmt.Errorf("unexpected request type: %w", errIntentTampered)
+	}
+	return nil
+}
+
+// wireKinds maps the kinds this controller sends to their wire kinds.
+var wireKinds = map[contracts.OperationKind]providerv1.OperationKind{
+	contracts.OperationKindCreate: providerv1.OperationKind_OPERATION_KIND_CREATE,
+	contracts.OperationKindDelete: providerv1.OperationKind_OPERATION_KIND_DELETE,
+}
+
+// holdIntentTampered holds vm for an intent that failed loadVerifiedIntent,
+// and records a Warning event (without any of the Secret's content) when the
+// hold begins.
+func (r *VirtualMachineReconciler) holdIntentTampered(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	a *infravirtrigaudiov1beta1.OperationAttempt, cause error) ctrl.Result {
+	log.FromContext(ctx).Info("The operation-intent Secret failed its checks; nothing is sent and it is kept as evidence",
+		"kind", a.Kind, "attempt", a.Attempt, "opID", a.OpID, "check", cause.Error())
+	if c := k8s.GetCondition(vm.Status.Conditions, k8s.ConditionReady); c == nil || c.Reason != k8s.ReasonOperationIntentTampered {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonOperationIntentTampered, fmt.Sprintf(
+			"The stored intent of %s attempt %d (Secret %s in the Provider's namespace) failed its authenticity or consistency "+
+				"checks; nothing is sent and the Secret is kept", a.Kind, a.Attempt, intentSecretName(a.OpID)))
+	}
+	return r.holdOperation(ctx, vm, k8s.ReasonOperationIntentTampered, msgOperationIntentTampered, operationHoldRecheckInterval)
 }
 
 // sendAttempt sends prepared (the attempt a) and records the answer. first is
 // true only for the delivery made by the reconcile that wrote a as Prepared.
 func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation,
-	knownAnswerID string, first bool) (attemptStep, ctrl.Result, error) {
+	first bool) (attemptStep, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	answer, err := ia.sender.SendOperation(ctx, prepared)
 	if r.operationCrashed(ctx, crashAfterSend) {
@@ -609,20 +767,15 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 		return r.sendFailed(ctx, vm, ia, a, err, first)
 	}
 	if answer.TaskRef == "" {
-		id := answer.ID
-		if id == "" {
-			id = knownAnswerID
-		}
-		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, "", id)
-	}
-	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate && answer.ID != "" {
-		if err := r.recordIntentAnswer(ctx, ia.providerCR.Namespace, a.OpID, vm.UID, answer.ID); err != nil {
-			logger.Info("Cannot record the Create's answer; the attempt is re-sent", "error", err.Error())
-			return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
-		}
+		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, "", answer.ID)
 	}
 	sent := *a
 	sent.Phase, sent.TaskRef, sent.LastTransitionTime = infravirtrigaudiov1beta1.OperationAttemptPhaseSent, answer.TaskRef, metav1.NewTime(r.now())
+	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate {
+		// The provider's VM id is kept on the marker (operator-written
+		// status), never in the Secret, until the Create Succeeded.
+		sent.ID = answer.ID
+	}
 	if err := r.writeIdentityStatus(ctx, vm, identityStatusWrite{attempts: withAttempt(vm, sent)}); err != nil {
 		logger.Info("The Sent marker was not written; the attempt is re-sent with the same op_id", "error", err.Error())
 		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
@@ -705,7 +858,7 @@ func redeliveryRefusal(err error) string {
 // writes unless the task is over) and closes the attempt on a terminal
 // outcome.
 func (r *VirtualMachineReconciler) pollAttempt(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt, answerID string) (attemptStep, ctrl.Result, error) {
+	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (attemptStep, ctrl.Result, error) {
 	st, err := ia.instance.TaskStatus(ctx, a.TaskRef)
 	if err != nil {
 		if contracts.IsUnknownToAgent(err) {
@@ -749,7 +902,7 @@ func (r *VirtualMachineReconciler) pollAttempt(ctx context.Context, vm *infravir
 	if r.operationCrashed(ctx, crashAfterReply) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
-	return r.closeAttempt(ctx, vm, ia, a, outcome, st.OutcomeReason, answerID)
+	return r.closeAttempt(ctx, vm, ia, a, outcome, st.OutcomeReason, a.ID)
 }
 
 // closeAttempt writes the attempt a Terminal with outcome (and, for a
@@ -780,8 +933,12 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 	if r.operationCrashed(ctx, crashAfterTerminal) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
-	if err := r.deleteIntent(ctx, ia.providerCR.Namespace, a.OpID, vm.UID); err != nil {
-		logger.Info("Could not remove the operation-intent Secret; the sweeper will", "error", err.Error())
+	// A Delete that Succeeded keeps its intent Secret until the finalizer is
+	// released: it is the evidence a later release is checked against.
+	if !(a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete && outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded) {
+		if err := r.deleteIntent(ctx, ia.providerCR.Namespace, a.OpID, vm.UID); err != nil {
+			logger.Info("Could not remove the operation-intent Secret; the sweeper will", "error", err.Error())
+		}
 	}
 	switch outcome {
 	case infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded:
@@ -806,7 +963,8 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 // Later ones are left to the sweeper, so a settled VM costs no reads.
 func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ns string) {
 	for _, a := range vm.Status.OperationAttempts {
-		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || r.now().Sub(a.LastTransitionTime.Time) > operationIntentSweepGrace {
+		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || r.now().Sub(a.LastTransitionTime.Time) > operationIntentSweepGrace ||
+			deleteAwaitingRelease(vm, &a) {
 			continue
 		}
 		if err := r.deleteIntent(ctx, ns, a.OpID, vm.UID); err != nil {
@@ -855,6 +1013,7 @@ func (r *VirtualMachineReconciler) identityDelete(ctx context.Context, vm *infra
 		}
 		return res, nil
 	}
+	ia.deleteRef = &ref
 	if stateLost(vm) {
 		if force {
 			return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOperationHeld)
@@ -863,28 +1022,99 @@ func (r *VirtualMachineReconciler) identityDelete(ctx context.Context, vm *infra
 	}
 	if a := inFlightAttempt(vm); a != nil {
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
-		return r.afterDeleteStep(ctx, vm, a.Kind, step, res, err, force)
+		return r.afterDeleteStep(ctx, vm, ia, a.Kind, step, res, err, force)
 	}
 	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)
 	if d := findAttempt(vm, contracts.OperationKindDelete); d != nil && d.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
-		return r.removeFinalizer(ctx, vm)
+		return r.confirmDeleteRelease(ctx, vm, ia, d, force)
 	}
 	if nothingCreated(vm) {
 		log.FromContext(ctx).Info("No Create of this VM was ever performed; releasing it without a Delete")
 		return r.removeFinalizer(ctx, vm)
 	}
 	step, res, err := r.startAttempt(ctx, vm, ia, contracts.OperationRequest{Kind: contracts.OperationKindDelete, VM: ref}, ref.HostID)
-	return r.afterDeleteStep(ctx, vm, infravirtrigaudiov1beta1.OperationAttemptKindDelete, step, res, err, force)
+	return r.afterDeleteStep(ctx, vm, ia, infravirtrigaudiov1beta1.OperationAttemptKindDelete, step, res, err, force)
+}
+
+// msgDeleteNotConfirmed is the hold of a Delete recorded Succeeded that its
+// stored intent or the Provider does not confirm.
+var msgDeleteNotConfirmed = "the VM's Delete is recorded Succeeded, but its stored intent or the Provider does not confirm it " +
+	"(status.operationAttempts may have been edited); " + operationHoldRecovery
+
+// confirmDeleteRelease releases the finalizer of a VM whose Delete attempt d
+// is recorded Succeeded but whose release was not made by the reconcile that
+// recorded it (a restart in between, or an edited status): the Delete's
+// intent Secret must authenticate and match d, and the Provider must confirm
+// the outcome: the task d names reports Succeeded, or, for a synchronous
+// Delete, a re-send of the same attempt (the host answers a known op_id from
+// its record) succeeds. Otherwise the VM is held (or released by
+// force-delete). The status itself is not authenticated: a principal that can
+// write it and can also make the Provider confirm a Delete it never ran can
+// still cause a release.
+func (r *VirtualMachineReconciler) confirmDeleteRelease(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ia identityAttempt, d *infravirtrigaudiov1beta1.OperationAttempt, force bool) (ctrl.Result, error) {
+	hold := func(res ctrl.Result) (ctrl.Result, error) {
+		if force {
+			return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOperationHeld)
+		}
+		return res, nil
+	}
+	prepared, found, err := r.loadIntent(ctx, vm, d.OpID, ia.providerCR.Namespace)
+	switch {
+	case err == nil && !found:
+		return hold(r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgDeleteNotConfirmed, operationHoldRecheckInterval))
+	case err != nil && errors.Is(err, errIntentTampered):
+		return hold(r.holdIntentTampered(ctx, vm, d, err))
+	case err != nil:
+		log.FromContext(ctx).Info("Cannot read the Delete's operation-intent Secret; retrying", "error", err.Error())
+		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+	}
+	if cerr := r.checkIntent(vm, ia, d, prepared); cerr != nil {
+		return hold(r.holdIntentTampered(ctx, vm, d, cerr))
+	}
+	confirmed := false
+	if d.TaskRef != "" {
+		st, terr := ia.instance.TaskStatus(ctx, d.TaskRef)
+		confirmed = terr == nil && (st.Outcome == contracts.TaskOutcomeSucceeded ||
+			(st.Outcome == contracts.TaskOutcomeUnspecified && st.IsCompleted && st.Error == ""))
+	} else {
+		answer, serr := ia.sender.SendOperation(ctx, prepared)
+		confirmed = serr == nil && answer.TaskRef == ""
+	}
+	if !confirmed {
+		return hold(r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgDeleteNotConfirmed, operationHoldRecheckInterval))
+	}
+	return r.releaseAfterDelete(ctx, vm, ia, d.OpID)
+}
+
+// releaseAfterDelete removes the finalizer of a VM whose Delete attempt opID
+// Succeeded, then deletes that attempt's intent Secret (the sweeper removes
+// it if this fails).
+func (r *VirtualMachineReconciler) releaseAfterDelete(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ia identityAttempt, opID string) (ctrl.Result, error) {
+	res, err := r.removeFinalizer(ctx, vm)
+	if err != nil {
+		return res, err
+	}
+	if derr := r.deleteIntent(ctx, ia.providerCR.Namespace, opID, vm.UID); derr != nil {
+		log.FromContext(ctx).Info("Could not remove the Delete's operation-intent Secret; the sweeper will", "error", derr.Error())
+	}
+	return res, nil
 }
 
 // afterDeleteStep maps a step of an attempt of kind driven by identityDelete.
 func (r *VirtualMachineReconciler) afterDeleteStep(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	kind infravirtrigaudiov1beta1.OperationAttemptKind, step attemptStep, res ctrl.Result, err error, force bool) (ctrl.Result, error) {
+	ia identityAttempt, kind infravirtrigaudiov1beta1.OperationAttemptKind, step attemptStep, res ctrl.Result, err error,
+	force bool) (ctrl.Result, error) {
 	switch {
 	case err != nil:
 		return res, err
 	case step == stepSucceeded && kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete:
-		return r.removeFinalizer(ctx, vm)
+		opID := ""
+		if d := findAttempt(vm, contracts.OperationKindDelete); d != nil {
+			opID = d.OpID
+		}
+		return r.releaseAfterDelete(ctx, vm, ia, opID)
 	case step == stepSucceeded:
 		// The Create in flight is over (its id is recorded): the Delete
 		// follows on the next reconcile.

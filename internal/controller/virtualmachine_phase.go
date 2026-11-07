@@ -63,6 +63,8 @@ var holdPhaseReasons = map[string]bool{
 	k8s.ReasonOperationEnrolmentUnavailable: true,
 	k8s.ReasonOperationStateLost:            true,
 	k8s.ReasonOperationIntentLost:           true,
+	k8s.ReasonOperationIntentTampered:       true,
+	k8s.ReasonOperationRequestTooLarge:      true,
 	k8s.ReasonOperationFailedDirty:          true,
 	k8s.ReasonOperationOutcomeUnknown:       true,
 	k8s.ReasonOperationUnknownToAgent:       true,

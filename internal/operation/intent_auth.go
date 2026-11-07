@@ -124,7 +124,9 @@ func (a *hmacIntentAuthenticator) OpenIntent(msg, tag []byte) bool {
 }
 
 // String never renders the key.
-func (a *hmacIntentAuthenticator) String() string { return "IntentAuthenticator{HMAC-SHA256, key redacted}" }
+func (a *hmacIntentAuthenticator) String() string {
+	return "IntentAuthenticator{HMAC-SHA256, key redacted}"
+}
 
 // GoString never renders the key.
 func (a *hmacIntentAuthenticator) GoString() string { return a.String() }

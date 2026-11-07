@@ -456,6 +456,9 @@ func main() {
 		// Development builds only: enrolments of the hosts of Providers
 		// whose type requires operation identity (nil: none).
 		OperationEnrolments: devOperationEnrolments,
+		// The authenticator of the intent Secrets, derived from the
+		// signer (nil without one: nothing is stored or sent).
+		OperationIntentAuth: operation.IntentAuthenticatorOf(devOperationSigner),
 	}
 	if err = vmReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")

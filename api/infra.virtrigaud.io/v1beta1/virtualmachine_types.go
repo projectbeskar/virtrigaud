@@ -495,11 +495,15 @@ type VirtualMachineStatus struct {
 	// builds only; no built-in Provider type requires it): at most one entry
 	// per operation kind, the latest attempt of that kind. An entry is written
 	// before its operation is first sent, and moves Prepared, Sent, Terminal.
-	// The exact request bytes of a non-terminal attempt are kept in a Secret
-	// in the Provider's namespace, never here. The entries are not signed.
-	// Never written for any other Provider. Written only by the operator;
-	// editing or removing an entry holds the VM (Ready=False) and never makes
-	// the operator send an operation again under a new identity.
+	// The exact request bytes of a non-terminal attempt are kept in an
+	// authenticated Secret in the Provider's namespace, never here. Never
+	// written for any other Provider. Written only by the operator. The
+	// entries are not signed or authenticated: an edit the operator detects
+	// (a removed entry, an id or confirmed host without a successful Create,
+	// a Delete recorded Succeeded that its stored intent and the Provider do
+	// not confirm) holds the VM (Ready=False), but a principal allowed to
+	// write virtualmachines/status can still cause a duplicate or a skipped
+	// operation; the host's own de-duplication is then the backstop.
 	// +optional
 	// +listType=map
 	// +listMapKey=kind
@@ -617,6 +621,13 @@ type OperationAttempt struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024
 	TaskRef string `json:"taskRef,omitempty"`
+
+	// ID is the provider's VM identifier an asynchronous Create answered,
+	// recorded with phase Sent; it becomes status.id once the attempt
+	// Succeeded.
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	ID string `json:"id,omitempty"`
 
 	// LastTransitionTime is when the attempt last changed phase.
 	LastTransitionTime metav1.Time `json:"lastTransitionTime"`

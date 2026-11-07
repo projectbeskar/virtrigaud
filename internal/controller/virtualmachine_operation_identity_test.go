@@ -30,9 +30,11 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -41,6 +43,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // These tests pin the operation-identity lifecycle of the VirtualMachine
@@ -61,6 +64,8 @@ type identityStub struct {
 	onSend  func(p contracts.PreparedOperation) (contracts.OperationAnswer, error)
 	onTask  func(ref string) (contracts.TaskStatus, error)
 	creates int // unsigned Creates (must stay 0)
+	// bigRequest makes BuildOperation return a request over the intent cap.
+	bigRequest bool
 	deletes int // unsigned Deletes (must stay 0)
 }
 
@@ -87,7 +92,22 @@ func (s *identityStub) BuildOperation(_ context.Context, id contracts.OperationA
 	if err != nil {
 		return contracts.PreparedOperation{}, err
 	}
-	body, _ := json.Marshal(map[string]string{"kind": string(req.Kind), "name": req.Spec.Name, "id": req.VM.ID, "host": id.HostID})
+	var msg proto.Message
+	switch req.Kind {
+	case contracts.OperationKindCreate:
+		msg = &providerv1.CreateRequest{Name: req.Spec.Name, TargetHostId: id.HostID,
+			Owner: &providerv1.ObjectIdentity{Uid: id.VMUID}}
+	default:
+		msg = &providerv1.DeleteRequest{Id: req.VM.ID, TargetHostId: req.VM.HostID,
+			Owner: &providerv1.ObjectIdentity{Uid: req.VM.Owner.UID}}
+	}
+	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+	if err != nil {
+		return contracts.PreparedOperation{}, err
+	}
+	if s.bigRequest {
+		body = make([]byte, maxIntentRequestBytes+1)
+	}
 	p := contracts.PreparedOperation{Kind: req.Kind, Identity: id, RequestBytes: body, DigestSalt: salt}
 	s.builds = append(s.builds, p)
 	return p, nil
@@ -149,6 +169,11 @@ func identityFixture(t *testing.T, stub contracts.Provider) (*VirtualMachineReco
 	holder[0] = 1
 	enrol := make([]byte, operation.IDLen)
 	enrol[0] = 2
+	intentKey := make([]byte, 32)
+	intentKey[0] = 9
+	auth, err := operation.NewIntentAuthenticator(intentKey)
+	require.NoError(t, err)
+	r.OperationIntentAuth = auth
 	r.OperationEnrolments = operation.StaticEnrolments{
 		Epoch: operation.Epoch{Counter: 2, Holder: holder},
 		Hosts: map[string]map[string][]byte{clusteredNS + "/prov-cluster": {"host-alpha": enrol}},
@@ -833,6 +858,7 @@ func TestSweepOperationIntents(t *testing.T) {
 	mk(intentSecretName("000000000000000000000000000000aa"), "vm-id", "uid-vm-id", true) // orphan of this VM
 	mk(intentSecretName("000000000000000000000000000000bb"), "gone", "uid-gone", true)   // its VM is gone
 	mk(intentSecretName("000000000000000000000000000000cc"), "gone", "uid-gone", false)  // not owned: never touched
+	mk(intentSecretName("000000000000000000000000000000dd"), "elsewhere", "uid-vm-id", true) // annotations disagree with the UID label: kept
 
 	// The fake client stores no creation time: the Secrets were "created" at
 	// the zero time.
@@ -851,8 +877,241 @@ func TestSweepOperationIntents(t *testing.T) {
 	a := findAttempt(idVM(t, r), contracts.OperationKindCreate)
 	assert.True(t, names[intentSecretName(a.OpID)], "the Secret of the attempt in flight is kept")
 	assert.True(t, names[intentSecretName("000000000000000000000000000000cc")], "a Secret the Provider does not own is kept")
-	assert.Len(t, names, 2)
+	assert.True(t, names[intentSecretName("000000000000000000000000000000dd")], "a Secret whose annotations disagree with its VM is kept")
+	assert.Len(t, names, 3)
 }
 
 // boolTrue is a pointer to true.
 func boolTrue() *bool { b := true; return &b }
+
+// preparedWithIntent leaves a Prepared Create attempt and its intent Secret
+// (the first delivery fails at transport level), and returns the Secret.
+func preparedWithIntent(t *testing.T) (*identityStub, *VirtualMachineReconciler, ctrl.Request, *corev1.Secret) {
+	t.Helper()
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	fail := true
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		if fail {
+			fail = false
+			return contracts.OperationAnswer{}, errors.New("connection reset")
+		}
+		return contracts.OperationAnswer{ID: "vm-1"}, nil
+	}
+	reconcileN(t, r, req, 1)
+	secrets := intentSecrets(t, r)
+	require.Len(t, secrets, 1)
+	return stub, r, req, &secrets[0]
+}
+
+// reseal recomputes s's tag with r's authenticator: a Secret whose content is
+// authentic but does not match its attempt (a bug, or a replayed Secret).
+func reseal(r *VirtualMachineReconciler, s *corev1.Secret) {
+	s.Data[intentKeyTag] = r.OperationIntentAuth.SealIntent(intentMAC(s))
+}
+
+func editIdentity(t *testing.T, s *corev1.Secret, edit func(*intentIdentity)) {
+	t.Helper()
+	var ident intentIdentity
+	require.NoError(t, json.Unmarshal(s.Data[intentKeyIdentity], &ident))
+	edit(&ident)
+	b, err := json.Marshal(ident)
+	require.NoError(t, err)
+	s.Data[intentKeyIdentity] = b
+}
+
+// A tampered intent Secret is never signed or sent: the VM is held as
+// OperationIntentTampered, a Warning event is recorded, and the Secret is
+// kept as evidence.
+func TestIdentityIntent_TamperedIsHeld(t *testing.T) {
+	cases := map[string]func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret){
+		"request bytes": func(t *testing.T, _ *VirtualMachineReconciler, s *corev1.Secret) {
+			s.Data[intentKeyRequest] = append(s.Data[intentKeyRequest], 0x01)
+		},
+		"salt": func(t *testing.T, _ *VirtualMachineReconciler, s *corev1.Secret) { s.Data[intentKeySalt][0] ^= 0xff },
+		"tag stripped": func(t *testing.T, _ *VirtualMachineReconciler, s *corev1.Secret) {
+			delete(s.Data, intentKeyTag)
+		},
+		"identity VM uid (unsealed)": func(t *testing.T, _ *VirtualMachineReconciler, s *corev1.Secret) {
+			editIdentity(t, s, func(i *intentIdentity) { i.Identity.VMUID = "uid-other" })
+		},
+		"identity VM uid (resealed)": func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret) {
+			editIdentity(t, s, func(i *intentIdentity) { i.Identity.VMUID = "uid-other" })
+			reseal(r, s)
+		},
+		"Provider uid (resealed)": func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret) {
+			editIdentity(t, s, func(i *intentIdentity) { i.Identity.ProviderUID = "uid-other-provider" })
+			reseal(r, s)
+		},
+		"host (resealed)": func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret) {
+			editIdentity(t, s, func(i *intentIdentity) { i.Identity.HostID = "host-beta" })
+			reseal(r, s)
+		},
+		"binding (resealed)": func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret) {
+			editIdentity(t, s, func(i *intentIdentity) { i.Identity.BindingID = make([]byte, operation.IDLen) })
+			reseal(r, s)
+		},
+		"request targets another host (resealed)": func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret) {
+			b, err := proto.Marshal(&providerv1.CreateRequest{Name: "vm-id", TargetHostId: "host-beta",
+				Owner: &providerv1.ObjectIdentity{Uid: "uid-vm-id"}})
+			require.NoError(t, err)
+			s.Data[intentKeyRequest] = b
+			reseal(r, s)
+		},
+		"VM annotations (another VM)": func(t *testing.T, _ *VirtualMachineReconciler, s *corev1.Secret) {
+			s.Annotations[operationIntentVMNameAnnotation] = "other-vm"
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			stub, r, req, s := preparedWithIntent(t)
+			rec := record.NewFakeRecorder(10)
+			r.Recorder = rec
+			tamper(t, r, s)
+			require.NoError(t, r.Update(context.Background(), s))
+
+			reconcileN(t, r, req, 2)
+			vm := idVM(t, r)
+			assert.Equal(t, k8s.ReasonOperationIntentTampered, readyReason(vm))
+			assert.Len(t, stub.sent(), 1, "nothing is sent from a tampered intent")
+			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, findAttempt(vm, contracts.OperationKindCreate).Phase)
+			assert.Len(t, intentSecrets(t, r), 1, "the Secret is kept as evidence")
+			require.Len(t, rec.Events, 1, "one Warning event when the hold begins")
+			ev := <-rec.Events
+			assert.Contains(t, ev, k8s.ReasonOperationIntentTampered)
+			assert.NotContains(t, ev, string(s.Data[intentKeySalt]))
+		})
+	}
+}
+
+// The intent Secret is authenticated, immutable and labelled as the
+// operator's.
+func TestIdentityIntent_SecretIsSealedAndImmutable(t *testing.T) {
+	_, r, _, s := preparedWithIntent(t)
+	require.NotNil(t, s.Immutable)
+	assert.True(t, *s.Immutable)
+	assert.Equal(t, managedByValue, s.Labels[managedByLabel])
+	assert.Len(t, s.Data[intentKeyTag], operation.IntentTagLen)
+	assert.True(t, r.OperationIntentAuth.OpenIntent(intentMAC(s), s.Data[intentKeyTag]))
+}
+
+// An injected answer id in the intent Secret is never used: the id of an
+// asynchronous Create comes from the marker the operator wrote with Sent.
+func TestIdentityIntent_AnswerIDOnlyFromMarker(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{ID: "vm-async", TaskRef: "task-1"}, nil
+	}
+	running := true
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		if running {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded, IsCompleted: true}, nil
+	}
+	reconcileN(t, r, req, 1)
+	assert.Equal(t, "vm-async", findAttempt(idVM(t, r), contracts.OperationKindCreate).ID)
+	secrets := intentSecrets(t, r)
+	require.Len(t, secrets, 1)
+	secrets[0].Data["answer-id"] = []byte("vm-injected")
+	require.NoError(t, r.Update(context.Background(), &secrets[0]))
+	running = false
+	reconcileN(t, r, req, 1)
+	assert.Equal(t, "vm-async", idVM(t, r).Status.ID)
+}
+
+// A Delete intent that names another VM than the one the Delete is routed
+// to now is held, and the finalizer kept.
+func TestIdentityIntent_TamperedDeleteTargetIsHeld(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	calls := 0
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		calls++
+		return contracts.OperationAnswer{}, errors.New("connection reset")
+	}
+	markDeleted(t, r, nil)
+	reconcileN(t, r, req, 1)
+	secrets := intentSecrets(t, r)
+	require.Len(t, secrets, 1)
+	b, err := proto.Marshal(&providerv1.DeleteRequest{Id: "another-vm", TargetHostId: "host-alpha",
+		Owner: &providerv1.ObjectIdentity{Uid: "uid-vm-id"}})
+	require.NoError(t, err)
+	secrets[0].Data[intentKeyRequest] = b
+	reseal(r, &secrets[0])
+	require.NoError(t, r.Update(context.Background(), &secrets[0]))
+	reconcileN(t, r, req, 2)
+	assert.False(t, vmGone(t, r))
+	assert.Equal(t, k8s.ReasonOperationIntentTampered, readyReason(idVM(t, r)))
+	assert.Equal(t, 1, calls, "the tampered Delete is never sent")
+}
+
+// A request over the intent cap is held, not retried.
+func TestIdentityIntent_RequestTooLargeIsHeld(t *testing.T) {
+	stub := newIdentityStub()
+	stub.bigRequest = true
+	r, req := identityFixture(t, stub)
+	reconcileN(t, r, req, 2)
+	assert.Equal(t, k8s.ReasonOperationRequestTooLarge, readyReason(idVM(t, r)))
+	assert.Empty(t, stub.sent())
+	assert.Empty(t, intentSecrets(t, r))
+}
+
+// A Create marker rewritten as not performed, while the VM records its id,
+// is held: no new Create attempt.
+func TestIdentityStateLost_EditedCreateMarker(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	vm := idVM(t, r)
+	vm.Status.OperationAttempts[0].Outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeRejected
+	vm.Status.OperationAttempts[0].LastTransitionTime = metav1.NewTime(time.Now().Add(-time.Hour))
+	vm.Status.ID = ""
+	require.NoError(t, r.Status().Update(context.Background(), vm))
+	reconcileN(t, r, req, 2)
+	assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(idVM(t, r)), "a confirmed host without a successful Create is held")
+	assert.Len(t, stub.sent(), 1, "no second Create")
+}
+
+// A Delete recorded Succeeded with no stored intent behind it (a fabricated
+// marker) does not release the finalizer.
+func TestIdentityDelete_FabricatedSucceededMarkerHolds(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	vm := idVM(t, r)
+	vm.Status.OperationAttempts = append(vm.Status.OperationAttempts, infravirtrigaudiov1beta1.OperationAttempt{
+		Kind: infravirtrigaudiov1beta1.OperationAttemptKindDelete, Attempt: 1, OpID: "0000000000000000000000000000abcd",
+		BindingID: bindingIDOf(vm), HostID: "host-alpha", Phase: infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal,
+		Outcome: infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, LastTransitionTime: metav1.Now(),
+	})
+	require.NoError(t, r.Status().Update(context.Background(), vm))
+	markDeleted(t, r, nil)
+	reconcileN(t, r, req, 2)
+	assert.False(t, vmGone(t, r), "a Delete marker nothing confirms keeps the finalizer")
+	assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(idVM(t, r)))
+	assert.Len(t, stub.sent(), 1, "only the Create was sent")
+}
+
+// A Delete recorded Succeeded by a manager that stopped before releasing the
+// finalizer is confirmed (its intent authenticates and a re-send of the same
+// attempt succeeds), then released and its intent Secret removed.
+func TestIdentityDelete_SucceededMarkerConfirmedAfterRestart(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	markDeleted(t, r, nil)
+	r.operationCrashHook = func(_ context.Context, p operationCrashPoint) bool { return p == crashAfterTerminal }
+	_, err := r.Reconcile(context.Background(), req)
+	require.ErrorIs(t, err, errOperationCrashed)
+	d := findAttempt(idVM(t, r), contracts.OperationKindDelete)
+	require.NotNil(t, d)
+	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, d.Outcome)
+	require.Len(t, intentSecrets(t, r), 1, "the Delete's intent is kept until the release")
+
+	r.operationCrashHook = nil
+	reconcileN(t, r, req, 1)
+	assert.True(t, vmGone(t, r))
+	assert.Empty(t, intentSecrets(t, r))
+	sends := stub.sent()
+	require.Len(t, sends, 3, "Create, Delete, and the confirming re-send of the same Delete attempt")
+	assert.Equal(t, sends[1].Identity.OpID, sends[2].Identity.OpID)
+}

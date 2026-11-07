@@ -680,6 +680,15 @@ const (
 	// so the operation cannot be re-sent with its exact bytes. Held for an
 	// operator.
 	ReasonOperationIntentLost = "OperationIntentLost"
+	// ReasonOperationIntentTampered: an attempt's intent Secret does not
+	// authenticate, or names another VM, Provider, host, binding, attempt
+	// or target than the attempt it is read for. Nothing is sent and the
+	// Secret is kept as evidence. Held for an operator.
+	ReasonOperationIntentTampered = "OperationIntentTampered"
+	// ReasonOperationRequestTooLarge: the operation's request (for example
+	// with large cloud-init user data) is larger than an intent Secret may
+	// hold. Nothing is sent until the specification is made smaller.
+	ReasonOperationRequestTooLarge = "OperationRequestTooLarge"
 	// ReasonOperationFailedDirty: the Provider reported the operation failed
 	// after an irreversible step began. Held for an operator.
 	ReasonOperationFailedDirty = "OperationFailedDirty"
