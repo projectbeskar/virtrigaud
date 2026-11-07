@@ -33,6 +33,7 @@ type Target struct {
 	violations map[Violation]bool
 	async      bool
 	caps       clustered.Capabilities
+	ident      *identityMode
 }
 
 // Option configures New.
@@ -52,6 +53,18 @@ func Synchronous() Option { return func(t *Target) { t.async = false } }
 
 // New returns a fake clustered Provider over hosts host-a and host-b.
 func New(opts ...Option) *Target {
+	t, _ := build(nil, opts) // without identity, build never fails
+	return t
+}
+
+// NewIdentity returns a fake clustered Provider over hosts host-a and host-b
+// in operation-identity mode (see IdentityConfig).
+func NewIdentity(cfg IdentityConfig, opts ...Option) (*Target, error) {
+	return build(&cfg, opts)
+}
+
+// build makes the fake, in identity mode when identity is set.
+func build(identity *IdentityConfig, opts []Option) (*Target, error) {
 	t := &Target{violations: map[Violation]bool{}, async: true}
 	for _, o := range opts {
 		o(t)
@@ -59,7 +72,14 @@ func New(opts ...Option) *Target {
 	t.w = &world{hosts: map[string]*hostState{}, ready: true}
 	for _, h := range []string{"host-a", "host-b"} {
 		t.w.order = append(t.w.order, h)
-		t.w.hosts[h] = &hostState{reachable: true, vms: map[string]*vm{}, tasks: map[string]*task{}}
+		t.w.hosts[h] = &hostState{reachable: true, vms: map[string]*vm{}, tasks: map[string]*task{}, ops: map[string]*opRecord{}}
+	}
+	if identity != nil {
+		m, err := newIdentityMode(*identity, t.w.order)
+		if err != nil {
+			return nil, err
+		}
+		t.ident = m
 	}
 	t.p = t.newProvider()
 	feats := []clustered.Feature{
@@ -73,14 +93,27 @@ func New(opts ...Option) *Target {
 	} else {
 		reasons[clustered.FeatureAsyncTasks] = "the fake is configured with synchronous calls"
 	}
+	if t.ident != nil {
+		feats = append(feats, clustered.FeatureOperationIdentity, clustered.FeatureScriptedOutcomes)
+		if t.ident.required {
+			feats = append(feats, clustered.FeatureOperationIdentityRequired)
+		} else {
+			reasons[clustered.FeatureOperationIdentityRequired] = "the fake is configured to accept unsigned calls too"
+		}
+	} else {
+		why := "the fake is configured without operation identity"
+		reasons[clustered.FeatureOperationIdentity] = why
+		reasons[clustered.FeatureOperationIdentityRequired] = why
+		reasons[clustered.FeatureScriptedOutcomes] = why
+	}
 	t.caps = clustered.Capabilities{Features: feats, Reasons: reasons}
-	return t
+	return t, nil
 }
 
 func (t *Target) newProvider() *provider {
 	return &provider{
 		w: t.w, violations: t.violations, async: t.async, notOwned: true,
-		memTasks: map[string]*task{},
+		memTasks: map[string]*task{}, ident: t.ident, memOps: map[string]map[string]*opRecord{},
 	}
 }
 
@@ -188,6 +221,9 @@ func (t *Target) FinishTasks() error {
 			return
 		}
 		k.done = true
+		if k.typed && !appliesEffect(k.outcome) {
+			return
+		}
 		if !t.violations[TaskDoneWithoutEffect] {
 			k.apply()
 		}
@@ -199,6 +235,15 @@ func (t *Target) FinishTasks() error {
 	}
 	for _, k := range t.p.memTasks {
 		finish(k)
+	}
+	if t.violations[DropsTombstones] {
+		for _, hs := range t.w.hosts {
+			for id, rec := range hs.ops {
+				if k := hs.tasks[rec.task]; k != nil && k.done {
+					delete(hs.ops, id)
+				}
+			}
+		}
 	}
 	return nil
 }

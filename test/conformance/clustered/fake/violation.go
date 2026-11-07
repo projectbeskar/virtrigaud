@@ -196,6 +196,57 @@ const (
 	CreateRebindsForeign Violation = "create-rebinds-foreign"
 	// CreateDuplicates makes a second VM when a Create is repeated.
 	CreateDuplicates Violation = "create-duplicates"
+
+	// The operation-identity violations: each needs the fake in identity mode
+	// (NewIdentity).
+
+	// IdentityCapsHidden does not report supports_operation_identity although
+	// the fake verifies grants.
+	IdentityCapsHidden Violation = "identity-caps-hidden"
+	// AcceptsUnsigned performs a mutating call that carries no grant although
+	// the fake reports requires_operation_identity.
+	AcceptsUnsigned Violation = "accepts-unsigned"
+	// RoutesFromOuter routes and acts on the outer request instead of the
+	// verified request inside the envelope.
+	RoutesFromOuter Violation = "routes-from-outer"
+	// AcceptsForgedGrant performs a call whose grant signature or certificate
+	// chain does not verify to the pinned anchor.
+	AcceptsForgedGrant Violation = "accepts-forged-grant"
+	// AcceptsWrongKindGrant performs a call whose grant names another
+	// operation kind (another RPC, or another PowerRequest.op).
+	AcceptsWrongKindGrant Violation = "accepts-wrong-kind-grant"
+	// AcceptsOuterFields performs a call that sets outer request fields
+	// beside the envelope.
+	AcceptsOuterFields Violation = "accepts-outer-fields"
+	// IgnoresDigest performs a call whose request bytes do not match the
+	// grant's intent_digest.
+	IgnoresDigest Violation = "ignores-digest"
+	// IgnoresBinding performs a call whose grant names another Provider, host
+	// or enrolment.
+	IgnoresBinding Violation = "ignores-binding"
+	// ExecutesDuplicateOpID executes a re-delivered op_id again.
+	ExecutesDuplicateOpID Violation = "executes-duplicate-op-id"
+	// DropsTombstones forgets an operation once it is over, so a late
+	// re-delivery of its op_id is executed again.
+	DropsTombstones Violation = "drops-tombstones"
+	// TombstonesInProviderMemory keeps the operation records in the
+	// Provider's memory instead of on the hosts, so a restart loses them.
+	TombstonesInProviderMemory Violation = "tombstones-in-provider-memory"
+	// IgnoresOpIDConflict answers a known op_id with other identity fields
+	// as if it were the known operation instead of OP_ID_CONFLICT.
+	IgnoresOpIDConflict Violation = "ignores-op-id-conflict"
+	// IgnoresVMBusy accepts a new operation for a VM that has a non-terminal
+	// one.
+	IgnoresVMBusy Violation = "ignores-vm-busy"
+	// IgnoresMintEpoch accepts the first delivery of an op_id minted before
+	// the host's enrolment.
+	IgnoresMintEpoch Violation = "ignores-mint-epoch"
+	// RetiredAsSucceeded reports a retired operation as succeeded.
+	RetiredAsSucceeded Violation = "retired-as-succeeded"
+	// UnknownAsDone reports an operation whose outcome is unknown as done.
+	UnknownAsDone Violation = "unknown-as-done"
+	// DirtyAsClean reports a dirty failure as a clean one.
+	DirtyAsClean Violation = "dirty-as-clean"
 )
 
 // All returns every violation, in declaration order.
@@ -216,5 +267,18 @@ func All() []Violation {
 		TaskDoneWithoutEffect, NameMatchAuthorizes, UnreadableStampAuthorizes, ForeignDescribeLeaksSize, BlackholeStallsList,
 		BlackholeNoReason, OpFailedNoReason, ConnLostNoReason, RemovedHostIsNotFound,
 		CreateIgnoresHost, CreateIgnoresReachability, CreateNoOwnerStamp, CreateRebindsForeign, CreateDuplicates,
+		IdentityCapsHidden, AcceptsUnsigned, RoutesFromOuter, AcceptsForgedGrant, AcceptsWrongKindGrant, AcceptsOuterFields,
+		IgnoresDigest, IgnoresBinding, ExecutesDuplicateOpID, DropsTombstones, TombstonesInProviderMemory,
+		IgnoresOpIDConflict, IgnoresVMBusy, IgnoresMintEpoch, RetiredAsSucceeded, UnknownAsDone, DirtyAsClean,
+	}
+}
+
+// IdentityViolations returns the violations that need the fake in
+// operation-identity mode, in declaration order.
+func IdentityViolations() []Violation {
+	return []Violation{
+		IdentityCapsHidden, AcceptsUnsigned, RoutesFromOuter, AcceptsForgedGrant, AcceptsWrongKindGrant, AcceptsOuterFields,
+		IgnoresDigest, IgnoresBinding, ExecutesDuplicateOpID, DropsTombstones, TombstonesInProviderMemory,
+		IgnoresOpIDConflict, IgnoresVMBusy, IgnoresMintEpoch, RetiredAsSucceeded, UnknownAsDone, DirtyAsClean,
 	}
 }

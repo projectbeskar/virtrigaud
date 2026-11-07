@@ -63,6 +63,7 @@ func Cases() []Case {
 	all = append(all, providerDownCases()...)
 	all = append(all, hostInventoryCases()...)
 	all = append(all, createCases()...)
+	all = append(all, identityCases()...)
 	return all
 }
 
@@ -83,12 +84,21 @@ func (c Case) SkipReason(caps Capabilities) string {
 	return strings.Join(missing, "; ")
 }
 
+// skipReasonFor returns why c does not apply to tg, or "": a Feature tg does
+// not offer, or the operation-identity probe (identityProbe).
+func skipReasonFor(c Case, tg Target) string {
+	if why := c.SkipReason(tg.Capabilities()); why != "" {
+		return why
+	}
+	return identityProbe(c, tg)
+}
+
 // RunCase runs c against a Target from factory on t, which may be a
 // *testing.T or a Recorder.
 func RunCase(t T, factory Factory, c Case) {
 	t.Helper()
 	tg := factory(t)
-	if why := c.SkipReason(tg.Capabilities()); why != "" {
+	if why := skipReasonFor(c, tg); why != "" {
 		t.Skipf("%s not applicable to %s: %s", c.ID, tg.Name(), why)
 		return
 	}
@@ -110,6 +120,15 @@ type ExpectedFailure struct {
 
 type runConfig struct {
 	expectedFailures map[string]ExpectedFailure
+	only             string
+}
+
+// OnlyCases runs only the cases whose ID starts with prefix (for example
+// "identity."). The others are not run and not reported. It is for a Target
+// that only the cases of one group apply to, such as a Provider that refuses
+// every mutating call without an operation grant.
+func OnlyCases(prefix string) Option {
+	return func(c *runConfig) { c.only = prefix }
 }
 
 // WithExpectedFailures marks cases a Target is known to fail. Such a case must
@@ -165,9 +184,12 @@ func Run(t *testing.T, factory Factory, opts ...Option) {
 		}
 	})
 	for _, c := range Cases() {
+		if !strings.HasPrefix(c.ID, cfg.only) {
+			continue
+		}
 		t.Run(c.ID, func(t *testing.T) {
 			tg := factory(t)
-			if why := c.SkipReason(tg.Capabilities()); why != "" {
+			if why := skipReasonFor(c, tg); why != "" {
 				note(c.ID, fmt.Sprintf("SKIPPED %s: %s", c.ID, why))
 				t.Skipf("%s not applicable to %s: %s", c.ID, tg.Name(), why)
 				return

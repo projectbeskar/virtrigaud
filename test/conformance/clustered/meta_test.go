@@ -35,6 +35,9 @@ type mutation struct {
 	violation fake.Violation
 	// sync runs the fake with synchronous calls.
 	sync bool
+	// identity runs the fake in operation-identity mode, requiring a grant
+	// on every mutating call.
+	identity bool
 	// kills are the IDs of the cases that must FAIL when the violation is
 	// seeded. They are chosen from the rule the violation breaks, not from
 	// what happens to fail.
@@ -120,6 +123,29 @@ func mutations() []mutation {
 	}
 }
 
+// identityMutations are the violations of the fake's operation-identity mode.
+func identityMutations() []mutation {
+	return []mutation{
+		{violation: fake.IdentityCapsHidden, kills: []string{"identity.capabilities"}, want: map[string]string{"identity.capabilities": "reports supports_operation_identity"}},
+		{violation: fake.AcceptsUnsigned, kills: []string{"identity.unsigned-refused"}, want: map[string]string{"identity.unsigned-refused": "must be refused"}},
+		{violation: fake.RoutesFromOuter, kills: []string{"identity.signed-power", "identity.signed-create-delete"}, want: map[string]string{"identity.signed-power": "is accepted"}},
+		{violation: fake.AcceptsForgedGrant, kills: []string{"identity.forged-grant-refused"}, want: map[string]string{"identity.forged-grant-refused": "must be refused"}},
+		{violation: fake.AcceptsWrongKindGrant, kills: []string{"identity.wrong-kind-refused"}, want: map[string]string{"identity.wrong-kind-refused": "must be refused"}},
+		{violation: fake.AcceptsOuterFields, kills: []string{"identity.outer-fields-refused"}, want: map[string]string{"identity.outer-fields-refused": "must be refused"}},
+		{violation: fake.IgnoresDigest, kills: []string{"identity.digest-bound"}, want: map[string]string{"identity.digest-bound": "must be refused"}},
+		{violation: fake.IgnoresBinding, kills: []string{"identity.binding-refused"}, want: map[string]string{"identity.binding-refused": "must be refused"}},
+		{violation: fake.ExecutesDuplicateOpID, kills: []string{"identity.duplicate-op-id-once", "identity.duplicate-after-restart", "identity.op-id-conflict"}, want: map[string]string{"identity.duplicate-op-id-once": "must not delete the VM made after it"}},
+		{violation: fake.DropsTombstones, kills: []string{"identity.duplicate-op-id-once", "identity.duplicate-after-restart"}, want: map[string]string{"identity.duplicate-op-id-once": "must not delete the VM made after it"}},
+		{violation: fake.TombstonesInProviderMemory, kills: []string{"identity.duplicate-after-restart"}, want: map[string]string{"identity.duplicate-after-restart": "must not delete the VM made after it"}},
+		{violation: fake.IgnoresOpIDConflict, kills: []string{"identity.op-id-conflict"}, want: map[string]string{"identity.op-id-conflict": "must be refused"}},
+		{violation: fake.IgnoresVMBusy, kills: []string{"identity.vm-busy", "identity.outcome-unknown"}, want: map[string]string{"identity.vm-busy": "must be refused"}},
+		{violation: fake.IgnoresMintEpoch, kills: []string{"identity.mint-epoch-first-delivery"}, want: map[string]string{"identity.mint-epoch-first-delivery": "minted before the enrolment must be refused"}},
+		{violation: fake.RetiredAsSucceeded, kills: []string{"identity.outcome-retired"}, want: map[string]string{"identity.outcome-retired": "typed outcome"}},
+		{violation: fake.UnknownAsDone, kills: []string{"identity.outcome-unknown"}, want: map[string]string{"identity.outcome-unknown": "typed outcome"}},
+		{violation: fake.DirtyAsClean, kills: []string{"identity.outcome-failed-dirty"}, want: map[string]string{"identity.outcome-failed-dirty": "typed outcome"}},
+	}
+}
+
 func caseByID(t *testing.T, id string) clustered.Case {
 	t.Helper()
 	for _, c := range clustered.Cases() {
@@ -140,7 +166,12 @@ func caseByID(t *testing.T, id string) clustered.Case {
 func TestEveryCaseCatchesItsSeededViolation(t *testing.T) {
 	killed := map[string][]fake.Violation{}
 	used := map[fake.Violation]bool{}
-	for _, m := range mutations() {
+	all := mutations()
+	for _, m := range identityMutations() {
+		m.identity = true
+		all = append(all, m)
+	}
+	for _, m := range all {
 		used[m.violation] = true
 		t.Run(string(m.violation), func(t *testing.T) {
 			opts := []fake.Option{fake.WithViolations(m.violation)}
@@ -148,6 +179,9 @@ func TestEveryCaseCatchesItsSeededViolation(t *testing.T) {
 				opts = append(opts, fake.Synchronous())
 			}
 			factory := func(clustered.T) clustered.Target { return fake.New(opts...) }
+			if m.identity {
+				factory = identityFake(true, opts...)
+			}
 			for _, id := range m.kills {
 				c := caseByID(t, id)
 				rec := clustered.NewRecorder(id)
