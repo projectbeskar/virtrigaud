@@ -462,8 +462,11 @@ func (r *VirtualMachineReconciler) reconcileBoundProvider(
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmplacementpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // The operation-intent Secrets of operation identity (operation_intent.go) are
-// created and deleted by the manager; RBAC cannot scope delete to them, so the
-// verb is granted alone (see docs/operation-grants-manager.md).
+// created and deleted by the manager. RBAC cannot scope delete to them (no
+// name-prefix, label or type scoping), so the verb is granted in a rule of its
+// own; it still covers every Secret the role covers (cluster-wide for a
+// ClusterRole), and the effective permission is the union of the rules. The
+// code deletes only intent Secrets (see docs/operation-grants-manager.md).
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch

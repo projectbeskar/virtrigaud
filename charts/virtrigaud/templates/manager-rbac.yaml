@@ -212,10 +212,15 @@ rules:
 # request of each operation attempt in flight in an operation-intent Secret
 # (vrtg-op-<op_id>, type virtrigaud.io/operation-intent) in the Provider's
 # namespace, and deletes it once the attempt is over. RBAC cannot scope delete
-# by name prefix, label or type, so the verb is granted alone (no patch, no
-# deletecollection); the manager deletes only Secrets of that type, label and
-# name prefix, with the UID it read as a precondition. See
-# docs/operation-grants-manager.md.
+# by name prefix, label or type, so the verb is granted in a rule of its own
+# (no patch, no deletecollection). It still covers every Secret this role
+# covers: cluster-wide in this ClusterRole, the bound namespaces in the Role.
+# Rules are additive, so the manager's effective Secrets permission is the
+# union with the rule above. The restriction to intent Secrets is in the code:
+# it deletes only Secrets of that type, label and name prefix, with the UID it
+# read as a precondition. Intent Secrets of consumer VMs hold their cloud-init
+# user data: restrict Secret read in Provider namespaces and enable encryption
+# at rest. See docs/operation-grants-manager.md.
 - apiGroups:
   - ""
   resources:
@@ -575,10 +580,15 @@ rules:
 # request of each operation attempt in flight in an operation-intent Secret
 # (vrtg-op-<op_id>, type virtrigaud.io/operation-intent) in the Provider's
 # namespace, and deletes it once the attempt is over. RBAC cannot scope delete
-# by name prefix, label or type, so the verb is granted alone (no patch, no
-# deletecollection); the manager deletes only Secrets of that type, label and
-# name prefix, with the UID it read as a precondition. See
-# docs/operation-grants-manager.md.
+# by name prefix, label or type, so the verb is granted in a rule of its own
+# (no patch, no deletecollection). It still covers every Secret this role
+# covers: its bound namespaces in this Role (cluster-wide with the ClusterRole).
+# Rules are additive, so the manager's effective Secrets permission is the
+# union with the rule above. The restriction to intent Secrets is in the code:
+# it deletes only Secrets of that type, label and name prefix, with the UID it
+# read as a precondition. Intent Secrets of consumer VMs hold their cloud-init
+# user data: restrict Secret read in Provider namespaces and enable encryption
+# at rest. See docs/operation-grants-manager.md.
 - apiGroups:
   - ""
   resources:

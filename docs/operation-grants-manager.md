@@ -213,7 +213,8 @@ no enrolment reports `Ready=False/OperationEnrolmentUnavailable` and nothing is 
 list keyed by `kind`, at most 18 entries): the latest attempt of that kind. Each entry has
 the attempt number (counting from 1), its random `opID` (32 hexadecimal characters), the
 `bindingID` and `hostID` it was issued for, its `phase`, and, once Terminal, its `outcome`
-and the Provider's `outcomeReason` and `taskRef`. `status.placement.bindingID` identifies
+and the Provider's `outcomeReason` and `taskRef`; a Create answered with a task also
+records the VM `id` the Provider answered, with `Sent`. `status.placement.bindingID` identifies
 the VM's placement; it is drawn with the VM's first Create attempt on its host, written in
 the same status write, and unchanged by re-sends. Neither field is ever written for any
 other Provider, and neither carries request bytes, a salt or a digest.
@@ -237,17 +238,27 @@ as the reconcile read them. A write that fails sends nothing. The order of one a
    error, `VM_BUSY`, a lost reply or a manager restart) sends the same bytes with the same
    `op_id`; a host answers a known `op_id` from its record and never executes it twice.
 4. Close: `Sent` with the task reference, then `Terminal` with the outcome, then the intent
-   Secret is deleted. A successful Create writes `Terminal`, `status.id` and the confirmed
-   placement in one status write.
+   Secret is deleted (a Delete's is kept until the finalizer is released). A successful
+   Create writes `Terminal`, `status.id` and the confirmed placement in one status write.
 
-A VM's finalizer is released only once a Delete attempt is `Terminal/Succeeded`, or when no
+A VM's finalizer is released once a Delete attempt is `Terminal/Succeeded`, or when no
 Create of the VM was ever performed (it has no Create attempt, or its latest one was not
-performed, and no id is recorded). A Delete waits for a Create in flight. Orphan-on-delete
-and force-delete work as for every Provider.
+performed, and no id is recorded). A Delete recorded `Succeeded` that the reconcile which
+recorded it did not release (a restart in between, or an edited status) releases the
+finalizer only when its intent Secret authenticates and matches it and the Provider
+confirms it: its task reports `Succeeded`, or, for a synchronous Delete, a re-send of the
+same attempt succeeds. A Delete waits for a Create in flight. Orphan-on-delete and
+force-delete work as for every Provider.
 
-The markers are not signed: anyone allowed to patch `virtualmachines/status` can edit them.
-An edit makes the controller hold the VM (below), or makes the host refuse a delivery; it
-never makes the controller send an operation again under a new identity.
+The markers are not signed or authenticated: anyone allowed to write
+`virtualmachines/status` can edit them (the bundled editor and admin roles grant only
+`get` on it). The controller holds the VM on the edits it can detect: a removed Create
+marker; an id, a confirmed host or a `Bound` placement without a successful Create
+marker; a Delete recorded `Succeeded` that its intent and the Provider do not confirm
+(`OperationStateLost`). It cannot detect every edit: a principal with status write access
+that also rewrites the placement and conditions consistently can still cause a duplicate
+Create, and one that can make the Provider confirm a Delete it never ran can cause a
+release. The host's own de-duplication of a VM's operations is then the backstop.
 
 ### Intent Secrets
 
@@ -256,29 +267,69 @@ and its digest salt are kept in a Secret, never in the VM's status:
 
 - name `vrtg-op-<opID>`, type `virtrigaud.io/operation-intent`, in the Provider's
   namespace, owned by the Provider (garbage-collected with it);
-- labels `virtrigaud.io/operation-intent: "true"`, `virtrigaud.io/vm-uid` and
-  `virtrigaud.io/operation-kind`; annotations naming the VM's namespace and name;
+- labels `virtrigaud.io/operation-intent: "true"`, `virtrigaud.io/vm-uid`,
+  `virtrigaud.io/operation-kind` and `app.kubernetes.io/managed-by: virtrigaud`;
+  annotations naming the VM's namespace and name;
 - data `request` (the exact serialised request), `salt`, `identity` (the attempt's grant
-  identity) and, for an asynchronous Create, `answer-id` (the VM id the Provider answered).
+  identity) and `tag`;
+- immutable (written once).
 
 It is written before the marker leaves `Prepared` and deleted once the marker is
-`Terminal`. The bytes are never logged or put in an event or condition. Restrict who can
-read Secrets in a Provider's namespace accordingly.
+`Terminal`. The bytes are never logged or put in an event or condition. A request larger
+than 768 KiB is not stored: the VM is held as `OperationRequestTooLarge` and nothing is
+sent.
+
+**Authentication.** `tag` is an HMAC-SHA256 over a domain-separated encoding (prefix
+`virtrigaud.io/operation-intent/v1` and a NUL byte, then each field length-prefixed) of
+the Secret's namespace and name, the VM's namespace, name and UID, the operation kind,
+and the exact identity, salt and request bytes. The key never leaves the manager: the
+development signer derives it with HKDF-SHA256 from its anchor key under that label, so
+it survives a manager restart and is independent of every grant-signing key. The grant
+signer itself is not used, because grants are signed over the `GrantBody` bytes with no
+domain-separation prefix, by a short-lived leaf key that a restart replaces: an intent
+signature with it would be neither separated from grant signatures nor verifiable after
+the restart it must survive. An intent tag (32 bytes) is never a DER ECDSA grant
+signature, and a grant signature never opens as an intent tag; a test pins both. Before
+an attempt is re-sent or a Delete's release is confirmed, the Secret must authenticate,
+and its identity must name the VM's UID, the Provider's UID, the marker's op_id, kind,
+attempt, host and binding, and the host's current enrolment; a Delete's request must name
+the VM the Delete is routed to now, and a Create's request the marker's host and the VM as
+owner. On any failure nothing is sent, the Secret is kept as evidence, the VM is held as
+`OperationIntentTampered`, and a Warning event (with no Secret content) is recorded when
+the hold begins. Without the key (a release build, or no signer) nothing is stored or
+sent. A principal that can write Secrets in the Provider's namespace can therefore delete
+an intent (the VM is held as `OperationIntentLost`) or replace it (held as
+`OperationIntentTampered`), but cannot make the manager sign other bytes.
+
+**Confidentiality.** For a VM in another namespace than its Provider (a consumer
+VirtualMachine), the request, including cloud-init user data that came from a Secret in
+the VM's own namespace, is copied into the Provider's namespace for as long as the attempt
+is in flight (and, for an abandoned attempt, until the sweeper removes it). Anyone allowed
+to read Secrets in the Provider's namespace can read it. Restrict Secret `get`, `list` and
+`watch` in Provider namespaces to the manager and the administrators who already may see
+every consumer's user data, and enable encryption at rest for Secrets in etcd.
 
 The Provider controller sweeps, at each reconcile of a Provider whose type requires
-operation identity, the intent Secrets it owns that are older than 10 minutes and that no
-non-terminal marker of their VM names (the VM is read from the API server): a manager that
-stopped between writing a Secret and its marker, or between a `Terminal` marker and the
-Secret delete, leaves one behind.
+operation identity, the intent Secrets it owns that are older than 10 minutes and that its
+VM no longer needs (no non-terminal marker names it, and it is not a Delete awaiting its
+finalizer's release). It finds the VM by the Secret's VM-UID label and reads it from the
+API server; a Secret whose VM annotations disagree with that VM is skipped and logged,
+never deleted. A manager that stopped between writing a Secret and its marker, or between
+a `Terminal` marker and the Secret delete, leaves one behind.
 
 ### RBAC
 
 The manager's role gains `delete` on Secrets, granted in a rule of its own (no `patch`, no
 `deletecollection`). RBAC cannot scope a verb by name prefix, label or Secret type, so the
-rule covers every Secret the role covers; the manager deletes only Secrets of type
-`virtrigaud.io/operation-intent` with the intent label, the `vrtg-op-` name prefix and the
-expected VM's UID label, with the UID it read as a delete precondition. Provider pods have
-no Secrets access.
+rule covers every Secret the role covers. With the chart's cluster scope
+(`rbac.scope=cluster`, a ClusterRole) that is every Secret in the cluster; with the
+namespace scope it is every Secret in the namespaces the Role is bound in. RBAC rules are
+additive: together with the existing `create`, `get`, `list`, `update` and `watch`, the
+manager's effective permission on Secrets is their union, which is now every verb but
+`patch` and `deletecollection`. The restriction to intent Secrets is in the code only: the
+manager deletes only Secrets of type `virtrigaud.io/operation-intent` with the intent
+label, the `vrtg-op-` name prefix and the expected VM's UID label, with the UID it read as
+a delete precondition. Provider pods have no Secrets access.
 
 ### Holds and how to clear them
 
@@ -290,8 +341,10 @@ attempt:
 | `OperationSignerUnavailable` | No operation signer (every release build). | Start a development manager with `--dev-operation-signer-key-file`. |
 | `OperationIdentityMismatch` | The Provider's advertised gates do not match its type. | Fix the Provider so it advertises `supports_` and `requires_operation_identity` and no fencing. |
 | `OperationEnrolmentUnavailable` | No enrolment for the VM's host. | Add the host to the enrolment file and restart the manager. |
-| `OperationStateLost` | The VM records a binding or an id but no Create marker (its status was edited or restored). | Operator. |
+| `OperationStateLost` | The VM records a binding, an id, a confirmed host or a `Bound` placement without a successful Create marker, or a Delete recorded `Succeeded` that its intent and the Provider do not confirm (its status was edited or restored). | Operator. |
 | `OperationIntentLost` | A marker in flight names an intent Secret that does not exist (for example after an etcd restore that did not restore it). | Operator, or restore the Secret. |
+| `OperationIntentTampered` | An intent Secret does not authenticate, or names another VM, Provider, host, binding, attempt or target than its marker. The Secret is kept. | Operator: investigate who wrote Secrets in the Provider's namespace. |
+| `OperationRequestTooLarge` | The request (with its user data) is over 768 KiB. | Make the user data smaller. |
 | `OperationFailedDirty` | The Provider reported the operation failed after an irreversible step began. | Operator. |
 | `OperationOutcomeUnknown` | The Provider cannot tell what the attempt did (an `Unknown` outcome, or a refusal of a re-delivery that proves nothing about an earlier one). The same attempt is asked about, or re-sent, every 5 minutes. | Resolves itself if the Provider later reports a terminal outcome; otherwise operator. |
 | `OperationUnknownToAgent` | The host has no record of the attempt's task. | Operator. |
@@ -322,7 +375,11 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   resizes of such a VM fail with a provider error).
 - A Provider's typed outcomes and refusal reasons are unsigned claims: a Provider that
   falsely answers `Retired` or `FailedClean` makes the controller mint a new attempt.
-- Attempt markers are not signed.
+- Attempt markers are not signed or authenticated: detected edits hold the VM, but a
+  principal with `virtualmachines/status` write access can still cause a duplicate or a
+  skipped operation (see above).
+- Intent Secrets of consumer VMs copy their user data into the Provider's namespace.
+- The `delete` verb on Secrets is not scoped to intent Secrets by RBAC.
 - A Delete releases the finalizer only on `Succeeded`: a host that answers that the VM is
   not there holds the delete until an operator releases it.
 - A VM whose Create attempts were not performed stays on its pending host; it is never
