@@ -76,6 +76,7 @@ const (
 // pinned Anchor once keeps verifying after a restart.
 type DevSigner struct {
 	installID  []byte
+	intentAuth IntentAuthenticator
 	anchorKey  *ecdsa.PrivateKey
 	anchorCert *x509.Certificate
 	now        func() time.Time
@@ -102,7 +103,15 @@ func NewDevSigner(anchorKey *ecdsa.PrivateKey, installID []byte, now func() time
 	if now == nil {
 		now = time.Now
 	}
-	s := &DevSigner{installID: append([]byte(nil), installID...), anchorKey: anchorKey, now: now}
+	intentKey, err := DeriveIntentKey(anchorKey.D.FillBytes(make([]byte, 32)))
+	if err != nil {
+		return nil, fmt.Errorf("new development signer: %w", err)
+	}
+	intentAuth, err := NewIntentAuthenticator(intentKey)
+	if err != nil {
+		return nil, fmt.Errorf("new development signer: %w", err)
+	}
+	s := &DevSigner{installID: append([]byte(nil), installID...), intentAuth: intentAuth, anchorKey: anchorKey, now: now}
 	t := now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -282,6 +291,15 @@ func bytesTrimSpace(b []byte) []byte {
 
 // Anchor is the signer's self-signed trust anchor, for a verifier to pin.
 func (s *DevSigner) Anchor() *x509.Certificate { return s.anchorCert }
+
+// IntentAuthenticator implements IntentAuthenticatorSource: an HMAC-SHA256
+// authenticator under a key derived (HKDF-SHA256, info IntentAuthContext)
+// from the anchor key, so it is the same after a restart with the same key
+// file and independent of every grant-signing key.
+func (s *DevSigner) IntentAuthenticator() IntentAuthenticator { return s.intentAuth }
+
+// Compile-time assertion that DevSigner can authenticate intents.
+var _ IntentAuthenticatorSource = (*DevSigner)(nil)
 
 // InstallID implements Signer.
 func (s *DevSigner) InstallID() []byte { return append([]byte(nil), s.installID...) }
