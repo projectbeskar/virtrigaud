@@ -556,6 +556,7 @@ func main() {
 		Scheme:         mgr.GetScheme(),
 		RemoteResolver: remoteResolver,
 		APIReader:      mgr.GetAPIReader(),
+		Recorder:       mgr.GetEventRecorderFor("vmadoption-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMAdoption")
 		os.Exit(1)

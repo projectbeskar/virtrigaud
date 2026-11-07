@@ -401,6 +401,11 @@ func (r *VirtualMachineReconciler) EnsureImageOnProvider(
 			"provider", provider.Name, "image", vmImage.Name)
 		return false, nil
 	}
+	// An image prepare has no signed path: refused, with nothing sent, for a
+	// Provider that requires operation identity.
+	if err := refuseUnsupportedForIdentity(provider, identityUnsupportedImagePrepare); err != nil {
+		return false, err
+	}
 
 	// State an earlier release recorded under bare Provider names (and its
 	// single image-wide task ref) is migrated before any entry is consulted, so
@@ -1143,6 +1148,12 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 	case isConsumerNotAllowed(perr):
 		res, err = r.refuseConsumer(ctx, vm, persisted, perr)
 		return true, res, err
+	case isOperationIdentityUnsupported(perr):
+		logger.Info("The Provider requires operation identity and an image prepare has no signed path; nothing is sent",
+			"image", vmImage.Name, "provider", provider.Name)
+		markIdentityUnsupported(r.Recorder, vm, &vm.Status.Conditions, k8s.ConditionReady, vm.Generation, identityUnsupportedImagePrepare)
+		r.updateStatus(ctx, vm)
+		return true, ctrl.Result{RequeueAfter: operationHoldRecheckInterval}, nil
 	case errors.Is(perr, errImagePrepareHold):
 		// The prepare may not run now (see errImagePrepareHold); the reason is
 		// recorded on the VMImage (except for an outdated CRD or an artifact

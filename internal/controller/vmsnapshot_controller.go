@@ -340,6 +340,9 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
 		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Failed to get provider: %v", err)), nil
 	}
+	if identityRequired(provider) {
+		return r.refuseSnapshotIdentityUnsupported(ctx, snapshot), nil
+	}
 
 	// Address the VM (ADR-0007 Addendum A, A1) before resolving a client for
 	// the Provider: a clustered VM with no confirmed host binding — or a VM
@@ -624,6 +627,9 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 	if err != nil {
 		logger.Error(err, "Failed to get provider")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if identityRequired(provider) {
+		return r.refuseSnapshotIdentityUnsupported(ctx, snapshot), nil
 	}
 
 	// The task belongs to the Provider the VM is bound through; never poll it
@@ -1375,6 +1381,11 @@ func (r *VMSnapshotReconciler) blockSnapshot(ctx context.Context, snapshot *infr
 
 // getProviderInstance resolves a provider to a remote implementation
 func (r *VMSnapshotReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
+	// A snapshot has no signed path: nothing is resolved (nor sent) for a
+	// Provider that requires operation identity.
+	if err := refuseUnsupportedForIdentity(provider, identityUnsupportedSnapshot); err != nil {
+		return nil, err
+	}
 	// Test hook: allow injecting a fake provider without dialing gRPC.
 	if r.providerInstanceFn != nil {
 		return r.providerInstanceFn(ctx, provider)
@@ -1563,4 +1574,19 @@ func (r *VMSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&infrav1beta1.VMSnapshot{}, builder.WithPredicates(snapshotUpdatePredicate()))
 	return withConsumerGrantWatches(b, r.snapshotsForGrantChange).
 		Complete(r)
+}
+
+// refuseSnapshotIdentityUnsupported refuses a snapshot of a VM whose Provider
+// requires operation identity: a snapshot has no signed path, so nothing is
+// sent (operation_identity_unsupported.go). The phase is left as it is.
+func (r *VMSnapshotReconciler) refuseSnapshotIdentityUnsupported(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) ctrl.Result {
+	logging.FromContext(ctx).Info("The VM's Provider requires operation identity and a snapshot has no signed path; nothing is sent")
+	if markIdentityUnsupported(r.Recorder, snapshot, &snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+		snapshot.Generation, identityUnsupportedSnapshot) {
+		snapshot.Status.Message = identityUnsupportedMessage(identityUnsupportedSnapshot)
+		snapshot.Status.ObservedGeneration = snapshot.Generation
+		// Status update errors are intentionally ignored to avoid blocking reconciliation.
+		_ = r.updateStatus(ctx, snapshot)
+	}
+	return ctrl.Result{RequeueAfter: operationHoldRecheckInterval}
 }

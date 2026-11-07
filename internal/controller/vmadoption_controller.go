@@ -24,11 +24,13 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -113,6 +115,8 @@ type VMAdoptionReconciler struct {
 	// VirtualMachine is gone (ADR-0007 Addendum A, slice 4); nil falls back to
 	// the cached client.
 	APIReader client.Reader
+	// Recorder records events on the Provider (nil records none).
+	Recorder record.EventRecorder
 }
 
 // VMAdoptionReconciler watches Providers and, on the adoption annotation,
@@ -186,6 +190,13 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Initialize adoption status
 	if provider.Status.Adoption == nil {
 		provider.Status.Adoption = &infravirtrigaudiov1beta1.ProviderAdoptionStatus{}
+	}
+
+	// Adoption hands an existing VM to a VirtualMachine (owner transfer),
+	// which has no signed path: refused, with nothing sent, for a Provider
+	// that requires operation identity.
+	if identityRequired(&provider) {
+		return r.refuseAdoptionIdentityUnsupported(ctx, &provider), nil
 	}
 
 	// Check if provider is ready
@@ -698,6 +709,11 @@ func (r *VMAdoptionReconciler) ensureVMClass(ctx context.Context, vmInfo contrac
 
 // getProviderInstance gets the provider instance using RemoteResolver
 func (r *VMAdoptionReconciler) getProviderInstance(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+	// Adoption has no signed path: nothing is resolved (nor sent) for a
+	// Provider that requires operation identity.
+	if err := refuseUnsupportedForIdentity(provider, identityUnsupportedAdoption); err != nil {
+		return nil, err
+	}
 	if r.RemoteResolver == nil {
 		return nil, fmt.Errorf("remote resolver not configured")
 	}
@@ -844,4 +860,22 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			},
 		}).
 		Complete(r)
+}
+
+// refuseAdoptionIdentityUnsupported refuses the adoption the annotation asks
+// of a Provider that requires operation identity: nothing is listed or sent,
+// status.adoption.message carries the fixed refusal, and one Warning event is
+// recorded when the refusal begins (operation_identity_unsupported.go).
+func (r *VMAdoptionReconciler) refuseAdoptionIdentityUnsupported(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) ctrl.Result {
+	msg := identityUnsupportedMessage(identityUnsupportedAdoption)
+	if provider.Status.Adoption == nil || provider.Status.Adoption.Message != msg {
+		log.FromContext(ctx).Info("The Provider requires operation identity and adoption has no signed path; nothing is sent")
+		if r.Recorder != nil {
+			r.Recorder.Event(provider, corev1.EventTypeWarning, k8s.ReasonOperationIdentityUnsupported, msg)
+		}
+		if err := r.writeAdoptionMessage(ctx, provider, msg); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to update adoption status")
+		}
+	}
+	return ctrl.Result{RequeueAfter: operationHoldRecheckInterval}
 }
