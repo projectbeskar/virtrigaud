@@ -59,3 +59,28 @@ func TestDevSignerKeyFileFlag_ReleaseBuildRefusesAtStartup(t *testing.T) {
 		})
 	}
 }
+
+// managerSubprocessEnrolmentEnv carries the --dev-operation-enrolment-file
+// value the enrolment-flag tests' child process starts main() with.
+const managerSubprocessEnrolmentEnv = "VIRTRIGAUD_TEST_DEV_ENROLMENT_FILE"
+
+// TestDevEnrolmentFileFlag_ReleaseBuildRefusesAtStartup: a release build
+// refuses --dev-operation-enrolment-file at once, like the signer flag.
+func TestDevEnrolmentFileFlag_ReleaseBuildRefusesAtStartup(t *testing.T) {
+	if os.Getenv(managerSubprocessEnv) == "1" {
+		os.Args = []string{"manager", "--dev-operation-enrolment-file=" + os.Getenv(managerSubprocessEnrolmentEnv)}
+		main()
+		return
+	}
+	path := filepath.Join(t.TempDir(), "enrolment.json")
+	require.NoError(t, os.WriteFile(path, []byte("not read"), 0o600))
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDevEnrolmentFileFlag_ReleaseBuildRefusesAtStartup$") // #nosec G204 -- re-runs this test binary
+	cmd.Env = append(os.Environ(), managerSubprocessEnv+"=1", managerSubprocessEnrolmentEnv+"="+path,
+		"KUBECONFIG="+t.TempDir()+"/none", "KUBERNETES_SERVICE_HOST=", "HOME="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr, "the manager must exit: %s", out)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	assert.Contains(t, string(out), "invalid --dev-operation-enrolment-file")
+	assert.Contains(t, string(out), "no operation-grant signer is compiled into this build")
+}

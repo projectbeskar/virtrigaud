@@ -641,3 +641,66 @@ const (
 	// operator sets orphan-on-delete or force-delete.
 	ReasonDeleteTaskProviderNotFound = "DeleteTaskProviderNotFound"
 )
+
+// Operation-identity reasons: Ready (and, for an operation in flight,
+// Provisioning) reasons of a VirtualMachine whose Provider requires operation
+// identity, and Ready reasons of such a Provider (development builds only; no
+// built-in Provider type requires operation identity). Every hold among them
+// sends nothing new; its message names the recovery path.
+const (
+	// ReasonOperationIdentityMismatch: what the Provider advertises
+	// (supports_/requires_operation_identity, supports_/requires_fencing)
+	// does not match the protection the manager requires for its type. The
+	// manager never lowers the protection to match: nothing is sent until
+	// the advertised capabilities match.
+	ReasonOperationIdentityMismatch = "OperationIdentityMismatch"
+	// ReasonOperationIdentityMatched is Ready=True on a Provider that
+	// requires operation identity and advertises exactly it.
+	ReasonOperationIdentityMatched = "OperationIdentityMatched"
+	// ReasonOperationSignerUnavailable: the Provider requires operation
+	// identity and the manager has no operation signer (every release build,
+	// or a development build started without one). Nothing is sent.
+	ReasonOperationSignerUnavailable = "OperationSignerUnavailable"
+	// ReasonOperationEnrolmentUnavailable: no enrolment is configured for
+	// the VM's host, so no operation can be issued for it. Nothing is sent.
+	ReasonOperationEnrolmentUnavailable = "OperationEnrolmentUnavailable"
+	// ReasonOperationInProgress: an operation is recorded and in flight;
+	// nothing else is sent for the VM until it is over.
+	ReasonOperationInProgress = "OperationInProgress"
+	// ReasonOperationRetryBackoff: the last attempt of an operation was
+	// not performed (Retired, FailedClean, Cancelled or Rejected); a new
+	// attempt is sent after a backoff.
+	ReasonOperationRetryBackoff = "OperationRetryBackoff"
+	// ReasonOperationStateLost: the VM records a binding or an id but no
+	// attempt marker of its Create (its status was edited or restored). No
+	// new attempt is minted. Held for an operator.
+	ReasonOperationStateLost = "OperationStateLost"
+	// ReasonOperationIntentLost: a non-terminal attempt marker names an
+	// intent Secret that does not exist (for example after an etcd restore),
+	// so the operation cannot be re-sent with its exact bytes. Held for an
+	// operator.
+	ReasonOperationIntentLost = "OperationIntentLost"
+	// ReasonOperationIntentTampered: an attempt's intent Secret does not
+	// authenticate, or names another VM, Provider, host, binding, attempt
+	// or target than the attempt it is read for. Nothing is sent and the
+	// Secret is kept as evidence. Held for an operator.
+	ReasonOperationIntentTampered = "OperationIntentTampered"
+	// ReasonOperationRequestTooLarge: the operation's request (for example
+	// with large cloud-init user data) is larger than an intent Secret may
+	// hold. Nothing is sent until the specification is made smaller.
+	ReasonOperationRequestTooLarge = "OperationRequestTooLarge"
+	// ReasonOperationFailedDirty: the Provider reported the operation failed
+	// after an irreversible step began. Held for an operator.
+	ReasonOperationFailedDirty = "OperationFailedDirty"
+	// ReasonOperationOutcomeUnknown: the Provider cannot tell what the
+	// operation did (an Unknown outcome, or a refusal that proves nothing).
+	// The same attempt is asked about again; no new attempt is minted.
+	ReasonOperationOutcomeUnknown = "OperationOutcomeUnknown"
+	// ReasonOperationUnknownToAgent: the host has no record of the
+	// operation's task. That proves nothing about the operation, so no new
+	// attempt is minted. Held for an operator.
+	ReasonOperationUnknownToAgent = "OperationUnknownToAgent"
+	// ReasonOperationProviderMismatch: the host refused the operation as
+	// coming from another Provider than the one it is enrolled with. Held.
+	ReasonOperationProviderMismatch = "OperationProviderMismatch"
+)

@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	grpcClient "github.com/projectbeskar/virtrigaud/internal/transport/grpc"
@@ -88,6 +89,23 @@ type Resolver struct {
 	// are constructed without circuit-breaker protection (intended for
 	// tests that don't exercise the breaker path).
 	cbRegistry *resilience.Registry
+	// opSigner signs the operations of a Provider whose type requires
+	// operation identity (operation.RequiredProtection). nil — every release
+	// build, and a development build started without a signer — makes every
+	// such Provider unresolvable (operation.ErrNoSigner): nothing is ever sent
+	// to it, signed or unsigned.
+	opSigner operation.Signer
+}
+
+// ResolverOption configures NewResolver.
+type ResolverOption func(*Resolver)
+
+// WithOperationSigner gives the resolver the signer of the operations it
+// sends to Providers that require operation identity. A nil signer, and any
+// signer in a release build (operation.SignerCompiled is false), leaves such
+// Providers unresolvable.
+func WithOperationSigner(s operation.Signer) ResolverOption {
+	return func(r *Resolver) { r.opSigner = s }
 }
 
 // cachedClient is a validated gRPC client and the configuration identity it
@@ -111,12 +129,39 @@ type cachedClient struct {
 // callers (cmd/manager/main.go) must pass a real registry so the G6
 // (#111) per-Provider breakers actually emit
 // virtrigaud_circuit_breaker_* samples.
-func NewResolver(k8sClient client.Client, cbRegistry *resilience.Registry) *Resolver {
-	return &Resolver{
+//
+// opts may give it an operation signer (WithOperationSigner).
+func NewResolver(k8sClient client.Client, cbRegistry *resilience.Registry, opts ...ResolverOption) *Resolver {
+	r := &Resolver{
 		client:     k8sClient,
 		clients:    make(map[string]*cachedClient),
 		cbRegistry: cbRegistry,
 	}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
+
+// requiresIdentity reports whether the manager requires operation identity
+// for provider: decided by its immutable spec.type alone, never by what the
+// Provider advertises.
+func requiresIdentity(provider *infravirtrigaudiov1beta1.Provider) bool {
+	return operation.RequiredProtection(provider.Spec.Type) == operation.ProtectionIdentity
+}
+
+// checkOperationSigner fails closed for a Provider that requires operation
+// identity when no signer is loaded (or none is compiled into this build):
+// no client is built for it, so nothing is sent to it.
+func (r *Resolver) checkOperationSigner(provider *infravirtrigaudiov1beta1.Provider) error {
+	if !requiresIdentity(provider) {
+		return nil
+	}
+	if !operation.SignerCompiled || r.opSigner == nil {
+		return fmt.Errorf("provider %s/%s (type %s) requires operation identity: %w",
+			provider.Namespace, provider.Name, provider.Spec.Type, operation.ErrNoSigner)
+	}
+	return nil
 }
 
 // GetProvider resolves a Provider object to a remote provider implementation
@@ -164,6 +209,11 @@ func (r *Resolver) ReadCapabilities(ctx context.Context, provider *infravirtriga
 func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
 	// Check if provider runtime is ready
 	if _, err := runtimeEndpoint(provider); err != nil {
+		return nil, err
+	}
+	// A Provider that requires operation identity is never resolved without a
+	// signer, not even to a client cached earlier.
+	if err := r.checkOperationSigner(provider); err != nil {
 		return nil, err
 	}
 
@@ -240,7 +290,17 @@ func (r *Resolver) revalidateOrConnect(ctx context.Context, provider *infravirtr
 	if r.cbRegistry != nil {
 		cb = r.cbRegistry.GetOrCreate(circuitBreakerName, string(provider.Spec.Type), provider.Name)
 	}
-	client, err := grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type), provider.Name, cb, tlsConfig)
+	// The client's mode comes from the Provider's type (requiresIdentity),
+	// never from its capabilities: a Provider that requires operation
+	// identity gets a client that sends every mutating call as a signed
+	// operation and refuses the unsigned ones.
+	var client *grpcClient.Client
+	if requiresIdentity(provider) {
+		client, err = grpcClient.NewOperationIdentityClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type),
+			provider.Name, cb, tlsConfig, r.opSigner)
+	} else {
+		client, err = grpcClient.NewClient(ctx, provider.Status.Runtime.Endpoint, string(provider.Spec.Type), provider.Name, cb, tlsConfig)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC client: %w", err)
 	}
@@ -269,7 +329,10 @@ func (r *Resolver) revalidateOrConnect(ctx context.Context, provider *infravirtr
 // validated one. It returns "" when the TLS Secret cannot be read; "" matches
 // no cached client, so the dial path reports the error.
 func (r *Resolver) validationKey(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) string {
-	key := fmt.Sprintf("%s|%d|%s|%s", provider.UID, provider.Generation, provider.Spec.Type, provider.Status.Runtime.Endpoint)
+	// The client's mode (operation identity or not) is part of the key, so a
+	// client built in one mode is never reused in the other.
+	key := fmt.Sprintf("%s|%d|%s|%s|%s", provider.UID, provider.Generation, provider.Spec.Type, provider.Status.Runtime.Endpoint,
+		operation.RequiredProtection(provider.Spec.Type))
 	rt := provider.Spec.Runtime
 	if rt == nil || rt.Service == nil || rt.Service.TLS == nil || !rt.Service.TLS.Enabled {
 		return key
