@@ -850,6 +850,9 @@ func checkIntentRequest(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identity
 		if _, _, err := requestedResources(req); err != nil {
 			return fmt.Errorf("Reconfigure resources: %w", errIntentTampered)
 		}
+		if err := checkReconfigureProjection(req); err != nil {
+			return fmt.Errorf("Reconfigure projection: %w", errIntentTampered)
+		}
 	default:
 		return fmt.Errorf("unexpected request type: %w", errIntentTampered)
 	}

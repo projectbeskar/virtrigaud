@@ -109,6 +109,34 @@ func requestedResources(req *providerv1.ReconfigureRequest) (cpu int32, memoryMi
 	return desired.Class.CPU, int64(desired.Class.MemoryMiB), nil
 }
 
+// reconfigureProjection is the desired configuration a signed Reconfigure
+// carries: req without its cloud-init user data and metadata. No Provider's
+// Reconfigure reads them (each reads the class's CPU, memory and disk
+// defaults, and the disks), so they are left out of the request, and so out
+// of the intent Secret and the grant.
+func reconfigureProjection(req contracts.CreateRequest) contracts.CreateRequest {
+	req.UserData, req.MetaData = nil, nil
+	return req
+}
+
+// errReconfigureCarriesCloudInit is checkIntentRequest's answer for a stored
+// Reconfigure that carries user data or metadata (reconfigureProjection never
+// writes one).
+var errReconfigureCarriesCloudInit = errors.New("the Reconfigure request carries cloud-init user data or metadata")
+
+// checkReconfigureProjection refuses a Reconfigure request whose desired
+// configuration carries user data or metadata.
+func checkReconfigureProjection(req *providerv1.ReconfigureRequest) error {
+	var desired contracts.CreateRequest
+	if err := json.Unmarshal([]byte(req.GetDesiredJson()), &desired); err != nil {
+		return fmt.Errorf("decode the desired configuration: %w", err)
+	}
+	if desired.UserData != nil || desired.MetaData != nil {
+		return errReconfigureCarriesCloudInit
+	}
+	return nil
+}
+
 // requestedResourcesOf is requestedResources of a prepared Reconfigure.
 func requestedResourcesOf(p *contracts.PreparedOperation) (int32, int64, error) {
 	if p == nil || p.Kind != contracts.OperationKindReconfigure {
@@ -230,7 +258,7 @@ func (r *VirtualMachineReconciler) startIdentityReconfigure(ctx context.Context,
 		return r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgOperationStateLost, operationHoldRecheckInterval), nil
 	}
 	step, res, err := r.startAttempt(ctx, vm, ia,
-		contracts.OperationRequest{Kind: contracts.OperationKindReconfigure, VM: ref, Spec: req}, ref.HostID)
+		contracts.OperationRequest{Kind: contracts.OperationKindReconfigure, VM: ref, Spec: reconfigureProjection(req)}, ref.HostID)
 	if err == nil && step == stepSucceeded {
 		return r.afterReconfigureSucceeded(ctx, vm, ia, ref.Routed()), nil
 	}

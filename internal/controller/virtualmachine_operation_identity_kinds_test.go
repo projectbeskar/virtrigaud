@@ -990,3 +990,49 @@ func TestIdentityPower_HostLevelSendAnswers(t *testing.T) {
 		})
 	}
 }
+
+// A signed Reconfigure carries no cloud-init user data or metadata, so
+// neither reaches its intent Secret or grant; a stored one that does is held
+// as tampered.
+func TestIdentityReconfigure_NoCloudInit(t *testing.T) {
+	assert.Nil(t, reconfigureProjection(contracts.CreateRequest{UserData: &contracts.UserData{CloudInitData: "secret"},
+		MetaData: &contracts.MetaData{}}).UserData)
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	honestReconfigure(t, r)
+	fail := true
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		if fail {
+			fail = false
+			return contracts.OperationAnswer{}, errors.New("connection reset")
+		}
+		return contracts.OperationAnswer{Honest: true}, nil
+	}
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
+	})
+	reconcileN(t, r, req, 1)
+	sends := stub.sent()
+	require.Len(t, sends, 2)
+	rr, ok := decodeSent(t, sends[1]).(*providerv1.ReconfigureRequest)
+	require.True(t, ok)
+	require.NoError(t, checkReconfigureProjection(rr))
+	assert.NotContains(t, rr.GetDesiredJson(), "CloudInitData")
+
+	secrets := intentSecrets(t, r)
+	require.Len(t, secrets, 1)
+	s := &secrets[0]
+	desired, err := json.Marshal(contracts.CreateRequest{Class: contracts.VMClass{CPU: 3, MemoryMiB: 4096},
+		UserData: &contracts.UserData{CloudInitData: "#cloud-config"}})
+	require.NoError(t, err)
+	b, err := proto.Marshal(&providerv1.ReconfigureRequest{Id: "vm-1", DesiredJson: string(desired), TargetHostId: "host-alpha",
+		Owner: &providerv1.ObjectIdentity{Uid: "uid-vm-id"}})
+	require.NoError(t, err)
+	s.Data[intentKeyRequest] = b
+	reseal(r, s)
+	require.NoError(t, r.Update(context.Background(), s))
+	r.Recorder = record.NewFakeRecorder(10)
+	reconcileN(t, r, req, 1)
+	assert.Equal(t, k8s.ReasonOperationIntentTampered, readyReason(idVM(t, r)))
+	assert.Len(t, stub.sent(), 2)
+}
