@@ -300,11 +300,23 @@ func withAttempt(vm *infravirtrigaudiov1beta1.VirtualMachine, a infravirtrigaudi
 	return out
 }
 
-// writeRejected reports whether a failed status write was refused outright
-// (it certainly did not change the stored object): a failed test
-// precondition, a conflict, an invalid request, forbidden, not found.
-func writeRejected(err error) bool {
-	return pendingHostWriteRejected(err)
+// markerNotStored reports whether the VM as the API server has it now
+// certainly carries no attempt marker of op_id opID (after a marker write
+// failed, whatever the error). Any doubt (the read failed) answers false.
+func (r *VirtualMachineReconciler) markerNotStored(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID string) bool {
+	live, gone, err := r.readLiveVM(ctx, vm)
+	if err != nil {
+		return false
+	}
+	if gone {
+		return true
+	}
+	for _, a := range live.Status.OperationAttempts {
+		if a.OpID == opID {
+			return false
+		}
+	}
+	return true
 }
 
 // operationCrashed reports whether a test stops the reconcile at point (as if
@@ -542,8 +554,8 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	}
 	if err := r.writeIdentityStatus(ctx, vm, w); err != nil {
 		logger.Info("The attempt marker was not written; nothing is sent", "kind", opReq.Kind, "attempt", attemptNo,
-			"rejected", writeRejected(err), "error", err.Error())
-		if writeRejected(err) {
+			"error", err.Error())
+		if r.markerNotStored(ctx, vm, opIDHex) {
 			// Certainly not stored: the intent Secret is this reconcile's
 			// own and nothing will ever name it.
 			if derr := r.deleteIntent(ctx, ia.providerCR.Namespace, opIDHex, vm.UID); derr != nil {
