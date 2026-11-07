@@ -851,6 +851,105 @@ spec:
                   the controller
                 format: int64
                 type: integer
+              operationAttempts:
+                description: |-
+                  OperationAttempts is the operator's durable record of the operations it
+                  sends to a Provider that requires operation identity (development
+                  builds only; no built-in Provider type requires it): at most one entry
+                  per operation kind, the latest attempt of that kind. An entry is written
+                  before its operation is first sent, and moves Prepared, Sent, Terminal.
+                  The exact request bytes of a non-terminal attempt are kept in a Secret
+                  in the Provider's namespace, never here. The entries are not signed.
+                  Never written for any other Provider. Written only by the operator;
+                  editing or removing an entry holds the VM (Ready=False) and never makes
+                  the operator send an operation again under a new identity.
+                items:
+                  description: |-
+                    OperationAttempt is the operator's durable record of one attempt of one
+                    operation on a VirtualMachine, for a Provider that requires operation
+                    identity. The operator writes it, through the status subresource with
+                    preconditions on the entries it read, before it first sends the
+                    operation; a re-send of the same attempt reuses every field.
+                  properties:
+                    attempt:
+                      description: Attempt counts the attempts of this kind for the
+                        VM, from 1.
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    bindingID:
+                      description: |-
+                        BindingID is the identifier of the VM's placement the attempt was
+                        issued for (status.placement.bindingID).
+                      pattern: ^[0-9a-f]{32}$
+                      type: string
+                    hostID:
+                      description: HostID is the Host the attempt was sent to.
+                      maxLength: 253
+                      type: string
+                    kind:
+                      description: Kind is the operation.
+                      enum:
+                      - Create
+                      - Delete
+                      - PowerOn
+                      - PowerOff
+                      - Reboot
+                      - ShutdownGraceful
+                      - Reconfigure
+                      type: string
+                    lastTransitionTime:
+                      description: LastTransitionTime is when the attempt last changed
+                        phase.
+                      format: date-time
+                      type: string
+                    opID:
+                      description: |-
+                        OpID is the attempt's random identifier, 32 lowercase hexadecimal
+                        characters. It names the Secret that holds the attempt's request.
+                      pattern: ^[0-9a-f]{32}$
+                      type: string
+                    outcome:
+                      description: Outcome is the attempt's outcome, once Terminal.
+                      enum:
+                      - Succeeded
+                      - FailedClean
+                      - FailedDirty
+                      - Retired
+                      - Cancelled
+                      - Rejected
+                      type: string
+                    outcomeReason:
+                      description: |-
+                        OutcomeReason is the Provider's reason code for a non-successful
+                        outcome, for operators.
+                      maxLength: 128
+                      type: string
+                    phase:
+                      description: Phase is where the attempt stands.
+                      enum:
+                      - Prepared
+                      - Sent
+                      - Terminal
+                      type: string
+                    taskRef:
+                      description: |-
+                        TaskRef is the Provider's task reference of an attempt it runs
+                        asynchronously.
+                      maxLength: 1024
+                      type: string
+                  required:
+                  - attempt
+                  - kind
+                  - lastTransitionTime
+                  - opID
+                  - phase
+                  type: object
+                maxItems: 18
+                type: array
+                x-kubernetes-list-map-keys:
+                - kind
+                x-kubernetes-list-type: map
               phase:
                 description: |-
                   Phase is the VM's phase, derived by the controller from the rest of its
@@ -882,6 +981,15 @@ spec:
                   VMs on single-host Providers, which have no operator-owned placement
                   decision.
                 properties:
+                  bindingID:
+                    description: |-
+                      BindingID identifies this placement of the VM for a Provider that
+                      requires operation identity (development builds only): 32 random
+                      lowercase hexadecimal characters, drawn when the VM's first Create
+                      attempt on its host is recorded, unchanged by re-sends. Never written
+                      for any other Provider.
+                    pattern: ^[0-9a-f]{32}$
+                    type: string
                   excludedHosts:
                     description: |-
                       ExcludedHosts are Hosts (CR names) the scheduler must not choose for this
