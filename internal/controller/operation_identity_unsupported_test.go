@@ -255,3 +255,32 @@ func (s *identityPreparingStub) SnapshotRevert(context.Context, contracts.VMRef,
 	s.reverts.Add(1)
 	return "", nil
 }
+
+// The sweeper's once-only warnings are forgotten when their Secret is no
+// longer kept, when an earlier Provider of the same name had them, and when
+// the Provider is gone.
+func TestProviderSweep_PrunesKeptIntentWarnings(t *testing.T) {
+	r := &ProviderReconciler{}
+	for _, k := range []string{
+		intentWarningKey("ns", "p", "uid-1", "vrtg-op-a"),
+		intentWarningKey("ns", "p", "uid-1", "vrtg-op-b"),
+		intentWarningKey("ns", "p", "uid-0", "vrtg-op-c"),
+		intentWarningKey("ns", "other", "uid-9", "vrtg-op-d"),
+	} {
+		r.intentSkipWarned.Store(k, struct{}{})
+	}
+	r.forgetIntentWarnings("ns", "p", "uid-1", map[string]bool{"vrtg-op-a": true})
+	keys := func() []string {
+		var out []string
+		r.intentSkipWarned.Range(func(k, _ any) bool {
+			s, _ := k.(string)
+			out = append(out, s)
+			return true
+		})
+		return out
+	}
+	assert.ElementsMatch(t, []string{intentWarningKey("ns", "p", "uid-1", "vrtg-op-a"), intentWarningKey("ns", "other", "uid-9", "vrtg-op-d")},
+		keys())
+	r.forgetIntentWarnings("ns", "p", "", nil)
+	assert.ElementsMatch(t, []string{intentWarningKey("ns", "other", "uid-9", "vrtg-op-d")}, keys())
+}

@@ -418,9 +418,17 @@ func (r *ProviderReconciler) sweepOperationIntents(ctx context.Context, provider
 	if err != nil {
 		log.FromContext(ctx).Info("Could not sweep the Provider's operation-intent Secrets; retried on the next reconcile",
 			"error", err.Error())
+	} else {
+		// A complete sweep: forget the warnings of Secrets it no longer
+		// keeps, and those of an earlier Provider of the same name.
+		keep := make(map[string]bool, len(skipped))
+		for _, name := range skipped {
+			keep[name] = true
+		}
+		r.forgetIntentWarnings(provider.Namespace, provider.Name, string(provider.UID), keep)
 	}
 	for _, name := range skipped {
-		key := string(provider.UID) + "/" + name
+		key := intentWarningKey(provider.Namespace, provider.Name, string(provider.UID), name)
 		if _, seen := r.intentSkipWarned.LoadOrStore(key, struct{}{}); seen || r.Recorder == nil {
 			continue
 		}
@@ -428,4 +436,30 @@ func (r *ProviderReconciler) sweepOperationIntents(ctx context.Context, provider
 			"Operation-intent Secret %s names a VirtualMachine that disagrees with its VM-UID label; it is kept, not swept. "+
 				"Investigate who wrote it, then delete it by hand (docs/operation-grants-manager.md)", name))
 	}
+}
+
+// intentWarningKey is the intentSkipWarned key of Secret name kept for the
+// Provider ns/name with uid.
+func intentWarningKey(ns, name, uid, secret string) string {
+	return ns + "/" + name + "/" + uid + "/" + secret
+}
+
+// forgetIntentWarnings drops the intentSkipWarned entries of the Provider
+// ns/name: every entry of another UID than uid (an earlier Provider of the
+// same name, or all of them when uid is empty: the Provider is gone), and the
+// entries of uid whose Secret keep does not name.
+func (r *ProviderReconciler) forgetIntentWarnings(ns, name, uid string, keep map[string]bool) {
+	prefix := ns + "/" + name + "/"
+	r.intentSkipWarned.Range(func(k, _ any) bool {
+		key, ok := k.(string)
+		if !ok || !strings.HasPrefix(key, prefix) {
+			return true
+		}
+		rest := strings.TrimPrefix(key, prefix)
+		keyUID, secret, _ := strings.Cut(rest, "/")
+		if uid == "" || keyUID != uid || !keep[secret] {
+			r.intentSkipWarned.Delete(key)
+		}
+		return true
+	})
 }
