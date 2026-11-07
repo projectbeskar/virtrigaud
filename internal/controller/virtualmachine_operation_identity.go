@@ -42,8 +42,9 @@ import (
 
 // Operation identity on the VirtualMachine controller (development builds
 // only; ADR-0016 Part A, manager half). For a Provider whose spec.type
-// requires operation identity (operation.RequiredProtection), the Create and
-// Delete of a VM are sent as signed operations, in this order:
+// requires operation identity (operation.RequiredProtection), the Create,
+// Delete, Power (on, off, reboot, graceful shutdown) and Reconfigure of a VM
+// are sent as signed operations, each in this order:
 //
 //  1. decide: a new attempt only when no attempt of any kind is in flight for
 //     the VM and the latest attempt of the kind ended not performed (after a
@@ -57,6 +58,11 @@ import (
 //     the same bytes with the same op_id;
 //  4. close: Sent with the task reference, then Terminal with the typed
 //     outcome, then the intent Secret is deleted.
+//
+// At most one attempt of any kind is in flight per VM: it is driven to its
+// end before anything else is decided (reconcileIdentityGate, identityDelete).
+// The other operation kinds of the provider contract have no signed path and
+// are refused locally (virtualmachine_operation_identity_kinds.go).
 //
 // Every other Provider never enters this file: no marker, no intent Secret,
 // no envelope, and its capabilities 31-34 are not read here.
@@ -231,13 +237,20 @@ func controllerutilContains(list []string, v string) bool {
 // attemptRetryWait is how long after a not-performed attempt a's terminal
 // transition the next attempt waits: blockedRetryMin doubling per attempt,
 // at most blockedRetryMax.
+//
+// A lastTransitionTime in the future (an edited status) counts as now, so the
+// wait never exceeds blockedRetryMax.
 func attemptRetryWait(a *infravirtrigaudiov1beta1.OperationAttempt, now time.Time) time.Duration {
 	wait := blockedRetryMin
 	for i := int64(1); i < a.Attempt && wait < blockedRetryMax; i++ {
 		wait *= 2
 	}
 	wait = min(wait, blockedRetryMax)
-	return max(wait-now.Sub(a.LastTransitionTime.Time), 0)
+	since := now.Sub(a.LastTransitionTime.Time)
+	if since < 0 {
+		since = 0
+	}
+	return min(max(wait-since, 0), blockedRetryMax)
 }
 
 // identityStatusWrite is one write of operation-identity status fields:
@@ -250,6 +263,9 @@ type identityStatusWrite struct {
 	placement    *infravirtrigaudiov1beta1.PlacementStatus
 	setID        bool
 	id           string
+	// resources, when set, replaces status.currentResources (a Reconfigure
+	// that Succeeded records its size in the write that makes it Terminal).
+	resources *infravirtrigaudiov1beta1.VirtualMachineResources
 }
 
 // rawJSON encodes v; an empty marker list encodes as null (it is not stored).
@@ -309,6 +325,11 @@ func (r *VirtualMachineReconciler) writeIdentityStatus(ctx context.Context, vm *
 			return err
 		}
 	}
+	if w.resources != nil {
+		if err := add("add", "/status/currentResources", w.resources); err != nil {
+			return err
+		}
+	}
 	body, err := json.Marshal(ops)
 	if err != nil {
 		return fmt.Errorf("encode status patch: %w", err)
@@ -321,6 +342,7 @@ func (r *VirtualMachineReconciler) writeIdentityStatus(ctx context.Context, vm *
 	vm.Status.OperationAttempts = obj.Status.OperationAttempts
 	vm.Status.Placement = obj.Status.Placement
 	vm.Status.ID = obj.Status.ID
+	vm.Status.CurrentResources = obj.Status.CurrentResources
 	return nil
 }
 
@@ -415,6 +437,17 @@ type identityAttempt struct {
 	// deleteRef is the VM reference a Delete attempt must name (set by
 	// identityDelete); a stored Delete intent naming another is tampered.
 	deleteRef *contracts.VMRef
+	// result is what this reconcile learned about the attempt it drove
+	// (shared by the copies of the identityAttempt).
+	result *attemptResult
+}
+
+// attemptResult is what one reconcile learned about the attempt it drove: the
+// verified prepared operation, and the Provider's answer when the outcome came
+// from a send (nil when it came from a task).
+type attemptResult struct {
+	prepared *contracts.PreparedOperation
+	answer   *contracts.OperationAnswer
 }
 
 // identityAttemptFor checks the Provider's client and advertised capabilities
@@ -446,7 +479,7 @@ func (r *VirtualMachineReconciler) identityAttemptFor(ctx context.Context, vm *i
 			why+"; the manager never lowers the protection it requires: nothing is sent until the Provider advertises a match",
 			operationHoldRecheckInterval), false
 	}
-	return identityAttempt{providerCR: providerCR, instance: instance, sender: sender}, ctrl.Result{}, true
+	return identityAttempt{providerCR: providerCR, instance: instance, sender: sender, result: &attemptResult{}}, ctrl.Result{}, true
 }
 
 // reconcileIdentityGate runs, for a VM of a Provider that requires operation
@@ -469,9 +502,7 @@ func (r *VirtualMachineReconciler) reconcileIdentityGate(ctx context.Context, vm
 	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)
 	if a := inFlightAttempt(vm); a != nil {
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
-		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate {
-			res, err = r.gateCreateDrive(ctx, vm, ia, step, res, err)
-		}
+		res, err = r.gateDriveStep(ctx, vm, ia, a, step, res, err)
 		return res, true, err
 	}
 	if c := findAttempt(vm, contracts.OperationKindCreate); c != nil && vm.Status.ID == "" &&
@@ -518,7 +549,13 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if prev := findAttempt(vm, opReq.Kind); prev != nil {
 		switch {
 		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedDirty:
-			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationFailedDirty, msgOperationFailedDirty, operationHoldRecheckInterval), nil
+			acked, err := r.consumeAcknowledgement(ctx, vm, prev)
+			if err != nil {
+				return stepWaiting, ctrl.Result{}, err
+			}
+			if !acked {
+				return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationFailedDirty, msgOperationFailedDirty, operationHoldRecheckInterval), nil
+			}
 		case notPerformed(prev.Outcome):
 			if wait := attemptRetryWait(prev, r.now()); wait > 0 {
 				msg := fmt.Sprintf("%s attempt %d was not performed (%s); attempt %d is sent in %s",
@@ -529,6 +566,16 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 			}
 		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded && opReq.Kind == contracts.OperationKindDelete:
 			return stepSucceeded, ctrl.Result{}, nil
+		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded && repeatableKind(opReq.Kind):
+			// A power operation or a Reconfigure may be asked for again once
+			// the last one Succeeded (the VM changed since), but not sooner
+			// than repeatGap after it, doubling over consecutive successes
+			// of the kind within repeatWindow (repeatGapWait), so a guest
+			// that powers itself off, or a Provider whose Describe lags its
+			// task, cannot drive a fast loop of new attempts.
+			if wait := r.repeatGapWait(vm, prev, r.now()); wait > 0 {
+				return stepWaiting, ctrl.Result{RequeueAfter: wait}, nil
+			}
 		default:
 			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgOperationStateLost, operationHoldRecheckInterval), nil
 		}
@@ -621,6 +668,7 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if r.operationCrashed(ctx, crashAfterPrepared) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	ia.noteResult(&prepared, nil)
 	return r.sendAttempt(ctx, vm, ia, &marker, prepared, true)
 }
 
@@ -634,6 +682,7 @@ func (r *VirtualMachineReconciler) driveAttempt(ctx context.Context, vm *infravi
 	if !ok {
 		return step, res, nil
 	}
+	ia.noteResult(&prepared, nil)
 	if a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent && a.TaskRef != "" {
 		if !r.taskRefBound(vm, a) {
 			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval), nil
@@ -736,7 +785,7 @@ func (r *VirtualMachineReconciler) taskTag(vm *infravirtrigaudiov1beta1.VirtualM
 // and number, the VM's UID and the task reference.
 func taskMessage(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt, taskRef string) []byte {
 	return operation.TaskMessage([]byte(a.OpID), []byte(a.Kind), []byte(strconv.FormatInt(a.Attempt, 10)),
-		[]byte(vm.UID), []byte(taskRef))
+		[]byte(vm.UID), []byte(taskRef), []byte(strconv.FormatBool(a.Honest)), []byte(strconv.FormatBool(a.RestartRequired)))
 }
 
 // taskRefBound reports whether a's task reference is the one the operator
@@ -782,6 +831,24 @@ func checkIntentRequest(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identity
 		if req.GetTargetHostId() != a.HostID || req.GetOwner().GetUid() != string(vm.UID) {
 			return fmt.Errorf("Create target: %w", errIntentTampered)
 		}
+	case *providerv1.PowerRequest:
+		row, _ := operation.RowFor(wire) // DecodeRequest refused a kind with no row
+		if req.GetOp() != row.FixedPowerOp {
+			return fmt.Errorf("power op: %w", errIntentTampered)
+		}
+		if err := checkVMTarget(vm, a, req.GetId(), req.GetTargetHostId(), req.GetOwner().GetUid()); err != nil {
+			return fmt.Errorf("Power target: %w", err)
+		}
+	case *providerv1.ReconfigureRequest:
+		if err := checkVMTarget(vm, a, req.GetId(), req.GetTargetHostId(), req.GetOwner().GetUid()); err != nil {
+			return fmt.Errorf("Reconfigure target: %w", err)
+		}
+		if _, _, err := requestedResources(req); err != nil {
+			return fmt.Errorf("Reconfigure resources: %w", errIntentTampered)
+		}
+		if err := checkReconfigureProjection(req); err != nil {
+			return fmt.Errorf("Reconfigure projection: %w", errIntentTampered)
+		}
 	default:
 		return fmt.Errorf("unexpected request type: %w", errIntentTampered)
 	}
@@ -790,8 +857,13 @@ func checkIntentRequest(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identity
 
 // wireKinds maps the kinds this controller sends to their wire kinds.
 var wireKinds = map[contracts.OperationKind]providerv1.OperationKind{
-	contracts.OperationKindCreate: providerv1.OperationKind_OPERATION_KIND_CREATE,
-	contracts.OperationKindDelete: providerv1.OperationKind_OPERATION_KIND_DELETE,
+	contracts.OperationKindCreate:           providerv1.OperationKind_OPERATION_KIND_CREATE,
+	contracts.OperationKindDelete:           providerv1.OperationKind_OPERATION_KIND_DELETE,
+	contracts.OperationKindPowerOn:          providerv1.OperationKind_OPERATION_KIND_POWER_ON,
+	contracts.OperationKindPowerOff:         providerv1.OperationKind_OPERATION_KIND_POWER_OFF,
+	contracts.OperationKindReboot:           providerv1.OperationKind_OPERATION_KIND_REBOOT,
+	contracts.OperationKindShutdownGraceful: providerv1.OperationKind_OPERATION_KIND_SHUTDOWN_GRACEFUL,
+	contracts.OperationKindReconfigure:      providerv1.OperationKind_OPERATION_KIND_RECONFIGURE,
 }
 
 // holdIntentTampered holds vm for an intent that failed loadVerifiedIntent,
@@ -822,6 +894,7 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 	if err != nil {
 		return r.sendFailed(ctx, vm, ia, a, err, first)
 	}
+	ia.noteResult(nil, &answer)
 	if answer.TaskRef == "" {
 		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, "", answer.ID)
 	}
@@ -831,6 +904,11 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 		// The provider's VM id is kept on the marker (operator-written
 		// status), never in the Secret, until the Create Succeeded.
 		sent.ID = answer.ID
+	}
+	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+		// The answer's flags decide what the task's success records; they
+		// are kept on the marker, under the task tag.
+		sent.Honest, sent.RestartRequired = answer.Honest, answer.RestartRequired
 	}
 	// The task reference is bound to this attempt, so an edited status cannot
 	// make another task (for example the Create's) confirm it.
@@ -855,6 +933,32 @@ func (r *VirtualMachineReconciler) sendFailed(ctx context.Context, vm *infravirt
 	switch {
 	case contracts.HasErrorInfoReason(err, contracts.ProviderMismatchReason):
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationProviderMismatch, msgOperationProviderMismatch, operationHoldRecheckInterval), nil
+	case a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete && contracts.IsNotFound(err):
+		// The host reports no such VM (or one it does not own): that does
+		// not confirm the Delete (deleteAbsentHolds).
+		return r.deleteAbsent(ctx, vm, ia, a)
+	case repeatableKind(contracts.OperationKind(a.Kind)) && !definiteRejection(err) && redeliveryRefusal(err) == "":
+		// A power operation or Reconfigure meets the host-level answers the
+		// unsigned path handles: an unavailable host, a VM missing on its
+		// host or not this VM's, an owner that cannot be told. The attempt
+		// stays as it is and is re-sent with the same op_id when the hold
+		// is re-checked.
+		ref := contracts.VMRef{ID: vm.Status.ID, HostID: a.HostID, Owner: vmOwnerIdentity(vm)}
+		errReason := errReasonProviderPower
+		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+			errReason = errReasonProviderReconfigure
+		}
+		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReason); handled {
+			return stepHeld, res, nil
+		}
+		if res, held := r.holdOwnerRefusal(ctx, vm, ref, err, string(a.Kind)); held {
+			return stepHeld, res, nil
+		}
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
+			fmt.Sprintf("%s attempt %d was not accepted; it is re-sent with the same identity: %s", a.Kind, a.Attempt, providerFailureDetail(err)),
+			vm.Generation)
+		r.updateStatus(ctx, vm)
+		return stepWaiting, ctrl.Result{RequeueAfter: max(blockedRetryMin, routedCallRetryAfter(ref, err))}, nil
 	case definiteRejection(err) && first:
 		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeRejected, rejectionReason(err), "")
 	case redeliveryRefusal(err) != "":
@@ -927,6 +1031,13 @@ func (r *VirtualMachineReconciler) pollAttempt(ctx context.Context, vm *infravir
 		return stepWaiting, ctrl.Result{RequeueAfter: blockedRetryMin}, nil
 	}
 	var outcome infravirtrigaudiov1beta1.OperationAttemptOutcome
+	running := st.Outcome == contracts.TaskOutcomeRunning || (st.Outcome == contracts.TaskOutcomeUnspecified && !st.IsCompleted)
+	if running && r.runningPastDeadline(a) {
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationOutcomeUnknown, fmt.Sprintf(
+			"%s attempt %d has been reported running for more than %s; its outcome is treated as unknown (it is still asked "+
+				"about, and a Delete of the VM supersedes it); %s", a.Kind, a.Attempt, sentAttemptDeadline, operationHoldRecovery),
+			operationHoldRecheckInterval), nil
+	}
 	switch st.Outcome {
 	case contracts.TaskOutcomeRunning:
 		return stepWaiting, r.operationInProgress(ctx, vm, a, operationPollInterval), nil
@@ -961,6 +1072,11 @@ func (r *VirtualMachineReconciler) pollAttempt(ctx context.Context, vm *infravir
 	if r.operationCrashed(ctx, crashAfterReply) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+		// The flags of the answer that returned the task, as recorded on the
+		// Sent marker under its task tag (verified before this poll).
+		ia.noteResult(nil, &contracts.OperationAnswer{TaskRef: a.TaskRef, Honest: a.Honest, RestartRequired: a.RestartRequired})
+	}
 	return r.closeAttempt(ctx, vm, ia, a, outcome, st.OutcomeReason, a.ID)
 }
 
@@ -983,6 +1099,11 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 		promotePendingHost(promoted, a.HostID)
 		w.setPlacement, w.placement = true, promoted.Status.Placement
 		w.setID, w.id = true, answerID
+	}
+	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure && outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
+		// The size is recorded in the same write as Terminal, so a restart
+		// in between cannot lose it.
+		w.resources = r.reconfiguredResources(vm, ia, isClusterTopology(ia.providerCR))
 	}
 	if err := r.writeIdentityStatus(ctx, vm, w); err != nil {
 		logger.Info("The Terminal marker was not written; the attempt is asked about again", "error", err.Error())
@@ -1023,7 +1144,7 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ns string) {
 	for _, a := range vm.Status.OperationAttempts {
 		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || r.now().Sub(a.LastTransitionTime.Time) > operationIntentSweepGrace ||
-			deleteAwaitingRelease(vm, &a) {
+			intentKeptAsEvidence(vm, &a) {
 			continue
 		}
 		if err := r.deleteIntent(ctx, ns, a.OpID, vm.UID); err != nil {
@@ -1044,16 +1165,6 @@ func (r *VirtualMachineReconciler) afterCreateSucceeded(ctx context.Context, vm 
 	}
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: createdDescribeFallback}
-}
-
-// gateCreateDrive maps the step of an in-flight Create the gate drove: a
-// success records what follows a Create.
-func (r *VirtualMachineReconciler) gateCreateDrive(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, step attemptStep, res ctrl.Result, err error) (ctrl.Result, error) {
-	if step == stepSucceeded {
-		return r.afterCreateSucceeded(ctx, vm, ia), nil
-	}
-	return res, err
 }
 
 // identityDelete is the finalizer of a VM of a Provider that requires
@@ -1081,6 +1192,9 @@ func (r *VirtualMachineReconciler) identityDelete(ctx context.Context, vm *infra
 	}
 	if a := inFlightAttempt(vm); a != nil {
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
+		if err == nil && step == stepHeld && !force && supersedableByDelete(vm, a) {
+			return r.supersedeForDelete(ctx, vm, a)
+		}
 		return r.afterDeleteStep(ctx, vm, ia, a.Kind, step, res, err, force)
 	}
 	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)

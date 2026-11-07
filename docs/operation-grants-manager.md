@@ -179,11 +179,116 @@ that must match the protection the Provider's type requires, never a way to lowe
 ## Operation identity on VirtualMachines
 
 For a Provider whose type requires operation identity, the VirtualMachine controller sends
-a VM's `Create` and `Delete` as signed operations and records each attempt before it is
-first sent. The other mutating calls of such a VM (power, reconfigure, snapshots, image
-prepare, ...) are not yet sent as signed operations: the operation-identity client refuses
-them locally (`contracts.ErrOperationIdentityRequired` or
-`ErrOperationIdentityNotImplemented`) and nothing is sent unsigned.
+a VM's `Create`, `Delete`, power operations (`PowerOn`, `PowerOff`, `Reboot`,
+`ShutdownGraceful`) and `Reconfigure` as signed operations, and records each attempt before
+it is first sent. Every other mutating operation on such a VM or Provider (snapshots,
+clones, image prepares, migrations, adoption) has no signed path and is refused locally
+before any RPC (see
+[Operations with no signed path](#operations-with-no-signed-path)). The
+operation-identity client also refuses every unsigned mutating call
+(`contracts.ErrOperationIdentityRequired` or `ErrOperationIdentityNotImplemented`), so
+nothing is ever sent unsigned.
+
+### Kinds and their requests
+
+| Kind | Asked for by | Request | Recorded once `Succeeded` |
+|---|---|---|---|
+| `Create` | a VM with no id, once placed | `CreateRequest` for the pending host, owner = the VM's UID | `status.id`, the confirmed placement, `Bound` |
+| `Delete` | the VM's deletion | `DeleteRequest` for the VM's id, host and owner | the finalizer is released |
+| `PowerOn` | `spec.powerState: On` while the VM is reported off | `PowerRequest`, `op` = `POWER_OP_ON` | nothing: the next Describe reports the state |
+| `PowerOff` | `spec.powerState: Off` while the VM is reported on (or suspended) | `PowerRequest`, `op` = `POWER_OP_OFF` | as above |
+| `ShutdownGraceful` | `spec.powerState: OffGraceful` while the VM is reported on | `PowerRequest`, `op` = `POWER_OP_SHUTDOWN_GRACEFUL` | as above |
+| `Reboot` | no VirtualMachine field asks for it yet; the controller can send it | `PowerRequest`, `op` = `POWER_OP_REBOOT` | as above |
+| `Reconfigure` | a CPU or memory change (class or `spec.resources`), after the same capacity and honest-result checks as for every clustered Provider | `ReconfigureRequest` for the VM's id, host and owner, with the desired configuration without cloud-init user data or metadata | `status.currentResources` = the CPU and memory the stored request asked for, written with `Terminal` |
+
+Each power kind fixes its `PowerRequest.op` (the `OperationKind` table), and the grant names
+the kind, so a host refuses a request whose `op` does not match its grant with
+`GRANT_MISMATCH` (for example a `REBOOT` grant over a `SHUTDOWN_GRACEFUL` request; the
+conformance case `identity.wrong-kind-refused`). When the controller loads a stored
+intent, it also checks the request against the attempt: a power request must carry its
+kind's `op` and name the VM's recorded id, its host and the VM's UID as owner; a
+Reconfigure request must name the same and a CPU and memory size, and carry no user data
+or metadata. A request that fails these checks is held as `OperationIntentTampered` and
+not sent.
+
+A signed `Reconfigure` leaves the VM's cloud-init user data and metadata out of its
+desired configuration: no Provider's Reconfigure reads them (each reads the class's CPU,
+memory and disk defaults, and the disks), so they are not copied into the intent Secret or
+covered by the grant. The unsigned Reconfigure of every other Provider is unchanged.
+
+A `Reconfigure` is bound to the exact resources it asks for: the grant covers the exact
+request bytes, and once the attempt `Succeeded` the controller records the size from the
+stored request, not from the spec as it is then. A synchronous answer is recorded as for
+every clustered Provider: applied, applied to the persistent definition only
+(`Reconfiguring=True/RestartRequired`, counted at the larger of the old and new size), or,
+without the honest-result marker, not trusted (counted at the larger size). An answer with
+a task records its honest-result and restart-required flags on the `Sent` marker
+(`honest`, `restartRequired`, covered by the task tag), and they are applied the same way
+when the task `Succeeded`. The size is written in the same status write as `Terminal`, so a
+restart in between cannot lose it. A spec that changes while the attempt is in flight is a
+new attempt once this one is over.
+
+A power operation or `Reconfigure` can be asked for again after one `Succeeded` (the VM's
+state or spec changed since); the next attempt of the same kind gets a new `op_id` and the
+next attempt number, after a wait measured from the end of the previous one. The wait is
+15 seconds, and doubles (at most 5 minutes) with each consecutive success of the kind that a
+new attempt follows within 10 minutes; a request more than 10 minutes after the last success
+waits not at all and starts the doubling again. The kinds are counted apart, so asking for
+another power state starts its own count. So a guest that powers itself off again, or a
+Provider whose Describe lags its task, cannot drive a fast loop of attempts. The count is
+kept in the manager's memory, like its other pacing records: a manager restart only
+shortens a wait. A `lastTransitionTime` in the future counts as now. A `Create` or a `Delete` that
+`Succeeded` is never sent again.
+
+A power or Reconfigure send that meets an unavailable host, a VM missing on its host or not
+this VM's, or an owner that cannot be told is held as for every clustered Provider
+(`HostUnavailable`, `VMMissingOnHost`, the owner-refusal holds), at their pace; the attempt
+stays and is re-sent with the same `op_id`.
+
+### One attempt at a time
+
+At most one attempt of any kind is in flight (`Prepared` or `Sent`) per VM. Each reconcile
+of a VM whose Provider requires operation identity first drives the attempt in flight, if
+there is one, to its end (re-sending it with the same `op_id` and bytes, or polling its
+task), and decides nothing else until it is `Terminal`. Then:
+
+1. a VM being deleted gets its `Delete` first; nothing else is started for it (a power
+   operation or Reconfigure in flight when the deletion began is finished first, or
+   superseded if it is held, below);
+2. otherwise the reconcile decides as it does for every Provider: `Create` for a VM with no
+   id, then the power state, then the size.
+
+So a resize requested while a power-off runs waits until the power-off is over and is then
+decided from the VM's state at that time; a deletion requested while a Reconfigure runs
+waits for it and is then the next attempt. Not-performed outcomes and their backoff apply
+per kind: while a power attempt waits out its backoff, the reconcile does not move on to
+the size.
+
+**A deadline on running power and Reconfigure attempts.** A `Sent` power or Reconfigure
+attempt that its host keeps reporting running for more than one hour, measured from its
+`Sent` transition (a `lastTransitionTime` in the future counts as now), is held as
+`OperationOutcomeUnknown`: it is still asked about, and a Delete of the VM supersedes it
+(below). A `Create` or `Delete` attempt has no such deadline.
+
+**A Delete supersedes a held power or Reconfigure attempt.** An attempt in flight whose
+outcome the controller cannot learn would otherwise block the VM's Delete for ever, and the
+only ways out (orphan-on-delete, force-delete) leave the VM on its host. So, for a VM being
+deleted, a power or Reconfigure attempt in flight that is held as `OperationUnknownToAgent`,
+`OperationOutcomeUnknown`, `OperationIntentLost`, `OperationIntentTampered` or
+`OperationStateLost` is written `Terminal` with outcome `Superseded`, a Warning event
+`OperationSuperseded` names its kind, number and op_id, its intent Secret is kept in the
+Provider's namespace as evidence while the VM exists (the sweeper removes it only once the
+VM is gone), and the signed Delete follows. The VM is released only once that Delete is
+confirmed. Whatever the superseded attempt did or still does, a confirmed Delete removes the
+VM. Nothing else supersedes a held attempt:
+
+- a held or in-flight `Create` is never superseded: the Delete needs the VM's id, and a
+  Create that may still run could create the VM after the Delete;
+- a `Delete` is never superseded;
+- a `PowerOff` or `ShutdownGraceful` never supersedes a held `PowerOn` or `Reboot`: the
+  held operation could still run on the host after the power-off and leave the VM on while
+  the operator reports it off. The held attempt keeps blocking power changes; deleting the
+  VM, or the acknowledgement below for a `FailedDirty` outcome, are the ways forward.
 
 ### The development enrolment file
 
@@ -223,7 +328,7 @@ other Provider, and neither carries request bytes, a salt or a digest.
 |---|---|
 | `Prepared` | The attempt's identity and exact request are stored. It may or may not have been delivered. |
 | `Sent` | The Provider accepted the operation and returned a task; its outcome is not known yet. |
-| `Terminal` | The outcome is known: `Succeeded`, `FailedClean`, `FailedDirty`, `Retired`, `Cancelled`, or `Rejected` (the host refused the first delivery with a reason that proves it was not performed). |
+| `Terminal` | The outcome is known: `Succeeded`, `FailedClean`, `FailedDirty`, `Retired`, `Cancelled`, or `Rejected` (the host refused the first delivery with a reason that proves it was not performed); or, for a held power or Reconfigure attempt of a VM being deleted, `Superseded` (its outcome is unknown; see "One attempt at a time"). |
 
 Every marker write is a JSON Patch on the status subresource whose `test` operations
 require the markers (and, where written, `status.placement` and `status.id`) to be exactly
@@ -231,8 +336,9 @@ as the reconcile read them. A write that fails sends nothing. The order of one a
 
 1. Decide: a new attempt only when no attempt of any kind is in flight for the VM, and the
    latest attempt of the kind ended not performed (`Retired`, `FailedClean`, `Cancelled`,
-   `Rejected`) and its backoff (15 s doubling per attempt, at most 5 min) is over, or there
-   is none. The `op_id` and digest salt are drawn once.
+   `Rejected`) and its backoff (15 s doubling per attempt, at most 5 min) is over, or, for
+   a power kind or `Reconfigure`, `Succeeded` and the same wait is over, or there is none. The
+   `op_id` and digest salt are drawn once.
 2. Persist: the intent Secret (below), then the `Prepared` marker.
 3. Transmit: the stored bytes under a freshly minted grant. A re-send (after a transport
    error, `VM_BUSY`, a lost reply or a manager restart) sends the same bytes with the same
@@ -247,13 +353,67 @@ performed, and no id is recorded). A Delete recorded `Succeeded` that the reconc
 recorded it did not release (a restart in between, or an edited status) releases the
 finalizer only when its intent Secret authenticates and matches it and the Provider
 confirms it: its task reports `Succeeded`, or, for a synchronous Delete, a re-send of the
-same attempt succeeds. A Delete waits for a Create in flight. Orphan-on-delete and
+same attempt succeeds. A Delete waits for any attempt in flight. Orphan-on-delete and
 force-delete work as for every Provider.
+
+### Delete: an absent VM never releases the finalizer
+
+For every other Provider, a Delete answered "not found", or an owner-checked Describe that
+reports the VM absent after a Delete task's outcome is unknown, releases the finalizer
+([`task-status-outcomes.md`](task-status-outcomes.md)). For a Provider that requires
+operation identity it never does: "no such VM" is an unsigned claim that a misrouted,
+restored or misbehaving host can make about a VM that still runs. The finalizer is
+released only by:
+
+- a confirmed Delete: a task bound to this Delete attempt (its `taskTag`) reports
+  `Succeeded`, or a re-send of the same `op_id` is answered with success;
+- no Create of the VM ever performed (no Create attempt, or only not-performed ones, and no
+  id);
+- orphan-on-delete or force-delete.
+
+So:
+
+| The host or Provider answers | Result |
+|---|---|
+| the Delete with "not found" or "not this VM's owner" (`NotFound`, `VM_NOT_OWNED`) | held as `OperationDeleteUnconfirmed`; the same attempt is re-sent every 5 minutes |
+| the Delete's task with `UNKNOWN_TO_AGENT` | held as `OperationUnknownToAgent`; no new Delete attempt |
+| the Delete's task with `Retired`, `FailedClean` or `Cancelled` | a new Delete attempt after the backoff (never a release) |
+| nothing, because the VM's Provider is gone, and a Create of the VM was or may have been performed | held as `OperationDeleteUnconfirmed` |
+
+No Describe is used to decide a release. An authenticated host answer that the VM is
+deleted (bound to the VM's UID and binding, signed by or bound to the host's enrolment)
+could release such a VM later; no such answer exists in the provider contract yet, and the
+controller's extension point for it (`authenticatedHostDeleted`) always answers no.
+
+### Operations with no signed path
+
+For a Provider that requires operation identity, these are refused locally, before any RPC:
+nothing is sent, signed or unsigned. The VMSnapshot, VMClone, VMMigration and VMAdoption
+controllers refuse before they resolve a Provider client at all; the VirtualMachine
+controller (image prepare, snapshot revert) has already resolved the VM's
+operation-identity client, which it needs for the signed lifecycle, and sends nothing on
+it for these.
+
+| Operation | Refused by | Where the refusal shows |
+|---|---|---|
+| VM snapshot create, delete | VMSnapshot controller | the VMSnapshot's `Ready=False/OperationIdentityUnsupported` |
+| Snapshot revert (`spec.snapshot.revertToRef`) | VirtualMachine controller | the VM's `SnapshotReverted=False/OperationIdentityUnsupported` (and `Ready=False`); power and size are still reconciled |
+| Image prepare (a VM with `spec.imageRef` on a Provider that advertises image import) | VirtualMachine controller | the VM's `Ready=False/OperationIdentityUnsupported`; the VM is not created |
+| Clone | VMClone controller | the VMClone's `Ready=False/OperationIdentityUnsupported`, phase `Pending`; no target is created |
+| Migration (snapshot, disk export and import, staged and landed disk deletion), when its source or target Provider requires operation identity | VMMigration controller | the VMMigration's `Ready=False/OperationIdentityUnsupported`; its phase does not advance |
+| Adoption (owner transfer) | VMAdoption controller | the Provider's `status.adoption.message` |
+
+Each refusal has a fixed message and records one Warning event with reason
+`OperationIdentityUnsupported` when it begins. The hardware upgrade kind has no manager
+call at all. The Provider client refuses the same calls again
+(`contracts.ErrOperationIdentityNotImplemented`) as a second lock.
 
 **Task binding.** When an attempt is recorded `Sent`, the controller also records
 `taskTag`: an HMAC-SHA256 under the intent key, with its own domain-separation prefix
-(`virtrigaud.io/operation-task/v1` and a NUL byte), over the attempt's op_id, kind and
-number, the VM's UID and the task reference. A task reference is polled, or used to
+(`virtrigaud.io/operation-task/v2` and a NUL byte), over the attempt's op_id, kind and
+number, the VM's UID, the task reference and a Reconfigure answer's honest-result and
+restart-required flags. (Version 1 covered the first five fields; a version 1 tag does not
+verify.) A task reference is polled, or used to
 confirm a Delete, only when its tag verifies and no other marker of the VM names the same
 reference; otherwise the VM is held as `OperationStateLost` and nothing is polled or
 sent. So copying the Create's task reference into the Delete marker, editing a task
@@ -362,10 +522,66 @@ attempt:
 | `OperationIntentLost` | A marker in flight names an intent Secret that does not exist (for example after an etcd restore that did not restore it). | Operator, or restore the Secret. |
 | `OperationIntentTampered` | An intent Secret does not authenticate, or names another VM, Provider, host, binding, attempt or target than its marker (also after the anchor key was rotated). The Secret is kept. | Operator: investigate who wrote Secrets in the Provider's namespace (the Secret is the evidence), check the host by hand, release the VM as below, then delete the Secret by hand: `kubectl -n <provider namespace> delete secret vrtg-op-<opID>`. The sweeper also keeps, and announces once with an `OperationIntentKept` Warning event on the Provider, an intent Secret whose VM annotations disagree with its VM-UID label; delete it by hand the same way once investigated. |
 | `OperationRequestTooLarge` | The request (with its user data) is over 768 KiB. | Make the user data smaller. |
-| `OperationFailedDirty` | The Provider reported the operation failed after an irreversible step began. | Operator. |
+| `OperationFailedDirty` | The Provider reported the operation failed after an irreversible step began. | For a power or Reconfigure attempt: check the VM on its host, then acknowledge that exact attempt with `kubectl annotate vm <name> virtrigaud.io/acknowledge-operation=<its opID>` (from `status.operationAttempts`). The manager removes the annotation, records an `OperationAcknowledged` event, and, after the next Describe, a new attempt of that kind may follow. The annotation does nothing for another op_id or for a Create or Delete. For a Create or Delete: operator. |
 | `OperationOutcomeUnknown` | The Provider cannot tell what the attempt did (an `Unknown` outcome, or a refusal of a re-delivery that proves nothing about an earlier one). The same attempt is asked about, or re-sent, every 5 minutes. | Resolves itself if the Provider later reports a terminal outcome; otherwise operator. |
 | `OperationUnknownToAgent` | The host has no record of the attempt's task. | Operator. |
 | `OperationProviderMismatch` | The host refused the operation as coming from another Provider. The same attempt is re-sent every 5 minutes. | Fix the host's enrolment, or operator. |
+| `OperationDeleteUnconfirmed` | The VM is being deleted and its host answers that there is no such VM, or its Provider is gone (see above). The same attempt is re-sent every 5 minutes. | Operator. |
+| `OperationIdentityUnsupported` | An operation with no signed path was asked of the VM (an image prepare; a snapshot revert shows on `SnapshotReverted`). Nothing is sent. | Remove the request (for example use an imported disk instead of an image), or use another Provider. |
+
+**Who can acknowledge.** The `virtrigaud.io/acknowledge-operation` annotation is part of
+the VirtualMachine's metadata: anyone allowed to update the VirtualMachine can set it,
+including a tenant whose VM runs on a Provider in another namespace (a consumer of a shared
+Provider). It names one attempt's exact op_id and only ends a `FailedDirty` hold of a power
+or Reconfigure attempt, but it is an operator decision, so restrict it. A
+ValidatingAdmissionPolicy can allow only a group of operators to set or change it (removing
+it, as the manager does, stays allowed):
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: virtrigaud-acknowledge-operation
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["infra.virtrigaud.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["virtualmachines"]
+  variables:
+    - name: key
+      expression: "'virtrigaud.io/acknowledge-operation'"
+    - name: newValue
+      expression: >-
+        has(object.metadata.annotations) && variables.key in object.metadata.annotations
+        ? object.metadata.annotations[variables.key] : ''
+    - name: oldValue
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations) && variables.key in oldObject.metadata.annotations
+        ? oldObject.metadata.annotations[variables.key] : ''
+  validations:
+    - expression: >-
+        variables.newValue == '' || variables.newValue == variables.oldValue ||
+        'virtrigaud:operation-acknowledgers' in request.userInfo.groups
+      message: "only members of virtrigaud:operation-acknowledgers may set virtrigaud.io/acknowledge-operation"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: virtrigaud-acknowledge-operation
+spec:
+  policyName: virtrigaud-acknowledge-operation
+  validationActions: ["Deny"]
+```
+
+Adapt the group to your operators and bind the policy to the namespaces that run VMs of
+Providers that require operation identity. The policy was checked with
+`kubectl apply --dry-run=client` and `--dry-run=server` against an ephemeral local test API
+server, which also denied the annotation to a user outside the group and allowed it to one
+inside it and its removal.
 
 "Operator" means: there is no retire, cancel or resolve path yet, so the controller cannot
 learn what happened on the host. Check the host by hand, then release the VirtualMachine
@@ -387,9 +603,16 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
 - `authority_generation` is not yet bound to the generation the issuer certificate names;
   it is only checked to be at least 1, and a verifier refuses a configured minimum above 1
   until that binding exists.
-- Only `Create` and `Delete` are sent as signed operations; the other kinds of a VM whose
-  Provider requires operation identity are refused locally (power state changes and
-  resizes of such a VM fail with a provider error).
+- Only the seven VM lifecycle kinds are sent as signed operations; snapshots, clones,
+  image prepares, migrations and adoption are refused locally for a Provider that
+  requires operation identity. No VirtualMachine field asks for a `Reboot` yet.
+- A held power attempt blocks later power changes of the VM (only a Delete supersedes it).
+  A task that the host keeps reporting as running blocks the VM, the Delete included, for
+  up to one hour for a power or Reconfigure attempt; a Create's has no deadline.
+- The acknowledgement annotation is restricted by RBAC on VirtualMachines only; restrict it
+  further with an admission policy (above).
+- A superseded attempt's outcome stays unknown: if it still runs on the host after the
+  Delete, only the host's own de-duplication by VM and binding stops it.
 - A Provider's typed outcomes and refusal reasons are unsigned claims: a Provider that
   falsely answers `Retired` or `FailedClean` makes the controller mint a new attempt.
 - Attempt markers are not signed or authenticated: detected edits hold the VM, but a
@@ -400,8 +623,9 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
 - `TaskStatus` is not bound to an op_id on the wire; the controller binds the task
   reference on its side only.
 - In development builds the intent MAC key is derived from the anchor signing key.
-- A Delete releases the finalizer only on `Succeeded`: a host that answers that the VM is
-  not there holds the delete until an operator releases it.
+- A Delete releases the finalizer only when it is confirmed: a host that answers that the
+  VM is not there, or a Provider that is gone, holds the delete until an operator releases
+  it. There is no authenticated "deleted" answer yet.
 - A VM whose Create attempts were not performed stays on its pending host; it is never
   re-scheduled automatically.
 - A restore of the VM's status to before its first Create attempt, together with the loss

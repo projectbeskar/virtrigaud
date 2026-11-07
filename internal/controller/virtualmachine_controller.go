@@ -348,6 +348,14 @@ type VirtualMachineReconciler struct {
 	// condition was kept instead). In-process state, as the elected leader is
 	// the only reconciler; after a restart only the marker identifies it.
 	powerTasks sync.Map
+
+	// identityRepeat counts, per VM and operation kind, the consecutive
+	// power or Reconfigure attempts of a Provider that requires operation
+	// identity that followed a success of the same kind within
+	// repeatWindow (repeatStreakKey): the repeat gap doubles with it. In
+	// memory only, like the other pacing records: a restart only shortens a
+	// wait.
+	identityRepeat sync.Map
 	// preScheduleClean remembers, per VM UID and generation, a recent clean
 	// answer of the pre-schedule uniqueness check (ADR-0007 A6.2, R4), so a
 	// VM re-scheduled on its own backoff does not ask every host each time.
@@ -677,6 +685,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// sends an image prepare, so nothing about its image can stop describe,
 	// power or reconfigure (no provider's Reconfigure reads the image).
 
+	// A VM of a Provider that requires operation identity tracks its tasks
+	// only on its attempt markers, bound by their task tags; the unsigned
+	// task fields are never written for it, so one found set (an edited
+	// status) is cleared, never polled or trusted.
+	if identityRequired(provider) {
+		vm.Status.LastTaskRef, vm.Status.ReconfigureTaskRef = "", ""
+	}
+
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)
@@ -977,7 +993,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		suspended := vm.Status.PowerState == infravirtrigaudiov1beta1.ObservedPowerStateSuspended
 		if suspended && desiredPowerState == infravirtrigaudiov1beta1.PowerStateOff {
 			logger.Info("VM is suspended and its spec asks for Off; powering it off (hard)")
-			return r.adjustPowerState(ctx, vm, providerInstance, ref, string(infravirtrigaudiov1beta1.PowerStateOff))
+			return r.setPowerState(ctx, vm, provider, providerInstance, ref, string(infravirtrigaudiov1beta1.PowerStateOff))
 		}
 		msg := fmt.Sprintf("the provider reports the VM %s: it is not reconfigured, and not powered on, until it is running or powered off "+
 			"(a suspended VM is powered off if its spec.powerState is Off)", vm.Status.PowerState)
@@ -1005,7 +1021,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// never sent a graceful shutdown again once it is off.
 	if !powerStateSatisfied(desiredPowerState, desc.PowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
-		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
+		return r.setPowerState(ctx, vm, provider, providerInstance, ref, string(desiredPowerState))
 	}
 
 	// The desired power state is reached: a power task that failed earlier is
@@ -1203,6 +1219,16 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				}
 				// force-delete: released without any provider call.
 				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
+			case errors.IsNotFound(err) && identityDeleteUnconfirmed(vm):
+				// A VM of a Provider that required operation identity, whose
+				// Create was (or may have been) performed: with its Provider
+				// gone nothing can confirm its Delete, so the finalizer is
+				// kept (identityDeleteUnconfirmed).
+				if force {
+					return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOperationHeld)
+				}
+				return r.holdOperation(ctx, vm, k8s.ReasonOperationDeleteUnconfirmed, msgOperationDeleteUnconfirmed,
+					operationHoldRecheckInterval), nil
 			case errors.IsNotFound(err) && r.hasUnresolvedDeleteTask(vm):
 				// A Delete task is recorded whose outcome only the gone
 				// Provider could tell: kept, unlike a VM with no task.
@@ -2455,6 +2481,17 @@ func requiredNetworksForScheduling(networks []*infravirtrigaudiov1beta1.VMNetwor
 	return out
 }
 
+// setPowerState sends the power operation desiredState asks for to the VM ref
+// addresses: as a signed attempt for a Provider that requires operation
+// identity (startIdentityPower), otherwise as before (adjustPowerState).
+func (r *VirtualMachineReconciler) setPowerState(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	providerCR *infravirtrigaudiov1beta1.Provider, provider contracts.Provider, ref contracts.VMRef, desiredState string) (ctrl.Result, error) {
+	if identityRequired(providerCR) {
+		return r.startIdentityPower(ctx, vm, providerCR, provider, ref, desiredState)
+	}
+	return r.adjustPowerState(ctx, vm, provider, ref, desiredState)
+}
+
 // adjustPowerState adjusts the power state of the VM ref addresses.
 func (r *VirtualMachineReconciler) adjustPowerState(
 	ctx context.Context,
@@ -2601,6 +2638,7 @@ func (r *VirtualMachineReconciler) forgetPowerState(vm *infravirtrigaudiov1beta1
 	r.powerTasks.Delete(uid)
 	r.powerRetry.reset(uid)
 	r.reconfigureRetry.reset(uid)
+	r.forgetIdentityRepeats(vm)
 }
 
 // powerRetryWait returns how long the power operation of vm must still wait
@@ -3313,6 +3351,12 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	// (synchronous, an async task, a change pending a restart, a failure)
 	// keeps it with the status write that ends this reconcile.
 	setDiskSizeWithinLimitCondition(vm, withheld)
+
+	// A Provider that requires operation identity gets the Reconfigure as a
+	// signed attempt with exactly this request.
+	if identityRequired(providerCR) {
+		return r.startIdentityReconfigure(ctx, vm, providerCR, provider, ref, vmClass, req)
+	}
 
 	// Call provider reconfigure
 	result, err := provider.Reconfigure(ctx, ref, req)

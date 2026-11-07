@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -104,9 +105,19 @@ func xnsLinkedClone(t *testing.T, providerType infrav1beta1.ProviderType, cloneT
 }
 
 func TestVMClone_LinkedCrossNamespace(t *testing.T) {
-	// libvirt, and the development-only cloudhypervisor type (refused the
-	// same way: the safe default).
-	for _, typ := range []infrav1beta1.ProviderType{infrav1beta1.ProviderTypeLibvirt, infrav1beta1.ProviderTypeCloudHypervisor} {
+	// The development-only cloudhypervisor type requires operation identity,
+	// and a clone has no signed path: refused before anything else, with
+	// nothing sent (operation_identity_unsupported.go).
+	t.Run("cloudhypervisor is refused as an operation with no signed path", func(t *testing.T) {
+		cp := &clonerProvider{caps: contracts.Capabilities{SupportsLinkedClones: true}, cloneResp: contracts.CloneResponse{TargetVmID: "x"}}
+		got := xnsLinkedClone(t, infrav1beta1.ProviderTypeCloudHypervisor, infrav1beta1.CloneTypeLinkedClone, cp)
+		assert.Equal(t, infrav1beta1.ClonePhasePending, got.Status.Phase)
+		assert.Zero(t, cp.cloneCnt)
+		ready := readyCondition(got.Status.Conditions, infrav1beta1.VMCloneConditionReady)
+		require.NotNil(t, ready)
+		assert.Equal(t, k8s.ReasonOperationIdentityUnsupported, ready.Reason)
+	})
+	for _, typ := range []infrav1beta1.ProviderType{infrav1beta1.ProviderTypeLibvirt} {
 		t.Run(string(typ)+" is refused, even with the grant", func(t *testing.T) {
 			cp := &clonerProvider{caps: contracts.Capabilities{SupportsLinkedClones: true}, cloneResp: contracts.CloneResponse{TargetVmID: "x"}}
 			got := xnsLinkedClone(t, typ, infrav1beta1.CloneTypeLinkedClone, cp)

@@ -301,6 +301,14 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
 			fmt.Sprintf("provider %q not found", providerKey.Name)), nil
 	}
+	// A clone has no signed path: refused, with nothing sent, for a Provider
+	// that requires operation identity.
+	if identityRequired(provider) {
+		logger.Info("The source VM's Provider requires operation identity and a clone has no signed path; nothing is sent")
+		markIdentityUnsupported(r.Recorder, clone, &clone.Status.Conditions, infrav1beta1.VMCloneConditionReady, clone.Generation,
+			identityUnsupportedClone)
+		return r.markPending(ctx, clone, conditions.ReasonOperationIdentityUnsupported, identityUnsupportedMessage(identityUnsupportedClone)), nil
+	}
 
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
@@ -1325,6 +1333,11 @@ func (r *VMCloneReconciler) placementJSON(_ context.Context, clone *infrav1beta1
 
 // getProviderInstance resolves a Provider CR to a remote provider implementation.
 func (r *VMCloneReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
+	// A clone has no signed path: nothing is resolved (nor sent) for a
+	// Provider that requires operation identity.
+	if err := refuseUnsupportedForIdentity(provider, identityUnsupportedClone); err != nil {
+		return nil, err
+	}
 	if r.RemoteResolver == nil {
 		return nil, fmt.Errorf("no remote resolver available")
 	}

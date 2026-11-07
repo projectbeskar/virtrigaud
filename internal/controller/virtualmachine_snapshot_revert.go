@@ -348,6 +348,16 @@ func (r *VirtualMachineReconciler) reconcileSnapshotRevert(
 		return ctrl.Result{}, false, nil
 	}
 
+	// A snapshot revert has no signed path: refused, with nothing sent, for
+	// a Provider that requires operation identity. The rest of the reconcile
+	// (power, size) goes on.
+	if identityRequired(provider) {
+		log.FromContext(ctx).Info("The Provider requires operation identity and a snapshot revert has no signed path; nothing is sent")
+		markIdentityUnsupported(r.Recorder, vm, &vm.Status.Conditions, infravirtrigaudiov1beta1.VirtualMachineConditionSnapshotReverted,
+			vm.Generation, identityUnsupportedSnapshot)
+		return ctrl.Result{RequeueAfter: operationHoldRecheckInterval}, false, nil
+	}
+
 	snap := &infravirtrigaudiov1beta1.VMSnapshot{}
 	getErr := r.Get(ctx, client.ObjectKey{Namespace: vm.Namespace, Name: want.Name}, snap)
 	if getErr != nil && !apierrors.IsNotFound(getErr) {

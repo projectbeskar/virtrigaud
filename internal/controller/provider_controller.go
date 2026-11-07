@@ -218,9 +218,12 @@ type ProviderReconciler struct {
 	// without one. Read only.
 	OperationSignerLoaded bool
 
-	// intentSkipWarned remembers, per Provider UID and Secret name, the
-	// intent Secrets the sweeper kept for disagreeing annotations that a
-	// Warning event was recorded for, so each is announced once.
+	// intentSkipWarned remembers, per Provider (namespace, name and UID) and
+	// Secret name, the intent Secrets the sweeper kept for disagreeing
+	// annotations that a Warning event was recorded for, so each is
+	// announced once. An entry is dropped once a sweep no longer keeps its
+	// Secret (it was deleted, or now agrees) and when its Provider is gone
+	// (forgetIntentWarnings).
 	intentSkipWarned sync.Map
 
 	// tmpLimitWarned records, per Provider, the annotation value last
@@ -288,6 +291,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		if apierrors.IsNotFound(err) {
 			logger.Info("Provider not found, may have been deleted")
 			r.forgetCapabilityReads(req.NamespacedName)
+			r.forgetIntentWarnings(req.Namespace, req.Name, "", nil)
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get Provider")

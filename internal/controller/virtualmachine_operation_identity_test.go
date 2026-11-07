@@ -97,6 +97,18 @@ func (s *identityStub) BuildOperation(_ context.Context, id contracts.OperationA
 	case contracts.OperationKindCreate:
 		msg = &providerv1.CreateRequest{Name: req.Spec.Name, TargetHostId: id.HostID,
 			Owner: &providerv1.ObjectIdentity{Uid: id.VMUID}}
+	case contracts.OperationKindPowerOn, contracts.OperationKindPowerOff, contracts.OperationKindReboot,
+		contracts.OperationKindShutdownGraceful:
+		row, _ := operation.RowFor(wireKinds[req.Kind])
+		msg = &providerv1.PowerRequest{Id: req.VM.ID, Op: row.FixedPowerOp, TargetHostId: req.VM.HostID,
+			Owner: &providerv1.ObjectIdentity{Uid: req.VM.Owner.UID}}
+	case contracts.OperationKindReconfigure:
+		desired, err := json.Marshal(req.Spec)
+		if err != nil {
+			return contracts.PreparedOperation{}, err
+		}
+		msg = &providerv1.ReconfigureRequest{Id: req.VM.ID, DesiredJson: string(desired), TargetHostId: req.VM.HostID,
+			Owner: &providerv1.ObjectIdentity{Uid: req.VM.Owner.UID}}
 	default:
 		msg = &providerv1.DeleteRequest{Id: req.VM.ID, TargetHostId: req.VM.HostID,
 			Owner: &providerv1.ObjectIdentity{Uid: req.VM.Owner.UID}}

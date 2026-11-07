@@ -328,6 +328,11 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if allowed, res, err := r.gateConsumers(ctx, migration); !allowed {
 			return res, err
 		}
+		// A migration has no signed path: refused, with nothing sent, when
+		// its source or target Provider requires operation identity.
+		if refused, res, err := r.gateOperationIdentity(ctx, migration); refused {
+			return res, err
+		}
 	}
 
 	// Handle migration lifecycle based on phase
@@ -3818,6 +3823,11 @@ func migrationFailureDetail(err error) string {
 // getProviderInstance retrieves a provider gRPC client; a resolve failure is a
 // *providerResolveError.
 func (r *VMMigrationReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
+	// A migration has no signed path: nothing is resolved (nor sent) for a
+	// Provider that requires operation identity.
+	if err := refuseUnsupportedForIdentity(provider, identityUnsupportedMigration); err != nil {
+		return nil, err
+	}
 	// Test hook: allow injecting a fake/counting provider without dialing gRPC.
 	if r.providerInstanceFn != nil {
 		p, err := r.providerInstanceFn(ctx, provider)
@@ -4175,4 +4185,34 @@ func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			MaxConcurrentReconciles: 3, // Limit concurrent reconciliations to prevent API server overload
 		}).
 		Complete(r)
+}
+
+// gateOperationIdentity refuses a migration whose source or target Provider
+// requires operation identity: a migration's snapshot, disk export and import
+// have no signed path (operation_identity_unsupported.go). refused is true
+// when it was refused (or a read failed), with what Reconcile returns. A
+// Provider that cannot be read is left to the phase handlers to report.
+func (r *VMMigrationReconciler) gateOperationIdentity(ctx context.Context, migration *infrav1beta1.VMMigration) (bool, ctrl.Result, error) {
+	identity := false
+	if sourceVM, err := r.getSourceVM(ctx, migration); err == nil {
+		if p, perr := r.sourceProviderFor(ctx, migration, sourceVM); perr == nil && identityRequired(p) {
+			identity = true
+		}
+	}
+	if p, err := r.targetProviderFor(ctx, r.Client, migration); err == nil && identityRequired(p) {
+		identity = true
+	}
+	if !identity {
+		return false, ctrl.Result{}, nil
+	}
+	logging.FromContext(ctx).Info("The migration's Provider requires operation identity and a migration has no signed path; nothing is sent")
+	if markIdentityUnsupported(r.Recorder, migration, &migration.Status.Conditions, infrav1beta1.VMMigrationConditionReady,
+		migration.Generation, identityUnsupportedMigration) {
+		migration.Status.Message = identityUnsupportedMessage(identityUnsupportedMigration)
+		migration.Status.ObservedGeneration = migration.Generation
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return true, ctrl.Result{}, err
+		}
+	}
+	return true, ctrl.Result{RequeueAfter: operationHoldRecheckInterval}, nil
 }

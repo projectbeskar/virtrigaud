@@ -78,6 +78,30 @@ type identityEnv struct {
 	deliveries sync.Map
 	opIDsMu    sync.Mutex
 	opIDs      []string
+	// opIDsByMethod records the op_id of every signed call delivered, per
+	// full method; calls counts every call (signed or not) per full method.
+	opIDsByMethod map[string][]string
+	calls         sync.Map
+}
+
+// called is the number of calls (signed or not) of method the fake received.
+func (e *identityEnv) called(method string) int64 {
+	if v, ok := e.calls.Load(method); ok {
+		n, _ := v.(*atomic.Int64)
+		return n.Load()
+	}
+	return 0
+}
+
+// opIDsOf is the set of op_ids delivered on method.
+func (e *identityEnv) opIDsOf(method string) map[string]bool {
+	e.opIDsMu.Lock()
+	defer e.opIDsMu.Unlock()
+	out := map[string]bool{}
+	for _, id := range e.opIDsByMethod[method] {
+		out[id] = true
+	}
+	return out
 }
 
 func (e *identityEnv) delivered(method string) int64 {
@@ -100,19 +124,27 @@ func (e *identityEnv) createOpIDs() map[string]bool {
 
 // countingInterceptor counts the signed calls and records Create op_ids.
 func (e *identityEnv) countingInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+	c, _ := e.calls.LoadOrStore(info.FullMethod, &atomic.Int64{})
+	cn, _ := c.(*atomic.Int64)
+	cn.Add(1)
 	if m, ok := req.(interface {
 		GetOperationEnvelope() *providerv1.OperationEnvelope
 	}); ok && m.GetOperationEnvelope() != nil {
 		v, _ := e.deliveries.LoadOrStore(info.FullMethod, &atomic.Int64{})
 		n, _ := v.(*atomic.Int64)
 		n.Add(1)
-		if info.FullMethod == providerv1.Provider_Create_FullMethodName {
-			body := &providerv1.GrantBody{}
-			if proto.Unmarshal(m.GetOperationEnvelope().GetGrant().GetBody(), body) == nil {
-				e.opIDsMu.Lock()
-				e.opIDs = append(e.opIDs, hex.EncodeToString(body.GetOpId()))
-				e.opIDsMu.Unlock()
+		body := &providerv1.GrantBody{}
+		if proto.Unmarshal(m.GetOperationEnvelope().GetGrant().GetBody(), body) == nil {
+			id := hex.EncodeToString(body.GetOpId())
+			e.opIDsMu.Lock()
+			if info.FullMethod == providerv1.Provider_Create_FullMethodName {
+				e.opIDs = append(e.opIDs, id)
 			}
+			if e.opIDsByMethod == nil {
+				e.opIDsByMethod = map[string][]string{}
+			}
+			e.opIDsByMethod[info.FullMethod] = append(e.opIDsByMethod[info.FullMethod], id)
+			e.opIDsMu.Unlock()
 		}
 	}
 	return h(ctx, req)
@@ -160,6 +192,7 @@ func newIdentityEnv(ctx context.Context) *identityEnv {
 	prov.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologyCluster
 	Expect(k8sClient.Create(ctx, prov)).To(Succeed())
 	prov.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{Phase: "Running", Endpoint: "provider:9443"}
+	prov.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{SupportsHonestReconfigure: true}
 	Expect(k8sClient.Status().Update(ctx, prov)).To(Succeed())
 	e.provider = prov
 	Expect(k8sClient.Create(ctx, &infravirtrigaudiov1beta1.HostPool{
