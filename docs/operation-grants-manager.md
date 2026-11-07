@@ -237,7 +237,7 @@ as the reconcile read them. A write that fails sends nothing. The order of one a
 3. Transmit: the stored bytes under a freshly minted grant. A re-send (after a transport
    error, `VM_BUSY`, a lost reply or a manager restart) sends the same bytes with the same
    `op_id`; a host answers a known `op_id` from its record and never executes it twice.
-4. Close: `Sent` with the task reference, then `Terminal` with the outcome, then the intent
+4. Close: `Sent` with the task reference and its `taskTag`, then `Terminal` with the outcome, then the intent
    Secret is deleted (a Delete's is kept until the finalizer is released). A successful
    Create writes `Terminal`, `status.id` and the confirmed placement in one status write.
 
@@ -250,6 +250,15 @@ confirms it: its task reports `Succeeded`, or, for a synchronous Delete, a re-se
 same attempt succeeds. A Delete waits for a Create in flight. Orphan-on-delete and
 force-delete work as for every Provider.
 
+**Task binding.** When an attempt is recorded `Sent`, the controller also records
+`taskTag`: an HMAC-SHA256 under the intent key, with its own domain-separation prefix
+(`virtrigaud.io/operation-task/v1` and a NUL byte), over the attempt's op_id, kind and
+number, the VM's UID and the task reference. A task reference is polled, or used to
+confirm a Delete, only when its tag verifies and no other marker of the VM names the same
+reference; otherwise the VM is held as `OperationStateLost` and nothing is polled or
+sent. So copying the Create's task reference into the Delete marker, editing a task
+reference, stripping its tag or reusing another attempt's tag cannot release a VM.
+
 The markers are not signed or authenticated: anyone allowed to write
 `virtualmachines/status` can edit them (the bundled editor and admin roles grant only
 `get` on it). The controller holds the VM on the edits it can detect: a removed Create
@@ -257,8 +266,11 @@ marker; an id, a confirmed host or a `Bound` placement without a successful Crea
 marker; a Delete recorded `Succeeded` that its intent and the Provider do not confirm
 (`OperationStateLost`). It cannot detect every edit: a principal with status write access
 that also rewrites the placement and conditions consistently can still cause a duplicate
-Create, and one that can make the Provider confirm a Delete it never ran can cause a
-release. The host's own de-duplication of a VM's operations is then the backstop.
+Create, or, by removing the Create marker and the binding, id and confirmed host, a
+release without a Delete. The task reference itself is bound (above), but `TaskStatus`
+is not yet bound to an op_id on the wire: the host answers for whatever task reference it
+is asked about. The host's own de-duplication of a VM's operations, and a host-side
+binding of tasks to operations (a follow-up for the agent contract), are the backstop.
 
 ### Intent Secrets
 
@@ -284,7 +296,12 @@ sent.
 the Secret's namespace and name, the VM's namespace, name and UID, the operation kind,
 and the exact identity, salt and request bytes. The key never leaves the manager: the
 development signer derives it with HKDF-SHA256 from its anchor key under that label, so
-it survives a manager restart and is independent of every grant-signing key. The grant
+it survives a manager restart and is independent of every grant-signing key. This is a
+development arrangement only: the MAC key and the anchor signing key then come from one
+secret (one key material, two purposes). A production key custody must supply its own,
+separate MAC key. Rotating the anchor key changes the MAC key, so every attempt in flight
+then fails authentication and is held as `OperationIntentTampered` (it fails safe; finish
+or release in-flight attempts before rotating). The grant
 signer itself is not used, because grants are signed over the `GrantBody` bytes with no
 domain-separation prefix, by a short-lived leaf key that a restart replaces: an intent
 signature with it would be neither separated from grant signatures nor verifiable after
@@ -343,7 +360,7 @@ attempt:
 | `OperationEnrolmentUnavailable` | No enrolment for the VM's host. | Add the host to the enrolment file and restart the manager. |
 | `OperationStateLost` | The VM records a binding, an id, a confirmed host or a `Bound` placement without a successful Create marker, or a Delete recorded `Succeeded` that its intent and the Provider do not confirm (its status was edited or restored). | Operator. |
 | `OperationIntentLost` | A marker in flight names an intent Secret that does not exist (for example after an etcd restore that did not restore it). | Operator, or restore the Secret. |
-| `OperationIntentTampered` | An intent Secret does not authenticate, or names another VM, Provider, host, binding, attempt or target than its marker. The Secret is kept. | Operator: investigate who wrote Secrets in the Provider's namespace. |
+| `OperationIntentTampered` | An intent Secret does not authenticate, or names another VM, Provider, host, binding, attempt or target than its marker (also after the anchor key was rotated). The Secret is kept. | Operator: investigate who wrote Secrets in the Provider's namespace (the Secret is the evidence), check the host by hand, release the VM as below, then delete the Secret by hand: `kubectl -n <provider namespace> delete secret vrtg-op-<opID>`. The sweeper also keeps, and announces once with an `OperationIntentKept` Warning event on the Provider, an intent Secret whose VM annotations disagree with its VM-UID label; delete it by hand the same way once investigated. |
 | `OperationRequestTooLarge` | The request (with its user data) is over 768 KiB. | Make the user data smaller. |
 | `OperationFailedDirty` | The Provider reported the operation failed after an irreversible step began. | Operator. |
 | `OperationOutcomeUnknown` | The Provider cannot tell what the attempt did (an `Unknown` outcome, or a refusal of a re-delivery that proves nothing about an earlier one). The same attempt is asked about, or re-sent, every 5 minutes. | Resolves itself if the Provider later reports a terminal outcome; otherwise operator. |
@@ -380,6 +397,9 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   skipped operation (see above).
 - Intent Secrets of consumer VMs copy their user data into the Provider's namespace.
 - The `delete` verb on Secrets is not scoped to intent Secrets by RBAC.
+- `TaskStatus` is not bound to an op_id on the wire; the controller binds the task
+  reference on its side only.
+- In development builds the intent MAC key is derived from the anchor signing key.
 - A Delete releases the finalizer only on `Succeeded`: a host that answers that the VM is
   not there holds the delete until an operator releases it.
 - A VM whose Create attempts were not performed stays on its pending host; it is never
