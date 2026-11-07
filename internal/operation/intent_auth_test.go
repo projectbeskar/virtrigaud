@@ -62,3 +62,13 @@ func TestIntentMessage_Unambiguous(t *testing.T) {
 func TestIntentAuthenticatorOf_NoSource(t *testing.T) {
 	assert.Nil(t, IntentAuthenticatorOf(nil))
 }
+
+// Task tags and intent tags are domain-separated: the same fields never frame
+// to the same message.
+func TestTaskMessage_SeparatedFromIntents(t *testing.T) {
+	f := [][]byte{[]byte("a"), []byte("b")}
+	assert.NotEqual(t, IntentMessage(f...), TaskMessage(f...))
+	assert.True(t, bytes.HasPrefix(TaskMessage(f...), []byte(TaskAuthContext)))
+	assert.False(t, bytes.HasPrefix([]byte(TaskAuthContext), []byte(IntentAuthContext)))
+	assert.False(t, bytes.HasPrefix([]byte(IntentAuthContext), []byte(TaskAuthContext)))
+}

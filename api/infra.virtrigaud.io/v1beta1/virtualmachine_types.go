@@ -622,6 +622,15 @@ type OperationAttempt struct {
 	// +kubebuilder:validation:MaxLength=1024
 	TaskRef string `json:"taskRef,omitempty"`
 
+	// TaskTag binds TaskRef to this attempt: an HMAC-SHA256 tag (64 lowercase
+	// hexadecimal characters) the operator computes over the attempt's opID,
+	// kind, attempt, the VM's UID and TaskRef with a key that never leaves the
+	// operator. A task reference whose tag does not verify, or that another
+	// entry also names, is never polled or used to confirm an outcome.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	TaskTag string `json:"taskTag,omitempty"`
+
 	// ID is the provider's VM identifier an asynchronous Create answered,
 	// recorded with phase Sent; it becomes status.id once the attempt
 	// Succeeded.

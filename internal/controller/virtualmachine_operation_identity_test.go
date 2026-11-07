@@ -863,12 +863,13 @@ func TestSweepOperationIntents(t *testing.T) {
 	// The fake client stores no creation time: the Secrets were "created" at
 	// the zero time.
 	var created time.Time
-	n, err := sweepOperationIntents(ctx, r.Client, r.Client, provider, created.Add(operationIntentSweepGrace/2))
+	n, _, err := sweepOperationIntents(ctx, r.Client, r.Client, provider, created.Add(operationIntentSweepGrace/2))
 	require.NoError(t, err)
 	assert.Zero(t, n, "nothing younger than the grace period is swept")
 
-	n, err = sweepOperationIntents(ctx, r.Client, r.Client, provider, created.Add(operationIntentSweepGrace+time.Minute))
+	n, skipped, err := sweepOperationIntents(ctx, r.Client, r.Client, provider, created.Add(operationIntentSweepGrace+time.Minute))
 	require.NoError(t, err)
+	assert.Equal(t, []string{intentSecretName("000000000000000000000000000000dd")}, skipped)
 	assert.Equal(t, 2, n)
 	names := map[string]bool{}
 	for _, s := range intentSecrets(t, r) {
@@ -1114,4 +1115,125 @@ func TestIdentityDelete_SucceededMarkerConfirmedAfterRestart(t *testing.T) {
 	sends := stub.sent()
 	require.Len(t, sends, 3, "Create, Delete, and the confirming re-send of the same Delete attempt")
 	assert.Equal(t, sends[1].Identity.OpID, sends[2].Identity.OpID)
+}
+
+// The Provider controller announces a kept, disagreeing intent Secret once.
+func TestProviderSweep_WarnsOnceForKeptIntent(t *testing.T) {
+	stub := newIdentityStub()
+	r, _ := identityFixture(t, stub)
+	provider := &infravirtrigaudiov1beta1.Provider{}
+	ctx := context.Background()
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, provider))
+	require.NoError(t, r.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: intentSecretName("000000000000000000000000000000ee"), Namespace: clusteredNS,
+			Labels:      map[string]string{operationIntentLabel: operationIntentLabelTrue, operationIntentVMUIDLabel: "uid-vm-id"},
+			Annotations: map[string]string{operationIntentVMNamespaceAnnotation: clusteredNS, operationIntentVMNameAnnotation: "elsewhere"},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "infra.virtrigaud.io/v1beta1", Kind: "Provider",
+				Name: provider.Name, UID: provider.UID, Controller: boolTrue()}}},
+		Type: operationIntentSecretType,
+	}))
+	rec := record.NewFakeRecorder(10)
+	pr := &ProviderReconciler{Client: r.Client, Recorder: rec}
+	pr.sweepOperationIntents(ctx, provider)
+	pr.sweepOperationIntents(ctx, provider)
+	require.Len(t, rec.Events, 1, "announced once")
+	ev := <-rec.Events
+	assert.Contains(t, ev, eventReasonOperationIntentKept)
+}
+
+// asyncDeleteInFlight runs a Create to completion with a task, then starts a
+// Delete answered with a task that is still running; it returns the
+// reconciler with the Delete marker Sent.
+func asyncDeleteInFlight(t *testing.T) (*identityStub, *VirtualMachineReconciler, ctrl.Request, *bool) {
+	t.Helper()
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		if p.Kind == contracts.OperationKindCreate {
+			return contracts.OperationAnswer{ID: "vm-1", TaskRef: "create-task"}, nil
+		}
+		return contracts.OperationAnswer{TaskRef: "delete-task"}, nil
+	}
+	deleteDone := false
+	stub.onTask = func(ref string) (contracts.TaskStatus, error) {
+		if ref == "create-task" || deleteDone {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded, IsCompleted: true}, nil
+		}
+		return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+	}
+	reconcileN(t, r, req, 2)
+	require.Equal(t, "vm-1", idVM(t, r).Status.ID)
+	markDeleted(t, r, nil)
+	reconcileN(t, r, req, 1)
+	d := findAttempt(idVM(t, r), contracts.OperationKindDelete)
+	require.NotNil(t, d)
+	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, d.Phase)
+	require.Len(t, d.TaskTag, 64, "the Sent marker binds its task reference")
+	return stub, r, req, &deleteDone
+}
+
+// A Delete's task reference that is not bound to it is never polled or used
+// to confirm the Delete: the finalizer is kept.
+func TestIdentityDelete_UnboundTaskRefHolds(t *testing.T) {
+	cases := map[string]func(t *testing.T, r *VirtualMachineReconciler, d *infravirtrigaudiov1beta1.OperationAttempt){
+		"the Create's task reference copied": func(_ *testing.T, _ *VirtualMachineReconciler, d *infravirtrigaudiov1beta1.OperationAttempt) {
+			d.TaskRef = "create-task"
+		},
+		"an edited task reference": func(_ *testing.T, _ *VirtualMachineReconciler, d *infravirtrigaudiov1beta1.OperationAttempt) {
+			d.TaskRef = "some-other-task"
+		},
+		"a stripped tag": func(_ *testing.T, _ *VirtualMachineReconciler, d *infravirtrigaudiov1beta1.OperationAttempt) {
+			d.TaskTag = ""
+		},
+		"a tag from another op_id": func(_ *testing.T, r *VirtualMachineReconciler, d *infravirtrigaudiov1beta1.OperationAttempt) {
+			other := *d
+			other.OpID = "0000000000000000000000000000beef"
+			d.TaskTag = r.taskTag(idVM(t, r), &other, d.TaskRef)
+		},
+	}
+	for _, terminal := range []bool{false, true} {
+		for name, edit := range cases {
+			t.Run(name+map[bool]string{false: " (in flight)", true: " (recorded Succeeded)"}[terminal], func(t *testing.T) {
+				_, r, req, deleteDone := asyncDeleteInFlight(t)
+				*deleteDone = true // a poll would now see Succeeded
+				vm := idVM(t, r)
+				for i := range vm.Status.OperationAttempts {
+					a := &vm.Status.OperationAttempts[i]
+					if a.Kind != infravirtrigaudiov1beta1.OperationAttemptKindDelete {
+						continue
+					}
+					edit(t, r, a)
+					if terminal {
+						a.Phase = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal
+						a.Outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded
+					}
+				}
+				require.NoError(t, r.Status().Update(context.Background(), vm))
+				reconcileN(t, r, req, 2)
+				assert.False(t, vmGone(t, r), "the finalizer is kept")
+				assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(idVM(t, r)))
+			})
+		}
+	}
+}
+
+// The bound task reference of a Delete in flight is polled and releases the
+// VM once it Succeeded.
+func TestIdentityDelete_BoundTaskRefReleases(t *testing.T) {
+	_, r, req, deleteDone := asyncDeleteInFlight(t)
+	reconcileN(t, r, req, 1)
+	assert.False(t, vmGone(t, r))
+	*deleteDone = true
+	reconcileN(t, r, req, 1)
+	assert.True(t, vmGone(t, r))
+}
+
+// With no enrolment source loaded, an attempt in flight is held on the load
+// path too: nothing is re-sent.
+func TestIdentityIntent_NoEnrolmentSourceHoldsOnLoad(t *testing.T) {
+	stub, r, req, _ := preparedWithIntent(t)
+	r.OperationEnrolments = nil
+	reconcileN(t, r, req, 2)
+	assert.Equal(t, k8s.ReasonOperationEnrolmentUnavailable, readyReason(idVM(t, r)))
+	assert.Len(t, stub.sent(), 1, "nothing is re-sent")
 }

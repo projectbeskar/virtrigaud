@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -634,6 +635,9 @@ func (r *VirtualMachineReconciler) driveAttempt(ctx context.Context, vm *infravi
 		return step, res, nil
 	}
 	if a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent && a.TaskRef != "" {
+		if !r.taskRefBound(vm, a) {
+			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval), nil
+		}
 		return r.pollAttempt(ctx, vm, ia, a)
 	}
 	return r.sendAttempt(ctx, vm, ia, a, prepared, false)
@@ -663,6 +667,9 @@ func (r *VirtualMachineReconciler) loadVerifiedIntent(ctx context.Context, vm *i
 		return prepared, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), false
 	}
 	if err := r.checkIntent(vm, ia, a, prepared); err != nil {
+		if errors.Is(err, errNoEnrolmentSource) {
+			return prepared, stepHeld, r.holdNoEnrolmentSource(ctx, vm), false
+		}
 		return prepared, stepHeld, r.holdIntentTampered(ctx, vm, a, err), false
 	}
 	return prepared, stepWaiting, ctrl.Result{}, true
@@ -689,14 +696,63 @@ func (r *VirtualMachineReconciler) checkIntent(vm *infravirtrigaudiov1beta1.Virt
 	case hex.EncodeToString(id.BindingID) != a.BindingID:
 		return fmt.Errorf("binding: %w", errIntentTampered)
 	}
-	if r.OperationEnrolments != nil {
-		enrol, err := r.OperationEnrolments.Enrolment(ia.providerCR.Namespace, ia.providerCR.Name, a.HostID)
-		if err != nil || !bytes.Equal(enrol.EnrolmentID, id.EnrolmentID) || enrol.Epoch.Counter != id.Epoch.Counter ||
-			!bytes.Equal(enrol.Epoch.Holder, id.Epoch.Holder) {
-			return fmt.Errorf("enrolment: %w", errIntentTampered)
-		}
+	if r.OperationEnrolments == nil {
+		return errNoEnrolmentSource
+	}
+	enrol, err := r.OperationEnrolments.Enrolment(ia.providerCR.Namespace, ia.providerCR.Name, a.HostID)
+	if err != nil || !bytes.Equal(enrol.EnrolmentID, id.EnrolmentID) || enrol.Epoch.Counter != id.Epoch.Counter ||
+		!bytes.Equal(enrol.Epoch.Holder, id.Epoch.Holder) {
+		return fmt.Errorf("enrolment: %w", errIntentTampered)
 	}
 	return checkIntentRequest(vm, ia, a, p)
+}
+
+// errNoEnrolmentSource is checkIntent's answer when no enrolment source is
+// loaded: the intent's enrolment cannot be checked, so nothing is sent.
+var errNoEnrolmentSource = errors.New("no operation-identity enrolment source is loaded")
+
+// msgNoEnrolmentSource is the hold of a manager with no enrolment source.
+var msgNoEnrolmentSource = "no operation-identity enrolment is configured for this manager (a development build needs --" +
+	operation.DevEnrolmentFileFlagName + "); nothing is sent"
+
+// holdNoEnrolmentSource holds vm when no enrolment source is loaded.
+func (r *VirtualMachineReconciler) holdNoEnrolmentSource(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) ctrl.Result {
+	return r.holdOperation(ctx, vm, k8s.ReasonOperationEnrolmentUnavailable, msgNoEnrolmentSource, operationHoldRecheckInterval)
+}
+
+// msgTaskNotBound is the hold of an attempt whose task reference is not bound
+// to it.
+var msgTaskNotBound = "the task reference recorded for an operation attempt is not bound to it " +
+	"(status.operationAttempts may have been edited): it is neither polled nor used to confirm an outcome; " + operationHoldRecovery
+
+// taskTag is the hex task tag binding taskRef to the attempt a of vm
+// (operation.TaskMessage under the intent authenticator).
+func (r *VirtualMachineReconciler) taskTag(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt,
+	taskRef string) string {
+	return hex.EncodeToString(r.OperationIntentAuth.SealIntent(taskMessage(vm, a, taskRef)))
+}
+
+// taskMessage is the message a task tag covers: the attempt's op_id, kind
+// and number, the VM's UID and the task reference.
+func taskMessage(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt, taskRef string) []byte {
+	return operation.TaskMessage([]byte(a.OpID), []byte(a.Kind), []byte(strconv.FormatInt(a.Attempt, 10)),
+		[]byte(vm.UID), []byte(taskRef))
+}
+
+// taskRefBound reports whether a's task reference is the one the operator
+// recorded for it: its TaskTag verifies over a's op_id, kind, attempt, vm's
+// UID and the reference, and no other marker of vm names the same reference.
+func (r *VirtualMachineReconciler) taskRefBound(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) bool {
+	if r.OperationIntentAuth == nil || a.TaskRef == "" {
+		return false
+	}
+	for _, other := range vm.Status.OperationAttempts {
+		if other.Kind != a.Kind && other.TaskRef == a.TaskRef {
+			return false
+		}
+	}
+	tag, err := hex.DecodeString(a.TaskTag)
+	return err == nil && r.OperationIntentAuth.OpenIntent(taskMessage(vm, a, a.TaskRef), tag)
 }
 
 // checkIntentRequest decodes the stored request as its kind's message and
@@ -776,6 +832,9 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 		// status), never in the Secret, until the Create Succeeded.
 		sent.ID = answer.ID
 	}
+	// The task reference is bound to this attempt, so an edited status cannot
+	// make another task (for example the Create's) confirm it.
+	sent.TaskTag = r.taskTag(vm, &sent, answer.TaskRef)
 	if err := r.writeIdentityStatus(ctx, vm, identityStatusWrite{attempts: withAttempt(vm, sent)}); err != nil {
 		logger.Info("The Sent marker was not written; the attempt is re-sent with the same op_id", "error", err.Error())
 		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
@@ -1070,10 +1129,16 @@ func (r *VirtualMachineReconciler) confirmDeleteRelease(ctx context.Context, vm 
 		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
 	if cerr := r.checkIntent(vm, ia, d, prepared); cerr != nil {
+		if errors.Is(cerr, errNoEnrolmentSource) {
+			return hold(r.holdNoEnrolmentSource(ctx, vm))
+		}
 		return hold(r.holdIntentTampered(ctx, vm, d, cerr))
 	}
 	confirmed := false
 	if d.TaskRef != "" {
+		if !r.taskRefBound(vm, d) {
+			return hold(r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval))
+		}
 		st, terr := ia.instance.TaskStatus(ctx, d.TaskRef)
 		confirmed = terr == nil && (st.Outcome == contracts.TaskOutcomeSucceeded ||
 			(st.Outcome == contracts.TaskOutcomeUnspecified && st.IsCompleted && st.Error == ""))

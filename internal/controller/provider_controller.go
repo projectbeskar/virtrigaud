@@ -218,6 +218,11 @@ type ProviderReconciler struct {
 	// without one. Read only.
 	OperationSignerLoaded bool
 
+	// intentSkipWarned remembers, per Provider UID and Secret name, the
+	// intent Secrets the sweeper kept for disagreeing annotations that a
+	// Warning event was recorded for, so each is announced once.
+	intentSkipWarned sync.Map
+
 	// tmpLimitWarned records, per Provider, the annotation value last
 	// announced by a TmpSizeLimitClamped event, so a clamp is announced once,
 	// not on every reconcile.

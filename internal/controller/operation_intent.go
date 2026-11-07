@@ -318,17 +318,16 @@ func (r *VirtualMachineReconciler) ownerScheme() *runtime.Scheme {
 // failed delete after the marker became Terminal. The VM is found by the
 // Secret's VM-UID label among the VirtualMachines c lists, and read again
 // through reader (the API server); a Secret whose VM annotations disagree
-// with the VM its UID label names is skipped and logged, never deleted. It
-// returns how many Secrets it deleted.
+// with the VM its UID label names is skipped and logged, never deleted, and
+// returned in skipped. It returns how many Secrets it deleted.
 func sweepOperationIntents(ctx context.Context, c client.Client, reader client.Reader,
-	provider *infravirtrigaudiov1beta1.Provider, now time.Time) (int, error) {
+	provider *infravirtrigaudiov1beta1.Provider, now time.Time) (deleted int, skipped []string, err error) {
 	var secrets corev1.SecretList
 	if err := c.List(ctx, &secrets, client.InNamespace(provider.Namespace),
 		client.MatchingLabels{operationIntentLabel: operationIntentLabelTrue}); err != nil {
-		return 0, fmt.Errorf("list the operation-intent Secrets of Provider %s/%s: %w", provider.Namespace, provider.Name, err)
+		return 0, nil, fmt.Errorf("list the operation-intent Secrets of Provider %s/%s: %w", provider.Namespace, provider.Name, err)
 	}
 	var vms *infravirtrigaudiov1beta1.VirtualMachineList
-	deleted := 0
 	for i := range secrets.Items {
 		s := &secrets.Items[i]
 		opID, ok := strings.CutPrefix(s.Name, operationIntentSecretPrefix)
@@ -339,24 +338,32 @@ func sweepOperationIntents(ctx context.Context, c client.Client, reader client.R
 		if vms == nil {
 			vms = &infravirtrigaudiov1beta1.VirtualMachineList{}
 			if err := c.List(ctx, vms); err != nil {
-				return deleted, fmt.Errorf("list VirtualMachines for the operation-intent sweep: %w", err)
+				return deleted, skipped, fmt.Errorf("list VirtualMachines for the operation-intent sweep: %w", err)
 			}
 		}
-		needed, err := intentNeeded(ctx, reader, vms, s, opID)
+		needed, mismatch, err := intentNeeded(ctx, reader, vms, s, opID)
 		if err != nil {
-			return deleted, err
+			return deleted, skipped, err
+		}
+		if mismatch {
+			skipped = append(skipped, s.Name)
 		}
 		if needed {
 			continue
 		}
 		if err := deleteIntentSecret(ctx, c, s); err != nil {
-			return deleted, err
+			return deleted, skipped, err
 		}
 		log.FromContext(ctx).Info("Removed an operation-intent Secret no attempt needs any more", "secret", s.Name)
 		deleted++
 	}
-	return deleted, nil
+	return deleted, skipped, nil
 }
+
+// eventReasonOperationIntentKept is the Provider Warning event reason of an
+// intent Secret the sweeper keeps because its VM annotations disagree with
+// its VM-UID label.
+const eventReasonOperationIntentKept = "OperationIntentKept"
 
 // errIntentVMMismatch is intentNeeded's answer for a Secret whose VM
 // annotations disagree with the VM its UID label names: it is kept.
@@ -364,40 +371,40 @@ var errIntentVMMismatch = errors.New("the operation-intent Secret's VM annotatio
 
 // intentNeeded reports whether the VM the intent Secret s names (by its
 // VM-UID label) still needs it for op_id opID. A Secret whose annotations
-// disagree with that VM is reported needed (kept) and logged.
+// disagree with that VM is reported needed (kept), with mismatch, and logged.
 func intentNeeded(ctx context.Context, reader client.Reader, vms *infravirtrigaudiov1beta1.VirtualMachineList,
-	s *corev1.Secret, opID string) (bool, error) {
+	s *corev1.Secret, opID string) (needed, mismatch bool, err error) {
 	uid := s.Labels[operationIntentVMUIDLabel]
 	key := types.NamespacedName{Namespace: s.Annotations[operationIntentVMNamespaceAnnotation], Name: s.Annotations[operationIntentVMNameAnnotation]}
 	for i := range vms.Items {
 		if string(vms.Items[i].UID) == uid && uid != "" && client.ObjectKeyFromObject(&vms.Items[i]) != key {
 			log.FromContext(ctx).Info("Not sweeping an operation-intent Secret whose VM annotations disagree with its VM-UID label",
 				"secret", s.Name, "error", errIntentVMMismatch.Error())
-			return true, nil
+			return true, true, nil
 		}
 	}
 	if key.Namespace == "" || key.Name == "" {
-		return false, nil
+		return false, false, nil
 	}
 	vm := &infravirtrigaudiov1beta1.VirtualMachine{}
 	if err := reader.Get(ctx, key, vm); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, fmt.Errorf("read VirtualMachine %s for operation-intent Secret %s: %w", key, s.Name, err)
+		return false, false, fmt.Errorf("read VirtualMachine %s for operation-intent Secret %s: %w", key, s.Name, err)
 	}
 	if string(vm.UID) != uid {
-		return false, nil
+		return false, false, nil
 	}
 	for _, a := range vm.Status.OperationAttempts {
 		if a.OpID != opID {
 			continue
 		}
 		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || deleteAwaitingRelease(vm, &a) {
-			return true, nil
+			return true, false, nil
 		}
 	}
-	return false, nil
+	return false, false, nil
 }
 
 // sweepOperationIntents runs sweepOperationIntents for provider, logging
@@ -407,8 +414,18 @@ func (r *ProviderReconciler) sweepOperationIntents(ctx context.Context, provider
 	if r.APIReader != nil {
 		reader = r.APIReader
 	}
-	if _, err := sweepOperationIntents(ctx, r.Client, reader, provider, time.Now()); err != nil {
+	_, skipped, err := sweepOperationIntents(ctx, r.Client, reader, provider, time.Now())
+	if err != nil {
 		log.FromContext(ctx).Info("Could not sweep the Provider's operation-intent Secrets; retried on the next reconcile",
 			"error", err.Error())
+	}
+	for _, name := range skipped {
+		key := string(provider.UID) + "/" + name
+		if _, seen := r.intentSkipWarned.LoadOrStore(key, struct{}{}); seen || r.Recorder == nil {
+			continue
+		}
+		r.Recorder.Event(provider, corev1.EventTypeWarning, eventReasonOperationIntentKept, fmt.Sprintf(
+			"Operation-intent Secret %s names a VirtualMachine that disagrees with its VM-UID label; it is kept, not swept. "+
+				"Investigate who wrote it, then delete it by hand (docs/operation-grants-manager.md)", name))
 	}
 }

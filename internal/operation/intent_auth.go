@@ -31,6 +31,12 @@ import (
 // this purpose and version only.
 const IntentAuthContext = "virtrigaud.io/operation-intent/v1\x00"
 
+// TaskAuthContext is the domain-separation prefix of the message that binds an
+// attempt's task reference to the attempt (TaskMessage). It differs from
+// IntentAuthContext, so a task tag and an intent tag under the same key never
+// cover the same message.
+const TaskAuthContext = "virtrigaud.io/operation-task/v1\x00"
+
 // IntentTagLen is the length of an intent tag (HMAC-SHA256).
 const IntentTagLen = sha256.Size
 
@@ -131,16 +137,28 @@ func (a *hmacIntentAuthenticator) String() string {
 // GoString never renders the key.
 func (a *hmacIntentAuthenticator) GoString() string { return a.String() }
 
+// TaskMessage is the canonical message a task tag covers: TaskAuthContext
+// followed by each field length-prefixed, as IntentMessage.
+func TaskMessage(fields ...[]byte) []byte {
+	return framedMessage(TaskAuthContext, fields)
+}
+
 // IntentMessage is the canonical message an intent tag covers:
 // IntentAuthContext followed by each field as a 4-byte big-endian length and
 // its bytes, so no two field lists encode alike.
 func IntentMessage(fields ...[]byte) []byte {
-	n := len(IntentAuthContext)
+	return framedMessage(IntentAuthContext, fields)
+}
+
+// framedMessage is prefix followed by each field as a 4-byte big-endian
+// length and its bytes.
+func framedMessage(prefix string, fields [][]byte) []byte {
+	n := len(prefix)
 	for _, f := range fields {
 		n += 4 + len(f)
 	}
 	out := make([]byte, 0, n)
-	out = append(out, IntentAuthContext...)
+	out = append(out, prefix...)
 	for _, f := range fields {
 		out = binary.BigEndian.AppendUint32(out, uint32(len(f))) // #nosec G115 -- intents are capped far below 4 GiB
 		out = append(out, f...)

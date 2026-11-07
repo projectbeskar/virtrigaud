@@ -949,6 +949,15 @@ spec:
                         asynchronously.
                       maxLength: 1024
                       type: string
+                    taskTag:
+                      description: |-
+                        TaskTag binds TaskRef to this attempt: an HMAC-SHA256 tag (64 lowercase
+                        hexadecimal characters) the operator computes over the attempt's opID,
+                        kind, attempt, the VM's UID and TaskRef with a key that never leaves the
+                        operator. A task reference whose tag does not verify, or that another
+                        entry also names, is never polled or used to confirm an outcome.
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
                   required:
                   - attempt
                   - kind
