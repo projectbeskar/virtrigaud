@@ -935,7 +935,7 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 	}
 	// A Delete that Succeeded keeps its intent Secret until the finalizer is
 	// released: it is the evidence a later release is checked against.
-	if !(a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete && outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded) {
+	if a.Kind != infravirtrigaudiov1beta1.OperationAttemptKindDelete || outcome != infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
 		if err := r.deleteIntent(ctx, ia.providerCR.Namespace, a.OpID, vm.UID); err != nil {
 			logger.Info("Could not remove the operation-intent Secret; the sweeper will", "error", err.Error())
 		}

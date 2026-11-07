@@ -48,7 +48,9 @@ func TestIntentAuthenticator(t *testing.T) {
 	require.Error(t, err)
 	_, err = DeriveIntentKey(make([]byte, 16))
 	require.Error(t, err)
-	assert.NotContains(t, a.(interface{ String() string }).String(), string(key))
+	str, ok := a.(interface{ String() string })
+	require.True(t, ok)
+	assert.NotContains(t, str.String(), string(key))
 }
 
 // Length-prefixing: moving bytes between fields changes the message.

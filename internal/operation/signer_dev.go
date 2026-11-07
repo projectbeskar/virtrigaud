@@ -103,7 +103,11 @@ func NewDevSigner(anchorKey *ecdsa.PrivateKey, installID []byte, now func() time
 	if now == nil {
 		now = time.Now
 	}
-	intentKey, err := DeriveIntentKey(anchorKey.D.FillBytes(make([]byte, 32)))
+	rawKey, err := anchorKey.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("new development signer: encode the anchor key: %w", err)
+	}
+	intentKey, err := DeriveIntentKey(rawKey)
 	if err != nil {
 		return nil, fmt.Errorf("new development signer: %w", err)
 	}

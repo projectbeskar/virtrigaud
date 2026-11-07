@@ -66,7 +66,7 @@ type identityStub struct {
 	creates int // unsigned Creates (must stay 0)
 	// bigRequest makes BuildOperation return a request over the intent cap.
 	bigRequest bool
-	deletes int // unsigned Deletes (must stay 0)
+	deletes    int // unsigned Deletes (must stay 0)
 }
 
 func newIdentityStub() *identityStub {
@@ -855,9 +855,9 @@ func TestSweepOperationIntents(t *testing.T) {
 		}
 		require.NoError(t, r.Create(ctx, s))
 	}
-	mk(intentSecretName("000000000000000000000000000000aa"), "vm-id", "uid-vm-id", true) // orphan of this VM
-	mk(intentSecretName("000000000000000000000000000000bb"), "gone", "uid-gone", true)   // its VM is gone
-	mk(intentSecretName("000000000000000000000000000000cc"), "gone", "uid-gone", false)  // not owned: never touched
+	mk(intentSecretName("000000000000000000000000000000aa"), "vm-id", "uid-vm-id", true)     // orphan of this VM
+	mk(intentSecretName("000000000000000000000000000000bb"), "gone", "uid-gone", true)       // its VM is gone
+	mk(intentSecretName("000000000000000000000000000000cc"), "gone", "uid-gone", false)      // not owned: never touched
 	mk(intentSecretName("000000000000000000000000000000dd"), "elsewhere", "uid-vm-id", true) // annotations disagree with the UID label: kept
 
 	// The fake client stores no creation time: the Secrets were "created" at
