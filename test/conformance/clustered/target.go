@@ -41,6 +41,7 @@ package clustered
 import (
 	"context"
 
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -96,6 +97,24 @@ const (
 	// FeatureProviderNotReady means the Target can make the Provider itself,
 	// not one host, unable to answer (Target.SetProviderReady).
 	FeatureProviderNotReady Feature = "provider-not-ready"
+
+	// FeatureOperationIdentity means the Provider reports
+	// supports_operation_identity: it accepts a mutating call carried in an
+	// operation_envelope and has the host verify the grant before it acts
+	// (Target implements OperationIdentityTarget). The identity.* cases need
+	// it; for every other Target they are skipped and listed as not
+	// applicable.
+	FeatureOperationIdentity Feature = "operation-identity"
+
+	// FeatureOperationIdentityRequired means the Provider also reports
+	// requires_operation_identity: it refuses a mutating call that carries no
+	// operation_envelope.
+	FeatureOperationIdentityRequired Feature = "operation-identity-required"
+
+	// FeatureScriptedOutcomes means the Target can make the next operation a
+	// host accepts end with a chosen typed TaskOutcome (Target implements
+	// OutcomeScripter).
+	FeatureScriptedOutcomes Feature = "scripted-outcomes"
 )
 
 // Capabilities declares what a Target offers beyond the required core.
@@ -307,4 +326,63 @@ type ProviderReadiness interface {
 	// SetProviderReady makes the Provider itself able (true) or unable (false)
 	// to serve, independent of any host.
 	SetProviderReady(ready bool) error
+}
+
+// OperationIdentityConfig is what the suite needs to send a Target signed
+// operations: a signer whose grants chain to the anchor the Provider's hosts
+// pinned, and the identity those hosts expect in a grant.
+type OperationIdentityConfig struct {
+	// Signer signs the grants the suite sends. Its certificate chain must
+	// verify to the anchor the hosts pinned. A Target never gets a signer
+	// from a release build: the suite's own tests supply a test-only one.
+	Signer operation.Signer
+	// ProviderUID is the provider_uid the hosts expect.
+	ProviderUID string
+	// Enrolments maps each host id to the 16-byte enrolment_id it expects.
+	Enrolments map[string][]byte
+	// Epoch is the epoch the suite issues grants under (an identity-only
+	// value: the suite makes no ordering or fencing claim with it).
+	Epoch operation.Epoch
+	// EnrolmentStartEpoch is the epoch counter at which the hosts were
+	// enrolled. An op_id minted before it is never accepted on its first
+	// delivery. 0 means 1.
+	EnrolmentStartEpoch uint64
+}
+
+// OperationIdentityTarget is implemented by a Target that offers
+// FeatureOperationIdentity.
+type OperationIdentityTarget interface {
+	// OperationIdentity returns how to sign operations for the Target.
+	OperationIdentity() OperationIdentityConfig
+}
+
+// OutcomeScripter is implemented by a Target that offers
+// FeatureScriptedOutcomes.
+type OutcomeScripter interface {
+	// ScriptOutcome makes the next operation the host accepts end, when the
+	// host finishes it, with outcome and outcome_reason reason instead of
+	// TASK_OUTCOME_SUCCEEDED. Only RETIRED, FAILED_CLEAN, FAILED_DIRTY,
+	// CANCELLED and UNKNOWN are scripted.
+	ScriptOutcome(host string, outcome providerv1.TaskOutcome, reason string) error
+}
+
+// identityProbe is the operation-identity probe: a case that needs
+// FeatureOperationIdentity runs only against a Target that declares the
+// feature and implements OperationIdentityTarget. It returns why c does not
+// apply to tg, or "". The identity.capabilities case then checks that the
+// Provider reports supports_operation_identity on the wire.
+func identityProbe(c Case, tg Target) string {
+	needs := false
+	for _, f := range c.Requires {
+		if f == FeatureOperationIdentity {
+			needs = true
+		}
+	}
+	if !needs {
+		return ""
+	}
+	if _, ok := tg.(OperationIdentityTarget); !ok {
+		return "the target declares operation identity but does not implement OperationIdentityTarget"
+	}
+	return ""
 }

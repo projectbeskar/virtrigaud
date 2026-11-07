@@ -30,6 +30,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -54,6 +55,11 @@ type vm struct {
 type task struct {
 	done  bool
 	apply func()
+	// typed marks the task of an operation accepted in identity mode: it
+	// reports a typed outcome, outcome when it is done.
+	typed   bool
+	outcome providerv1.TaskOutcome
+	reason  string
 }
 
 type hostState struct {
@@ -65,6 +71,11 @@ type hostState struct {
 	removed    bool // removed from the provider's registry; its VMs stay
 	vms        map[string]*vm
 	tasks      map[string]*task
+	// ops are the host's records of the operations it accepted in identity
+	// mode, by op_id in hex. Never dropped.
+	ops map[string]*opRecord
+	// script is the outcome the next accepted operation ends with.
+	script *scripted
 }
 
 // world is the state that lives on the hosts: it survives a restart of the
@@ -95,6 +106,13 @@ type provider struct {
 	capsCalls  int
 	memTasks   map[string]*task // TasksInMemory
 	served     int
+	// ident is the operation-identity mode, nil when the fake is not in it.
+	ident *identityMode
+	// memOps holds the operation records in the provider's memory
+	// (TombstonesInProviderMemory).
+	memOps map[string]map[string]*opRecord
+	// cur is the signed call being executed, while w.mu is held.
+	cur *admission
 }
 
 func (p *provider) v(x Violation) bool { return p.violations[x] }
@@ -363,9 +381,12 @@ func (p *provider) run(host string, hs *hostState, effect func()) *providerv1.Ta
 		effect()
 		return nil
 	}
-	p.w.taskSeq++
-	inner := "job-" + strconv.Itoa(p.w.taskSeq)
 	t := &task{apply: effect}
+	inner, signed := p.opTask(hs, t)
+	if !signed {
+		p.w.taskSeq++
+		inner = "job-" + strconv.Itoa(p.w.taskSeq)
+	}
 	if p.v(TasksInMemory) {
 		p.memTasks[host+"/"+inner] = t
 	} else {
@@ -408,7 +429,15 @@ func withInfos(c codes.Code, msg string, infos []*errdetails.ErrorInfo) error {
 }
 
 // Power implements the owner-checked, routed Power.
-func (p *provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+func (p *provider) Power(ctx context.Context, outer *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	m, adm, err := p.admit(providerv1.Provider_Power_FullMethodName, outer)
+	if err != nil {
+		return nil, err
+	}
+	req, err := requestOf[*providerv1.PowerRequest](m)
+	if err != nil {
+		return nil, err
+	}
 	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
 		return nil, err
 	}
@@ -421,6 +450,10 @@ func (p *provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	if err != nil {
 		return nil, err
 	}
+	if known, done, err := p.agentStep(host, hs, adm); done {
+		return taskResponse(known), err
+	}
+	defer func() { p.cur = nil }()
 	v := p.findVM(host, hs, req.Id)
 	if v == nil || !p.authorize(v, req.Owner, true) {
 		return nil, p.refuse(v)
@@ -441,11 +474,20 @@ func (p *provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		v.running = want
 		return nil, hostUnavailable(p, host, "host is unreachable")
 	}
+	p.remember(host, hs, adm, resp, resp.Task)
 	return resp, nil
 }
 
 // Delete implements the owner-checked, routed Delete.
-func (p *provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
+func (p *provider) Delete(ctx context.Context, outer *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
+	m, adm, err := p.admit(providerv1.Provider_Delete_FullMethodName, outer)
+	if err != nil {
+		return nil, err
+	}
+	req, err := requestOf[*providerv1.DeleteRequest](m)
+	if err != nil {
+		return nil, err
+	}
 	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
 		return nil, err
 	}
@@ -458,6 +500,10 @@ func (p *provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	if err != nil {
 		return nil, err
 	}
+	if known, done, err := p.agentStep(host, hs, adm); done {
+		return taskResponse(known), err
+	}
+	defer func() { p.cur = nil }()
 	v := hs.vms[req.Id]
 	if v == nil {
 		if p.v(DeleteTwiceFails) {
@@ -473,14 +519,24 @@ func (p *provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	}
 	id := req.Id
 	gone := *v
-	return &providerv1.TaskResponse{Task: p.run(host, hs, func() {
+	resp := &providerv1.TaskResponse{Task: p.run(host, hs, func() {
 		p.w.deleted = append(p.w.deleted, deletedVM{host: host, v: gone})
 		delete(hs.vms, id)
-	})}, nil
+	})}
+	p.remember(host, hs, adm, resp, resp.Task)
+	return resp, nil
 }
 
 // Reconfigure implements the owner-checked, routed Reconfigure.
-func (p *provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+func (p *provider) Reconfigure(ctx context.Context, outer *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+	m, adm, err := p.admit(providerv1.Provider_Reconfigure_FullMethodName, outer)
+	if err != nil {
+		return nil, err
+	}
+	req, err := requestOf[*providerv1.ReconfigureRequest](m)
+	if err != nil {
+		return nil, err
+	}
 	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
 		return nil, err
 	}
@@ -493,6 +549,10 @@ func (p *provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	if err != nil {
 		return nil, err
 	}
+	if known, done, err := p.agentStep(host, hs, adm); done {
+		return taskResponse(known), err
+	}
+	defer func() { p.cur = nil }()
 	v := p.findVM(host, hs, req.Id)
 	if v == nil || !p.authorize(v, req.Owner, true) {
 		return nil, p.refuse(v)
@@ -501,7 +561,9 @@ func (p *provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		return nil, err
 	}
 	v.cpu, v.memMiB = 4, 4096
-	return &providerv1.TaskResponse{HonestResult: true}, nil
+	resp := &providerv1.TaskResponse{HonestResult: true}
+	p.remember(host, hs, adm, resp, nil)
+	return resp, nil
 }
 
 // TaskStatus implements the routed TaskStatus.
@@ -556,6 +618,9 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 			return nil, status.Error(codes.NotFound, "no such task on the host")
 		}
 		return nil, withInfo(codes.NotFound, "no such task on the host", contracts.UnknownToAgentReason, contracts.ErrorInfoDomain, nil)
+	}
+	if t.typed {
+		return p.typedStatus(t), nil
 	}
 	return &providerv1.TaskStatusResponse{Done: t.done}, nil
 }
@@ -628,6 +693,10 @@ func (p *provider) GetCapabilities(_ context.Context, _ *providerv1.GetCapabilit
 	if p.v(CapsUnstable) {
 		caps.SupportsSnapshots = p.capsCalls%2 == 0
 	}
+	if p.ident != nil && !p.v(IdentityCapsHidden) {
+		caps.SupportsOperationIdentity = true
+		caps.RequiresOperationIdentity = p.ident.required
+	}
 	if p.v(CapsAdvertiseUnrouted) {
 		caps.SupportsDiskExport = true
 		caps.SupportsRoutedClone = true
@@ -678,7 +747,15 @@ func (p *provider) SnapshotRevert(_ context.Context, req *providerv1.SnapshotRev
 }
 
 // Create makes a VM on the target host and stamps its owner.
-func (p *provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
+func (p *provider) Create(ctx context.Context, outer *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
+	m, adm, err := p.admit(providerv1.Provider_Create_FullMethodName, outer)
+	if err != nil {
+		return nil, err
+	}
+	req, err := requestOf[*providerv1.CreateRequest](m)
+	if err != nil {
+		return nil, err
+	}
 	if err := p.blackholeWait(ctx, req.TargetHostId); err != nil {
 		return nil, err
 	}
@@ -695,6 +772,11 @@ func (p *provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	if err != nil {
 		return nil, err
 	}
+	if known, done, err := p.agentStep(host, hs, adm); done {
+		resp, _ := known.(*providerv1.CreateResponse)
+		return resp, err
+	}
+	defer func() { p.cur = nil }()
 	id := req.Name
 	if old := hs.vms[id]; old != nil {
 		switch {
@@ -715,8 +797,9 @@ func (p *provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		owner = clustered.Identity{}
 	}
 	hs.vms[id] = &vm{name: req.Name, owner: owner, cpu: 2, memMiB: 1024}
-	_ = host
-	return &providerv1.CreateResponse{Id: id}, nil
+	resp := &providerv1.CreateResponse{Id: id}
+	p.remember(host, hs, adm, resp, nil)
+	return resp, nil
 }
 
 // ListHosts reports the host inventory.
@@ -760,4 +843,11 @@ func (p *provider) GetHostInfo(_ context.Context, req *providerv1.GetHostInfoReq
 		health = providerv1.HostHealth_HOST_HEALTH_NOT_READY
 	}
 	return &providerv1.HostInfo{Id: req.HostId, Health: health}, nil
+}
+
+// taskResponse asserts a known operation's recorded answer to a TaskResponse
+// (nil when the call was refused).
+func taskResponse(m proto.Message) *providerv1.TaskResponse {
+	r, _ := m.(*providerv1.TaskResponse)
+	return r
 }

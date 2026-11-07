@@ -34,3 +34,21 @@ func TestSuiteAgainstReferenceFake(t *testing.T) {
 		clustered.Run(t, func(clustered.T) clustered.Target { return fake.New(fake.Synchronous()) })
 	})
 }
+
+// TestSuiteAgainstIdentityFake runs the suite against the fake in
+// operation-identity mode, with a test-only signer. A fake that also accepts
+// unsigned calls must pass the whole suite, asynchronous and synchronous. A
+// fake that requires a grant on every mutating call refuses the unsigned
+// calls of the other groups by design, so only the identity.* cases are run
+// against it.
+func TestSuiteAgainstIdentityFake(t *testing.T) {
+	t.Run("supports-async", func(t *testing.T) {
+		clustered.Run(t, identityFake(false))
+	})
+	t.Run("supports-sync", func(t *testing.T) {
+		clustered.Run(t, identityFake(false, fake.Synchronous()))
+	})
+	t.Run("requires-async", func(t *testing.T) {
+		clustered.Run(t, identityFake(true), clustered.OnlyCases("identity."))
+	})
+}
