@@ -100,6 +100,18 @@ releases the finalizer. The clustered conformance case `tasks.forged-inner-ref` 
 Required and checks the code, the reason and the manager mapping (see
 [`test/conformance/README.md`](../test/conformance/README.md)).
 
+## Providers that require operation identity
+
+For a Provider whose type requires operation identity (development builds only; no
+bundled Provider type does), the VirtualMachine controller reads these answers for its
+signed `Create`, `Delete`, power and `Reconfigure` attempts with the same outcome table,
+with one difference for the `Delete`: an answer that finds no VM never releases the
+finalizer. A `Delete` answered `NotFound` (or `VM_NOT_OWNED`) is held as
+`OperationDeleteUnconfirmed`, `UNKNOWN_TO_AGENT` is held, and no `Describe` is used to
+decide a release; only a confirmed `Delete`, orphan-on-delete or force-delete releases the
+VM. Every other Provider keeps the behaviour described above. See
+[`operation-grants-manager.md`](operation-grants-manager.md#delete-an-absent-vm-never-releases-the-finalizer).
+
 ## Per-host agent error reasons
 
 These `google.rpc.ErrorInfo` reasons (domain `provider.virtrigaud.io`) are defined for

@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-07 15:10] - Signed power and Reconfigure, one attempt at a time, and the identity Delete rule for Providers that require operation identity (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/virtualmachine_operation_identity_kinds.go`, `virtualmachine_controller.go`: for a Provider whose type requires operation identity, a VM's `PowerOn`, `PowerOff`, `ShutdownGraceful` (from `spec.powerState`), `Reboot` (no VirtualMachine field asks for it yet) and `Reconfigure` are sent as signed attempts with the same lifecycle, intent authentication, outcome table, holds and backoff as Create and Delete. A stored power request must carry the `PowerRequest.op` its kind fixes and name the VM's id, host and owner; a stored Reconfigure request must name the same and a size. The size a `Reconfigure` asked for, read from its stored request, is what `status.currentResources` records once it `Succeeded` (synchronous answers are recorded as applied, pending a restart, or untrusted without the honest-result marker, as for every clustered Provider). A power operation or Reconfigure may be asked for again after one `Succeeded`, not sooner than 15 seconds later.
+- `internal/controller/virtualmachine_operation_identity_kinds.go`, `virtualmachine_controller.go`: the Delete of such a VM is never released by an answer that finds no VM: a Delete answered `NotFound` or `VM_NOT_OWNED` holds as `OperationDeleteUnconfirmed` and re-sends the same attempt, `UNKNOWN_TO_AGENT` keeps holding, and a VM whose Create was (or may have been) performed keeps its finalizer when its Provider is gone. Release only on a confirmed Delete, no Create ever performed, orphan-on-delete or force-delete. `authenticatedHostDeleted` is the named extension point for a future authenticated host answer; it always answers no.
+- `internal/controller/operation_identity_unsupported.go`, `vmsnapshot_controller.go`, `vmclone_controller.go`, `vmmigration_controller.go`, `vmadoption_controller.go`, `virtualmachine_image_prepare.go`, `virtualmachine_snapshot_revert.go`: snapshots, snapshot revert, clones, image prepares, migrations and adoption are refused locally for a Provider that requires operation identity, before any client is resolved: `Ready=False/OperationIdentityUnsupported` with a fixed message (the VM's `SnapshotReverted` condition for a revert, `status.adoption.message` for an adoption) and one Warning event when the refusal begins.
+- `internal/k8s/conditions.go`: reasons `OperationDeleteUnconfirmed` and `OperationIdentityUnsupported`.
+- `test/conformance/clustered/cases_identity.go`, `test/conformance/README.md`: `identity.wrong-kind-refused` also refuses a `REBOOT` grant over a `SHUTDOWN_GRACEFUL` request and the reverse. `test/conformance/clustered/fake/target.go`: `Target.RemoveVM` for manager tests.
+- Tests: scripted-client tests of each power kind's `op`, async power with a repeat after the gap, the outcome table for power, tampered power and Reconfigure intents, the Reconfigure size binding and synchronous answers, waits across kinds (a Reconfigure behind a power-off, a Delete behind a Reconfigure), the absent-VM, `UNKNOWN_TO_AGENT` and gone-Provider Delete holds, the refusals with no client resolved, the pruning of kept-intent warnings, and a table showing unsigned power and resize, with no marker, for vsphere, libvirt (both topologies), proxmox and mock; envtest specs (development builds) against the instrumented fake over TLS gRPC: a manager restarted at each crash point of `PowerOn`, `PowerOff`, `ShutdownGraceful`, `Reboot` and `Reconfigure` ends with one execution and a Terminal marker, waits across kinds, a tampered power intent holds with nothing sent, an absent VM never releases its Delete, and a snapshot of an identity VM reaches no RPC.
+
+### Changed
+- `internal/controller/operation_intent.go`, `provider_controller.go`: the record of announced kept intent Secrets is keyed by Provider namespace, name and UID and pruned when a sweep no longer keeps a Secret and when the Provider is gone.
+- `cmd/manager/main.go`: the VMAdoption reconciler gets an event recorder.
+- `docs/operation-grants-manager.md`: the seven kinds and their requests, one attempt at a time and the order of kinds, the Delete rule for an absent VM, the operations with no signed path, the new holds, updated limits. `docs/task-status-outcomes.md`: a section on Providers that require operation identity.
+
+### Why
+Power and resize of a VM of a Provider that requires operation identity failed, because its client refuses unsigned calls; they now use the same single-execution lifecycle as Create and Delete. An unsigned "no such VM" from a host is not proof of a Delete, so it no longer releases such a VM, and operations with no signed path are refused visibly instead of failing as provider errors. Release builds and every other Provider type behave exactly as before.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-07 14:00] - Operation attempt markers and signed Create/Delete for Providers that require operation identity (development builds only)
 **Author:** @wrkode (William Rizzo)
 
