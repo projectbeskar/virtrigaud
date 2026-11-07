@@ -52,3 +52,6 @@ libvirt-monitoring-test.yaml
 *release-checklist*
 *PROXMOX_*
 .cursor/
+
+# libvirt test fixtures created by main_test.go at test time
+internal/providers/libvirt/_fixture_images_*/
