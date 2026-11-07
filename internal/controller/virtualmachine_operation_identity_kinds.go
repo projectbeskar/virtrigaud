@@ -70,7 +70,7 @@ const sentAttemptDeadline = time.Hour
 
 // repeatStreakKey is the identityRepeat key of vm's kind.
 func repeatStreakKey(vm *infravirtrigaudiov1beta1.VirtualMachine, kind infravirtrigaudiov1beta1.OperationAttemptKind) string {
-	return string(vmSchedulingUID(vm)) + "/" + string(kind)
+	return vmSchedulingUID(vm) + "/" + string(kind)
 }
 
 // repeatStreak is the identityRepeat record of one VM and kind: how many
