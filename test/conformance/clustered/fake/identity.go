@@ -164,8 +164,8 @@ type scripted struct {
 	reason  string
 }
 
-// admission is a signed call the host admitted: the grant body and the
-// request to act on.
+// admission is a signed call the host admitted: its grant body and its op_id
+// in hex ("" when the call is not checked for single execution).
 type admission struct {
 	body *providerv1.GrantBody
 	opID string
