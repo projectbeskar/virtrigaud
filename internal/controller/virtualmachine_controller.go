@@ -977,7 +977,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		suspended := vm.Status.PowerState == infravirtrigaudiov1beta1.ObservedPowerStateSuspended
 		if suspended && desiredPowerState == infravirtrigaudiov1beta1.PowerStateOff {
 			logger.Info("VM is suspended and its spec asks for Off; powering it off (hard)")
-			return r.adjustPowerState(ctx, vm, providerInstance, ref, string(infravirtrigaudiov1beta1.PowerStateOff))
+			return r.setPowerState(ctx, vm, provider, providerInstance, ref, string(infravirtrigaudiov1beta1.PowerStateOff))
 		}
 		msg := fmt.Sprintf("the provider reports the VM %s: it is not reconfigured, and not powered on, until it is running or powered off "+
 			"(a suspended VM is powered off if its spec.powerState is Off)", vm.Status.PowerState)
@@ -1005,7 +1005,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// never sent a graceful shutdown again once it is off.
 	if !powerStateSatisfied(desiredPowerState, desc.PowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
-		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
+		return r.setPowerState(ctx, vm, provider, providerInstance, ref, string(desiredPowerState))
 	}
 
 	// The desired power state is reached: a power task that failed earlier is
@@ -2455,6 +2455,17 @@ func requiredNetworksForScheduling(networks []*infravirtrigaudiov1beta1.VMNetwor
 	return out
 }
 
+// setPowerState sends the power operation desiredState asks for to the VM ref
+// addresses: as a signed attempt for a Provider that requires operation
+// identity (startIdentityPower), otherwise as before (adjustPowerState).
+func (r *VirtualMachineReconciler) setPowerState(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	providerCR *infravirtrigaudiov1beta1.Provider, provider contracts.Provider, ref contracts.VMRef, desiredState string) (ctrl.Result, error) {
+	if identityRequired(providerCR) {
+		return r.startIdentityPower(ctx, vm, providerCR, provider, ref, desiredState)
+	}
+	return r.adjustPowerState(ctx, vm, provider, ref, desiredState)
+}
+
 // adjustPowerState adjusts the power state of the VM ref addresses.
 func (r *VirtualMachineReconciler) adjustPowerState(
 	ctx context.Context,
@@ -3313,6 +3324,12 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	// (synchronous, an async task, a change pending a restart, a failure)
 	// keeps it with the status write that ends this reconcile.
 	setDiskSizeWithinLimitCondition(vm, withheld)
+
+	// A Provider that requires operation identity gets the Reconfigure as a
+	// signed attempt with exactly this request.
+	if identityRequired(providerCR) {
+		return r.startIdentityReconfigure(ctx, vm, providerCR, provider, ref, vmClass, req)
+	}
 
 	// Call provider reconfigure
 	result, err := provider.Reconfigure(ctx, ref, req)

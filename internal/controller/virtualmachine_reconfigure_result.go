@@ -96,9 +96,23 @@ const reconfigureRetryMaxInterval = 5 * time.Minute
 // is.
 func (r *VirtualMachineReconciler) recordRestartPending(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
 	desiredCPU, desiredMem32, _ := r.recordAtLeastDesired(vm, vmClass)
+	setRestartPending(vm, desiredCPU, int64(desiredMem32))
+}
+
+// recordRestartPendingAt is recordRestartPending for an explicit requested
+// size (cpu, memoryMiB): the size a signed Reconfigure's stored request asked
+// for.
+func (r *VirtualMachineReconciler) recordRestartPendingAt(vm *infravirtrigaudiov1beta1.VirtualMachine, cpu int32, memoryMiB int64) {
+	r.recordAtLeast(vm, cpu, memoryMiB)
+	setRestartPending(vm, cpu, memoryMiB)
+}
+
+// setRestartPending sets Reconfiguring=True/RestartRequired for a requested
+// size (desiredCPU, desiredMem), and keeps the VM Ready.
+func setRestartPending(vm *infravirtrigaudiov1beta1.VirtualMachine, desiredCPU int32, desiredMem int64) {
 	msg := fmt.Sprintf("the new size (%d vCPU, %d MiB) is in the VM's persistent definition and takes effect at its next power cycle "+
 		"(power off, then on; a reboot from inside the guest is not enough). Until then the running VM keeps its previous size; "+
-		"status.currentResources counts the larger of the two", desiredCPU, desiredMem32)
+		"status.currentResources counts the larger of the two", desiredCPU, desiredMem)
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 		Type:               k8s.ConditionReconfiguring,
 		Status:             metav1.ConditionTrue,
@@ -163,6 +177,20 @@ func (r *VirtualMachineReconciler) holdResizeWithoutHonestReconfigure(
 // spec change); a marked answer then records what was applied.
 func (r *VirtualMachineReconciler) recordUnmarkedResult(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
 	r.recordAtLeastDesired(vm, vmClass)
+	setUnmarkedResult(vm)
+}
+
+// recordUnmarkedResultAt is recordUnmarkedResult for an explicit requested
+// size (cpu, memoryMiB): the size a signed Reconfigure's stored request asked
+// for.
+func (r *VirtualMachineReconciler) recordUnmarkedResultAt(vm *infravirtrigaudiov1beta1.VirtualMachine, cpu int32, memoryMiB int64) {
+	r.recordAtLeast(vm, cpu, memoryMiB)
+	setUnmarkedResult(vm)
+}
+
+// setUnmarkedResult sets the Reconfiguring condition of a Reconfigure answered
+// without the honest-result marker.
+func setUnmarkedResult(vm *infravirtrigaudiov1beta1.VirtualMachine) {
 	setResizeRefused(vm, k8s.ReasonProviderLacksHonestReconfigure,
 		"the VM's Provider answered the resize without the honest-result marker (an older provider image), so the answer is not "+
 			"trusted: the VM is counted at the larger of its previous and its requested size, and the resize is re-checked every "+
@@ -179,14 +207,14 @@ func (r *VirtualMachineReconciler) recordAtLeastDesired(vm *infravirtrigaudiov1b
 	if err != nil {
 		return desiredCPU, desiredMemMiB, false
 	}
-	cpu := max(r.getCurrentCPU(vm), desiredCPU)
-	mem := max(r.getCurrentMemoryMiB(vm), int64(desiredMemMiB))
-	if vm.Status.CurrentResources == nil {
-		vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{}
-	}
-	vm.Status.CurrentResources.CPU = &cpu
-	vm.Status.CurrentResources.MemoryMiB = &mem
+	r.recordAtLeast(vm, desiredCPU, int64(desiredMemMiB))
 	return desiredCPU, desiredMemMiB, true
+}
+
+// recordAtLeast raises status.currentResources, per resource, to cpu and
+// memoryMiB where they are larger: max(recorded, requested).
+func (r *VirtualMachineReconciler) recordAtLeast(vm *infravirtrigaudiov1beta1.VirtualMachine, cpu int32, memoryMiB int64) {
+	setCurrentResources(vm, max(r.getCurrentCPU(vm), cpu), max(r.getCurrentMemoryMiB(vm), memoryMiB))
 }
 
 // recordReconfigureFailure records a Reconfigure that failed with err:

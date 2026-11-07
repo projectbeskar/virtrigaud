@@ -1,0 +1,578 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+)
+
+// These tests pin the signed Power and Reconfigure of a VM of a Provider that
+// requires operation identity, and the serialisation of attempts across
+// kinds, against the scripted client (identityStub). The envtest specs run
+// the same lifecycle against the instrumented fake over gRPC.
+
+// setVMSpec edits the VM's spec.
+func setVMSpec(t *testing.T, r *VirtualMachineReconciler, edit func(*infravirtrigaudiov1beta1.VirtualMachine)) {
+	t.Helper()
+	vm := idVM(t, r)
+	edit(vm)
+	require.NoError(t, r.Update(context.Background(), vm))
+}
+
+// sentKinds lists the kinds of the stub's sends, in order.
+func sentKinds(stub *identityStub) []contracts.OperationKind {
+	var out []contracts.OperationKind
+	for _, p := range stub.sent() {
+		out = append(out, p.Kind)
+	}
+	return out
+}
+
+// decodeSent decodes a prepared operation's request.
+func decodeSent(t *testing.T, p contracts.PreparedOperation) proto.Message {
+	t.Helper()
+	m, err := decodePrepared(&p)
+	require.NoError(t, err)
+	return m
+}
+
+// honestReconfigure makes the fixture's Provider report the honest
+// Reconfigure result, which a clustered resize needs.
+func honestReconfigure(t *testing.T, r *VirtualMachineReconciler) {
+	t.Helper()
+	p := &infravirtrigaudiov1beta1.Provider{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, p))
+	p.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{SupportsHonestReconfigure: true}
+	require.NoError(t, r.Update(context.Background(), p))
+}
+
+// Each power state the spec can ask for is sent as a signed attempt of the
+// matching kind, whose request carries the PowerRequest.op the kind fixes;
+// nothing is sent unsigned, and the VM is Ready only after a Describe.
+func TestIdentityPower_SignedAttemptPerKind(t *testing.T) {
+	cases := []struct {
+		desired  infravirtrigaudiov1beta1.PowerState
+		observed string
+		kind     contracts.OperationKind
+		op       providerv1.PowerOp
+	}{
+		{infravirtrigaudiov1beta1.PowerStateOn, "Off", contracts.OperationKindPowerOn, providerv1.PowerOp_POWER_OP_ON},
+		{infravirtrigaudiov1beta1.PowerStateOff, "On", contracts.OperationKindPowerOff, providerv1.PowerOp_POWER_OP_OFF},
+		{infravirtrigaudiov1beta1.PowerStateOffGraceful, "On", contracts.OperationKindShutdownGraceful,
+			providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			stub := newIdentityStub()
+			r, req := createdIdentityVM(t, stub)
+			stub.describeResp.PowerState = tc.observed
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = tc.desired })
+			reconcileN(t, r, req, 1)
+
+			vm := idVM(t, r)
+			a := findAttempt(vm, tc.kind)
+			require.NotNil(t, a)
+			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, a.Phase)
+			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, a.Outcome)
+			assert.Equal(t, int64(1), a.Attempt)
+			assert.Equal(t, "host-alpha", a.HostID)
+			assert.Equal(t, bindingIDOf(vm), a.BindingID)
+			sends := stub.sent()
+			require.Len(t, sends, 2)
+			assert.Equal(t, tc.kind, sends[1].Kind)
+			pr, ok := decodeSent(t, sends[1]).(*providerv1.PowerRequest)
+			require.True(t, ok)
+			assert.Equal(t, tc.op, pr.GetOp())
+			assert.Equal(t, "vm-1", pr.GetId())
+			assert.Equal(t, "uid-vm-id", pr.GetOwner().GetUid())
+			assert.Empty(t, stub.powerRefs, "no unsigned Power")
+			assert.Empty(t, intentSecrets(t, r))
+			assert.NotEqual(t, k8s.ReasonReconcileSuccess, readyReason(vm), "Ready only after a Describe")
+		})
+	}
+}
+
+// Reboot and graceful shutdown are bound to their own PowerRequest.op.
+func TestIdentityPower_RebootAndShutdownBoundToPowerOp(t *testing.T) {
+	for kind, op := range map[contracts.OperationKind]providerv1.PowerOp{
+		contracts.OperationKindReboot:           providerv1.PowerOp_POWER_OP_REBOOT,
+		contracts.OperationKindShutdownGraceful: providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL,
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			stub := newIdentityStub()
+			r, _ := createdIdentityVM(t, stub)
+			providerCR := &infravirtrigaudiov1beta1.Provider{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, providerCR))
+			vm := idVM(t, r)
+			ref, err := vmRefFor(vm, providerCR)
+			require.NoError(t, err)
+			_, err = r.startIdentityPowerOp(context.Background(), vm, providerCR, stub, ref, kind)
+			require.NoError(t, err)
+			sends := stub.sent()
+			require.Len(t, sends, 2)
+			assert.Equal(t, kind, sends[1].Kind)
+			pr, ok := decodeSent(t, sends[1]).(*providerv1.PowerRequest)
+			require.True(t, ok)
+			assert.Equal(t, op, pr.GetOp())
+			a := findAttempt(idVM(t, r), kind)
+			require.NotNil(t, a)
+			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, a.Outcome)
+		})
+	}
+	t.Run("a kind with no signed power path is refused", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, _ := createdIdentityVM(t, stub)
+		_, err := r.startIdentityPowerOp(context.Background(), idVM(t, r), nil, stub, contracts.VMRef{}, contracts.OperationKindReconfigure)
+		require.ErrorIs(t, err, contracts.ErrOperationIdentityNotImplemented)
+		assert.Len(t, stub.sent(), 1)
+	})
+}
+
+// An asynchronous power attempt is polled until its task is over; a later
+// request for the same kind is a new attempt (new op_id, next number), but
+// not sooner than repeatGap after the last one Succeeded.
+func TestIdentityPower_AsyncThenRepeatAfterGap(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	outcome := contracts.TaskOutcomeRunning
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "task-" + string(p.Kind)}, nil
+	}
+	stub.onTask = func(string) (contracts.TaskStatus, error) { return contracts.TaskStatus{Outcome: outcome}, nil }
+	stub.describeResp.PowerState = "Off"
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+	reconcileN(t, r, req, 2)
+	a := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
+	require.NotNil(t, a)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, a.Phase)
+	assert.Len(t, stub.sent(), 2, "the attempt in flight is polled, not sent again")
+	assert.Len(t, intentSecrets(t, r), 1)
+
+	outcome = contracts.TaskOutcomeSucceeded
+	reconcileN(t, r, req, 1)
+	first := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
+	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, first.Outcome)
+	assert.Empty(t, intentSecrets(t, r))
+
+	// The VM is still reported Off (the Provider lags, or it went off again):
+	// no new attempt within the gap.
+	reconcileN(t, r, req, 2)
+	assert.Len(t, stub.sent(), 2, "no new attempt within the gap")
+
+	r.clock = func() time.Time { return time.Now().Add(repeatGap + time.Second) }
+	outcome = contracts.TaskOutcomeRunning
+	reconcileN(t, r, req, 1)
+	second := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
+	require.NotNil(t, second)
+	assert.Equal(t, int64(2), second.Attempt)
+	assert.NotEqual(t, first.OpID, second.OpID)
+	assert.Len(t, stub.sent(), 3)
+}
+
+// The outcome table is the Create's: a not-performed power attempt is
+// followed by a new one after its backoff; a dirty failure holds.
+func TestIdentityPower_OutcomeTable(t *testing.T) {
+	t.Run("FailedClean then a new attempt after the backoff", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "task-" + string(p.Kind) + "-" + string(rune('0'+p.Identity.Attempt))}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedClean, IsCompleted: true, Error: "x"}, nil
+		}
+		stub.describeResp.PowerState = "Off"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		reconcileN(t, r, req, 3)
+		assert.Equal(t, k8s.ReasonOperationRetryBackoff, readyReason(idVM(t, r)))
+		assert.Len(t, stub.sent(), 2, "no new attempt during the backoff")
+		r.clock = func() time.Time { return time.Now().Add(blockedRetryMax) }
+		reconcileN(t, r, req, 1)
+		assert.Len(t, stub.sent(), 3)
+		assert.Equal(t, uint64(2), stub.sent()[2].Identity.Attempt)
+	})
+	t.Run("FailedDirty holds", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "task-power"}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedDirty, IsCompleted: true, Error: "x"}, nil
+		}
+		stub.describeResp.PowerState = "Off"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		reconcileN(t, r, req, 3)
+		r.clock = func() time.Time { return time.Now().Add(blockedRetryMax) }
+		reconcileN(t, r, req, 2)
+		assert.Equal(t, k8s.ReasonOperationFailedDirty, readyReason(idVM(t, r)))
+		assert.Len(t, stub.sent(), 2, "no new attempt after a dirty failure")
+	})
+	t.Run("UNKNOWN_TO_AGENT holds", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "task-power"}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
+		}
+		stub.describeResp.PowerState = "Off"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		reconcileN(t, r, req, 3)
+		assert.Equal(t, k8s.ReasonOperationUnknownToAgent, readyReason(idVM(t, r)))
+		assert.Len(t, stub.sent(), 2)
+	})
+	t.Run("a transport error re-sends the same attempt", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		fail := true
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			if fail {
+				fail = false
+				return contracts.OperationAnswer{}, errors.New("connection reset")
+			}
+			return contracts.OperationAnswer{}, nil
+		}
+		stub.describeResp.PowerState = "Off"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		reconcileN(t, r, req, 2)
+		sends := stub.sent()
+		require.Len(t, sends, 3)
+		assert.Equal(t, sends[1].Identity.OpID, sends[2].Identity.OpID)
+		assert.Equal(t, sends[1].RequestBytes, sends[2].RequestBytes)
+		assert.Equal(t, sends[1].DigestSalt, sends[2].DigestSalt)
+		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded,
+			findAttempt(idVM(t, r), contracts.OperationKindPowerOn).Outcome)
+	})
+}
+
+// A tampered power intent (another op, another VM id) is never sent.
+func TestIdentityPower_TamperedIntentHeld(t *testing.T) {
+	cases := map[string]func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret){
+		"a REBOOT op under a PowerOn attempt (resealed)": func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret) {
+			b, err := proto.Marshal(&providerv1.PowerRequest{Id: "vm-1", Op: providerv1.PowerOp_POWER_OP_REBOOT, TargetHostId: "host-alpha",
+				Owner: &providerv1.ObjectIdentity{Uid: "uid-vm-id"}})
+			require.NoError(t, err)
+			s.Data[intentKeyRequest] = b
+			reseal(r, s)
+		},
+		"another VM id (resealed)": func(t *testing.T, r *VirtualMachineReconciler, s *corev1.Secret) {
+			b, err := proto.Marshal(&providerv1.PowerRequest{Id: "vm-other", Op: providerv1.PowerOp_POWER_OP_ON, TargetHostId: "host-alpha",
+				Owner: &providerv1.ObjectIdentity{Uid: "uid-vm-id"}})
+			require.NoError(t, err)
+			s.Data[intentKeyRequest] = b
+			reseal(r, s)
+		},
+		"request bytes (unsealed)": func(t *testing.T, _ *VirtualMachineReconciler, s *corev1.Secret) {
+			s.Data[intentKeyRequest] = append(s.Data[intentKeyRequest], 0x01)
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			stub := newIdentityStub()
+			r, req := createdIdentityVM(t, stub)
+			fail := true
+			stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+				if fail {
+					fail = false
+					return contracts.OperationAnswer{}, errors.New("connection reset")
+				}
+				return contracts.OperationAnswer{}, nil
+			}
+			stub.describeResp.PowerState = "Off"
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+			reconcileN(t, r, req, 1)
+			secrets := intentSecrets(t, r)
+			require.Len(t, secrets, 1)
+			r.Recorder = record.NewFakeRecorder(10)
+			tamper(t, r, &secrets[0])
+			require.NoError(t, r.Update(context.Background(), &secrets[0]))
+			reconcileN(t, r, req, 2)
+			assert.Equal(t, k8s.ReasonOperationIntentTampered, readyReason(idVM(t, r)))
+			assert.Len(t, stub.sent(), 2, "nothing is sent from a tampered intent")
+		})
+	}
+}
+
+// A resize is sent as a signed Reconfigure whose request carries the size
+// asked for; that size, not the spec when the attempt ends, is what is
+// recorded once it Succeeded.
+func TestIdentityReconfigure_BindsRequestedResources(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	honestReconfigure(t, r)
+	outcome := contracts.TaskOutcomeRunning
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "task-reconfigure", Honest: true}, nil
+	}
+	stub.onTask = func(string) (contracts.TaskStatus, error) { return contracts.TaskStatus{Outcome: outcome}, nil }
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
+	})
+	reconcileN(t, r, req, 1)
+	a := findAttempt(idVM(t, r), contracts.OperationKindReconfigure)
+	require.NotNil(t, a)
+	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, a.Phase)
+	sends := stub.sent()
+	require.Len(t, sends, 2)
+	rr, ok := decodeSent(t, sends[1]).(*providerv1.ReconfigureRequest)
+	require.True(t, ok)
+	cpu, mem, err := requestedResources(rr)
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), cpu)
+	assert.Equal(t, int64(4096), mem)
+	assert.Empty(t, stub.reconfigureRefs, "no unsigned Reconfigure")
+
+	// The spec changes again while the attempt is in flight: nothing new is sent.
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(4)}
+	})
+	reconcileN(t, r, req, 1)
+	assert.Len(t, stub.sent(), 2)
+
+	outcome = contracts.TaskOutcomeSucceeded
+	reconcileN(t, r, req, 1)
+	vm := idVM(t, r)
+	require.NotNil(t, vm.Status.CurrentResources)
+	assert.Equal(t, int32(3), *vm.Status.CurrentResources.CPU, "the size the attempt asked for")
+	assert.Equal(t, int64(4096), *vm.Status.CurrentResources.MemoryMiB)
+
+	// The newer size is a new attempt after the gap.
+	r.clock = func() time.Time { return time.Now().Add(repeatGap + time.Second) }
+	outcome = contracts.TaskOutcomeRunning
+	reconcileN(t, r, req, 1)
+	second := findAttempt(idVM(t, r), contracts.OperationKindReconfigure)
+	assert.Equal(t, int64(2), second.Attempt)
+	rr2, ok := decodeSent(t, stub.sent()[2]).(*providerv1.ReconfigureRequest)
+	require.True(t, ok)
+	cpu2, _, err := requestedResources(rr2)
+	require.NoError(t, err)
+	assert.Equal(t, int32(4), cpu2)
+}
+
+// A synchronous Reconfigure answer is recorded like the unsigned path's:
+// applied, pending a restart, or not trusted without the honest marker.
+func TestIdentityReconfigure_SyncAnswers(t *testing.T) {
+	cases := map[string]struct {
+		answer  contracts.OperationAnswer
+		reason  string
+		wantCPU int32
+	}{
+		"applied":          {contracts.OperationAnswer{Honest: true}, k8s.ReasonReconcileSuccess, 3},
+		"restart required": {contracts.OperationAnswer{Honest: true, RestartRequired: true}, k8s.ReasonRestartRequired, 3},
+		"no honest marker": {contracts.OperationAnswer{}, k8s.ReasonProviderLacksHonestReconfigure, 3},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			stub := newIdentityStub()
+			r, req := createdIdentityVM(t, stub)
+			honestReconfigure(t, r)
+			stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) { return tc.answer, nil }
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+				vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
+			})
+			reconcileN(t, r, req, 1)
+			vm := idVM(t, r)
+			a := findAttempt(vm, contracts.OperationKindReconfigure)
+			require.NotNil(t, a)
+			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, a.Outcome)
+			c := k8s.GetCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+			require.NotNil(t, c)
+			assert.Equal(t, tc.reason, c.Reason)
+			assert.Equal(t, tc.wantCPU, *vm.Status.CurrentResources.CPU)
+			assert.Empty(t, intentSecrets(t, r))
+		})
+	}
+}
+
+// A tampered Reconfigure intent (another size, resealed with the right key
+// but naming no resources) is never sent.
+func TestIdentityReconfigure_TamperedIntentHeld(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	honestReconfigure(t, r)
+	fail := true
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		if fail {
+			fail = false
+			return contracts.OperationAnswer{}, errors.New("connection reset")
+		}
+		return contracts.OperationAnswer{Honest: true}, nil
+	}
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
+	})
+	reconcileN(t, r, req, 1)
+	secrets := intentSecrets(t, r)
+	require.Len(t, secrets, 1)
+	s := &secrets[0]
+	desired, err := json.Marshal(contracts.CreateRequest{})
+	require.NoError(t, err)
+	b, err := proto.Marshal(&providerv1.ReconfigureRequest{Id: "vm-1", DesiredJson: string(desired), TargetHostId: "host-alpha",
+		Owner: &providerv1.ObjectIdentity{Uid: "uid-vm-id"}})
+	require.NoError(t, err)
+	s.Data[intentKeyRequest] = b
+	reseal(r, s)
+	require.NoError(t, r.Update(context.Background(), s))
+	r.Recorder = record.NewFakeRecorder(10)
+	reconcileN(t, r, req, 2)
+	assert.Equal(t, k8s.ReasonOperationIntentTampered, readyReason(idVM(t, r)))
+	assert.Len(t, stub.sent(), 2)
+}
+
+// At most one attempt is in flight per VM across kinds: a resize requested
+// while a power operation is in flight waits for it, and is then decided from
+// the VM's state; a Delete waits for whatever is in flight and comes first
+// after it.
+func TestIdentity_SerialisesAcrossKinds(t *testing.T) {
+	t.Run("a Reconfigure waits for a power attempt in flight", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		honestReconfigure(t, r)
+		powerDone := false
+		stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			if p.Kind == contracts.OperationKindPowerOff {
+				return contracts.OperationAnswer{TaskRef: "task-off"}, nil
+			}
+			return contracts.OperationAnswer{Honest: true}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			if powerDone {
+				return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded}, nil
+			}
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		stub.describeResp.PowerState = "On"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff
+		})
+		reconcileN(t, r, req, 1)
+		require.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindPowerOff}, sentKinds(stub))
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
+		})
+		reconcileN(t, r, req, 3)
+		assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindPowerOff}, sentKinds(stub),
+			"no Reconfigure while the power-off is in flight")
+		assert.Nil(t, findAttempt(idVM(t, r), contracts.OperationKindReconfigure))
+
+		powerDone = true
+		stub.describeResp.PowerState = "Off"
+		reconcileN(t, r, req, 2)
+		assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindPowerOff,
+			contracts.OperationKindReconfigure}, sentKinds(stub))
+		assert.Equal(t, int32(3), *idVM(t, r).Status.CurrentResources.CPU)
+	})
+	t.Run("a Delete waits for a Reconfigure in flight, then comes first", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		honestReconfigure(t, r)
+		rcDone := false
+		stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			if p.Kind == contracts.OperationKindReconfigure {
+				return contracts.OperationAnswer{TaskRef: "task-rc", Honest: true}, nil
+			}
+			return contracts.OperationAnswer{}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			if rcDone {
+				return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded}, nil
+			}
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(3)}
+		})
+		reconcileN(t, r, req, 1)
+		stub.describeResp.PowerState = "Off"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 2)
+		assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindReconfigure}, sentKinds(stub),
+			"no Delete while the Reconfigure is in flight")
+		rcDone = true
+		reconcileN(t, r, req, 3)
+		assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindReconfigure,
+			contracts.OperationKindDelete}, sentKinds(stub), "the Delete comes first; no power operation for a VM being deleted")
+		assert.True(t, vmGone(t, r))
+	})
+}
+
+// For every Provider type that does not require operation identity, power
+// and resize are the unsigned calls, as before: no marker, no signed
+// operation.
+func TestNonIdentityProviders_PowerAndResizeUnchanged(t *testing.T) {
+	cases := []struct {
+		name     string
+		typ      infravirtrigaudiov1beta1.ProviderType
+		topology string
+	}{
+		{"vsphere", infravirtrigaudiov1beta1.ProviderTypeVSphere, ""},
+		{"libvirt single", infravirtrigaudiov1beta1.ProviderTypeLibvirt, ""},
+		{"libvirt cluster", infravirtrigaudiov1beta1.ProviderTypeLibvirt, infravirtrigaudiov1beta1.ProviderTopologyCluster},
+		{"proxmox", infravirtrigaudiov1beta1.ProviderTypeProxmox, ""},
+		{"mock", "mock", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newIdentityStub()
+			stub.caps = contracts.Capabilities{SupportsListOwnerFilter: true}
+			r, req := identityFixture(t, stub)
+			p := &infravirtrigaudiov1beta1.Provider{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, p))
+			p.Spec.Type, p.Spec.Topology = tc.typ, tc.topology
+			require.NoError(t, r.Update(context.Background(), p))
+			honestReconfigure(t, r)
+			reconcileN(t, r, req, 2)
+
+			stub.describeResp.PowerState = "Off"
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+				vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+			})
+			reconcileN(t, r, req, 1)
+			assert.NotEmpty(t, stub.powerRefs, "the unsigned Power, as before")
+
+			stub.describeResp.PowerState = "On"
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+				vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(1)}
+			})
+			reconcileN(t, r, req, 2)
+			vm := idVM(t, r)
+			assert.Empty(t, vm.Status.OperationAttempts)
+			assert.Empty(t, stub.builds)
+			assert.Empty(t, stub.sent())
+			assert.Empty(t, intentSecrets(t, r))
+		})
+	}
+}

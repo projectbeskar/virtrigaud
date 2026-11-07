@@ -42,8 +42,9 @@ import (
 
 // Operation identity on the VirtualMachine controller (development builds
 // only; ADR-0016 Part A, manager half). For a Provider whose spec.type
-// requires operation identity (operation.RequiredProtection), the Create and
-// Delete of a VM are sent as signed operations, in this order:
+// requires operation identity (operation.RequiredProtection), the Create,
+// Delete, Power (on, off, reboot, graceful shutdown) and Reconfigure of a VM
+// are sent as signed operations, each in this order:
 //
 //  1. decide: a new attempt only when no attempt of any kind is in flight for
 //     the VM and the latest attempt of the kind ended not performed (after a
@@ -57,6 +58,11 @@ import (
 //     the same bytes with the same op_id;
 //  4. close: Sent with the task reference, then Terminal with the typed
 //     outcome, then the intent Secret is deleted.
+//
+// At most one attempt of any kind is in flight per VM: it is driven to its
+// end before anything else is decided (reconcileIdentityGate, identityDelete).
+// The other operation kinds of the provider contract have no signed path and
+// are refused locally (virtualmachine_operation_identity_kinds.go).
 //
 // Every other Provider never enters this file: no marker, no intent Secret,
 // no envelope, and its capabilities 31-34 are not read here.
@@ -415,6 +421,17 @@ type identityAttempt struct {
 	// deleteRef is the VM reference a Delete attempt must name (set by
 	// identityDelete); a stored Delete intent naming another is tampered.
 	deleteRef *contracts.VMRef
+	// result is what this reconcile learned about the attempt it drove
+	// (shared by the copies of the identityAttempt).
+	result *attemptResult
+}
+
+// attemptResult is what one reconcile learned about the attempt it drove: the
+// verified prepared operation, and the Provider's answer when the outcome came
+// from a send (nil when it came from a task).
+type attemptResult struct {
+	prepared *contracts.PreparedOperation
+	answer   *contracts.OperationAnswer
 }
 
 // identityAttemptFor checks the Provider's client and advertised capabilities
@@ -446,7 +463,7 @@ func (r *VirtualMachineReconciler) identityAttemptFor(ctx context.Context, vm *i
 			why+"; the manager never lowers the protection it requires: nothing is sent until the Provider advertises a match",
 			operationHoldRecheckInterval), false
 	}
-	return identityAttempt{providerCR: providerCR, instance: instance, sender: sender}, ctrl.Result{}, true
+	return identityAttempt{providerCR: providerCR, instance: instance, sender: sender, result: &attemptResult{}}, ctrl.Result{}, true
 }
 
 // reconcileIdentityGate runs, for a VM of a Provider that requires operation
@@ -469,9 +486,7 @@ func (r *VirtualMachineReconciler) reconcileIdentityGate(ctx context.Context, vm
 	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)
 	if a := inFlightAttempt(vm); a != nil {
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
-		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate {
-			res, err = r.gateCreateDrive(ctx, vm, ia, step, res, err)
-		}
+		res, err = r.gateDriveStep(ctx, vm, ia, a, step, res, err)
 		return res, true, err
 	}
 	if c := findAttempt(vm, contracts.OperationKindCreate); c != nil && vm.Status.ID == "" &&
@@ -529,6 +544,14 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 			}
 		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded && opReq.Kind == contracts.OperationKindDelete:
 			return stepSucceeded, ctrl.Result{}, nil
+		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded && repeatableKind(opReq.Kind):
+			// A power operation or a Reconfigure may be asked for again once
+			// the last one Succeeded (the VM changed since), but not sooner
+			// than repeatGap after it, so a Provider whose Describe lags its
+			// task cannot drive a loop of new attempts.
+			if wait := repeatGap - r.now().Sub(prev.LastTransitionTime.Time); wait > 0 {
+				return stepWaiting, ctrl.Result{RequeueAfter: wait}, nil
+			}
 		default:
 			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgOperationStateLost, operationHoldRecheckInterval), nil
 		}
@@ -621,6 +644,7 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if r.operationCrashed(ctx, crashAfterPrepared) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	ia.noteResult(&prepared, nil)
 	return r.sendAttempt(ctx, vm, ia, &marker, prepared, true)
 }
 
@@ -634,6 +658,7 @@ func (r *VirtualMachineReconciler) driveAttempt(ctx context.Context, vm *infravi
 	if !ok {
 		return step, res, nil
 	}
+	ia.noteResult(&prepared, nil)
 	if a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent && a.TaskRef != "" {
 		if !r.taskRefBound(vm, a) {
 			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval), nil
@@ -782,6 +807,21 @@ func checkIntentRequest(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identity
 		if req.GetTargetHostId() != a.HostID || req.GetOwner().GetUid() != string(vm.UID) {
 			return fmt.Errorf("Create target: %w", errIntentTampered)
 		}
+	case *providerv1.PowerRequest:
+		row, _ := operation.RowFor(wire) // DecodeRequest refused a kind with no row
+		if req.GetOp() != row.FixedPowerOp {
+			return fmt.Errorf("power op: %w", errIntentTampered)
+		}
+		if err := checkVMTarget(vm, a, req.GetId(), req.GetTargetHostId(), req.GetOwner().GetUid()); err != nil {
+			return fmt.Errorf("Power target: %w", err)
+		}
+	case *providerv1.ReconfigureRequest:
+		if err := checkVMTarget(vm, a, req.GetId(), req.GetTargetHostId(), req.GetOwner().GetUid()); err != nil {
+			return fmt.Errorf("Reconfigure target: %w", err)
+		}
+		if _, _, err := requestedResources(req); err != nil {
+			return fmt.Errorf("Reconfigure resources: %w", errIntentTampered)
+		}
 	default:
 		return fmt.Errorf("unexpected request type: %w", errIntentTampered)
 	}
@@ -790,8 +830,13 @@ func checkIntentRequest(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identity
 
 // wireKinds maps the kinds this controller sends to their wire kinds.
 var wireKinds = map[contracts.OperationKind]providerv1.OperationKind{
-	contracts.OperationKindCreate: providerv1.OperationKind_OPERATION_KIND_CREATE,
-	contracts.OperationKindDelete: providerv1.OperationKind_OPERATION_KIND_DELETE,
+	contracts.OperationKindCreate:           providerv1.OperationKind_OPERATION_KIND_CREATE,
+	contracts.OperationKindDelete:           providerv1.OperationKind_OPERATION_KIND_DELETE,
+	contracts.OperationKindPowerOn:          providerv1.OperationKind_OPERATION_KIND_POWER_ON,
+	contracts.OperationKindPowerOff:         providerv1.OperationKind_OPERATION_KIND_POWER_OFF,
+	contracts.OperationKindReboot:           providerv1.OperationKind_OPERATION_KIND_REBOOT,
+	contracts.OperationKindShutdownGraceful: providerv1.OperationKind_OPERATION_KIND_SHUTDOWN_GRACEFUL,
+	contracts.OperationKindReconfigure:      providerv1.OperationKind_OPERATION_KIND_RECONFIGURE,
 }
 
 // holdIntentTampered holds vm for an intent that failed loadVerifiedIntent,
@@ -822,6 +867,7 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 	if err != nil {
 		return r.sendFailed(ctx, vm, ia, a, err, first)
 	}
+	ia.noteResult(nil, &answer)
 	if answer.TaskRef == "" {
 		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, "", answer.ID)
 	}
@@ -1044,16 +1090,6 @@ func (r *VirtualMachineReconciler) afterCreateSucceeded(ctx context.Context, vm 
 	}
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: createdDescribeFallback}
-}
-
-// gateCreateDrive maps the step of an in-flight Create the gate drove: a
-// success records what follows a Create.
-func (r *VirtualMachineReconciler) gateCreateDrive(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, step attemptStep, res ctrl.Result, err error) (ctrl.Result, error) {
-	if step == stepSucceeded {
-		return r.afterCreateSucceeded(ctx, vm, ia), nil
-	}
-	return res, err
 }
 
 // identityDelete is the finalizer of a VM of a Provider that requires
