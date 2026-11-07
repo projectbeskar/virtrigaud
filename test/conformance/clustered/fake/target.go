@@ -143,6 +143,22 @@ func (t *Target) wipeVMs() {
 	}
 }
 
+// RemoveVM removes the VM id from host behind the provider's back (as if it
+// vanished on the hypervisor), without any record of a Delete.
+func (t *Target) RemoveVM(host, id string) error {
+	t.w.mu.Lock()
+	defer t.w.mu.Unlock()
+	hs := t.w.hosts[host]
+	if hs == nil {
+		return fmt.Errorf("fake: no host %q", host)
+	}
+	if _, ok := hs.vms[id]; !ok {
+		return fmt.Errorf("fake: no VM %q on host %q", id, host)
+	}
+	delete(hs.vms, id)
+	return nil
+}
+
 // SeedVM places a VM on a host.
 func (t *Target) SeedVM(_ context.Context, spec clustered.SeedSpec) (clustered.VM, error) {
 	t.w.mu.Lock()
