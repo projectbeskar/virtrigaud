@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -51,9 +52,98 @@ import (
 // then decided from the VM's state at that time.
 
 // repeatGap is the least time between a power or Reconfigure attempt that
-// Succeeded and the next attempt of the same kind for the same VM; it doubles
-// with each attempt of the kind that follows quickly (attemptRetryWait).
+// Succeeded and the next attempt of the same kind for the same VM. It doubles
+// with each consecutive success of the kind that a new attempt follows within
+// repeatWindow, up to blockedRetryMax (repeatGapWait).
 const repeatGap = blockedRetryMin
+
+// repeatWindow is how long after a success of a kind a new attempt of that
+// kind still counts as a quick repeat: a request that comes later starts the
+// doubling again, with no wait.
+const repeatWindow = 10 * time.Minute
+
+// sentAttemptDeadline is how long a Sent power or Reconfigure attempt may be
+// reported running before its outcome is treated as unknown
+// (OperationOutcomeUnknown), so that a Delete can supersede it. It never
+// applies to a Create or a Delete.
+const sentAttemptDeadline = time.Hour
+
+// repeatStreakKey is the identityRepeat key of vm's kind.
+func repeatStreakKey(vm *infravirtrigaudiov1beta1.VirtualMachine, kind infravirtrigaudiov1beta1.OperationAttemptKind) string {
+	return string(vmSchedulingUID(vm)) + "/" + string(kind)
+}
+
+// repeatStreak is the identityRepeat record of one VM and kind: how many
+// consecutive quick repeats followed, and the op_id of the success the last
+// one followed.
+type repeatStreak struct {
+	n       int
+	sinceOp string
+}
+
+// repeatGapFor is the gap after streak consecutive quick repeats: repeatGap
+// doubling per repeat, at most blockedRetryMax.
+func repeatGapFor(streak int) time.Duration {
+	gap := repeatGap
+	for i := 0; i < streak && gap < blockedRetryMax; i++ {
+		gap *= 2
+	}
+	return min(gap, blockedRetryMax)
+}
+
+// repeatGapWait is how long a new attempt of the kind of prev (a power or
+// Reconfigure attempt that Succeeded) must still wait at now. A success older
+// than repeatWindow ends the streak: no wait. Otherwise the gap doubles with
+// each quick repeat that already followed a success of this kind
+// (consecutive successes), and the attempt this answer lets through counts
+// as one more. A lastTransitionTime in the future counts as now.
+func (r *VirtualMachineReconciler) repeatGapWait(vm *infravirtrigaudiov1beta1.VirtualMachine, prev *infravirtrigaudiov1beta1.OperationAttempt,
+	now time.Time) time.Duration {
+	key := repeatStreakKey(vm, prev.Kind)
+	since := max(now.Sub(prev.LastTransitionTime.Time), 0)
+	if since > repeatWindow {
+		r.identityRepeat.Delete(key)
+		return 0
+	}
+	streak := 0
+	if v, ok := r.identityRepeat.Load(key); ok {
+		if rs, ok := v.(repeatStreak); ok {
+			streak = rs.n
+			if rs.sinceOp == prev.OpID {
+				// This success was already counted (the attempt it let
+				// through was not written): same gap again.
+				streak = max(rs.n-1, 0)
+			}
+		}
+	}
+	if wait := repeatGapFor(streak) - since; wait > 0 {
+		return wait
+	}
+	r.identityRepeat.Store(key, repeatStreak{n: streak + 1, sinceOp: prev.OpID})
+	return 0
+}
+
+// forgetIdentityRepeats drops vm's identityRepeat records.
+func (r *VirtualMachineReconciler) forgetIdentityRepeats(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	for _, kind := range []infravirtrigaudiov1beta1.OperationAttemptKind{
+		infravirtrigaudiov1beta1.OperationAttemptKindPowerOn, infravirtrigaudiov1beta1.OperationAttemptKindPowerOff,
+		infravirtrigaudiov1beta1.OperationAttemptKindReboot, infravirtrigaudiov1beta1.OperationAttemptKindShutdownGraceful,
+		infravirtrigaudiov1beta1.OperationAttemptKindReconfigure,
+	} {
+		r.identityRepeat.Delete(repeatStreakKey(vm, kind))
+	}
+}
+
+// runningPastDeadline reports whether the Sent attempt a, a power or
+// Reconfigure attempt, has been in phase Sent longer than
+// sentAttemptDeadline (a lastTransitionTime in the future counts as now). A
+// Create or a Delete is never past it.
+func (r *VirtualMachineReconciler) runningPastDeadline(a *infravirtrigaudiov1beta1.OperationAttempt) bool {
+	if !repeatableKind(contracts.OperationKind(a.Kind)) || a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseSent {
+		return false
+	}
+	return max(r.now().Sub(a.LastTransitionTime.Time), 0) > sentAttemptDeadline
+}
 
 // repeatableKind reports whether kind may be asked for again after an
 // attempt of it Succeeded: the power operations and Reconfigure. A Create or

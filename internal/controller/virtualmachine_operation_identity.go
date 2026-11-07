@@ -238,11 +238,7 @@ func controllerutilContains(list []string, v string) bool {
 // transition the next attempt waits: blockedRetryMin doubling per attempt,
 // at most blockedRetryMax.
 //
-// The same wait spaces a power or Reconfigure attempt after one of its kind
-// that Succeeded, so attempts that follow each other quickly (a guest that
-// powers itself off again, a Provider whose Describe lags) back off to the
-// maximum; one that follows long after the last waits not at all. A
-// lastTransitionTime in the future (an edited status) counts as now, so the
+// A lastTransitionTime in the future (an edited status) counts as now, so the
 // wait never exceeds blockedRetryMax.
 func attemptRetryWait(a *infravirtrigaudiov1beta1.OperationAttempt, now time.Time) time.Duration {
 	wait := blockedRetryMin
@@ -573,11 +569,11 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded && repeatableKind(opReq.Kind):
 			// A power operation or a Reconfigure may be asked for again once
 			// the last one Succeeded (the VM changed since), but not sooner
-			// than repeatGap after it, doubling with each attempt of the
-			// kind (attemptRetryWait), so a guest that powers itself off, or
-			// a Provider whose Describe lags its task, cannot drive a fast
-			// loop of new attempts.
-			if wait := attemptRetryWait(prev, r.now()); wait > 0 {
+			// than repeatGap after it, doubling over consecutive successes
+			// of the kind within repeatWindow (repeatGapWait), so a guest
+			// that powers itself off, or a Provider whose Describe lags its
+			// task, cannot drive a fast loop of new attempts.
+			if wait := r.repeatGapWait(vm, prev, r.now()); wait > 0 {
 				return stepWaiting, ctrl.Result{RequeueAfter: wait}, nil
 			}
 		default:
@@ -1035,6 +1031,13 @@ func (r *VirtualMachineReconciler) pollAttempt(ctx context.Context, vm *infravir
 		return stepWaiting, ctrl.Result{RequeueAfter: blockedRetryMin}, nil
 	}
 	var outcome infravirtrigaudiov1beta1.OperationAttemptOutcome
+	running := st.Outcome == contracts.TaskOutcomeRunning || (st.Outcome == contracts.TaskOutcomeUnspecified && !st.IsCompleted)
+	if running && r.runningPastDeadline(a) {
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationOutcomeUnknown, fmt.Sprintf(
+			"%s attempt %d has been reported running for more than %s; its outcome is treated as unknown (it is still asked "+
+				"about, and a Delete of the VM supersedes it); %s", a.Kind, a.Attempt, sentAttemptDeadline, operationHoldRecovery),
+			operationHoldRecheckInterval), nil
+	}
 	switch st.Outcome {
 	case contracts.TaskOutcomeRunning:
 		return stepWaiting, r.operationInProgress(ctx, vm, a, operationPollInterval), nil

@@ -1053,3 +1053,118 @@ func TestIdentity_LegacyTaskRefsIgnored(t *testing.T) {
 	assert.Empty(t, vm.Status.LastTaskRef)
 	assert.Empty(t, vm.Status.ReconfigureTaskRef)
 }
+
+// The repeat gap doubles only over consecutive successes of a kind that new
+// attempts follow within repeatWindow; a request after the window waits not
+// at all and starts again at repeatGap.
+func TestIdentityPower_RepeatGapStreakWithinWindow(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	now := time.Now()
+	r.clock = func() time.Time { return now }
+	stub.describeResp.PowerState = "Off"
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+	})
+	powerOns := func() int {
+		n := 0
+		for _, k := range sentKinds(stub) {
+			if k == contracts.OperationKindPowerOn {
+				n++
+			}
+		}
+		return n
+	}
+	reconcileN(t, r, req, 1)
+	require.Equal(t, 1, powerOns(), "the first PowerOn")
+
+	// The guest keeps powering itself off: the gaps are 15 s, then 30 s.
+	now = now.Add(repeatGap - time.Second)
+	reconcileN(t, r, req, 1)
+	assert.Equal(t, 1, powerOns())
+	now = now.Add(2 * time.Second)
+	reconcileN(t, r, req, 1)
+	require.Equal(t, 2, powerOns())
+	now = now.Add(repeatGap + time.Second)
+	reconcileN(t, r, req, 1)
+	assert.Equal(t, 2, powerOns(), "the second quick repeat waits 30 s")
+	now = now.Add(repeatGap)
+	reconcileN(t, r, req, 1)
+	require.Equal(t, 3, powerOns())
+
+	// Long after the last success: no wait, and the gap is back to 15 s.
+	now = now.Add(repeatWindow + time.Minute)
+	reconcileN(t, r, req, 1)
+	require.Equal(t, 4, powerOns(), "after the window, at once")
+	now = now.Add(repeatGap + time.Second)
+	reconcileN(t, r, req, 1)
+	assert.Equal(t, 5, powerOns(), "the streak started again")
+	assert.Equal(t, int64(5), findAttempt(idVM(t, r), contracts.OperationKindPowerOn).Attempt)
+
+	assert.Equal(t, repeatGap, repeatGapFor(0))
+	assert.Equal(t, 2*repeatGap, repeatGapFor(1))
+	assert.Equal(t, blockedRetryMax, repeatGapFor(50))
+}
+
+// A Sent power attempt reported running past sentAttemptDeadline is held as
+// OperationOutcomeUnknown, so a Delete supersedes it; a Create is never held
+// for running long.
+func TestIdentity_SentAttemptDeadline(t *testing.T) {
+	t.Run("power: held, then superseded by the Delete", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "task-" + string(p.Kind)}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		stub.describeResp.PowerState = "Off"
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		})
+		reconcileN(t, r, req, 2)
+		assert.Equal(t, k8s.ReasonOperationInProgress, readyReason(idVM(t, r)), "within the deadline")
+
+		r.clock = func() time.Time { return time.Now().Add(sentAttemptDeadline + time.Minute) }
+		reconcileN(t, r, req, 1)
+		assert.Equal(t, k8s.ReasonOperationOutcomeUnknown, readyReason(idVM(t, r)))
+		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(idVM(t, r), contracts.OperationKindPowerOn).Phase)
+
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 3)
+		vm := idVM(t, r)
+		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded, findAttempt(vm, contracts.OperationKindPowerOn).Outcome)
+		assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindPowerOn,
+			contracts.OperationKindDelete}, sentKinds(stub), "the signed Delete is sent")
+	})
+	t.Run("a future transition time counts as now", func(t *testing.T) {
+		r := &VirtualMachineReconciler{}
+		a := &infravirtrigaudiov1beta1.OperationAttempt{Kind: infravirtrigaudiov1beta1.OperationAttemptKindPowerOn,
+			Phase: infravirtrigaudiov1beta1.OperationAttemptPhaseSent, LastTransitionTime: metav1.NewTime(time.Now().Add(1000 * time.Hour))}
+		assert.False(t, r.runningPastDeadline(a))
+		a.LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * sentAttemptDeadline))
+		assert.True(t, r.runningPastDeadline(a))
+		a.Kind = infravirtrigaudiov1beta1.OperationAttemptKindDelete
+		assert.False(t, r.runningPastDeadline(a), "never a Delete")
+	})
+	t.Run("a Create in flight past the deadline is unchanged", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := identityFixture(t, stub)
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{ID: "vm-1", TaskRef: "task-create"}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		reconcileN(t, r, req, 1)
+		r.clock = func() time.Time { return time.Now().Add(sentAttemptDeadline + time.Hour) }
+		reconcileN(t, r, req, 2)
+		vm := idVM(t, r)
+		assert.Equal(t, k8s.ReasonOperationInProgress, readyReason(vm))
+		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(vm, contracts.OperationKindCreate).Phase)
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 2)
+		assert.Nil(t, findAttempt(idVM(t, r), contracts.OperationKindDelete), "the Delete still waits for the Create")
+	})
+}

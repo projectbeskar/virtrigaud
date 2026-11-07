@@ -348,6 +348,14 @@ type VirtualMachineReconciler struct {
 	// condition was kept instead). In-process state, as the elected leader is
 	// the only reconciler; after a restart only the marker identifies it.
 	powerTasks sync.Map
+
+	// identityRepeat counts, per VM and operation kind, the consecutive
+	// power or Reconfigure attempts of a Provider that requires operation
+	// identity that followed a success of the same kind within
+	// repeatWindow (repeatStreakKey): the repeat gap doubles with it. In
+	// memory only, like the other pacing records: a restart only shortens a
+	// wait.
+	identityRepeat sync.Map
 	// preScheduleClean remembers, per VM UID and generation, a recent clean
 	// answer of the pre-schedule uniqueness check (ADR-0007 A6.2, R4), so a
 	// VM re-scheduled on its own backoff does not ask every host each time.
@@ -2630,6 +2638,7 @@ func (r *VirtualMachineReconciler) forgetPowerState(vm *infravirtrigaudiov1beta1
 	r.powerTasks.Delete(uid)
 	r.powerRetry.reset(uid)
 	r.reconfigureRetry.reset(uid)
+	r.forgetIdentityRepeats(vm)
 }
 
 // powerRetryWait returns how long the power operation of vm must still wait
