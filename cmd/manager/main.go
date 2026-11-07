@@ -208,8 +208,14 @@ func main() {
 	flag.StringVar(&devOperationSignerKeyFile, operation.DevSignerKeyFileFlagName, "",
 		"DEVELOPMENT ONLY. Path to a development operation-grant signer key file (a PEM file holding an ECDSA "+
 			"P-256 private key and an install id). Empty (the default) loads none. Honoured only by a manager built "+
-			"with the "+devgate.BuildTag+" build tag; a release build refuses to start when it is set. No "+
-			"controller uses the signer yet.")
+			"with the "+devgate.BuildTag+" build tag; a release build refuses to start when it is set. It signs "+
+			"the operations sent to Providers whose type requires operation identity.")
+	var devOperationEnrolmentFile string
+	flag.StringVar(&devOperationEnrolmentFile, operation.DevEnrolmentFileFlagName, "",
+		"DEVELOPMENT ONLY. Path to a development enrolment file (JSON: the epoch and, per Provider, each host's "+
+			"enrolment id) for Providers whose type requires operation identity. Empty (the default) loads none, and "+
+			"nothing is sent to such a Provider. Honoured only by a manager built with the "+devgate.BuildTag+
+			" build tag; a release build refuses to start when it is set.")
 	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
@@ -248,8 +254,8 @@ func main() {
 	// The development operation-grant signer, checked before anything else
 	// starts: a release build (no signer compiled in) refuses to start when
 	// the flag is set, and a development build refuses an unreadable or
-	// malformed key file. The signer is loaded only to fail fast; no
-	// controller sends signed operations yet. Key material is never logged.
+	// malformed key file. Key material is never logged. Only Providers whose
+	// spec.type requires operation identity use it.
 	devOperationSigner, err := operation.LoadSigner(devOperationSignerKeyFile)
 	if err != nil {
 		setupLog.Error(err, "invalid --"+operation.DevSignerKeyFileFlagName)
@@ -257,6 +263,16 @@ func main() {
 	}
 	if devOperationSigner != nil {
 		setupLog.Info("WARNING: a development operation-grant signer is loaded; this manager is not for production use")
+	}
+	// The development enrolment stand-in, refused by a release build like
+	// the signer.
+	devOperationEnrolments, err := operation.LoadEnrolments(devOperationEnrolmentFile)
+	if err != nil {
+		setupLog.Error(err, "invalid --"+operation.DevEnrolmentFileFlagName)
+		os.Exit(1)
+	}
+	if devOperationEnrolments != nil {
+		setupLog.Info("WARNING: a development operation-identity enrolment file is loaded; this manager is not for production use")
 	}
 
 	// The client rate limits, checked before the manager connects to the
@@ -418,7 +434,11 @@ func main() {
 	cbRegistry := resilience.NewRegistry(resilience.DefaultConfig())
 
 	// Create remote provider resolver (all providers are now remote)
-	remoteResolver := remote.NewResolver(mgr.GetClient(), cbRegistry)
+	var resolverOpts []remote.ResolverOption
+	if devOperationSigner != nil {
+		resolverOpts = append(resolverOpts, remote.WithOperationSigner(devOperationSigner))
+	}
+	remoteResolver := remote.NewResolver(mgr.GetClient(), cbRegistry, resolverOpts...)
 
 	// The CRD security-feature checker (see below) also gates image prepare:
 	// while the installed VMImage CRD verifiably cannot record per-Provider
@@ -433,6 +453,9 @@ func main() {
 		ImageCRDFeatures: vmCRDCheck,
 		APIReader:        mgr.GetAPIReader(),
 		MaxDiskSize:      maxDiskSizeLimit,
+		// Development builds only: enrolments of the hosts of Providers
+		// whose type requires operation identity (nil: none).
+		OperationEnrolments: devOperationEnrolments,
 	}
 	if err = vmReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
@@ -457,6 +480,7 @@ func main() {
 		TmpSizeLimitMax:         providerTmpSizeLimitMax,
 		Recorder:                mgr.GetEventRecorderFor("provider-controller"),
 		EnabledDevProviderTypes: enabledDevProviderTypes,
+		OperationSignerLoaded:   devOperationSigner != nil,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)

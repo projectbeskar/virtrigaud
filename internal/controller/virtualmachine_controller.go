@@ -52,6 +52,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
@@ -374,6 +375,16 @@ type VirtualMachineReconciler struct {
 	// that could not be read, per VM: from blockedRetryMin doubling to
 	// blockedRetryMax. Any answer of the provider resets it.
 	deleteTaskStatusRetry unschedulableBackoff
+
+	// OperationEnrolments returns the enrolment of a host of a Provider that
+	// requires operation identity (development builds only: the
+	// --dev-operation-enrolment-file stand-in). nil: no host has one, and
+	// nothing is sent to such a Provider. Every other Provider ignores it.
+	OperationEnrolments operation.EnrolmentSource
+	// operationCrashHook, set by tests only, stops a reconcile at an
+	// operation-identity crash point when it returns true, as if the
+	// manager died there (virtualmachine_operation_identity.go).
+	operationCrashHook func(ctx context.Context, point operationCrashPoint) bool
 }
 
 // now returns the reconciler's current time (clock, or time.Now).
@@ -445,6 +456,10 @@ func (r *VirtualMachineReconciler) reconcileBoundProvider(
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmplacementpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// The operation-intent Secrets of operation identity (operation_intent.go) are
+// created and deleted by the manager; RBAC cannot scope delete to them, so the
+// verb is granted alone (see docs/operation-grants-manager.md).
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
@@ -610,6 +625,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	runtimePhase, runtimeEndpoint := providerRuntimeState(provider)
 	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", runtimePhase, "endpoint", runtimeEndpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
+	if err != nil && stderrors.Is(err, operation.ErrNoSigner) && identityRequired(provider) {
+		// A Provider that requires operation identity, and no signer: nothing
+		// is ever sent to it (the resolver built no client).
+		logger.Info("The Provider requires operation identity and no operation signer is loaded; nothing is sent", "provider", provider.Name)
+		return r.holdOperationSignerUnavailable(ctx, vm), nil
+	}
 	if err != nil {
 		// The resolver's error names the TLS Secret, the provider Service's
 		// address and the runtime phase: it goes to the manager log only, and
@@ -622,6 +643,17 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 	logger.V(1).Info("Provider instance obtained successfully", "provider", provider.Name)
+
+	// A Provider that requires operation identity (its spec.type; development
+	// builds only): its advertised capabilities must match, a VM whose
+	// attempt markers were lost is held, and an attempt in flight is driven
+	// until it is over before anything else is sent. Every other Provider
+	// skips this entirely.
+	if identityRequired(provider) {
+		if res, handled, err := r.reconcileIdentityGate(ctx, vm, provider, providerInstance, vmClass); handled {
+			return res, err
+		}
+	}
 
 	// Provider validation is the Resolver's job: GetProvider validates each new
 	// connection, and validates again whenever the Provider's configuration
@@ -1121,6 +1153,17 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOwnDomainElsewhere)
 	}
 
+	// A VM whose operation attempts (recorded only for a Provider that
+	// requires operation identity) may have done something on a host, but
+	// that records no host any more (its pending host was cleared by hand),
+	// has nowhere to send a Delete: held, unless force-delete releases it.
+	if !vmIsBound(vm) && identityAttemptsNeedHost(vm) {
+		if force {
+			return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOperationHeld)
+		}
+		return r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgOperationStateLost, operationHoldRecheckInterval), nil
+	}
+
 	// Get provider if we have a provider ref and either a VM ID or a clustered
 	// create in flight (status.placement.pendingHost, ADR-0007 Addendum A, A2).
 	if vmIsBound(vm) && vm.Spec.ProviderRef.Name != "" {
@@ -1187,6 +1230,12 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				}
 				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftProviderUnavailable)
 			} else {
+				// A Provider that requires operation identity gets the
+				// Delete as a signed operation, recorded as an attempt
+				// marker; the finalizer is released only once it Succeeded.
+				if identityRequired(provider) {
+					return r.identityDelete(ctx, vm, provider, providerInstance, deleteRef(vm, ref), force)
+				}
 				// A Delete answered with a task that is still in flight is
 				// observed instead of sent again (virtualmachine_delete_task.go).
 				if res, handled, err := r.continueDeleteTask(ctx, vm, providerInstance, deleteRef(vm, ref), force); handled {
@@ -1911,6 +1960,13 @@ func (r *VirtualMachineReconciler) createVMOn(
 	// through a Provider being deleted (ADR-0010).
 	if res, held := r.holdIfProviderDeletingLive(ctx, vm, providerCR, !clustered, attempt); held {
 		return res, nil
+	}
+
+	// A Provider that requires operation identity gets the Create as a
+	// signed operation, recorded as an attempt marker before it is sent
+	// (instead of the unsigned Create below).
+	if clustered && identityRequired(providerCR) {
+		return r.startIdentityCreate(ctx, vm, providerCR, provider, vmClass, req)
 	}
 
 	// Create VM

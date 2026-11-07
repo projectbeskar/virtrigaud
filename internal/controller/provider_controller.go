@@ -212,6 +212,12 @@ type ProviderReconciler struct {
 	// never deployed or updated (refuseDisabledDevProviderType). Read only.
 	EnabledDevProviderTypes map[infravirtrigaudiov1beta1.ProviderType]struct{}
 
+	// OperationSignerLoaded reports whether the manager has an operation
+	// signer (development builds started with one; never a release build). A
+	// Provider whose type requires operation identity reports Ready=False
+	// without one. Read only.
+	OperationSignerLoaded bool
+
 	// tmpLimitWarned records, per Provider, the annotation value last
 	// announced by a TmpSizeLimitClamped event, so a clamp is announced once,
 	// not on every reconcile.
@@ -329,6 +335,13 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		if err == nil {
 			result = requeueNoLaterThan(result, after)
 		}
+	}
+
+	// The operation-intent Secrets of a Provider that requires operation
+	// identity that no attempt needs any more are removed (best effort; the
+	// next reconcile tries again).
+	if identityRequired(&provider) {
+		r.sweepOperationIntents(ctx, &provider)
 	}
 
 	if updateErr := r.writeProviderStatus(ctx, base, &provider); updateErr == nil {
@@ -506,6 +519,7 @@ func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, 
 	k8s.SetCondition(&provider.Status.Conditions,
 		providerConditionCapabilitiesReported, metav1.ConditionTrue,
 		providerReasonCapabilitiesFetched, "Provider capabilities reported", provider.Generation)
+	setOperationIdentityReadiness(provider, caps, r.OperationSignerLoaded)
 	return true
 }
 
