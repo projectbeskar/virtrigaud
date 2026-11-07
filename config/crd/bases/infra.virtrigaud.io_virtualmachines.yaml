@@ -887,6 +887,11 @@ spec:
                         issued for (status.placement.bindingID).
                       pattern: ^[0-9a-f]{32}$
                       type: string
+                    honest:
+                      description: |-
+                        Honest records, for a Reconfigure answered with a task, that the
+                        answer carried the honest-result marker. Covered by TaskTag.
+                      type: boolean
                     hostID:
                       description: HostID is the Host the attempt was sent to.
                       maxLength: 253
@@ -929,6 +934,7 @@ spec:
                       - Retired
                       - Cancelled
                       - Rejected
+                      - Superseded
                       type: string
                     outcomeReason:
                       description: |-
@@ -943,6 +949,12 @@ spec:
                       - Sent
                       - Terminal
                       type: string
+                    restartRequired:
+                      description: |-
+                        RestartRequired records, for a Reconfigure answered with a task, that
+                        the answer said the change applies at the next power cycle. Covered by
+                        TaskTag.
+                      type: boolean
                     taskRef:
                       description: |-
                         TaskRef is the Provider's task reference of an attempt it runs
@@ -953,8 +965,8 @@ spec:
                       description: |-
                         TaskTag binds TaskRef to this attempt: an HMAC-SHA256 tag (64 lowercase
                         hexadecimal characters) the operator computes over the attempt's opID,
-                        kind, attempt, the VM's UID and TaskRef with a key that never leaves the
-                        operator. A task reference whose tag does not verify, or that another
+                        kind, attempt, the VM's UID, TaskRef, Honest and RestartRequired with a
+                        key that never leaves the operator. A task reference whose tag does not verify, or that another
                         entry also names, is never polled or used to confirm an outcome.
                       pattern: ^[0-9a-f]{64}$
                       type: string

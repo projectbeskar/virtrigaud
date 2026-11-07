@@ -551,7 +551,7 @@ const (
 
 // OperationAttemptOutcome is the outcome of a terminal OperationAttempt, as
 // the Provider reported it (an unsigned claim).
-// +kubebuilder:validation:Enum=Succeeded;FailedClean;FailedDirty;Retired;Cancelled;Rejected
+// +kubebuilder:validation:Enum=Succeeded;FailedClean;FailedDirty;Retired;Cancelled;Rejected;Superseded
 type OperationAttemptOutcome string
 
 const (
@@ -572,6 +572,12 @@ const (
 	// OperationAttemptOutcomeRejected: the host refused its first delivery
 	// before accepting it, with a reason that proves it was not performed.
 	OperationAttemptOutcomeRejected OperationAttemptOutcome = "Rejected"
+	// OperationAttemptOutcomeSuperseded: a power or Reconfigure attempt that
+	// was held (its outcome cannot be learned) when the VM was deleted, ended
+	// by the operator so the VM's Delete could be sent. What it did on the
+	// host is unknown; its intent Secret is kept as evidence while the VM
+	// exists.
+	OperationAttemptOutcomeSuperseded OperationAttemptOutcome = "Superseded"
 )
 
 // OperationAttempt is the operator's durable record of one attempt of one
@@ -624,12 +630,23 @@ type OperationAttempt struct {
 
 	// TaskTag binds TaskRef to this attempt: an HMAC-SHA256 tag (64 lowercase
 	// hexadecimal characters) the operator computes over the attempt's opID,
-	// kind, attempt, the VM's UID and TaskRef with a key that never leaves the
-	// operator. A task reference whose tag does not verify, or that another
+	// kind, attempt, the VM's UID, TaskRef, Honest and RestartRequired with a
+	// key that never leaves the operator. A task reference whose tag does not verify, or that another
 	// entry also names, is never polled or used to confirm an outcome.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
 	TaskTag string `json:"taskTag,omitempty"`
+
+	// Honest records, for a Reconfigure answered with a task, that the
+	// answer carried the honest-result marker. Covered by TaskTag.
+	// +optional
+	Honest bool `json:"honest,omitempty"`
+
+	// RestartRequired records, for a Reconfigure answered with a task, that
+	// the answer said the change applies at the next power cycle. Covered by
+	// TaskTag.
+	// +optional
+	RestartRequired bool `json:"restartRequired,omitempty"`
 
 	// ID is the provider's VM identifier an asynchronous Create answered,
 	// recorded with phase Sent; it becomes status.id once the attempt
