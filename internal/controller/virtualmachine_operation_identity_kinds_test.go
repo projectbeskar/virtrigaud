@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -887,7 +888,9 @@ func TestIdentity_AcknowledgeFailedDirty(t *testing.T) {
 			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded}, nil
 		}
 		stub.describeResp.PowerState = "Off"
-		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		})
 		reconcileN(t, r, req, 3)
 		require.Equal(t, k8s.ReasonOperationFailedDirty, readyReason(idVM(t, r)))
 		first := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
@@ -932,4 +935,58 @@ func TestIdentity_AcknowledgeFailedDirty(t *testing.T) {
 		assert.Equal(t, c.OpID, vm.Annotations[acknowledgeOperationAnnotation], "not consumed")
 		assert.Len(t, stub.sent(), 1)
 	})
+}
+
+// The gap after a power or Reconfigure attempt that Succeeded doubles with
+// each attempt of the kind (15 s to 5 min), and a lastTransitionTime in the
+// future never makes it longer than the maximum.
+func TestAttemptRetryWait_DoublesAndClamps(t *testing.T) {
+	now := time.Now()
+	at := func(attempt int64, last time.Time) *infravirtrigaudiov1beta1.OperationAttempt {
+		return &infravirtrigaudiov1beta1.OperationAttempt{Attempt: attempt, LastTransitionTime: metav1.NewTime(last)}
+	}
+	assert.Equal(t, 15*time.Second, attemptRetryWait(at(1, now), now))
+	assert.Equal(t, 30*time.Second, attemptRetryWait(at(2, now), now))
+	assert.Equal(t, 60*time.Second, attemptRetryWait(at(3, now), now))
+	assert.Equal(t, blockedRetryMax, attemptRetryWait(at(20, now), now))
+	assert.Zero(t, attemptRetryWait(at(20, now.Add(-time.Hour)), now), "long after the last attempt, no wait")
+	assert.Equal(t, blockedRetryMax, attemptRetryWait(at(20, now.Add(1000*time.Hour)), now), "a future timestamp counts as now")
+	assert.Equal(t, 15*time.Second, attemptRetryWait(at(1, now.Add(1000*time.Hour)), now))
+}
+
+// A power attempt's send that meets an unavailable host, or a VM missing on
+// (or not owned by) its host, is held as the unsigned path holds it; the same
+// attempt is re-sent later with the same op_id.
+func TestIdentityPower_HostLevelSendAnswers(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		reason string
+	}{
+		"host unavailable": {contracts.NewHostUnavailableError("host down", nil), k8s.ReasonHostUnavailable},
+		"VM not found":     {contracts.NewNotFoundError("no such VM", nil), k8s.ReasonVMMissingOnHost},
+		"VM not owned":     {contracts.NewNotFoundError("not this VM's", contracts.ErrVMNotOwned), k8s.ReasonVMMissingOnHost},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newIdentityStub()
+			r, req := createdIdentityVM(t, stub)
+			stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+				return contracts.OperationAnswer{}, tc.err
+			}
+			stub.describeResp.PowerState = "Off"
+			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+				vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+			})
+			res := reconcileN(t, r, req, 1)
+			vm := idVM(t, r)
+			assert.Equal(t, tc.reason, readyReason(vm))
+			assert.Greater(t, res.RequeueAfter, blockedRetryMin, "not the 15 s cadence")
+			a := findAttempt(vm, contracts.OperationKindPowerOn)
+			require.NotNil(t, a)
+			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, a.Phase, "the attempt stays, to be re-sent")
+			reconcileN(t, r, req, 1)
+			sends := stub.sent()
+			require.Len(t, sends, 3)
+			assert.Equal(t, sends[1].Identity.OpID, sends[2].Identity.OpID)
+		})
+	}
 }

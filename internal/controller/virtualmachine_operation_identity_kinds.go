@@ -51,7 +51,8 @@ import (
 // then decided from the VM's state at that time.
 
 // repeatGap is the least time between a power or Reconfigure attempt that
-// Succeeded and the next attempt of the same kind for the same VM.
+// Succeeded and the next attempt of the same kind for the same VM; it doubles
+// with each attempt of the kind that follows quickly (attemptRetryWait).
 const repeatGap = blockedRetryMin
 
 // repeatableKind reports whether kind may be asked for again after an

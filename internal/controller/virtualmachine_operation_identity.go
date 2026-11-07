@@ -237,13 +237,24 @@ func controllerutilContains(list []string, v string) bool {
 // attemptRetryWait is how long after a not-performed attempt a's terminal
 // transition the next attempt waits: blockedRetryMin doubling per attempt,
 // at most blockedRetryMax.
+//
+// The same wait spaces a power or Reconfigure attempt after one of its kind
+// that Succeeded, so attempts that follow each other quickly (a guest that
+// powers itself off again, a Provider whose Describe lags) back off to the
+// maximum; one that follows long after the last waits not at all. A
+// lastTransitionTime in the future (an edited status) counts as now, so the
+// wait never exceeds blockedRetryMax.
 func attemptRetryWait(a *infravirtrigaudiov1beta1.OperationAttempt, now time.Time) time.Duration {
 	wait := blockedRetryMin
 	for i := int64(1); i < a.Attempt && wait < blockedRetryMax; i++ {
 		wait *= 2
 	}
 	wait = min(wait, blockedRetryMax)
-	return max(wait-now.Sub(a.LastTransitionTime.Time), 0)
+	since := now.Sub(a.LastTransitionTime.Time)
+	if since < 0 {
+		since = 0
+	}
+	return min(max(wait-since, 0), blockedRetryMax)
 }
 
 // identityStatusWrite is one write of operation-identity status fields:
@@ -562,9 +573,11 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 		case prev.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded && repeatableKind(opReq.Kind):
 			// A power operation or a Reconfigure may be asked for again once
 			// the last one Succeeded (the VM changed since), but not sooner
-			// than repeatGap after it, so a Provider whose Describe lags its
-			// task cannot drive a loop of new attempts.
-			if wait := repeatGap - r.now().Sub(prev.LastTransitionTime.Time); wait > 0 {
+			// than repeatGap after it, doubling with each attempt of the
+			// kind (attemptRetryWait), so a guest that powers itself off, or
+			// a Provider whose Describe lags its task, cannot drive a fast
+			// loop of new attempts.
+			if wait := attemptRetryWait(prev, r.now()); wait > 0 {
 				return stepWaiting, ctrl.Result{RequeueAfter: wait}, nil
 			}
 		default:
@@ -925,6 +938,28 @@ func (r *VirtualMachineReconciler) sendFailed(ctx context.Context, vm *infravirt
 		// The host reports no such VM (or one it does not own): that does
 		// not confirm the Delete (deleteAbsentHolds).
 		return r.deleteAbsent(ctx, vm, ia, a)
+	case repeatableKind(contracts.OperationKind(a.Kind)) && !definiteRejection(err) && redeliveryRefusal(err) == "":
+		// A power operation or Reconfigure meets the host-level answers the
+		// unsigned path handles: an unavailable host, a VM missing on its
+		// host or not this VM's, an owner that cannot be told. The attempt
+		// stays as it is and is re-sent with the same op_id when the hold
+		// is re-checked.
+		ref := contracts.VMRef{ID: vm.Status.ID, HostID: a.HostID, Owner: vmOwnerIdentity(vm)}
+		errReason := errReasonProviderPower
+		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+			errReason = errReasonProviderReconfigure
+		}
+		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReason); handled {
+			return stepHeld, res, nil
+		}
+		if res, held := r.holdOwnerRefusal(ctx, vm, ref, err, string(a.Kind)); held {
+			return stepHeld, res, nil
+		}
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
+			fmt.Sprintf("%s attempt %d was not accepted; it is re-sent with the same identity: %s", a.Kind, a.Attempt, providerFailureDetail(err)),
+			vm.Generation)
+		r.updateStatus(ctx, vm)
+		return stepWaiting, ctrl.Result{RequeueAfter: max(blockedRetryMin, routedCallRetryAfter(ref, err))}, nil
 	case definiteRejection(err) && first:
 		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeRejected, rejectionReason(err), "")
 	case redeliveryRefusal(err) != "":
