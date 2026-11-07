@@ -139,6 +139,21 @@ func (e *identityEnv) settledVM(ctx context.Context, name string, initial infrav
 	return key
 }
 
+// forgeIntent replaces the intent Secret of attempt a (immutable: delete and
+// re-create) with one whose request bytes were changed.
+func (e *identityEnv) forgeIntent(ctx context.Context, a *infravirtrigaudiov1beta1.OperationAttempt) {
+	secret := &corev1.Secret{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: e.ns, Name: intentSecretName(a.OpID)}, secret)).To(Succeed())
+	forged := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secret.Name, Namespace: secret.Namespace, Labels: secret.Labels,
+		Annotations: secret.Annotations, OwnerReferences: secret.OwnerReferences}, Type: secret.Type, Data: map[string][]byte{}}
+	for k, v := range secret.Data {
+		forged.Data[k] = append([]byte(nil), v...)
+	}
+	forged.Data[intentKeyRequest] = append(forged.Data[intentKeyRequest], 0x01)
+	Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+	Expect(k8sClient.Create(ctx, forged)).To(Succeed())
+}
+
 var _ = Describe("Operation identity: power, Reconfigure and serialisation against the instrumented fake (envtest, development build)", func() {
 	ctx := context.Background()
 
@@ -272,6 +287,72 @@ var _ = Describe("Operation identity: power, Reconfigure and serialisation again
 		}, "2s", "100ms").Should(BeZero(), "no Delete while the power-off is in flight")
 		e.waitDeleted(ctx, key)
 		Expect(e.target.AcceptedOperations(providerv1.OperationKind_OPERATION_KIND_DELETE)).To(Equal(1))
+	})
+
+	It("lets the Delete supersede a held PowerOn, sends the signed Delete, and releases only once it is confirmed", func() {
+		e := newIdentityEnv(ctx)
+		key := e.settledVM(ctx, "supersede", infravirtrigaudiov1beta1.PowerStateOff)
+		crashed := make(chan struct{})
+		stop := e.startManager(ctx, crashAt(crashAfterPrepared, contracts.OperationKindPowerOn, crashed))
+		e.patchVM(ctx, key, kindPowerOn.ask)
+		Eventually(crashed, "30s").Should(BeClosed())
+		stop()
+		held := findAttempt(getIdentityVM(ctx, Default, key), contracts.OperationKindPowerOn)
+		Expect(held).NotTo(BeNil())
+		e.forgeIntent(ctx, held)
+
+		e.startManager(ctx, nil)
+		Eventually(func(g Gomega) {
+			g.Expect(readyReasonOf(ctx, g, key)).To(Equal(k8s.ReasonOperationIntentTampered))
+		}, "30s", "100ms").Should(Succeed(), "the PowerOn is held")
+		Expect(k8sClient.Delete(ctx, getIdentityVM(ctx, Default, key))).To(Succeed())
+
+		Eventually(func(g Gomega) {
+			vm := getIdentityVM(ctx, g, key)
+			p := findAttempt(vm, contracts.OperationKindPowerOn)
+			g.Expect(p.Outcome).To(Equal(infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded))
+			d := findAttempt(vm, contracts.OperationKindDelete)
+			g.Expect(d).NotTo(BeNil())
+			g.Expect(d.Phase).To(Equal(infravirtrigaudiov1beta1.OperationAttemptPhaseSent))
+		}, "30s", "100ms").Should(Succeed())
+		Expect(e.delivered(providerv1.Provider_Delete_FullMethodName)).To(BeNumerically(">=", 1), "the Delete is signed and sent")
+		Consistently(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, key, &infravirtrigaudiov1beta1.VirtualMachine{})).To(Succeed())
+		}, "1s", "100ms").Should(Succeed(), "not released before the Delete is confirmed")
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: e.ns, Name: intentSecretName(held.OpID)}, &corev1.Secret{})).To(Succeed(),
+			"the superseded attempt's intent Secret is kept")
+
+		Eventually(func(g Gomega) {
+			g.Expect(e.target.FinishTasks()).To(Succeed())
+			err := k8sClient.Get(ctx, key, &infravirtrigaudiov1beta1.VirtualMachine{})
+			g.Expect(err).To(HaveOccurred())
+		}, "30s", "100ms").Should(Succeed(), "released once the Delete is confirmed")
+		Expect(e.target.AcceptedOperations(providerv1.OperationKind_OPERATION_KIND_DELETE)).To(Equal(1))
+		Expect(e.target.AcceptedOperations(providerv1.OperationKind_OPERATION_KIND_POWER_ON)).To(BeZero())
+	})
+
+	It("keeps a deleted VM whose Create is held: a Create is never superseded", func() {
+		e := newIdentityEnv(ctx)
+		crashed := make(chan struct{})
+		stop := e.startManager(ctx, crashAt(crashAfterPrepared, contracts.OperationKindCreate, crashed))
+		key := e.createVM(ctx, "held-create")
+		Eventually(crashed, "30s").Should(BeClosed())
+		stop()
+		c := findAttempt(getIdentityVM(ctx, Default, key), contracts.OperationKindCreate)
+		Expect(c).NotTo(BeNil())
+		e.forgeIntent(ctx, c)
+
+		e.startManager(ctx, nil)
+		Eventually(func(g Gomega) {
+			g.Expect(readyReasonOf(ctx, g, key)).To(Equal(k8s.ReasonOperationIntentTampered))
+		}, "30s", "100ms").Should(Succeed())
+		Expect(k8sClient.Delete(ctx, getIdentityVM(ctx, Default, key))).To(Succeed())
+		Consistently(func(g Gomega) {
+			vm := getIdentityVM(ctx, g, key)
+			g.Expect(findAttempt(vm, contracts.OperationKindCreate).Phase).To(Equal(infravirtrigaudiov1beta1.OperationAttemptPhasePrepared))
+			g.Expect(findAttempt(vm, contracts.OperationKindDelete)).To(BeNil())
+		}, "2s", "100ms").Should(Succeed(), "held as before")
+		Expect(e.delivered(providerv1.Provider_Delete_FullMethodName)).To(BeZero())
 	})
 
 	It("holds a power intent tampered with after Prepared, and sends nothing", func() {
