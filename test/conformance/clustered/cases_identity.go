@@ -174,7 +174,7 @@ func identityCases() []Case {
 		}),
 		idCase(Case{
 			ID:     "identity.wrong-kind-refused",
-			Rule:   "an authentic grant whose operation kind does not fit the call (another PowerRequest.op, or another RPC) is refused with GRANT_MISMATCH, and nothing is performed",
+			Rule:   "an authentic grant whose operation kind does not fit the call (another PowerRequest.op, including REBOOT against SHUTDOWN_GRACEFUL, or another RPC) is refused with GRANT_MISMATCH, and nothing is performed",
 			Source: "provider.proto OperationKind (each kind names exactly one RPC, its request type and, for Power, the op); contracts.GrantMismatchReason",
 			Run: func(e *Env) {
 				vm := seedStopped(e, e.HostA(), "id-kind")
@@ -190,6 +190,18 @@ func identityCases() []Case {
 				g = e.Resign(on, func(b *providerv1.GrantBody) { b.Kind = providerv1.OperationKind_OPERATION_KIND_REBOOT })
 				_, err = e.SendEnvelope(power, &providerv1.OperationEnvelope{Request: on.Request, Grant: g}, nil)
 				requireRefusedWith(e, err, contracts.GrantMismatchReason, "a REBOOT grant on a POWER_ON request")
+
+				// REBOOT and SHUTDOWN_GRACEFUL are bound to their own op: each
+				// grant over the other's request is refused.
+				shutdown := e.NewOp(providerv1.OperationKind_OPERATION_KIND_SHUTDOWN_GRACEFUL, vm.Host,
+					powerReq(vm, providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL))
+				g = e.Resign(shutdown, func(b *providerv1.GrantBody) { b.Kind = providerv1.OperationKind_OPERATION_KIND_REBOOT })
+				_, err = e.SendEnvelope(power, &providerv1.OperationEnvelope{Request: shutdown.Request, Grant: g}, nil)
+				requireRefusedWith(e, err, contracts.GrantMismatchReason, "a REBOOT grant on a SHUTDOWN_GRACEFUL request")
+				reboot := e.NewOp(providerv1.OperationKind_OPERATION_KIND_REBOOT, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_REBOOT))
+				g = e.Resign(reboot, func(b *providerv1.GrantBody) { b.Kind = providerv1.OperationKind_OPERATION_KIND_SHUTDOWN_GRACEFUL })
+				_, err = e.SendEnvelope(power, &providerv1.OperationEnvelope{Request: reboot.Request, Grant: g}, nil)
+				requireRefusedWith(e, err, contracts.GrantMismatchReason, "a SHUTDOWN_GRACEFUL grant on a REBOOT request")
 
 				// A DELETE grant sent on Power.
 				g = e.Resign(on, func(b *providerv1.GrantBody) { b.Kind = providerv1.OperationKind_OPERATION_KIND_DELETE })
