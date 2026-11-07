@@ -230,11 +230,14 @@ new attempt once this one is over.
 
 A power operation or `Reconfigure` can be asked for again after one `Succeeded` (the VM's
 state or spec changed since); the next attempt of the same kind gets a new `op_id` and the
-next attempt number, after a wait that starts at 15 seconds and doubles with each attempt
-of the kind (at most 5 minutes), measured from the end of the previous one. So a guest that
-powers itself off again, or a Provider whose Describe lags its task, cannot drive a fast
-loop of attempts, while a request long after the last one waits not at all. A
-`lastTransitionTime` in the future counts as now. A `Create` or a `Delete` that
+next attempt number, after a wait measured from the end of the previous one. The wait is
+15 seconds, and doubles (at most 5 minutes) with each consecutive success of the kind that a
+new attempt follows within 10 minutes; a request more than 10 minutes after the last success
+waits not at all and starts the doubling again. The kinds are counted apart, so asking for
+another power state starts its own count. So a guest that powers itself off again, or a
+Provider whose Describe lags its task, cannot drive a fast loop of attempts. The count is
+kept in the manager's memory, like its other pacing records: a manager restart only
+shortens a wait. A `lastTransitionTime` in the future counts as now. A `Create` or a `Delete` that
 `Succeeded` is never sent again.
 
 A power or Reconfigure send that meets an unavailable host, a VM missing on its host or not
@@ -261,6 +264,12 @@ waits for it and is then the next attempt. Not-performed outcomes and their back
 per kind: while a power attempt waits out its backoff, the reconcile does not move on to
 the size.
 
+**A deadline on running power and Reconfigure attempts.** A `Sent` power or Reconfigure
+attempt that its host keeps reporting running for more than one hour, measured from its
+`Sent` transition (a `lastTransitionTime` in the future counts as now), is held as
+`OperationOutcomeUnknown`: it is still asked about, and a Delete of the VM supersedes it
+(below). A `Create` or `Delete` attempt has no such deadline.
+
 **A Delete supersedes a held power or Reconfigure attempt.** An attempt in flight whose
 outcome the controller cannot learn would otherwise block the VM's Delete for ever, and the
 only ways out (orphan-on-delete, force-delete) leave the VM on its host. So, for a VM being
@@ -275,6 +284,7 @@ VM. Nothing else supersedes a held attempt:
 
 - a held or in-flight `Create` is never superseded: the Delete needs the VM's id, and a
   Create that may still run could create the VM after the Delete;
+- a `Delete` is never superseded;
 - a `PowerOff` or `ShutdownGraceful` never supersedes a held `PowerOn` or `Reboot`: the
   held operation could still run on the host after the power-off and leave the VM on while
   the operator reports it off. The held attempt keeps blocking power changes; deleting the
@@ -519,6 +529,60 @@ attempt:
 | `OperationDeleteUnconfirmed` | The VM is being deleted and its host answers that there is no such VM, or its Provider is gone (see above). The same attempt is re-sent every 5 minutes. | Operator. |
 | `OperationIdentityUnsupported` | An operation with no signed path was asked of the VM (an image prepare; a snapshot revert shows on `SnapshotReverted`). Nothing is sent. | Remove the request (for example use an imported disk instead of an image), or use another Provider. |
 
+**Who can acknowledge.** The `virtrigaud.io/acknowledge-operation` annotation is part of
+the VirtualMachine's metadata: anyone allowed to update the VirtualMachine can set it,
+including a tenant whose VM runs on a Provider in another namespace (a consumer of a shared
+Provider). It names one attempt's exact op_id and only ends a `FailedDirty` hold of a power
+or Reconfigure attempt, but it is an operator decision, so restrict it. A
+ValidatingAdmissionPolicy can allow only a group of operators to set or change it (removing
+it, as the manager does, stays allowed):
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: virtrigaud-acknowledge-operation
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["infra.virtrigaud.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["virtualmachines"]
+  variables:
+    - name: key
+      expression: "'virtrigaud.io/acknowledge-operation'"
+    - name: newValue
+      expression: >-
+        has(object.metadata.annotations) && variables.key in object.metadata.annotations
+        ? object.metadata.annotations[variables.key] : ''
+    - name: oldValue
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations) && variables.key in oldObject.metadata.annotations
+        ? oldObject.metadata.annotations[variables.key] : ''
+  validations:
+    - expression: >-
+        variables.newValue == '' || variables.newValue == variables.oldValue ||
+        'virtrigaud:operation-acknowledgers' in request.userInfo.groups
+      message: "only members of virtrigaud:operation-acknowledgers may set virtrigaud.io/acknowledge-operation"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: virtrigaud-acknowledge-operation
+spec:
+  policyName: virtrigaud-acknowledge-operation
+  validationActions: ["Deny"]
+```
+
+Adapt the group to your operators and bind the policy to the namespaces that run VMs of
+Providers that require operation identity. The policy was checked with
+`kubectl apply --dry-run=client` and `--dry-run=server` against an ephemeral local test API
+server, which also denied the annotation to a user outside the group and allowed it to one
+inside it and its removal.
+
 "Operator" means: there is no retire, cancel or resolve path yet, so the controller cannot
 learn what happened on the host. Check the host by hand, then release the VirtualMachine
 with `virtrigaud.io/orphan-on-delete=true` (leave whatever is on the host) or
@@ -542,8 +606,11 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
 - Only the seven VM lifecycle kinds are sent as signed operations; snapshots, clones,
   image prepares, migrations and adoption are refused locally for a Provider that
   requires operation identity. No VirtualMachine field asks for a `Reboot` yet.
-- A held power attempt blocks later power changes of the VM (only a Delete supersedes it);
-  a task that the host keeps reporting as running blocks the VM, the Delete included.
+- A held power attempt blocks later power changes of the VM (only a Delete supersedes it).
+  A task that the host keeps reporting as running blocks the VM, the Delete included, for
+  up to one hour for a power or Reconfigure attempt; a Create's has no deadline.
+- The acknowledgement annotation is restricted by RBAC on VirtualMachines only; restrict it
+  further with an admission policy (above).
 - A superseded attempt's outcome stays unknown: if it still runs on the host after the
   Delete, only the host's own de-duplication by VM and binding stops it.
 - A Provider's typed outcomes and refusal reasons are unsigned claims: a Provider that
