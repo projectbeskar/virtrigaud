@@ -354,7 +354,10 @@ func (p *provider) remember(host string, hs *hostState, adm *admission, resp pro
 	rec := &opRecord{
 		kind: b.GetKind(), vmUID: b.GetVmUid(), attempt: b.GetAttempt(),
 		digest: append([]byte(nil), b.GetIntentDigest()...), bindingID: append([]byte(nil), b.GetBindingId()...),
-		mintEpoch: proto.Clone(b.GetMintEpoch()).(*providerv1.Epoch), resp: proto.Clone(resp),
+		resp: proto.Clone(resp),
+	}
+	if m := b.GetMintEpoch(); m != nil {
+		rec.mintEpoch = &providerv1.Epoch{Counter: m.GetCounter(), Holder: append([]byte(nil), m.GetHolder()...)}
 	}
 	if ref := task.GetId(); ref != "" {
 		rec.task = opTaskPrefix + adm.opID

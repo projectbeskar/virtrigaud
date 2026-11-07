@@ -147,8 +147,10 @@ func identityCases() []Case {
 				body := &providerv1.GrantBody{}
 				require.NoError(e.T, proto.Unmarshal(g.GetBody(), body))
 				body.Attempt++
-				g.Body, _ = proto.MarshalOptions{Deterministic: true}.Marshal(body)
-				_, err := e.SendEnvelope(power, &providerv1.OperationEnvelope{Request: op.Request, Grant: g}, nil)
+				changed, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
+				require.NoError(e.T, err)
+				g.Body = changed
+				_, err = e.SendEnvelope(power, &providerv1.OperationEnvelope{Request: op.Request, Grant: g}, nil)
 				requireRefusedWith(e, err, contracts.GrantUnauthenticatedReason, "a body changed after signing")
 
 				// Another grant's signature.
@@ -204,14 +206,16 @@ func identityCases() []Case {
 			Run: func(e *Env) {
 				vm := seedStopped(e, e.HostA(), "id-outer")
 				op := e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON))
-				for name, set := range map[string]func(proto.Message){
-					"target_host_id": func(m proto.Message) { m.(*providerv1.PowerRequest).TargetHostId = vm.Host },
-					"id and op": func(m proto.Message) {
-						r := m.(*providerv1.PowerRequest)
-						r.Id, r.Op = vm.ID, providerv1.PowerOp_POWER_OP_ON
-					},
-					"owner": func(m proto.Message) { m.(*providerv1.PowerRequest).Owner = OwnerA.Proto() },
+				for name, set := range map[string]func(*providerv1.PowerRequest){
+					"target_host_id": func(r *providerv1.PowerRequest) { r.TargetHostId = vm.Host },
+					"id and op":      func(r *providerv1.PowerRequest) { r.Id, r.Op = vm.ID, providerv1.PowerOp_POWER_OP_ON },
+					"owner":          func(r *providerv1.PowerRequest) { r.Owner = OwnerA.Proto() },
 				} {
+					set := func(m proto.Message) {
+						r, ok := m.(*providerv1.PowerRequest)
+						require.True(e.T, ok, "the outer request of Power is a PowerRequest")
+						set(r)
+					}
 					_, err := e.SendEnvelope(providerv1.Provider_Power_FullMethodName, e.Envelope(op), set)
 					requireCode(e, err, codes.InvalidArgument, "outer "+name+" beside the envelope")
 				}
@@ -369,7 +373,7 @@ func identityCases() []Case {
 			Source: srcOutcomes + " (RETIRED: \"done=true, error=not performed: RETIRED{<outcome_reason>}\")",
 			Run: func(e *Env) {
 				vm := seedStopped(e, e.HostA(), "id-retired")
-				require.NoError(e.T, e.Target.(OutcomeScripter).ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_RETIRED, "never_received"))
+				e.ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_RETIRED, "never_received")
 				a, err := e.SendSigned(e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON)))
 				require.NoError(e.T, err)
 				require.NotEmpty(e.T, a.TaskRef)
@@ -392,7 +396,7 @@ func identityCases() []Case {
 			Source: srcOutcomes + " (UNKNOWN: \"Not terminal: the VM is held, and the task is never read as done\")",
 			Run: func(e *Env) {
 				vm := seedStopped(e, e.HostA(), "id-unknown")
-				require.NoError(e.T, e.Target.(OutcomeScripter).ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_UNKNOWN, "host_lost_record"))
+				e.ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_UNKNOWN, "host_lost_record")
 				a, err := e.SendSigned(e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON)))
 				require.NoError(e.T, err)
 				require.NotEmpty(e.T, a.TaskRef)
@@ -414,7 +418,7 @@ func identityCases() []Case {
 			Source: srcOutcomes + " (FAILED_DIRTY: \"something may have happened, and the VM is held\")",
 			Run: func(e *Env) {
 				vm := seedStopped(e, e.HostA(), "id-dirty")
-				require.NoError(e.T, e.Target.(OutcomeScripter).ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY, "disk_half_written"))
+				e.ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY, "disk_half_written")
 				a, err := e.SendSigned(e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON)))
 				require.NoError(e.T, err)
 				require.NotEmpty(e.T, a.TaskRef)

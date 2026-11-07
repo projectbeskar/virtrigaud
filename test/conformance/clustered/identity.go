@@ -192,6 +192,15 @@ func (e *Env) SendEnvelope(fullMethod string, env *providerv1.OperationEnvelope,
 	return SignedAnswer{}, nil
 }
 
+// ScriptOutcome makes the next operation host accepts end with outcome
+// (OutcomeScripter). Only a case that needs FeatureScriptedOutcomes calls it.
+func (e *Env) ScriptOutcome(host string, outcome providerv1.TaskOutcome, reason string) {
+	e.T.Helper()
+	sc, ok := e.Target.(OutcomeScripter)
+	require.True(e.T, ok, "the target offers scripted outcomes, so it implements OutcomeScripter")
+	require.NoError(e.T, sc.ScriptOutcome(host, outcome, reason))
+}
+
 // FinishTasks completes the Target's tasks, when it has a TaskController.
 func (e *Env) FinishTasks() {
 	e.T.Helper()
