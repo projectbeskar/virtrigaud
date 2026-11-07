@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-07 23:55] - Durable operation store library for a per-host agent (not used by any binary yet)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/journal`: the durable journal of a per-host agent's operation store. A bbolt store opened with full fsync (unsynchronised options are refused), a hash chain inside it (every write transaction is one chain step, counting from 1, over the exact bytes written), a separately fsynced append-only anchor log written after each commit and before the commit returns, chain checkpoints, and a schema with a minimum reader version (a store that needs a newer reader refuses to open and names the version). At open, before any commit, it verifies the chain and compares the store with the anchor log under a tail rule: a store behind its anchor is `rolled_back`, more than one ahead or diverging is `inconsistent_store`, a missing store or anchor is `journal_missing` or `anchor_missing`, an invalid anchor record before the last is `anchor_corrupt`; exactly one unacknowledged commit is accepted and re-anchored, and a torn last anchor record is cut off. A lost store refuses commits and serves reads; the loss is recorded durably in a quarantine marker file, the anchor log and, when writable, the store. A failed fsync quarantines and is never retried. Migrations run only after continuity is established. `journal.FS` is the fault-injection interface for every file other than the bbolt store; `journaltest` provides an in-memory implementation that drops unsynchronised data on a simulated crash.
+- `internal/agent/journal/journalpb/journal.proto` and generated code: the internal record schema (not part of the public proto module, never on a wire); `make proto-agent-journal` lints and regenerates it.
+- `internal/agent/opstore`: operation records, op_id tombstones, VM records, attempt marks and VM tombstones kept for the life of the enrolment; O_EXCL witness files made durable before a once step's effect and never removed while the enrolment lasts; the admission decision table (dedup by op_id with every identity field and the intent digest, VM busy, binding check, attempts that only increase, the first-delivery mint epoch rule, a size threshold); the step journal (intent, witness, effect, done, then one terminal transaction with the tombstone, the VM update and, for a completed Delete, the VM tombstone); per-kind step deadlines resolved by inspection; the recovery classifier (`Classify`), which never runs a once or irreversible step twice and answers OutcomeUnknown when the evidence cannot decide; payload-only compaction; the re-enrolment freeze and its confirmation. No request bytes are stored, journalled or audited.
+- `internal/agent/executor`: the executor interface (steps with an idempotent, once or irreversible class, launch-identity inspection, goal check). No implementation.
+- `internal/agent/importboundary_test.go`: nothing under `internal/agent` links Kubernetes, controller-runtime, the API types, the controllers or the provider contract package.
+- `go.mod`: `go.etcd.io/bbolt` v1.4.3 as a direct dependency (checked with govulncheck and the OSV database: no known vulnerabilities); `github.com/spf13/pflag` (indirect) moves from v1.0.5 to v1.0.6, the minimum bbolt v1.4.3 requires.
+- `hack/agent-mutation.sh`, `Makefile`: `make test-agent-mutation` switches off each safety guard of the store in a `virtrigaud_mutation` test build and fails if no test notices; `make test-agent-model-long` runs the reference-model test for 10 million seeds; `make fuzz-agent` runs the fuzz targets.
+- Tests: crash points across admission, steps, terminal writes, compaction, anchor rotation and re-enrolment with a fault-injecting file system and commit hooks (one effect, the terminal answer, the tombstone and a verifying chain after recovery); every rollback-detection case, including the documented undetectable joint restore; quarantine durability under injected fsync and commit errors; one test per admission row and twelve concurrent duplicates producing one record and one effect; the recovery table; compaction and the freeze; a redaction canary over the store, the anchor log, witnesses, markers and audit events; a reference-model test with 100000 seeded runs in the normal test run (10000 with `-short`); fuzz targets for anchor parsing and record decoding; benchmarks (report only).
+
+### Why
+A per-host agent must execute each signed operation at most once and answer for it truthfully across crashes, restarts and storage faults. This library is that store, built and tested on its own before any agent binary or wire change uses it. The package documentation states its guarantees and its limits: in particular, a simultaneous restore of both the store and its anchor log is undetectable on the host alone.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-07 17:30] - Signed power and Reconfigure, one attempt at a time, a Delete that supersedes held attempts, and the identity Delete rule for Providers that require operation identity (development builds only)
 **Author:** @wrkode (William Rizzo)
 
