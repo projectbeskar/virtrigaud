@@ -72,3 +72,15 @@ func TestTaskMessage_SeparatedFromIntents(t *testing.T) {
 	assert.False(t, bytes.HasPrefix([]byte(TaskAuthContext), []byte(IntentAuthContext)))
 	assert.False(t, bytes.HasPrefix([]byte(IntentAuthContext), []byte(TaskAuthContext)))
 }
+
+// The task prefix is versioned: a message framed under the earlier prefix
+// never equals one under the current prefix, and the prefixes do not extend
+// each other.
+func TestTaskMessage_VersionedPrefix(t *testing.T) {
+	f := [][]byte{[]byte("a"), []byte("b")}
+	assert.NotEqual(t, framedMessage(taskAuthContextV1, f), TaskMessage(f...))
+	assert.NotEqual(t, taskAuthContextV1, TaskAuthContext)
+	assert.False(t, bytes.HasPrefix([]byte(TaskAuthContext), []byte(taskAuthContextV1)))
+	assert.False(t, bytes.HasPrefix([]byte(taskAuthContextV1), []byte(TaskAuthContext)))
+	assert.False(t, bytes.HasPrefix([]byte(TaskAuthContext), []byte(IntentAuthContext)))
+}

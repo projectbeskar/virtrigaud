@@ -770,7 +770,7 @@ func (r *VirtualMachineReconciler) taskTag(vm *infravirtrigaudiov1beta1.VirtualM
 // and number, the VM's UID and the task reference.
 func taskMessage(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt, taskRef string) []byte {
 	return operation.TaskMessage([]byte(a.OpID), []byte(a.Kind), []byte(strconv.FormatInt(a.Attempt, 10)),
-		[]byte(vm.UID), []byte(taskRef))
+		[]byte(vm.UID), []byte(taskRef), []byte(strconv.FormatBool(a.Honest)), []byte(strconv.FormatBool(a.RestartRequired)))
 }
 
 // taskRefBound reports whether a's task reference is the one the operator
@@ -886,6 +886,11 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 		// The provider's VM id is kept on the marker (operator-written
 		// status), never in the Secret, until the Create Succeeded.
 		sent.ID = answer.ID
+	}
+	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+		// The answer's flags decide what the task's success records; they
+		// are kept on the marker, under the task tag.
+		sent.Honest, sent.RestartRequired = answer.Honest, answer.RestartRequired
 	}
 	// The task reference is bound to this attempt, so an edited status cannot
 	// make another task (for example the Create's) confirm it.
@@ -1020,6 +1025,11 @@ func (r *VirtualMachineReconciler) pollAttempt(ctx context.Context, vm *infravir
 	if r.operationCrashed(ctx, crashAfterReply) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+		// The flags of the answer that returned the task, as recorded on the
+		// Sent marker under its task tag (verified before this poll).
+		ia.noteResult(nil, &contracts.OperationAnswer{TaskRef: a.TaskRef, Honest: a.Honest, RestartRequired: a.RestartRequired})
+	}
 	return r.closeAttempt(ctx, vm, ia, a, outcome, st.OutcomeReason, a.ID)
 }
 
@@ -1087,7 +1097,7 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ns string) {
 	for _, a := range vm.Status.OperationAttempts {
 		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || r.now().Sub(a.LastTransitionTime.Time) > operationIntentSweepGrace ||
-			deleteAwaitingRelease(vm, &a) {
+			intentKeptAsEvidence(vm, &a) {
 			continue
 		}
 		if err := r.deleteIntent(ctx, ns, a.OpID, vm.UID); err != nil {
@@ -1135,6 +1145,9 @@ func (r *VirtualMachineReconciler) identityDelete(ctx context.Context, vm *infra
 	}
 	if a := inFlightAttempt(vm); a != nil {
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
+		if err == nil && step == stepHeld && !force && supersedableByDelete(vm, a) {
+			return r.supersedeForDelete(ctx, vm, a)
+		}
 		return r.afterDeleteStep(ctx, vm, ia, a.Kind, step, res, err, force)
 	}
 	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)

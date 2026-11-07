@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -688,5 +690,168 @@ func TestIdentityDelete_ProviderGone(t *testing.T) {
 		markDeleted(t, r, nil)
 		reconcileN(t, r, req, 1)
 		assert.True(t, vmGone(t, r))
+	})
+}
+
+// A Delete supersedes a held power attempt: the held attempt ends
+// Terminal/Superseded, its intent Secret is kept as evidence, a Warning event
+// records it, and the signed Delete is sent; the VM is released only once the
+// Delete is confirmed.
+func TestIdentityDelete_SupersedesHeldPowerAttempt(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	rec := record.NewFakeRecorder(20)
+	r.Recorder = rec
+	deleteDone := false
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "task-" + string(p.Kind)}, nil
+	}
+	stub.onTask = func(ref string) (contracts.TaskStatus, error) {
+		if ref == "task-Delete" {
+			if deleteDone {
+				return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded}, nil
+			}
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
+	}
+	stub.describeResp.PowerState = "Off"
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+	reconcileN(t, r, req, 2)
+	require.Equal(t, k8s.ReasonOperationUnknownToAgent, readyReason(idVM(t, r)), "the PowerOn is held")
+	held := findAttempt(idVM(t, r), contracts.OperationKindPowerOn)
+	require.NotNil(t, held)
+
+	markDeleted(t, r, nil)
+	reconcileN(t, r, req, 3)
+	vm := idVM(t, r)
+	p := findAttempt(vm, contracts.OperationKindPowerOn)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, p.Phase)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded, p.Outcome)
+	d := findAttempt(vm, contracts.OperationKindDelete)
+	require.NotNil(t, d)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, d.Phase)
+	assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindPowerOn,
+		contracts.OperationKindDelete}, sentKinds(stub))
+	require.False(t, vmGone(t, r), "not released before the Delete is confirmed")
+	names := map[string]bool{}
+	for _, s := range intentSecrets(t, r) {
+		names[s.Name] = true
+	}
+	assert.True(t, names[intentSecretName(held.OpID)], "the superseded attempt's intent Secret is kept as evidence")
+	evs := drainEvents(rec)
+	n := 0
+	for _, e := range evs {
+		if strings.Contains(e, eventReasonOperationSuperseded) {
+			n++
+			assert.Contains(t, e, held.OpID)
+		}
+	}
+	assert.Equal(t, 1, n)
+	assert.True(t, intentKeptAsEvidence(vm, p))
+	r.cleanupTerminalIntents(context.Background(), vm, clusteredNS)
+	names = map[string]bool{}
+	for _, s := range intentSecrets(t, r) {
+		names[s.Name] = true
+	}
+	assert.True(t, names[intentSecretName(held.OpID)], "terminal clean-up keeps it too")
+
+	deleteDone = true
+	reconcileN(t, r, req, 1)
+	assert.True(t, vmGone(t, r), "released once the Delete is confirmed")
+}
+
+// A held Create is never superseded: the Delete waits behind it, as before.
+func TestIdentityDelete_HeldCreateIsNotSuperseded(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{ID: "vm-1", TaskRef: "task-" + string(p.Kind)}, nil
+	}
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
+	}
+	reconcileN(t, r, req, 2)
+	markDeleted(t, r, nil)
+	reconcileN(t, r, req, 3)
+	vm := idVM(t, r)
+	assert.False(t, vmGone(t, r))
+	assert.Equal(t, k8s.ReasonOperationUnknownToAgent, readyReason(vm))
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(vm, contracts.OperationKindCreate).Phase)
+	assert.Nil(t, findAttempt(vm, contracts.OperationKindDelete))
+	assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate}, sentKinds(stub))
+}
+
+// A PowerOff never supersedes a held PowerOn: it waits.
+func TestIdentityPower_HeldPowerOnNotSupersededByPowerOff(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "task-" + string(p.Kind)}, nil
+	}
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		return contracts.TaskStatus{}, contracts.NewNotFoundError("no such task", errors.Join(contracts.ErrUnknownToAgent))
+	}
+	stub.describeResp.PowerState = "Off"
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn })
+	reconcileN(t, r, req, 2)
+	stub.describeResp.PowerState = "On"
+	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff })
+	reconcileN(t, r, req, 3)
+	assert.Equal(t, []contracts.OperationKind{contracts.OperationKindCreate, contracts.OperationKindPowerOn}, sentKinds(stub))
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(idVM(t, r), contracts.OperationKindPowerOn).Phase)
+}
+
+// An asynchronous Reconfigure keeps its answer's flags on the Sent marker,
+// under the task tag: an unmarked answer is not trusted when its task
+// Succeeds, and an edited flag unbinds the task.
+func TestIdentityReconfigure_AsyncFlagsKeptUnderTaskTag(t *testing.T) {
+	setup := func(t *testing.T, honest bool) (*identityStub, *VirtualMachineReconciler, ctrl.Request, *contracts.TaskOutcome) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		honestReconfigure(t, r)
+		outcome := contracts.TaskOutcomeRunning
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "task-rc", Honest: honest}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) { return contracts.TaskStatus{Outcome: outcome}, nil }
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: i32p(1)}
+		})
+		reconcileN(t, r, req, 1)
+		return stub, r, req, &outcome
+	}
+	t.Run("an unmarked answer is recorded at the larger size", func(t *testing.T) {
+		_, r, req, outcome := setup(t, false)
+		a := findAttempt(idVM(t, r), contracts.OperationKindReconfigure)
+		require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, a.Phase)
+		assert.False(t, a.Honest)
+		*outcome = contracts.TaskOutcomeSucceeded
+		reconcileN(t, r, req, 1)
+		vm := idVM(t, r)
+		assert.Equal(t, int32(2), *vm.Status.CurrentResources.CPU, "a shrink without the honest marker is not trusted")
+		assert.Equal(t, k8s.ReasonProviderLacksHonestReconfigure, k8s.GetCondition(vm.Status.Conditions, k8s.ConditionReconfiguring).Reason)
+	})
+	t.Run("an honest answer is recorded at the requested size", func(t *testing.T) {
+		_, r, req, outcome := setup(t, true)
+		assert.True(t, findAttempt(idVM(t, r), contracts.OperationKindReconfigure).Honest)
+		*outcome = contracts.TaskOutcomeSucceeded
+		reconcileN(t, r, req, 1)
+		assert.Equal(t, int32(1), *idVM(t, r).Status.CurrentResources.CPU)
+	})
+	t.Run("an edited flag unbinds the task", func(t *testing.T) {
+		_, r, req, outcome := setup(t, false)
+		vm := idVM(t, r)
+		for i := range vm.Status.OperationAttempts {
+			if vm.Status.OperationAttempts[i].Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+				vm.Status.OperationAttempts[i].Honest = true
+			}
+		}
+		require.NoError(t, r.Status().Update(context.Background(), vm))
+		*outcome = contracts.TaskOutcomeSucceeded
+		reconcileN(t, r, req, 1)
+		vm = idVM(t, r)
+		assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(vm))
+		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(vm, contracts.OperationKindReconfigure).Phase)
 	})
 }

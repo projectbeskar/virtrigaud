@@ -34,8 +34,15 @@ const IntentAuthContext = "virtrigaud.io/operation-intent/v1\x00"
 // TaskAuthContext is the domain-separation prefix of the message that binds an
 // attempt's task reference to the attempt (TaskMessage). It differs from
 // IntentAuthContext, so a task tag and an intent tag under the same key never
-// cover the same message.
-const TaskAuthContext = "virtrigaud.io/operation-task/v1\x00"
+// cover the same message. Version 2 frames seven fields (the attempt's op_id,
+// kind, number, the VM's UID, the task reference, and a Reconfigure answer's
+// honest-result and restart-required flags); a version 1 tag (five fields)
+// never verifies as version 2.
+const TaskAuthContext = "virtrigaud.io/operation-task/v2\x00"
+
+// taskAuthContextV1 is the earlier task prefix, kept only so tests can show
+// that it differs from TaskAuthContext.
+const taskAuthContextV1 = "virtrigaud.io/operation-task/v1\x00"
 
 // IntentTagLen is the length of an intent tag (HMAC-SHA256).
 const IntentTagLen = sha256.Size

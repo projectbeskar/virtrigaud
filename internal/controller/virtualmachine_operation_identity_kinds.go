@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -373,4 +374,75 @@ func (r *VirtualMachineReconciler) reconfiguredResources(vm *infravirtrigaudiov1
 		cpu, mem = max(r.getCurrentCPU(vm), cpu), max(r.getCurrentMemoryMiB(vm), mem)
 	}
 	return &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
+}
+
+// A Delete supersedes a held power or Reconfigure attempt. One attempt in
+// flight per VM is the rule, but a power or Reconfigure attempt whose outcome
+// cannot be learned (the host has no record of its task, cannot tell what it
+// did, refuses its re-delivery, or its intent or task binding is lost or
+// fails its checks) would otherwise block the VM's Delete for ever, leaving
+// only orphan-on-delete or force-delete, which leave the VM on its host.
+// Whatever such an attempt did or still does, a Delete that is confirmed
+// removes the VM, so for a VM being deleted the held attempt is ended as
+// Superseded (its outcome stays unknown, its intent Secret is kept as
+// evidence while the VM exists, and a Warning event records it) and the
+// signed Delete follows. Nothing else supersedes a held attempt:
+//   - a held or in-flight Create is never superseded: the Delete needs the
+//     VM's id, and a Create that may still run could create the VM after the
+//     Delete;
+//   - a PowerOff (or graceful shutdown) never supersedes a held PowerOn (or
+//     Reboot): the held operation could still run on the host after the
+//     PowerOff and leave the VM on, while the operator reports it off.
+
+// supersedableHoldReasons are the holds of an attempt in flight whose outcome
+// the controller cannot learn.
+var supersedableHoldReasons = map[string]bool{
+	k8s.ReasonOperationUnknownToAgent: true,
+	k8s.ReasonOperationOutcomeUnknown: true,
+	k8s.ReasonOperationIntentLost:     true,
+	k8s.ReasonOperationIntentTampered: true,
+	k8s.ReasonOperationStateLost:      true,
+}
+
+// supersedableByDelete reports whether the held attempt a in flight may be
+// superseded by vm's Delete: a power or Reconfigure attempt (never a Create
+// or a Delete) held for a reason that the controller cannot resolve.
+func supersedableByDelete(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) bool {
+	if !repeatableKind(contracts.OperationKind(a.Kind)) {
+		return false
+	}
+	c := k8s.GetCondition(vm.Status.Conditions, k8s.ConditionReady)
+	return c != nil && c.Status == metav1.ConditionFalse && supersedableHoldReasons[c.Reason]
+}
+
+// eventReasonOperationSuperseded is the Warning event of a superseded
+// attempt.
+const eventReasonOperationSuperseded = "OperationSuperseded"
+
+// supersedeForDelete ends the held attempt a of vm, being deleted, as
+// Terminal/Superseded, keeps its intent Secret, records a Warning event
+// (names and numbers only), and requeues: the next reconcile sends the
+// signed Delete.
+func (r *VirtualMachineReconciler) supersedeForDelete(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	a *infravirtrigaudiov1beta1.OperationAttempt) (ctrl.Result, error) {
+	done := *a
+	done.Phase, done.Outcome = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded
+	done.OutcomeReason, done.LastTransitionTime = "", metav1.NewTime(r.now())
+	if err := r.writeIdentityStatus(ctx, vm, identityStatusWrite{attempts: withAttempt(vm, done)}); err != nil {
+		log.FromContext(ctx).Info("The superseded marker was not written; retrying", "error", err.Error())
+		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+	}
+	log.FromContext(ctx).Info("A held attempt was superseded by the VM's Delete", "kind", a.Kind, "attempt", a.Attempt, "opID", a.OpID)
+	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonOperationSuperseded, fmt.Sprintf(
+		"%s attempt %d (op_id %s) was held, and its outcome cannot be learned; it is superseded by the VM's Delete. What it did on the "+
+			"host is unknown; its intent Secret %s is kept in the Provider's namespace as evidence while the VM exists",
+		a.Kind, a.Attempt, a.OpID, intentSecretName(a.OpID)))
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// intentKeptAsEvidence reports whether the intent Secret of the Terminal
+// attempt a is kept while vm exists: a Delete awaiting its release, or an
+// attempt a Delete superseded.
+func intentKeptAsEvidence(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) bool {
+	return deleteAwaitingRelease(vm, a) || a.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded
 }

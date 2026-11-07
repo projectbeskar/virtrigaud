@@ -400,7 +400,7 @@ func intentNeeded(ctx context.Context, reader client.Reader, vms *infravirtrigau
 		if a.OpID != opID {
 			continue
 		}
-		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || deleteAwaitingRelease(vm, &a) {
+		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || intentKeptAsEvidence(vm, &a) {
 			return true, false, nil
 		}
 	}
