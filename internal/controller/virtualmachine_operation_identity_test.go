@@ -71,7 +71,9 @@ func newIdentityStub() *identityStub {
 	return s
 }
 
-func (s *identityStub) GetCapabilities(context.Context) (contracts.Capabilities, error) { return s.caps, nil }
+func (s *identityStub) GetCapabilities(context.Context) (contracts.Capabilities, error) {
+	return s.caps, nil
+}
 
 func (s *identityStub) ListVMsForOwner(context.Context, contracts.OwnerFilter) (contracts.VMList, error) {
 	return contracts.VMList{OwnerFilterApplied: true}, nil
@@ -605,7 +607,7 @@ func (w *racingStatusWriter) Patch(ctx context.Context, obj client.Object, patch
 	if patch.Type() == types.JSONPatchType && !w.m.raced {
 		w.m.raced = true
 		vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-		if err := w.m.Client.Get(ctx, client.ObjectKeyFromObject(obj), vm); err != nil {
+		if err := w.m.Get(ctx, client.ObjectKeyFromObject(obj), vm); err != nil {
 			return err
 		}
 		vm.Status.OperationAttempts = []infravirtrigaudiov1beta1.OperationAttempt{{

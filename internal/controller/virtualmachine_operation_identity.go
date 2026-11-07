@@ -124,7 +124,7 @@ func operationHintMismatch(required operation.Protection, caps contracts.Capabil
 	switch {
 	case caps.SupportsFencing || caps.RequiresFencing:
 		return "the Provider advertises fencing, which this manager does not implement"
-	case required == operation.ProtectionIdentity && !(caps.SupportsOperationIdentity && caps.RequiresOperationIdentity):
+	case required == operation.ProtectionIdentity && (!caps.SupportsOperationIdentity || !caps.RequiresOperationIdentity):
 		return "the Provider's type requires operation identity, but the Provider does not advertise that it supports and requires it"
 	case required == operation.ProtectionNone && (caps.SupportsOperationIdentity || caps.RequiresOperationIdentity):
 		return "the Provider advertises operation identity, which its type does not use"
@@ -783,13 +783,13 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 	if err := r.deleteIntent(ctx, ia.providerCR.Namespace, a.OpID, vm.UID); err != nil {
 		logger.Info("Could not remove the operation-intent Secret; the sweeper will", "error", err.Error())
 	}
-	switch {
-	case outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded:
+	switch outcome {
+	case infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded:
 		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate {
 			setPlacedCondition(vm, metav1.ConditionTrue, k8s.ReasonBound, fmt.Sprintf("VM is bound to host %s", a.HostID))
 		}
 		return stepSucceeded, ctrl.Result{}, nil
-	case outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedDirty:
+	case infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedDirty:
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationFailedDirty, msgOperationFailedDirty, operationHoldRecheckInterval), nil
 	}
 	wait := attemptRetryWait(&done, r.now())
