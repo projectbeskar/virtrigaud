@@ -234,6 +234,14 @@ PROTO_BREAKING_AGAINST ?= ../.git\#ref=origin/main,subdir=proto
 proto: buf ## Generate gRPC stubs from protocol buffer definitions using buf
 	cd $(PROTO_DIR) && $(BUF) generate
 
+# The per-host agent's internal journal record schema. It is not part of the
+# public proto module and never goes on a wire; see its journal.proto.
+AGENT_JOURNAL_PROTO_DIR = internal/agent/journal/journalpb
+
+.PHONY: proto-agent-journal
+proto-agent-journal: buf ## Lint and generate the per-host agent's internal journal record types (not in the public proto module)
+	cd $(AGENT_JOURNAL_PROTO_DIR) && $(BUF) lint && $(BUF) generate
+
 .PHONY: proto-lint
 proto-lint: buf ## Lint protocol buffer definitions
 	cd $(PROTO_DIR) && $(BUF) lint
