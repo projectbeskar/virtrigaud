@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-07 14:00] - Operation attempt markers and signed Create/Delete for Providers that require operation identity (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `VirtualMachine.status.operationAttempts` (list keyed by `kind`, at most 18 entries: kind, attempt from 1, `opID`, `bindingID`, `hostID`, phase `Prepared`/`Sent`/`Terminal`, outcome, outcome reason, task reference, transition time) and `status.placement.bindingID`. Optional, `omitempty`, v1beta1-additive; written only for a Provider whose type requires operation identity. CRD regenerated (`config/crd/bases`, deepcopy; the Helm chart CRDs are generated from the same types).
+- `internal/operation/protection.go`: `RequiredProtection` — the protection a Provider requires comes only from its immutable `spec.type` (`cloudhypervisor` requires operation identity, every other type none).
+- `internal/operation/enrolment.go`, `enrolment_dev.go`, `enrolment_release.go`, `cmd/manager/main.go`: `--dev-operation-enrolment-file` (development builds only; a release build refuses to start when it is set), a JSON stand-in for the hosts' enrolment ids and the identity-only epoch.
+- `internal/controller/virtualmachine_operation_identity.go`: for a Provider whose type requires operation identity, a VM's Create and Delete are sent as signed operations: the attempt's exact request bytes and salt are stored, then a `Prepared` marker is written with JSON Patch `test` preconditions on the status subresource, then the operation is sent; a re-send reuses the same `op_id` and bytes; `Sent` and `Terminal` follow, and a successful Create writes its id and confirmed placement in the same write. At most one attempt per VM is in flight. `Retired`, `FailedClean`, `Cancelled` and a definite refusal of the first delivery start a new attempt after a backoff; `FailedDirty`, `Unknown`, `UNKNOWN_TO_AGENT`, `PROVIDER_MISMATCH`, a lost marker (`OperationStateLost`) and a missing intent Secret (`OperationIntentLost`) hold the VM. A Delete releases the finalizer only on `Succeeded`, or when no Create was ever performed. The advertised capabilities 31–34 must match the required protection (`Ready=False/OperationIdentityMismatch` on the Provider and its VMs, never a downgrade; any fencing gate is a mismatch).
+- `internal/controller/operation_intent.go`: per-attempt intent Secrets (`vrtg-op-<opID>`, type `virtrigaud.io/operation-intent`, in the Provider's namespace, owned by the Provider, labelled with the VM UID), deleted once the attempt is Terminal; a sweeper on the Provider controller removes those no attempt needs after a 10-minute grace.
+- `internal/controller/provider_operation_identity.go`: the Provider's `Ready` condition for operation identity (`OperationIdentityMatched`, `OperationIdentityMismatch`, `OperationSignerUnavailable`); set only for a type that requires operation identity, or a Provider that advertises a gate its type does not use.
+- `internal/k8s/conditions.go`: the operation-identity condition reasons.
+- `test/conformance/clustered/fake/identity.go`: `IdentityConfig.ProviderUID` and `Target.AcceptedOperations` for manager tests.
+- Tests: scripted-client tests of the lifecycle, holds, Delete rule, sweeper, missing signer with the production resolver, and a table showing no marker and no signed operation for vsphere, libvirt (both topologies), proxmox and mock; envtest specs (development builds) against the instrumented fake over TLS gRPC: a manager restarted at each crash point of Create and Delete ends with one execution and a Terminal marker, status loss holds, a restored in-flight attempt is answered from the host's record, a restore without its intent Secret holds, and 12 racing reconciles send one attempt; resolver, enrolment-file and manager-flag tests in both builds.
+
+### Changed
+- `internal/runtime/remote/resolver.go`: a Provider whose type requires operation identity gets an operation-identity client (chosen from `spec.type`, never from capabilities) signed by the signer passed with `WithOperationSigner`; without one (every release build) it is not resolved (`operation.ErrNoSigner`) and its VMs report `Ready=False/OperationSignerUnavailable`. The client mode is part of the client cache key.
+- `config/rbac/role.yaml`, `charts/virtrigaud/templates/manager-rbac.yaml`: the manager role gains `delete` on Secrets, in a delete-only rule (no `patch`, no `deletecollection`), for the intent Secrets; RBAC cannot scope it by name, label or type, and the manager deletes only its own intent Secrets with a UID precondition.
+- `docs/operation-grants-manager.md`: markers, intent Secrets, the enrolment file, RBAC, holds and how an operator clears them, updated limits.
+
+### Why
+A Provider that requires operation identity must never execute an operation twice or receive one unsigned: recording each attempt before it is sent, keeping its exact bytes for same-attempt re-sends, and holding on any outcome that proves nothing lets the controller survive restarts and lost replies without a second execution. Release builds and every other Provider type behave exactly as before.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-07 09:00] - Operation-identity mode in the clustered conformance fake (test only)
 **Author:** @wrkode (William Rizzo)
 

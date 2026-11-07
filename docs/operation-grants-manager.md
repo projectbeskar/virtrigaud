@@ -5,10 +5,12 @@ grant messages in the provider contract. This page describes the manager-side co
 mints, sends and verifies them, following the operation-identity design of ADR-0016
 (status: Proposed).
 
-**It is development-only, and no controller uses it.** A release build has no grant signer,
-refuses the development signer flag, and refuses to send a signed operation. No bundled
-provider reports operation identity, and no controller builds an operation-identity client,
-so a running manager, release or development, sends exactly the calls it sent before.
+**It is development-only.** A release build has no grant signer, refuses the development
+signer and enrolment flags, and refuses to send a signed operation. Only a Provider whose
+`spec.type` requires operation identity (the development-only `cloudhypervisor` type, which
+only a development build admits) gets signed operations; no bundled Provider type does, so
+for every other Provider a manager, release or development, sends exactly the calls it sent
+before, and writes none of the status fields or Secrets described below.
 
 ## How release builds are kept unchanged
 
@@ -17,10 +19,13 @@ so a running manager, release or development, sends exactly the calls it sent be
 | No signer | `internal/operation/signer_release.go` | `operation.SignerCompiled` is `false`; the only signer, `DevSigner`, is not compiled in. `operation.LoadSigner` refuses any key file with `operation.ErrNoSigner` and never reads it. |
 | Startup refusal | `cmd/manager/main.go` | `--dev-operation-signer-key-file` set: the manager logs `invalid --dev-operation-signer-key-file` and exits 1 before it connects to the cluster, like `--enable-dev-provider-types`. |
 | No sending | `internal/transport/grpc/client_operation.go` | `NewOperationIdentityClient` and `Client.SendOperation` return `operation.ErrNoSigner` and send nothing. |
-| No new path | every controller | Nothing calls `NewOperationIdentityClient`, `BuildOperation` or `SendOperation`. Every existing client keeps its behaviour: no `operation_envelope` is set on any call. |
+| Startup refusal | `cmd/manager/main.go` | `--dev-operation-enrolment-file` set: the manager logs `invalid --dev-operation-enrolment-file` and exits 1. |
+| Type-gated path | `internal/runtime/remote/resolver.go`, `internal/controller/virtualmachine_operation_identity.go` | Only a Provider whose `spec.type` requires operation identity gets an operation-identity client and the attempt-marker code path. Without a signer (every release build) such a Provider is not resolved at all: its VMs report `Ready=False/OperationSignerUnavailable` and nothing is sent. Every other Provider keeps its behaviour: no `operation_envelope`, no marker, no intent Secret. |
 
 The tagged and untagged builds are both tested: `go test ./internal/operation/
-./internal/transport/grpc/ ./cmd/manager/` and the same with `-tags virtrigaud_dev`.
+./internal/transport/grpc/ ./internal/runtime/remote/ ./internal/controller/ ./cmd/manager/`
+and the same with `-tags virtrigaud_dev` (the end-to-end controller specs against the
+instrumented fake run only in the tagged build).
 
 ## Operation kinds
 
@@ -146,16 +151,161 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 > signer.pem
 The file must not be accessible to group or others (mode `0600` or `0400`); a Kubernetes
 Secret holding it is mounted with `defaultMode: 0400`. A development manager started with
 the flag loads the file, refuses a malformed one at
-startup (without quoting it), and logs a warning that it is not for production use. It does
-not use the signer for anything else yet.
+startup (without quoting it), and logs a warning that it is not for production use. The
+signer signs the operations sent to Providers whose type requires operation identity.
 
 ## Capability gates
 
 The transport client reads `GetCapabilitiesResponse` fields 31–34 into
 `contracts.Capabilities` (`SupportsOperationIdentity`, `RequiresOperationIdentity`,
-`SupportsFencing`, `RequiresFencing`). They are a Provider's unauthenticated claims: they
-are hints that must match the protection a Provider's type requires, and they never lower
-it. No controller reads them yet, and every bundled provider reports `false`.
+`SupportsFencing`, `RequiresFencing`). They are a Provider's unauthenticated claims: hints
+that must match the protection the Provider's type requires, never a way to lower it.
+
+- The required protection comes only from the Provider's immutable `spec.type`
+  (`operation.RequiredProtection`): `cloudhypervisor` requires operation identity, every
+  other type requires none. The client mode is chosen from it, never from the capabilities,
+  and is part of the resolver's client cache key.
+- A Provider whose type requires operation identity must advertise both
+  `supports_operation_identity` and `requires_operation_identity`, and no fencing gate.
+  Otherwise the Provider reports `Ready=False/OperationIdentityMismatch`, its VMs report the
+  same, and nothing is sent to it (signed or unsigned) until it advertises a match. With a
+  match and a signer loaded the Provider reports `Ready=True/OperationIdentityMatched`.
+- Any other Provider that advertises any of the four gates reports
+  `Ready=False/OperationIdentityMismatch` on the Provider only; its VMs are unchanged (they
+  are never sent signed operations). Every bundled provider advertises none, so no other
+  Provider gets a `Ready` condition from this.
+- Fencing is not implemented: advertising either fencing gate is always a mismatch.
+
+## Operation identity on VirtualMachines
+
+For a Provider whose type requires operation identity, the VirtualMachine controller sends
+a VM's `Create` and `Delete` as signed operations and records each attempt before it is
+first sent. The other mutating calls of such a VM (power, reconfigure, snapshots, image
+prepare, ...) are not yet sent as signed operations: the operation-identity client refuses
+them locally (`contracts.ErrOperationIdentityRequired` or
+`ErrOperationIdentityNotImplemented`) and nothing is sent unsigned.
+
+### The development enrolment file
+
+A grant names the host's enrolment identifier and an epoch. Until hosts prove their
+enrolment with a signed answer, a development manager reads them from the JSON file named
+by `--dev-operation-enrolment-file` (compiled only with `-tags virtrigaud_dev`; a release
+build refuses the flag):
+
+```json
+{
+  "epoch": {"counter": 2, "holder": "<32 hexadecimal characters>"},
+  "providers": {
+    "<provider namespace>/<provider name>": {
+      "<host name>": "<32 hexadecimal characters: the host's enrolment id>"
+    }
+  }
+}
+```
+
+Unknown fields are refused, the epoch counter counts from 1, and every identifier is 16
+bytes. The epoch carries identity only: no ordering or fencing meaning. A VM whose host has
+no enrolment reports `Ready=False/OperationEnrolmentUnavailable` and nothing is sent.
+
+### Attempt markers: `status.operationAttempts`
+
+`VirtualMachine.status.operationAttempts` holds at most one entry per operation kind (a
+list keyed by `kind`, at most 18 entries): the latest attempt of that kind. Each entry has
+the attempt number (counting from 1), its random `opID` (32 hexadecimal characters), the
+`bindingID` and `hostID` it was issued for, its `phase`, and, once Terminal, its `outcome`
+and the Provider's `outcomeReason` and `taskRef`. `status.placement.bindingID` identifies
+the VM's placement; it is drawn with the VM's first Create attempt on its host, written in
+the same status write, and unchanged by re-sends. Neither field is ever written for any
+other Provider, and neither carries request bytes, a salt or a digest.
+
+| Phase | Meaning |
+|---|---|
+| `Prepared` | The attempt's identity and exact request are stored. It may or may not have been delivered. |
+| `Sent` | The Provider accepted the operation and returned a task; its outcome is not known yet. |
+| `Terminal` | The outcome is known: `Succeeded`, `FailedClean`, `FailedDirty`, `Retired`, `Cancelled`, or `Rejected` (the host refused the first delivery with a reason that proves it was not performed). |
+
+Every marker write is a JSON Patch on the status subresource whose `test` operations
+require the markers (and, where written, `status.placement` and `status.id`) to be exactly
+as the reconcile read them. A write that fails sends nothing. The order of one attempt is:
+
+1. Decide: a new attempt only when no attempt of any kind is in flight for the VM, and the
+   latest attempt of the kind ended not performed (`Retired`, `FailedClean`, `Cancelled`,
+   `Rejected`) and its backoff (15 s doubling per attempt, at most 5 min) is over, or there
+   is none. The `op_id` and digest salt are drawn once.
+2. Persist: the intent Secret (below), then the `Prepared` marker.
+3. Transmit: the stored bytes under a freshly minted grant. A re-send (after a transport
+   error, `VM_BUSY`, a lost reply or a manager restart) sends the same bytes with the same
+   `op_id`; a host answers a known `op_id` from its record and never executes it twice.
+4. Close: `Sent` with the task reference, then `Terminal` with the outcome, then the intent
+   Secret is deleted. A successful Create writes `Terminal`, `status.id` and the confirmed
+   placement in one status write.
+
+A VM's finalizer is released only once a Delete attempt is `Terminal/Succeeded`, or when no
+Create of the VM was ever performed (it has no Create attempt, or its latest one was not
+performed, and no id is recorded). A Delete waits for a Create in flight. Orphan-on-delete
+and force-delete work as for every Provider.
+
+The markers are not signed: anyone allowed to patch `virtualmachines/status` can edit them.
+An edit makes the controller hold the VM (below), or makes the host refuse a delivery; it
+never makes the controller send an operation again under a new identity.
+
+### Intent Secrets
+
+The exact request bytes of each attempt in flight (they can carry cloud-init user data)
+and its digest salt are kept in a Secret, never in the VM's status:
+
+- name `vrtg-op-<opID>`, type `virtrigaud.io/operation-intent`, in the Provider's
+  namespace, owned by the Provider (garbage-collected with it);
+- labels `virtrigaud.io/operation-intent: "true"`, `virtrigaud.io/vm-uid` and
+  `virtrigaud.io/operation-kind`; annotations naming the VM's namespace and name;
+- data `request` (the exact serialised request), `salt`, `identity` (the attempt's grant
+  identity) and, for an asynchronous Create, `answer-id` (the VM id the Provider answered).
+
+It is written before the marker leaves `Prepared` and deleted once the marker is
+`Terminal`. The bytes are never logged or put in an event or condition. Restrict who can
+read Secrets in a Provider's namespace accordingly.
+
+The Provider controller sweeps, at each reconcile of a Provider whose type requires
+operation identity, the intent Secrets it owns that are older than 10 minutes and that no
+non-terminal marker of their VM names (the VM is read from the API server): a manager that
+stopped between writing a Secret and its marker, or between a `Terminal` marker and the
+Secret delete, leaves one behind.
+
+### RBAC
+
+The manager's role gains `delete` on Secrets, granted in a rule of its own (no `patch`, no
+`deletecollection`). RBAC cannot scope a verb by name prefix, label or Secret type, so the
+rule covers every Secret the role covers; the manager deletes only Secrets of type
+`virtrigaud.io/operation-intent` with the intent label, the `vrtg-op-` name prefix and the
+expected VM's UID label, with the UID it read as a delete precondition. Provider pods have
+no Secrets access.
+
+### Holds and how to clear them
+
+A held VM reports `Ready=False` with one of these reasons (phase `Failed`) and sends no new
+attempt:
+
+| Reason | Cause | What clears it |
+|---|---|---|
+| `OperationSignerUnavailable` | No operation signer (every release build). | Start a development manager with `--dev-operation-signer-key-file`. |
+| `OperationIdentityMismatch` | The Provider's advertised gates do not match its type. | Fix the Provider so it advertises `supports_` and `requires_operation_identity` and no fencing. |
+| `OperationEnrolmentUnavailable` | No enrolment for the VM's host. | Add the host to the enrolment file and restart the manager. |
+| `OperationStateLost` | The VM records a binding or an id but no Create marker (its status was edited or restored). | Operator. |
+| `OperationIntentLost` | A marker in flight names an intent Secret that does not exist (for example after an etcd restore that did not restore it). | Operator, or restore the Secret. |
+| `OperationFailedDirty` | The Provider reported the operation failed after an irreversible step began. | Operator. |
+| `OperationOutcomeUnknown` | The Provider cannot tell what the attempt did (an `Unknown` outcome, or a refusal of a re-delivery that proves nothing about an earlier one). The same attempt is asked about, or re-sent, every 5 minutes. | Resolves itself if the Provider later reports a terminal outcome; otherwise operator. |
+| `OperationUnknownToAgent` | The host has no record of the attempt's task. | Operator. |
+| `OperationProviderMismatch` | The host refused the operation as coming from another Provider. The same attempt is re-sent every 5 minutes. | Fix the host's enrolment, or operator. |
+
+"Operator" means: there is no retire, cancel or resolve path yet, so the controller cannot
+learn what happened on the host. Check the host by hand, then release the VirtualMachine
+with `virtrigaud.io/orphan-on-delete=true` (leave whatever is on the host) or
+`virtrigaud.io/force-delete=true` (the controller stops waiting; remove anything left by
+hand) and delete it. Do not remove or edit `status.operationAttempts` to retry: that is
+itself held as `OperationStateLost`.
+
+A not-performed outcome is not a hold: the VM reports `Ready=False/OperationRetryBackoff`
+until the next attempt is sent, and `OperationInProgress` while an attempt is in flight.
 
 ## Known limits
 
@@ -167,7 +317,19 @@ it. No controller reads them yet, and every bundled provider reports `false`.
 - `authority_generation` is not yet bound to the generation the issuer certificate names;
   it is only checked to be at least 1, and a verifier refuses a configured minimum above 1
   until that binding exists.
-- No durable attempt state: nothing records an attempt before it is sent.
+- Only `Create` and `Delete` are sent as signed operations; the other kinds of a VM whose
+  Provider requires operation identity are refused locally (power state changes and
+  resizes of such a VM fail with a provider error).
+- A Provider's typed outcomes and refusal reasons are unsigned claims: a Provider that
+  falsely answers `Retired` or `FailedClean` makes the controller mint a new attempt.
+- Attempt markers are not signed.
+- A Delete releases the finalizer only on `Succeeded`: a host that answers that the VM is
+  not there holds the delete until an operator releases it.
+- A VM whose Create attempts were not performed stays on its pending host; it is never
+  re-scheduled automatically.
+- A restore of the VM's status to before its first Create attempt, together with the loss
+  of its placement, is indistinguishable from a new VM: a new attempt is minted, and only
+  the host's own state of the VM protects against a second create.
 - The outer-request rule is about decoded presence: an outer field encoded on the wire with
   its default value (for example an empty string) is not seen. This is harmless because a
   verifier's caller acts only on the decoded request the verifier returns.

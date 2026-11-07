@@ -40,6 +40,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 )
 
 // These tests pin the operation-identity lifecycle of the VirtualMachine
@@ -794,7 +795,8 @@ func TestNonIdentityProviders_NoMarkersNoSignedOperations(t *testing.T) {
 func TestIdentity_NoSignerFailsClosed(t *testing.T) {
 	stub := newIdentityStub()
 	r, req := identityFixture(t, stub)
-	r.RemoteResolver = &stubResolver{err: operation.ErrNoSigner}
+	// The production resolver, with no signer (as in every release build).
+	r.RemoteResolver = remote.NewResolver(r.Client, nil)
 	reconcileN(t, r, req, 2)
 	vm := idVM(t, r)
 	assert.Equal(t, k8s.ReasonOperationSignerUnavailable, readyReason(vm))

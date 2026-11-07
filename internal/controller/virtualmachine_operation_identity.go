@@ -421,6 +421,7 @@ func (r *VirtualMachineReconciler) reconcileIdentityGate(ctx context.Context, vm
 	if stateLost(vm) {
 		return r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgOperationStateLost, operationHoldRecheckInterval), true, nil
 	}
+	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)
 	if a := inFlightAttempt(vm); a != nil {
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
 		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate {
@@ -799,6 +800,22 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 	return stepNotPerformed, ctrl.Result{RequeueAfter: wait}, nil
 }
 
+// cleanupTerminalIntents deletes the intent Secrets of vm's attempts that
+// became Terminal within operationIntentSweepGrace: a manager that stopped
+// between an attempt's Terminal write and its Secret delete leaves one behind.
+// Later ones are left to the sweeper, so a settled VM costs no reads.
+func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ns string) {
+	for _, a := range vm.Status.OperationAttempts {
+		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || r.now().Sub(a.LastTransitionTime.Time) > operationIntentSweepGrace {
+			continue
+		}
+		if err := r.deleteIntent(ctx, ns, a.OpID, vm.UID); err != nil {
+			log.FromContext(ctx).Info("Could not remove a finished attempt's operation-intent Secret; the sweeper will",
+				"kind", a.Kind, "error", err.Error())
+		}
+	}
+}
+
 // afterCreateSucceeded records what follows a successful Create once its id
 // and placement are written: the Create's outcome, the applied size, the
 // Bound condition. The VM is described next.
@@ -848,6 +865,7 @@ func (r *VirtualMachineReconciler) identityDelete(ctx context.Context, vm *infra
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
 		return r.afterDeleteStep(ctx, vm, a.Kind, step, res, err, force)
 	}
+	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)
 	if d := findAttempt(vm, contracts.OperationKindDelete); d != nil && d.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
 		return r.removeFinalizer(ctx, vm)
 	}
