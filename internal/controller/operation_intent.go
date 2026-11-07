@@ -60,7 +60,7 @@ const (
 	// vrtg-op-<op_id in hex>.
 	operationIntentSecretPrefix = "vrtg-op-"
 	// operationIntentSecretType is the type of every intent Secret.
-	operationIntentSecretType corev1.SecretType = "virtrigaud.io/operation-intent"
+	operationIntentSecretType corev1.SecretType = "virtrigaud.io/operation-intent" // #nosec G101 -- a Secret type name, not a credential
 	// operationIntentLabel marks an intent Secret (value "true").
 	operationIntentLabel = "virtrigaud.io/operation-intent"
 	// operationIntentVMUIDLabel holds the UID of the VM the attempt is for.
