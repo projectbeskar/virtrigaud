@@ -183,7 +183,8 @@ contain, and the run fails if the case starts passing or fails in some other way
 ## Cases
 
 "fake" is the instrumented reference provider (below), asynchronous: in its synchronous
-configuration the two `async-tasks` cases are skipped.
+configuration the two `async-tasks` cases are skipped. The `identity.*` cases are listed
+separately, under [Operation identity cases](#operation-identity-cases).
 
 | Case | Level | Rule | Needs | fake | clustered libvirt |
 |------|-------|------|-------|------|-------------------|
@@ -241,6 +242,58 @@ Clustered libvirt: 41 Required cases pass and 5 are skipped, each with a reason 
 calls; no `VM_NOT_OWNED` reason, which the contract does not require of a clustered provider;
 Create runs through a seam, so the owner rebind is left to the real-pipeline tests; no safe way to
 make the Provider itself unready). 3 Recommended cases: 2 pass and 1 fails (recorded below).
+The 17 `identity.*` cases are skipped for clustered libvirt and for the default fake: neither
+offers `operation-identity`.
+
+## Operation identity cases
+
+A Provider that reports `supports_operation_identity` accepts a mutating call carried in an
+`operation_envelope`: the request's exact bytes and a signed grant that binds them
+([`docs/operation-grants-wire-shape.md`](../../docs/operation-grants-wire-shape.md)). Its hosts
+verify the grant before they act and execute each operation (each `op_id`) at most once. No
+built-in provider reports it, and only a development build of the manager can sign a grant.
+
+The `identity.*` cases run only against a Target that declares the `operation-identity` feature and
+implements `clustered.OperationIdentityTarget`, which hands the suite a signer whose grants chain to
+the anchor the Provider's hosts pinned, and the Provider, enrolment and epoch values the hosts
+expect. For every other Target they are skipped and listed as not applicable, so the results of the
+cases above do not change. The suite mints grants with `internal/operation` and sends them on the
+raw gRPC client, so it can also send grants that are forged, re-signed with other fields, bound
+elsewhere or paired with other request bytes.
+
+| Case | Level | Rule | Needs | identity fake |
+|------|-------|------|-------|---------------|
+| `identity.capabilities` | Required | a Provider whose hosts verify operation grants reports supports_operation_identity, and reports requires_operation_identity exactly when it refuses a mutating call that carries no grant | `operation-identity` | pass |
+| `identity.unsigned-refused` | Required | a Provider that reports requires_operation_identity refuses a mutating call with no operation_envelope with IDENTITY_REQUIRED, and the VM is untouched | `operation-identity`, `operation-identity-required` | pass |
+| `identity.signed-power` | Required | a correctly signed Power is routed by the request inside the envelope, performed on that host, and its task reports TASK_OUTCOME_SUCCEEDED once the host finished it | `operation-identity` | pass |
+| `identity.signed-create-delete` | Required | a correctly signed Create makes the VM on the host its request names, stamped with its owner, and a correctly signed Delete removes it | `operation-identity`, `create` | pass |
+| `identity.forged-grant-refused` | Required | a grant whose signature or certificate chain does not verify to the anchor the host pinned is refused with GRANT_UNAUTHENTICATED, and nothing is performed | `operation-identity` | pass |
+| `identity.wrong-kind-refused` | Required | an authentic grant whose operation kind does not fit the call (another PowerRequest.op, or another RPC) is refused with GRANT_MISMATCH, and nothing is performed | `operation-identity` | pass |
+| `identity.outer-fields-refused` | Required | a request that sets any field beside operation_envelope is refused with INVALID_ARGUMENT, and nothing is performed | `operation-identity` | pass |
+| `identity.digest-bound` | Required | request bytes that are not the ones the grant's intent_digest covers are refused with GRANT_MISMATCH, and neither request is performed | `operation-identity` | pass |
+| `identity.binding-refused` | Required | an authentic grant for another Provider, another enrolment or another host than the one the request names is refused with GRANT_MISMATCH, and nothing is performed | `operation-identity` | pass |
+| `identity.duplicate-op-id-once` | Required | a re-delivery of an op_id the host accepted, even after the operation is over, is answered as the first delivery was and never performed again: a re-sent Delete does not delete a VM made after it | `operation-identity` | pass |
+| `identity.duplicate-after-restart` | Required | the host's record of an accepted op_id survives a restart of the Provider: a re-delivery after the restart is never performed again | `operation-identity` | pass |
+| `identity.op-id-conflict` | Required | a known op_id that arrives with other identity fields (another attempt, another intent_digest, another VM) is refused with OP_ID_CONFLICT, and nothing is performed | `operation-identity` | pass |
+| `identity.vm-busy` | Required | while an operation on a VM is not over, a new operation (a new op_id) for the same VM is refused with VM_BUSY; once the first is over the same attempt is accepted | `operation-identity`, `async-tasks` | pass |
+| `identity.mint-epoch-first-delivery` | Recommended | the first delivery of an op_id minted before the host's enrolment started is refused, and nothing is performed: the host cannot know what an earlier enrolment did with it | `operation-identity` | pass |
+| `identity.outcome-retired` | Required | a task that never started reports TASK_OUTCOME_RETIRED with done=true and a "not performed" error, the manager reads it as not performed, and it had no effect | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass |
+| `identity.outcome-unknown` | Required | a task whose outcome the host cannot tell reports TASK_OUTCOME_UNKNOWN and is never done, and the VM stays busy for a new operation | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass |
+| `identity.outcome-failed-dirty` | Required | a task that failed after an irreversible step reports TASK_OUTCOME_FAILED_DIRTY with done=true and an error, and the manager reads it as a failure, never as not performed | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass |
+
+The identity fake is the instrumented fake made with `fake.NewIdentity`, with a test-only signer
+that exists only in the suite's test binary. It is run three ways: accepting unsigned calls too,
+asynchronous and synchronous, against the whole suite (every case above passes; the synchronous run
+skips the `async-tasks` cases, and both skip `identity.unsigned-refused`); and requiring a grant on
+every mutating call, against the `identity.*` cases only (`clustered.OnlyCases("identity.")`),
+because such a Provider refuses the unsigned calls of the other groups by design. The Recommended
+`identity.mint-epoch-first-delivery` rule is not yet written in `provider.proto`, which is why it is
+Recommended.
+
+What the identity cases do not cover: the snapshot family, Clone, the disk calls and the other
+mutating RPCs under a grant; `expect_known`; epochs beyond the identity-only values (no ordering,
+no fencing); and anything host-signed (receipts, signed answers). The fake keeps its operation
+records in memory, on its hosts, so they survive a restart of the Provider but are not durable.
 
 ## Optional features
 
@@ -256,12 +309,15 @@ make the Provider itself unready). 3 Recommended cases: 2 pass and 1 fails (reco
 | `host-faults` | The Target can make a host fail an operation cleanly, or lose its connection during one (`HostFaulter`). |
 | `host-removal` | The Target can remove a host from the Provider's registry while VMs are bound to it (`HostRemover`). |
 | `unreadable-stamp` | `SeedSpec.Stamp` can make a VM's owner stamp unreadable or ambiguous. |
+| `operation-identity` | The Provider reports `supports_operation_identity` and its hosts verify operation grants (`OperationIdentityTarget`). Needed by every `identity.*` case. |
+| `operation-identity-required` | The Provider also reports `requires_operation_identity` and refuses a mutating call with no grant. |
+| `scripted-outcomes` | The Target can make the next operation a host accepts end with a chosen typed outcome (`OutcomeScripter`). |
 
 ## Writing an adapter for another clustered provider
 
 Implement `clustered.Target` (and, for the features you declare, `TaskController`,
-`DialObserver`, `CreateTemplater`, `HostBlackholer`, `HostFaulter`, `HostRemover` or
-`ProviderReadiness`) and run the suite from a test in your provider's package:
+`DialObserver`, `CreateTemplater`, `HostBlackholer`, `HostFaulter`, `HostRemover`,
+`ProviderReadiness`, `OperationIdentityTarget` or `OutcomeScripter`) and run the suite from a test in your provider's package:
 
 ```go
 func TestMyProvider_Conformance(t *testing.T) {
@@ -279,10 +335,15 @@ that its coverage is reduced.
 ## The instrumented fake and the mutation test
 
 [`clustered/fake`](clustered/fake/) is an in-memory clustered Provider that obeys every rule above
-and can be told to break any one of them (`fake.WithViolations(...)`: 61 violations, such as
+and can be told to break any one of them (`fake.WithViolations(...)`: 78 violations, such as
 `AllowEmptyHost`, `IgnoreOwnerMutate`, `ListDropsUnreachable`, `TaskWrongHost`). In its
 asynchronous mode its effects happen when the host finishes the task, as a real asynchronous
-provider's do.
+provider's do. 17 of the violations need its operation-identity mode (`fake.IdentityViolations()`),
+such as `AcceptsUnsigned`, `AcceptsWrongKindGrant`, `IgnoresDigest`, `ExecutesDuplicateOpID` and
+`DropsTombstones`; the mutation test runs them against the identity fake that requires a grant. In
+that mode the fake uses the shared verifier (`internal/operation`), the one a per-host agent is to
+use, rather than verification of its own; a violation makes it act on a call the verifier refused
+under one rule.
 
 `TestEveryCaseCatchesItsSeededViolation` runs, for each violation, the cases that guard the broken
 rule against a fake that breaks it, and requires each of them to **fail**, for some of them with a
