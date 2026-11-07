@@ -677,6 +677,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// sends an image prepare, so nothing about its image can stop describe,
 	// power or reconfigure (no provider's Reconfigure reads the image).
 
+	// A VM of a Provider that requires operation identity tracks its tasks
+	// only on its attempt markers, bound by their task tags; the unsigned
+	// task fields are never written for it, so one found set (an edited
+	// status) is cleared, never polled or trusted.
+	if identityRequired(provider) {
+		vm.Status.LastTaskRef, vm.Status.ReconfigureTaskRef = "", ""
+	}
+
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)

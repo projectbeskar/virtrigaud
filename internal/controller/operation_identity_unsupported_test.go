@@ -89,6 +89,8 @@ func TestIdentityUnsupported_RefusalGuard(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, isOperationIdentityUnsupported(err))
 	assert.ErrorIs(t, err, contracts.ErrOperationIdentityNotImplemented)
+	assert.Equal(t, identityUnsupportedMessage(identityUnsupportedClone), err.Error(), "a fixed message")
+	assert.NotContains(t, err.Error(), "ns/p")
 }
 
 func TestIdentityUnsupported_VMSnapshot(t *testing.T) {

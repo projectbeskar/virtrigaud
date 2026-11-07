@@ -37,8 +37,10 @@ import (
 // mutating kind of the provider contract (hardware upgrade, snapshot create,
 // delete and revert, clone, image prepare, disk export and import, staged and
 // landed disk deletion, adoption) has no signed path in the manager: for such
-// a Provider it is refused locally, before any client is resolved, so nothing
-// is sent, signed or unsigned, and the refusal is surfaced as
+// a Provider it is refused locally before any RPC (and, in the VMSnapshot,
+// VMClone, VMMigration and VMAdoption controllers, before any client is
+// resolved), so nothing is sent, signed or unsigned, and the refusal is
+// surfaced as
 // Ready=False/OperationIdentityUnsupported with a fixed message and one
 // Warning event when it begins. The Provider client refuses the same calls
 // again (contracts.ErrOperationIdentityNotImplemented) as a second lock.
@@ -63,12 +65,23 @@ func isOperationIdentityUnsupported(err error) bool {
 	return errors.Is(err, errOperationIdentityUnsupported)
 }
 
-// refuseUnsupportedForIdentity returns errOperationIdentityUnsupported for a
-// Provider that requires operation identity, and nil for any other: the guard
-// of a controller's provider-client lookup for operations with no signed path.
+// identityUnsupportedError is the refusal of op: its text is the fixed
+// message (it can reach a status message, so it names no Provider), and it
+// wraps errOperationIdentityUnsupported.
+type identityUnsupportedError struct{ op string }
+
+// Error implements error with the fixed message.
+func (e *identityUnsupportedError) Error() string { return identityUnsupportedMessage(e.op) }
+
+// Unwrap returns errOperationIdentityUnsupported.
+func (e *identityUnsupportedError) Unwrap() error { return errOperationIdentityUnsupported }
+
+// refuseUnsupportedForIdentity returns the refusal of op for a Provider that
+// requires operation identity, and nil for any other: the guard of a
+// controller's provider-client lookup for operations with no signed path.
 func refuseUnsupportedForIdentity(provider *infravirtrigaudiov1beta1.Provider, op string) error {
 	if identityRequired(provider) {
-		return fmt.Errorf("%s through Provider %s/%s: %w", op, provider.Namespace, provider.Name, errOperationIdentityUnsupported)
+		return &identityUnsupportedError{op: op}
 	}
 	return nil
 }

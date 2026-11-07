@@ -1036,3 +1036,20 @@ func TestIdentityReconfigure_NoCloudInit(t *testing.T) {
 	assert.Equal(t, k8s.ReasonOperationIntentTampered, readyReason(idVM(t, r)))
 	assert.Len(t, stub.sent(), 2)
 }
+
+// The unsigned task fields are never polled for a VM of a Provider that
+// requires operation identity: one found set is cleared.
+func TestIdentity_LegacyTaskRefsIgnored(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := createdIdentityVM(t, stub)
+	polled := 0
+	stub.IsTaskCompleteFn = func(context.Context, string) (bool, error) { polled++; return true, nil }
+	vm := idVM(t, r)
+	vm.Status.LastTaskRef, vm.Status.ReconfigureTaskRef = "forged-task", "forged-rc-task"
+	require.NoError(t, r.Status().Update(context.Background(), vm))
+	reconcileN(t, r, req, 1)
+	vm = idVM(t, r)
+	assert.Zero(t, polled, "never polled")
+	assert.Empty(t, vm.Status.LastTaskRef)
+	assert.Empty(t, vm.Status.ReconfigureTaskRef)
+}
