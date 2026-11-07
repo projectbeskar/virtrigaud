@@ -286,7 +286,9 @@ that exists only in the suite's test binary. It is run three ways: accepting uns
 asynchronous and synchronous, against the whole suite (every case above passes; the synchronous run
 skips the `async-tasks` cases, and both skip `identity.unsigned-refused`); and requiring a grant on
 every mutating call, against the `identity.*` cases only (`clustered.OnlyCases("identity.")`),
-because such a Provider refuses the unsigned calls of the other groups by design. The Recommended
+because such a Provider refuses the unsigned calls of the other groups by design. A development
+build (`go test -tags virtrigaud_dev ./test/conformance/clustered/`) also runs the `identity.*`
+cases with the manager's development signer in place of the test-only one. The Recommended
 `identity.mint-epoch-first-delivery` rule is not yet written in `provider.proto`, which is why it is
 Recommended.
 
