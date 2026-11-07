@@ -32,6 +32,23 @@ type Tx struct {
 	writable bool
 	seq      uint64
 	writes   []write
+	buckets  map[string]*bolt.Bucket
+}
+
+// lookup returns the named bucket, or nil, caching the handle for the life
+// of the transaction.
+func (t *Tx) lookup(name string) *bolt.Bucket {
+	if b, ok := t.buckets[name]; ok {
+		return b
+	}
+	b := t.btx.Bucket([]byte(name))
+	if b != nil {
+		if t.buckets == nil {
+			t.buckets = map[string]*bolt.Bucket{}
+		}
+		t.buckets[name] = b
+	}
+	return b
 }
 
 // errReadOnly is returned by a write in a read transaction.
@@ -42,7 +59,7 @@ var errReadOnly = errors.New("journal: write in a read transaction")
 func (t *Tx) Seq() uint64 { return t.seq }
 
 func (t *Tx) bucket(name string) (*bolt.Bucket, error) {
-	b := t.btx.Bucket([]byte(name))
+	b := t.lookup(name)
 	if b == nil {
 		return nil, fmt.Errorf("journal: bucket %s missing", name)
 	}
@@ -58,7 +75,7 @@ func checkClientBucket(name string) error {
 
 // Get returns a copy of the value of key in bucket, or nil.
 func (t *Tx) Get(bucket string, key []byte) []byte {
-	b := t.btx.Bucket([]byte(bucket))
+	b := t.lookup(bucket)
 	if b == nil {
 		return nil
 	}
@@ -126,7 +143,7 @@ func (t *Tx) createBucket(name string) error {
 // order, with copies of the key and value. Writing to the bucket inside fn is
 // not allowed.
 func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) error {
-	b := t.btx.Bucket([]byte(bucket))
+	b := t.lookup(bucket)
 	if b == nil {
 		return nil
 	}
@@ -141,7 +158,7 @@ func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) e
 
 // Last returns a copy of the last key of bucket, or nil.
 func (t *Tx) Last(bucket string) []byte {
-	b := t.btx.Bucket([]byte(bucket))
+	b := t.lookup(bucket)
 	if b == nil {
 		return nil
 	}

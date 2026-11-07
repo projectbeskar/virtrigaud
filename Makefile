@@ -157,6 +157,22 @@ test: gen-crds generate fmt vet setup-envtest ## Run tests.
 	go list ./... | grep -v '/test/e2e' | grep -v '/test/integration' | \
 	xargs go test -timeout 20m -coverprofile cover.out
 
+.PHONY: test-agent-mutation
+test-agent-mutation: ## Mutation test of the per-host agent's operation store: every safety guard switched off in turn must fail a test; reports surviving mutants
+	./hack/agent-mutation.sh
+
+.PHONY: test-agent-model-long
+test-agent-model-long: ## Long reference-model run of the per-host agent's operation store (VIRTRIGAUD_MODEL_RUNS, default 10000000)
+	VIRTRIGAUD_MODEL_RUNS=$${VIRTRIGAUD_MODEL_RUNS:-10000000} go test -count=1 -timeout 0 -run '^TestReferenceModel$$' ./internal/agent/opstore/
+
+AGENT_FUZZTIME ?= 30s
+
+.PHONY: fuzz-agent
+fuzz-agent: ## Run each fuzz target of the per-host agent's store for AGENT_FUZZTIME (default 30s)
+	go test -run '^$$' -fuzz '^FuzzParseAnchorLog$$' -fuzztime $(AGENT_FUZZTIME) ./internal/agent/journal/
+	go test -run '^$$' -fuzz '^FuzzDecodeStoreMeta$$' -fuzztime $(AGENT_FUZZTIME) ./internal/agent/journal/
+	go test -run '^$$' -fuzz '^FuzzDecodeRecord$$' -fuzztime $(AGENT_FUZZTIME) ./internal/agent/opstore/
+
 .PHONY: test-integration
 test-integration: ## Run integration tests under test/integration/ (cross-package observability + future controller integration). Distinct from make test (unit) and make test-e2e (kind cluster + ginkgo).
 	@echo "Running integration tests under test/integration/..."
