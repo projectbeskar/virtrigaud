@@ -178,7 +178,7 @@ func (r *VirtualMachineReconciler) startIdentityPower(ctx context.Context, vm *i
 func (r *VirtualMachineReconciler) startIdentityPowerOp(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	providerCR *infravirtrigaudiov1beta1.Provider, instance contracts.Provider, ref contracts.VMRef,
 	kind contracts.OperationKind) (ctrl.Result, error) {
-	if _, isPower := wireKinds[kind]; !isPower || !repeatableKind(kind) || kind == contracts.OperationKindReconfigure {
+	if !repeatableKind(kind) || kind == contracts.OperationKindReconfigure {
 		return ctrl.Result{}, fmt.Errorf("start a power attempt of kind %q: %w", kind, contracts.ErrOperationIdentityNotImplemented)
 	}
 	ia, res, ok := r.identityAttemptFor(ctx, vm, providerCR, instance)
@@ -352,4 +352,25 @@ func (r *VirtualMachineReconciler) deleteAbsent(ctx context.Context, vm *infravi
 // its Delete.
 func identityDeleteUnconfirmed(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	return len(vm.Status.OperationAttempts) > 0 && !nothingCreated(vm)
+}
+
+// reconfiguredResources is status.currentResources after the Reconfigure
+// attempt this reconcile drove Succeeded: the size its stored request asked
+// for, or, for a synchronous answer applied only to the persistent definition
+// or without the honest-result marker on a clustered Provider, the larger of
+// that and the recorded size per resource. nil when the request cannot be
+// read (unexpected: it was checked when it was loaded).
+func (r *VirtualMachineReconciler) reconfiguredResources(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
+	routed bool) *infravirtrigaudiov1beta1.VirtualMachineResources {
+	if ia.result == nil {
+		return nil
+	}
+	cpu, mem, err := requestedResourcesOf(ia.result.prepared)
+	if err != nil {
+		return nil
+	}
+	if answer := ia.result.answer; answer != nil && (answer.RestartRequired || (routed && !answer.Honest)) {
+		cpu, mem = max(r.getCurrentCPU(vm), cpu), max(r.getCurrentMemoryMiB(vm), mem)
+	}
+	return &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
 }

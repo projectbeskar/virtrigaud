@@ -256,6 +256,9 @@ type identityStatusWrite struct {
 	placement    *infravirtrigaudiov1beta1.PlacementStatus
 	setID        bool
 	id           string
+	// resources, when set, replaces status.currentResources (a Reconfigure
+	// that Succeeded records its size in the write that makes it Terminal).
+	resources *infravirtrigaudiov1beta1.VirtualMachineResources
 }
 
 // rawJSON encodes v; an empty marker list encodes as null (it is not stored).
@@ -315,6 +318,11 @@ func (r *VirtualMachineReconciler) writeIdentityStatus(ctx context.Context, vm *
 			return err
 		}
 	}
+	if w.resources != nil {
+		if err := add("add", "/status/currentResources", w.resources); err != nil {
+			return err
+		}
+	}
 	body, err := json.Marshal(ops)
 	if err != nil {
 		return fmt.Errorf("encode status patch: %w", err)
@@ -327,6 +335,7 @@ func (r *VirtualMachineReconciler) writeIdentityStatus(ctx context.Context, vm *
 	vm.Status.OperationAttempts = obj.Status.OperationAttempts
 	vm.Status.Placement = obj.Status.Placement
 	vm.Status.ID = obj.Status.ID
+	vm.Status.CurrentResources = obj.Status.CurrentResources
 	return nil
 }
 
@@ -1033,6 +1042,11 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 		promotePendingHost(promoted, a.HostID)
 		w.setPlacement, w.placement = true, promoted.Status.Placement
 		w.setID, w.id = true, answerID
+	}
+	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure && outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
+		// The size is recorded in the same write as Terminal, so a restart
+		// in between cannot lose it.
+		w.resources = r.reconfiguredResources(vm, ia, isClusterTopology(ia.providerCR))
 	}
 	if err := r.writeIdentityStatus(ctx, vm, w); err != nil {
 		logger.Info("The Terminal marker was not written; the attempt is asked about again", "error", err.Error())
