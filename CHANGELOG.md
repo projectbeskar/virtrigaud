@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-07 09:00] - Operation-identity mode in the clustered conformance fake (test only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `test/conformance/clustered/fake/identity.go`, `fake/provider.go`, `fake/target.go`: an operation-identity mode for the instrumented fake (`fake.NewIdentity`). It reports `supports_operation_identity` (and `requires_operation_identity` when configured to refuse unsigned calls with `IDENTITY_REQUIRED`); each host routes a signed `Create`, `Delete`, `Power` or `Reconfigure` by the request inside the envelope and verifies the grant with the shared `internal/operation` verifier against a pinned anchor; acts only on the verified request; keeps in-memory operation records on its hosts that are never dropped, so a known `op_id` is answered from its record (also after a Provider restart) and never executed again; refuses a known `op_id` with other identity fields or another `intent_digest` (`OP_ID_CONFLICT`), a new operation for a VM with a non-terminal one (`VM_BUSY`), and the first delivery of an `op_id` minted before the host's enrolment epoch; issues task references that encode the `op_id`, and reports typed outcomes that a test can script (`RETIRED`, `FAILED_CLEAN`, `FAILED_DIRTY`, `CANCELLED`, `UNKNOWN`).
+- `test/conformance/clustered/cases_identity.go`, `identity.go`, `target.go`, `run.go`: 17 `identity.*` cases (capabilities, unsigned refused, signed Power and Create/Delete, forged grants, wrong-kind grants, outer fields beside the envelope, digest binding, Provider/host/enrolment binding, duplicate `op_id` before and after a restart, `OP_ID_CONFLICT`, `VM_BUSY`, the `mint_epoch` first-delivery rule (Recommended), and the `RETIRED`, `UNKNOWN` and `FAILED_DIRTY` outcomes); the features `operation-identity`, `operation-identity-required` and `scripted-outcomes`; the optional `OperationIdentityTarget` and `OutcomeScripter` interfaces; an identity probe so the cases run only against a Target that offers operation identity and are skipped, with the reason, for every other Target; `clustered.OnlyCases`.
+- `test/conformance/clustered/fake/violation.go`, `meta_test.go`: 17 identity-mode violations (78 in all), each caught by at least one `identity.*` case in the mutation meta-test.
+- `test/conformance/clustered/suite_test.go`, `identity_signer_test.go`: the suite runs against the identity fake with a test-only signer that exists only in the test binary: the whole suite with unsigned calls also accepted (asynchronous and synchronous), and the `identity.*` cases with a grant required.
+- `test/conformance/README.md`: "Operation identity cases" section, the new features and violations.
+
+### Why
+A test Provider that verifies operation grants, executes each operation at most once and reports typed outcomes lets later manager work be tested against the rules a per-host agent enforces, with the same verifier. Existing Targets are unaffected: clustered libvirt and the default fake report the same results, and the new cases are listed as skipped for them.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-06 17:45] - Manager-side operation grants (development builds only)
 **Author:** @wrkode (William Rizzo)
 
