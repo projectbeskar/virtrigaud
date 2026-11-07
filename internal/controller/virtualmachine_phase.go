@@ -57,6 +57,18 @@ var holdPhaseReasons = map[string]bool{
 	k8s.ReasonPlacementTopologyMismatch: true,
 	k8s.ReasonConsumerNotAllowed:        true,
 	k8s.ReasonVMMissingOnHost:           true,
+	// Operation-identity holds (Providers that require operation identity).
+	k8s.ReasonOperationIdentityMismatch:     true,
+	k8s.ReasonOperationSignerUnavailable:    true,
+	k8s.ReasonOperationEnrolmentUnavailable: true,
+	k8s.ReasonOperationStateLost:            true,
+	k8s.ReasonOperationIntentLost:           true,
+	k8s.ReasonOperationIntentTampered:       true,
+	k8s.ReasonOperationRequestTooLarge:      true,
+	k8s.ReasonOperationFailedDirty:          true,
+	k8s.ReasonOperationOutcomeUnknown:       true,
+	k8s.ReasonOperationUnknownToAgent:       true,
+	k8s.ReasonOperationProviderMismatch:     true,
 }
 
 // restoreHoldPhaseReasons are the reasons of the clustered restore guards'

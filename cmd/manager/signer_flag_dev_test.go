@@ -75,3 +75,42 @@ func TestDevSignerKeyFileFlag_DevBuild(t *testing.T) {
 		})
 	}
 }
+
+// managerSubprocessEnrolmentEnv carries the --dev-operation-enrolment-file
+// value the enrolment-flag tests' child process starts main() with.
+const managerSubprocessEnrolmentEnv = "VIRTRIGAUD_TEST_DEV_ENROLMENT_FILE"
+
+// TestDevEnrolmentFileFlag_DevBuild: a development build loads a valid
+// enrolment file with a warning and refuses a malformed or missing one.
+func TestDevEnrolmentFileFlag_DevBuild(t *testing.T) {
+	if os.Getenv(managerSubprocessEnv) == "1" {
+		os.Args = []string{"manager", "--dev-operation-enrolment-file=" + os.Getenv(managerSubprocessEnrolmentEnv)}
+		main()
+		return
+	}
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "valid.json")
+	require.NoError(t, os.WriteFile(valid, []byte(`{"epoch":{"counter":2,"holder":"000102030405060708090a0b0c0d0e0f"},`+
+		`"providers":{"ns/p":{"host-a":"101112131415161718191a1b1c1d1e1f"}}}`), 0o600))
+	malformed := filepath.Join(dir, "malformed.json")
+	require.NoError(t, os.WriteFile(malformed, []byte(`{"epoch":{"counter":0}}`), 0o600))
+	run := func(t *testing.T, path string) string {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestDevEnrolmentFileFlag_DevBuild$") // #nosec G204 -- re-runs this test binary
+		cmd.Env = append(os.Environ(), managerSubprocessEnv+"=1", managerSubprocessEnrolmentEnv+"="+path,
+			"KUBECONFIG="+t.TempDir()+"/none", "KUBERNETES_SERVICE_HOST=", "HOME="+t.TempDir())
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr, "the manager must exit: %s", out)
+		return string(out)
+	}
+	t.Run("valid file", func(t *testing.T) {
+		out := run(t, valid)
+		assert.Contains(t, out, "a development operation-identity enrolment file is loaded")
+		assert.NotContains(t, out, "invalid --dev-operation-enrolment-file")
+	})
+	for name, path := range map[string]string{"malformed file": malformed, "missing file": filepath.Join(dir, "none.json")} {
+		t.Run(name, func(t *testing.T) {
+			assert.Contains(t, run(t, path), "invalid --dev-operation-enrolment-file")
+		})
+	}
+}

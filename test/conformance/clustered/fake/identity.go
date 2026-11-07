@@ -86,6 +86,10 @@ type IdentityConfig struct {
 	// a mutating call that carries no operation_envelope (IDENTITY_REQUIRED).
 	// Without it the fake also accepts unsigned calls, as before.
 	Required bool
+	// ProviderUID is the Provider metadata.uid the fake's hosts are enrolled
+	// with (a grant naming another is refused). Empty uses a fixed one; a
+	// manager test sets the uid of the Provider object it created.
+	ProviderUID string
 }
 
 // identityMode is the fake's operation-identity state that is fixed when the
@@ -97,6 +101,8 @@ type identityMode struct {
 	enrolments map[string][]byte
 	epoch      operation.Epoch
 	startEpoch uint64
+	// providerUID is the Provider uid the hosts are enrolled with.
+	providerUID string
 }
 
 // newIdentityMode builds the verifier of each host from cfg.
@@ -108,13 +114,18 @@ func newIdentityMode(cfg IdentityConfig, hosts []string) (*identityMode, error) 
 	if err != nil {
 		return nil, fmt.Errorf("fake: epoch holder: %w", err)
 	}
+	providerUID := cfg.ProviderUID
+	if providerUID == "" {
+		providerUID = identityProviderUID
+	}
 	m := &identityMode{
-		required:   cfg.Required,
-		signer:     cfg.Signer,
-		verifiers:  map[string]*operation.Verifier{},
-		enrolments: map[string][]byte{},
-		epoch:      operation.Epoch{Counter: identityEpochCounter, Holder: holder},
-		startEpoch: identityEnrolmentStart,
+		providerUID: providerUID,
+		required:    cfg.Required,
+		signer:      cfg.Signer,
+		verifiers:   map[string]*operation.Verifier{},
+		enrolments:  map[string][]byte{},
+		epoch:       operation.Epoch{Counter: identityEpochCounter, Holder: holder},
+		startEpoch:  identityEnrolmentStart,
 	}
 	for _, h := range hosts {
 		enrolment, err := operation.NewRandomID()
@@ -124,7 +135,7 @@ func newIdentityMode(cfg IdentityConfig, hosts []string) (*identityMode, error) 
 		v, err := operation.NewVerifier(operation.VerifierConfig{
 			Anchors:     []*x509.Certificate{cfg.Anchor},
 			InstallID:   cfg.Signer.InstallID(),
-			ProviderUID: identityProviderUID,
+			ProviderUID: providerUID,
 			HostID:      h,
 			EnrolmentID: enrolment,
 		})
@@ -425,7 +436,7 @@ func (t *Target) OperationIdentity() clustered.OperationIdentityConfig {
 	}
 	return clustered.OperationIdentityConfig{
 		Signer:              m.signer,
-		ProviderUID:         identityProviderUID,
+		ProviderUID:         m.providerUID,
 		Enrolments:          enrolments,
 		Epoch:               operation.Epoch{Counter: m.epoch.Counter, Holder: append([]byte(nil), m.epoch.Holder...)},
 		EnrolmentStartEpoch: m.startEpoch,
@@ -442,6 +453,23 @@ func (t *Target) ScriptOutcome(host string, outcome providerv1.TaskOutcome, reas
 		return fmt.Errorf("fake: outcome %s cannot be scripted", outcome)
 	}
 	return t.withHost(host, func(hs *hostState) { hs.script = &scripted{outcome: outcome, reason: reason} })
+}
+
+// AcceptedOperations counts the distinct operations of kind (distinct
+// op_ids) the fake's hosts accepted and remember, over every host: each is
+// executed at most once.
+func (t *Target) AcceptedOperations(kind providerv1.OperationKind) int {
+	t.w.mu.Lock()
+	defer t.w.mu.Unlock()
+	n := 0
+	for h, hs := range t.w.hosts {
+		for _, rec := range t.p.ops(h, hs) {
+			if rec.kind == kind {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // requestOf asserts the request admit returned to the handler's type.

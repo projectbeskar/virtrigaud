@@ -489,6 +489,157 @@ type VirtualMachineStatus struct {
 	// removed. Written only by the operator.
 	// +optional
 	SnapshotRevert *SnapshotRevertStatus `json:"snapshotRevert,omitempty"`
+
+	// OperationAttempts is the operator's durable record of the operations it
+	// sends to a Provider that requires operation identity (development
+	// builds only; no built-in Provider type requires it): at most one entry
+	// per operation kind, the latest attempt of that kind. An entry is written
+	// before its operation is first sent, and moves Prepared, Sent, Terminal.
+	// The exact request bytes of a non-terminal attempt are kept in an
+	// authenticated Secret in the Provider's namespace, never here. Never
+	// written for any other Provider. Written only by the operator. The
+	// entries are not signed or authenticated: an edit the operator detects
+	// (a removed entry, an id or confirmed host without a successful Create,
+	// a Delete recorded Succeeded that its stored intent and the Provider do
+	// not confirm) holds the VM (Ready=False), but a principal allowed to
+	// write virtualmachines/status can still cause a duplicate or a skipped
+	// operation; the host's own de-duplication is then the backstop.
+	// +optional
+	// +listType=map
+	// +listMapKey=kind
+	// +kubebuilder:validation:MaxItems=18
+	OperationAttempts []OperationAttempt `json:"operationAttempts,omitempty"`
+}
+
+// OperationAttemptKind is the kind of operation an OperationAttempt records.
+// +kubebuilder:validation:Enum=Create;Delete;PowerOn;PowerOff;Reboot;ShutdownGraceful;Reconfigure
+type OperationAttemptKind string
+
+// The operation kinds an OperationAttempt records.
+const (
+	// OperationAttemptKindCreate is a Create.
+	OperationAttemptKindCreate OperationAttemptKind = "Create"
+	// OperationAttemptKindDelete is a Delete.
+	OperationAttemptKindDelete OperationAttemptKind = "Delete"
+	// OperationAttemptKindPowerOn is a power-on.
+	OperationAttemptKindPowerOn OperationAttemptKind = "PowerOn"
+	// OperationAttemptKindPowerOff is a hard power-off.
+	OperationAttemptKindPowerOff OperationAttemptKind = "PowerOff"
+	// OperationAttemptKindReboot is a reboot.
+	OperationAttemptKindReboot OperationAttemptKind = "Reboot"
+	// OperationAttemptKindShutdownGraceful is a graceful shutdown.
+	OperationAttemptKindShutdownGraceful OperationAttemptKind = "ShutdownGraceful"
+	// OperationAttemptKindReconfigure is a Reconfigure.
+	OperationAttemptKindReconfigure OperationAttemptKind = "Reconfigure"
+)
+
+// OperationAttemptPhase is where an OperationAttempt stands.
+// +kubebuilder:validation:Enum=Prepared;Sent;Terminal
+type OperationAttemptPhase string
+
+const (
+	// OperationAttemptPhasePrepared: the attempt's identity and request bytes
+	// are stored, and the operation may or may not have been delivered.
+	OperationAttemptPhasePrepared OperationAttemptPhase = "Prepared"
+	// OperationAttemptPhaseSent: the Provider accepted the operation and its
+	// outcome is not known yet.
+	OperationAttemptPhaseSent OperationAttemptPhase = "Sent"
+	// OperationAttemptPhaseTerminal: the attempt's outcome is known
+	// (status.operationAttempts[].outcome).
+	OperationAttemptPhaseTerminal OperationAttemptPhase = "Terminal"
+)
+
+// OperationAttemptOutcome is the outcome of a terminal OperationAttempt, as
+// the Provider reported it (an unsigned claim).
+// +kubebuilder:validation:Enum=Succeeded;FailedClean;FailedDirty;Retired;Cancelled;Rejected
+type OperationAttemptOutcome string
+
+const (
+	// OperationAttemptOutcomeSucceeded: the operation was performed.
+	OperationAttemptOutcomeSucceeded OperationAttemptOutcome = "Succeeded"
+	// OperationAttemptOutcomeFailedClean: it failed before any irreversible
+	// step.
+	OperationAttemptOutcomeFailedClean OperationAttemptOutcome = "FailedClean"
+	// OperationAttemptOutcomeFailedDirty: it failed after an irreversible
+	// step began; something may have happened. The VM is held.
+	OperationAttemptOutcomeFailedDirty OperationAttemptOutcome = "FailedDirty"
+	// OperationAttemptOutcomeRetired: it provably never started and never
+	// will.
+	OperationAttemptOutcomeRetired OperationAttemptOutcome = "Retired"
+	// OperationAttemptOutcomeCancelled: it was cancelled before any
+	// irreversible step.
+	OperationAttemptOutcomeCancelled OperationAttemptOutcome = "Cancelled"
+	// OperationAttemptOutcomeRejected: the host refused its first delivery
+	// before accepting it, with a reason that proves it was not performed.
+	OperationAttemptOutcomeRejected OperationAttemptOutcome = "Rejected"
+)
+
+// OperationAttempt is the operator's durable record of one attempt of one
+// operation on a VirtualMachine, for a Provider that requires operation
+// identity. The operator writes it, through the status subresource with
+// preconditions on the entries it read, before it first sends the
+// operation; a re-send of the same attempt reuses every field.
+type OperationAttempt struct {
+	// Kind is the operation.
+	Kind OperationAttemptKind `json:"kind"`
+
+	// Attempt counts the attempts of this kind for the VM, from 1.
+	// +kubebuilder:validation:Minimum=1
+	Attempt int64 `json:"attempt"`
+
+	// OpID is the attempt's random identifier, 32 lowercase hexadecimal
+	// characters. It names the Secret that holds the attempt's request.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	OpID string `json:"opID"`
+
+	// BindingID is the identifier of the VM's placement the attempt was
+	// issued for (status.placement.bindingID).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	BindingID string `json:"bindingID,omitempty"`
+
+	// HostID is the Host the attempt was sent to.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	HostID string `json:"hostID,omitempty"`
+
+	// Phase is where the attempt stands.
+	Phase OperationAttemptPhase `json:"phase"`
+
+	// Outcome is the attempt's outcome, once Terminal.
+	// +optional
+	Outcome OperationAttemptOutcome `json:"outcome,omitempty"`
+
+	// OutcomeReason is the Provider's reason code for a non-successful
+	// outcome, for operators.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	OutcomeReason string `json:"outcomeReason,omitempty"`
+
+	// TaskRef is the Provider's task reference of an attempt it runs
+	// asynchronously.
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	TaskRef string `json:"taskRef,omitempty"`
+
+	// TaskTag binds TaskRef to this attempt: an HMAC-SHA256 tag (64 lowercase
+	// hexadecimal characters) the operator computes over the attempt's opID,
+	// kind, attempt, the VM's UID and TaskRef with a key that never leaves the
+	// operator. A task reference whose tag does not verify, or that another
+	// entry also names, is never polled or used to confirm an outcome.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	TaskTag string `json:"taskTag,omitempty"`
+
+	// ID is the provider's VM identifier an asynchronous Create answered,
+	// recorded with phase Sent; it becomes status.id once the attempt
+	// Succeeded.
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	ID string `json:"id,omitempty"`
+
+	// LastTransitionTime is when the attempt last changed phase.
+	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
 }
 
 // BoundProviderRef identifies the Provider object a VirtualMachine is bound
@@ -606,6 +757,15 @@ type PlacementStatus struct {
 	// (e.g. the winning score or the constraint that narrowed the candidates).
 	// +optional
 	Reason string `json:"reason,omitempty"`
+
+	// BindingID identifies this placement of the VM for a Provider that
+	// requires operation identity (development builds only): 32 random
+	// lowercase hexadecimal characters, drawn when the VM's first Create
+	// attempt on its host is recorded, unchanged by re-sends. Never written
+	// for any other Provider.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	BindingID string `json:"bindingID,omitempty"`
 }
 
 // PlacementResources is a CPU/memory size recorded by the clustered scheduler
