@@ -37,6 +37,33 @@ import (
 // evidence that site will need. It covers the legacy create-marker and
 // delete-task paths too, which are reached only for Creates made without
 // operation identity. Line numbers in the comments are informative only.
+//
+// Besides the three helpers it counts, fail-closed, every direct
+// RemoveFinalizer call (the k8s helper or controllerutil) whose finalizer
+// argument is not one of the other kinds' finalizer constants, so a release
+// of the VirtualMachine finalizer that bypasses removeFinalizer is seen too,
+// and every assignment to a Finalizers field. References in package-level
+// declarations (a function literal or a method expression in a var) are
+// counted under the name of the declared variable.
+
+// directRemoveFinalizer is the callee name recorded for a direct
+// RemoveFinalizer call that may remove the VirtualMachine finalizer.
+const directRemoveFinalizer = "RemoveFinalizer"
+
+// finalizersAssignment is the callee name recorded for an assignment to a
+// Finalizers field.
+const finalizersAssignment = "Finalizers="
+
+// otherKindFinalizers are the finalizer constants of other kinds. A direct
+// RemoveFinalizer call whose last argument names one of them is not counted;
+// any other argument (VirtualMachineFinalizer, a literal, a variable) is.
+var otherKindFinalizers = map[string]bool{
+	"VMSnapshotFinalizer":    true,
+	"VMCloneFinalizer":       true,
+	"VMMigrationFinalizer":   true,
+	"ProviderInUseFinalizer": true,
+	"HostInUseFinalizer":     true,
+}
 
 // releaseSiteCallees are the functions whose calls this test enumerates.
 var releaseSiteCallees = map[string]bool{
@@ -76,6 +103,9 @@ var releaseSites = map[releaseSite]int{
 	{"virtualmachine_controller.go", "orphanOnDelete", "removeFinalizer"}:            1,
 	// The body of every releaseLeavingHypervisorVM call.
 	{"virtualmachine_controller.go", "releaseLeavingHypervisorVM", "removeFinalizer"}: 1,
+	// The only direct removal of the VirtualMachine finalizer: the body of
+	// every removeFinalizer call.
+	{"virtualmachine_controller.go", "removeFinalizer", directRemoveFinalizer}: 1,
 
 	// The final release of handleDeletion: an unbound VM with no attempt
 	// that needs its host, or whose Provider is gone with no unconfirmed
@@ -101,11 +131,39 @@ var releaseSites = map[releaseSite]int{
 }
 
 // releaseSiteTotal is the number of calls releaseSites enumerates.
-const releaseSiteTotal = 38
+const releaseSiteTotal = 39
+
+// lastArgName returns the identifier or selector name of the last argument
+// of call, or "" when it is neither.
+func lastArgName(call *ast.CallExpr) string {
+	if len(call.Args) == 0 {
+		return ""
+	}
+	switch a := call.Args[len(call.Args)-1].(type) {
+	case *ast.Ident:
+		return a.Name
+	case *ast.SelectorExpr:
+		return a.Sel.Name
+	}
+	return ""
+}
+
+// calleeName returns the name of the function call calls, or "".
+func calleeName(call *ast.CallExpr) string {
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}
 
 // findReleaseSites parses the non-test Go files of dir and counts every
-// reference to a releaseSiteCallees function (a call or a method value),
-// keyed by file, enclosing function and callee.
+// reference to a releaseSiteCallees function (a call, a method value or a
+// method expression), every direct RemoveFinalizer call that may remove the
+// VirtualMachine finalizer and every assignment to a Finalizers field, keyed
+// by file, enclosing function (or package-level variable) and callee.
 func findReleaseSites(t *testing.T, dir string) (map[releaseSite]int, map[releaseSite][]int) {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
@@ -123,10 +181,12 @@ func findReleaseSites(t *testing.T, dir string) (map[releaseSite]int, map[releas
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+		base := filepath.Base(path)
+		scan := func(root ast.Node, function string) {
+			add := func(callee string, pos token.Pos) {
+				site := releaseSite{base, function, callee}
+				found[site]++
+				lines[site] = append(lines[site], fset.Position(pos).Line)
 			}
 			// A selector's Sel is visited after the selector itself; count
 			// the reference once.
@@ -136,12 +196,20 @@ func findReleaseSites(t *testing.T, dir string) (map[releaseSite]int, map[releas
 					return
 				}
 				seen[id] = true
-				site := releaseSite{filepath.Base(path), fn.Name.Name, id.Name}
-				found[site]++
-				lines[site] = append(lines[site], fset.Position(id.Pos()).Line)
+				add(id.Name, id.Pos())
 			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
+			ast.Inspect(root, func(n ast.Node) bool {
 				switch x := n.(type) {
+				case *ast.CallExpr:
+					if calleeName(x) == directRemoveFinalizer && !otherKindFinalizers[lastArgName(x)] {
+						add(directRemoveFinalizer, x.Pos())
+					}
+				case *ast.AssignStmt:
+					for _, lhs := range x.Lhs {
+						if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Finalizers" {
+							add(finalizersAssignment, sel.Pos())
+						}
+					}
 				case *ast.SelectorExpr:
 					record(x.Sel)
 				case *ast.Ident:
@@ -149,6 +217,28 @@ func findReleaseSites(t *testing.T, dir string) (map[releaseSite]int, map[releas
 				}
 				return true
 			})
+		}
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Body != nil {
+					scan(d.Body, d.Name.Name)
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					names := make([]string, 0, len(vs.Names))
+					for _, n := range vs.Names {
+						names = append(names, n.Name)
+					}
+					for _, v := range vs.Values {
+						scan(v, "var "+strings.Join(names, ","))
+					}
+				}
+			}
 		}
 	}
 	return found, lines
@@ -209,6 +299,18 @@ func a(v r) {
 	v.RemoveFinalizer()
 }
 
+var hook = func(v r) { v.removeFinalizer() }
+
+var expr = r.closeAttempt
+
+func direct(ctx, c, vm, snap, fin any) {
+	_ = k8s.RemoveFinalizer(ctx, c, vm, v1beta1.VirtualMachineFinalizer)
+	controllerutil.RemoveFinalizer(snap, v1beta1.VMSnapshotFinalizer)
+	controllerutil.RemoveFinalizer(vm, fin)
+	controllerutil.RemoveFinalizer(vm, "virtualmachine.infra.virtrigaud.io/finalizer")
+	vm.Finalizers = nil
+}
+
 func releaseLeavingHypervisorVM() {}
 
 func (r) RemoveFinalizer() {}
@@ -226,6 +328,12 @@ func (r) RemoveFinalizer() {}
 		{"x.go", "a", "removeFinalizer"}:            3,
 		{"x.go", "a", "closeAttempt"}:               1,
 		{"x.go", "a", "releaseLeavingHypervisorVM"}: 1,
+		// v.RemoveFinalizer() has no finalizer argument: counted, fail-closed.
+		{"x.go", "a", directRemoveFinalizer}:      1,
+		{"x.go", "var hook", "removeFinalizer"}:   1,
+		{"x.go", "var expr", "closeAttempt"}:      1,
+		{"x.go", "direct", directRemoveFinalizer}: 3,
+		{"x.go", "direct", finalizersAssignment}:  1,
 	}
 	if len(found) != len(want) {
 		t.Errorf("found %v, want %v", found, want)
