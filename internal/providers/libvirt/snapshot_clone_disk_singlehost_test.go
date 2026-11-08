@@ -61,7 +61,9 @@ import (
 // the overlay files it would create, one `sh -c` before the ejection,
 // snapshot_overlay_collision.go), and for the classified SnapshotRevert
 // failures (snapshot_revert_outcome.go: its error answers changed, not its
-// commands) — with
+// commands), and for the refused empty task reference (task-status-empty-ref:
+// a TaskStatus without a task id is now InvalidArgument instead of done; it
+// issues no command, and the manager never sends one) — with
 // VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
 // reproduces it byte for byte. A change to any of them — which would restart
 // the ADR-0008 D5 soak window — fails here.
@@ -571,7 +573,7 @@ func singleHostSCDScenarios() []scdScenario {
 // TestSingleHost_SnapshotCloneDisk_ResultsUnchanged is the single-host
 // equivalence proof for slice 3: every scenario's virsh/host command sequence,
 // response, error and (Clone) defined domain XML equal what origin/main
-// produced before the slice.
+// produced before the slice, apart from the later changes listed above.
 func TestSingleHost_SnapshotCloneDisk_ResultsUnchanged(t *testing.T) {
 	got := map[string]scdResult{}
 	for _, sc := range singleHostSCDScenarios() {

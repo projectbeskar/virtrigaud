@@ -46,3 +46,12 @@ func TestTaskStatus_NoTaskReferenceIsInvalidArgument(t *testing.T) {
 		})
 	}
 }
+
+// TestTaskStatus_NoTaskReferenceBeforeClient: the reference is checked
+// before the PVE client, so an unconfigured provider refuses a task-less
+// request the same way.
+func TestTaskStatus_NoTaskReferenceBeforeClient(t *testing.T) {
+	_, err := (&Provider{}).TaskStatus(context.Background(), &providerv1.TaskStatusRequest{})
+	require.Error(t, err)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
