@@ -64,10 +64,50 @@ const (
 // (security: tenant-controlled command injection on the hypervisor host).
 const HostEndpointPattern = `^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$`
 
+// HostConditionAgentEnrolled is the Host condition type the host-agent
+// enrolment controller sets on a Host whose Provider runs a per-host agent. It
+// is True once a certificate for the host's agent has been validated and its
+// key pinned, and False (with one of the HostReasonAgent* reasons) otherwise.
+// Used only by development builds.
+const HostConditionAgentEnrolled = "AgentEnrolled"
+
+// Reasons of the AgentEnrolled Host condition. Used only by development
+// builds.
+const (
+	// HostReasonAgentEnrolled: an issued certificate matched the authorised
+	// request and its key is pinned.
+	HostReasonAgentEnrolled = "Enrolled"
+	// HostReasonAgentIdentityMissing: spec.identity is not set, so no
+	// enrolment is authorised for the host.
+	HostReasonAgentIdentityMissing = "IdentityMissing"
+	// HostReasonAgentRevoked: spec.revoked is true, so no enrolment is
+	// authorised for the host.
+	HostReasonAgentRevoked = "Revoked"
+	// HostReasonAgentAwaitingRequest: an enrolment record is drawn and the
+	// manager waits for a certificate request carrying it.
+	HostReasonAgentAwaitingRequest = "AwaitingCertificateRequest"
+	// HostReasonAgentAwaitingCertificate: a certificate request is authorised
+	// and the manager waits for the issued certificate.
+	HostReasonAgentAwaitingCertificate = "AwaitingCertificate"
+	// HostReasonAgentRequestDenied: the last certificate request for the host
+	// was denied.
+	HostReasonAgentRequestDenied = "CertificateRequestDenied"
+	// HostReasonAgentCertificateRejected: an issued certificate did not match
+	// the authorised request and was not pinned.
+	HostReasonAgentCertificateRejected = "CertificateRejected"
+)
+
+// HostAgentModeIdentity is the only agent enrolment mode: the agent proves its
+// identity, and operation epochs carry no fencing meaning.
+const HostAgentModeIdentity = "identity"
+
 // HostSpec is admin-authored desired inventory: one bare hypervisor host that a
 // clustered Provider (spec.topology=cluster) executes on. The admin
 // declares which hosts exist; the provider reports what they can do right now
 // (see HostStatus).
+//
+// spec.identity, once set, cannot be changed or removed (a replaced machine is
+// a new Host identity and never inherits the old host's pinned keys).
 //
 // Same-namespace model (security): a Host, its HostPool, its optional credential
 // Secret, and the clustered Provider it names all live in ONE namespace — the
@@ -76,6 +116,7 @@ const HostEndpointPattern = `^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za
 // into a Provider's inventory nor point the operator at a credential Secret in
 // a namespace its author does not control: the inventory render lists Hosts and
 // resolves credential Secrets in the Provider's namespace only.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.identity) || (has(self.identity) && self.identity == oldSelf.identity)",message="spec.identity is immutable once set",fieldPath=".identity"
 type HostSpec struct {
 	// ProviderRef is the clustered Provider that executes on this host. It must
 	// be in the Host's own namespace: a Host can only be fronted by a Provider in
@@ -135,6 +176,67 @@ type HostSpec struct {
 	// +optional
 	// +kubebuilder:default=true
 	Schedulable bool `json:"schedulable"`
+
+	// Identity is the host's identity anchor for per-host agent enrolment: for
+	// example a TPM endorsement-key hash, a hardware serial number or an
+	// administrator-assigned host UUID. It is set once and is immutable
+	// afterwards. A host whose Provider runs a per-host agent can enrol only
+	// once it is set; a replaced machine gets a new identity (a new Host) and
+	// never inherits the old host's pinned keys. Used only by development
+	// builds; ignored by libvirt hosts.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._:-]*$`
+	Identity string `json:"identity,omitempty"`
+
+	// Revoked, when true, revokes the host's per-host agent identity: the
+	// manager never authorises a certificate request for the host, and the
+	// host is not rendered into its Provider's inventory with agent
+	// credentials. Used only by development builds; ignored by libvirt hosts.
+	// +optional
+	Revoked bool `json:"revoked,omitempty"`
+}
+
+// HostAgentStatus is the per-host agent enrolment state the manager mirrors
+// into Host.status.agent. It is a MIRROR: the authoritative record (the pinned
+// keys and the enrolment record) lives in a manager-owned Secret per Host, and
+// a lost or edited status is rewritten from it. It carries public identifiers
+// only, never key material. Used only by development builds.
+type HostAgentStatus struct {
+	// Mode is the enrolment mode. Only "identity" exists.
+	// +optional
+	// +kubebuilder:validation:Enum=identity
+	Mode string `json:"mode,omitempty"`
+
+	// EnrolmentID is the current enrolment identifier: 32 lowercase
+	// hexadecimal characters, carried in the agent certificate.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	EnrolmentID string `json:"enrolmentID,omitempty"`
+
+	// PendingEnrolmentID is the enrolment identifier drawn for the next
+	// enrolment, waiting for a certificate request that carries it.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	PendingEnrolmentID string `json:"pendingEnrolmentID,omitempty"`
+
+	// RequestURIs are the exact URI subject alternative names a certificate
+	// request for the pending enrolment must carry, and nothing else: the
+	// host's URI identity and the enrolment record.
+	// +optional
+	// +kubebuilder:validation:MaxItems=8
+	RequestURIs []string `json:"requestURIs,omitempty"`
+
+	// KeyPins are the pinned agent keys: the SHA-256 of each certificate's
+	// DER SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
+	// +optional
+	// +kubebuilder:validation:MaxItems=4
+	KeyPins []string `json:"keyPins,omitempty"`
+
+	// CertificateExpiry is when the pinned agent certificate expires.
+	// +optional
+	CertificateExpiry *metav1.Time `json:"certificateExpiry,omitempty"`
 }
 
 // HostStatus is operator-synced observed state from the provider's ListHosts and
@@ -188,6 +290,12 @@ type HostStatus struct {
 	// whose status.placement.host names this Host instead.
 	// +optional
 	BoundVMs int32 `json:"boundVMs,omitempty"`
+
+	// Agent is the per-host agent enrolment state, mirrored from the
+	// manager-owned pins Secret. Set only for hosts of a Provider that runs a
+	// per-host agent. Used only by development builds.
+	// +optional
+	Agent *HostAgentStatus `json:"agent,omitempty"`
 
 	// LastHeartbeatTime is when the operator last successfully synced this host.
 	// +optional
