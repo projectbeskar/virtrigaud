@@ -11,10 +11,13 @@ Edit the placeholders before applying:
   issuer, of the enrolment `CertificateRequest`s and of the per-Host pins
   Secrets (`--dev-host-enrolment-namespace`). Grant nobody but the manager
   Secret write access in it.
-- `issuers.cert-manager.io/host-agent-pki.host-agent-ca`: the cert-manager
-  signer name of the host-agent issuer: `issuers.cert-manager.io/<namespace>.<name>`
-  for an `Issuer`, `clusterissuers.cert-manager.io/<name>` for a `ClusterIssuer`.
-  With an external-PKI issuer reference, add its signer name too
+- `clusterissuers.cert-manager.io/host-agent-ca`: the cert-manager signer
+  name of the host-agent issuer, a `ClusterIssuer`
+  (`clusterissuers.cert-manager.io/<name>`). Use a ClusterIssuer, so the
+  sub-CA key Secret lives in cert-manager's cluster resource namespace and not
+  in the enrolment namespace, where the manager can write Secrets. A
+  namespaced `Issuer` whose key Secret sits in the enrolment namespace is not
+  supported. With an external-PKI issuer reference, add its signer name too
   (`<resource plural>.<group>/<namespace>.<name>`).
 - `virtrigaud-system` / `virtrigaud-controller-manager`: the manager's
   ServiceAccount.
@@ -36,6 +39,13 @@ What is granted, and nothing more:
 
 The manager does not get `create` on `certificaterequests`: it only decides
 requests administrators submitted.
+
+Residual: the manager's existing cluster-wide Secret permission (from the
+default RBAC) still reaches every Secret, including the sub-CA key. Narrowing
+it is separate work.
+
+A wildcard verb (`*`) on `hosts` satisfies `enrol`: audit such roles before
+adding anyone to the enrolment administrator group.
 
 Administrators who submit requests need, besides `create` on
 `certificaterequests` in the enrolment namespace, the `enrol` verb on the

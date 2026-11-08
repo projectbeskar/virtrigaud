@@ -123,9 +123,21 @@ authorised key. A certificate issued after the Host was revoked is refused.
 Each Host has a manager-written Secret in the **enrolment namespace**
 (`--dev-host-enrolment-namespace`), never in the Host's own namespace:
 whoever can write Secrets in a tenant namespace must not be able to enrol a
-host. The enrolment namespace is the issuer's namespace, which already holds
-the subordinate CA's key for a cert-manager `Issuer`; grant nobody but the
-manager Secret write access in it.
+host. Grant nobody but the manager Secret write access in the enrolment
+namespace.
+
+Use a cert-manager **ClusterIssuer** for the host-agent subordinate CA
+(`--dev-host-enrolment-issuer=ClusterIssuer/<name>`, signer name
+`clusterissuers.cert-manager.io/<name>`): its CA key Secret then lives in
+cert-manager's cluster resource namespace, not in the enrolment namespace
+where the manager can write Secrets. A namespaced `Issuer` keeps its key
+Secret in its own namespace, which is the enrolment namespace; that layout
+is not supported, because it puts the sub-CA key where the manager writes.
+
+Residual: the manager's existing cluster-wide Secret permission (used for
+provider credentials and the host inventories) still reaches every Secret,
+including the sub-CA key wherever it lives. Narrowing that grant is separate
+work.
 
 The Secret is named `virtrigaud-agent-pins-<hash>` (a hash of the Host's
 namespace and name, so the name is bounded), labelled
@@ -137,8 +149,11 @@ authorised request, the current enrolment (record, key pins, expiry) and the
 retired enrolment ids (up to 256). It holds no private key and no CA bundle.
 
 Owner references cannot cross namespaces, so the manager deletes the Secret
-itself: when the Host starts deleting, when it is gone, and, at start-up, for
-every pins Secret whose Host no longer exists. A state bound to another Host
+itself: when the Host starts deleting (only a Secret bound to that Host's
+UID), when it is gone, and, at start-up, for every pins Secret whose Host no
+longer exists. Before deleting, it re-reads the Secret and the Host from the
+API server (not its cache) and deletes with UID and resourceVersion
+preconditions, so a live Host or a Secret rewritten in between is kept. A state bound to another Host
 UID or identity (a replaced host) is discarded, never inherited. A Secret with
 that name that is not a VirtRigaud pins Secret for the Host is never read as
 pins, overwritten or deleted.
@@ -161,7 +176,8 @@ vrtg -n <host namespace> host revoke --host <name>
 ```
 
 `host enroll` checks the CSR file locally (a regular file of at most 64 KiB
-holding one PEM CSR whose signature verifies). Output files are written with
+holding one PEM CSR whose signature verifies; a FIFO or device is refused
+before it is opened). Output files are written with
 mode 0600 through a temporary file and a rename, never through a symbolic
 link. With `--manifest-out` it writes the `CertificateRequest` to a file
 and contacts no cluster, so the whole flow works by copying files: the agent's
@@ -192,9 +208,12 @@ them immutable; without the webhooks, whoever creates a request chooses them.
 At startup the manager therefore refuses to run enrolment unless it finds a
 mutating webhook (on create) and a validating webhook (on create and update)
 that cover `cert-manager.io/v1` `certificaterequests` in the enrolment
-namespace with `failurePolicy: Fail`. This is a registration check: it cannot
-prove the registered webhook is cert-manager's. A registered webhook that is
-down makes creates fail, which is closed.
+namespace with `failurePolicy: Fail` and no `matchConditions` (which could
+skip a request). It repeats the check every three minutes; while it fails, the
+manager decides no request (it retries each minute) and logs that approvals
+are suspended. This is a registration check: it cannot prove the registered
+webhook is cert-manager's. A registered webhook that is down makes creates
+fail, which is closed.
 
 ## RBAC
 
@@ -206,8 +225,8 @@ fails without it), `experimental.hostEnrolment.namespace` and
 `experimental.hostEnrolment.signerNames`. They grant exactly:
 
 - `approve` on `signers.cert-manager.io` for the named signer names only
-  (`resourceNames`, for example
-  `issuers.cert-manager.io/<namespace>.<issuer>`; wildcards are refused);
+  (`resourceNames`, for example `clusterissuers.cert-manager.io/<name>` for
+  the recommended ClusterIssuer; wildcards are refused);
 - `create` on `subjectaccessreviews` (the per-Host `enrol` check);
 - `get`, `list` on mutating and validating webhook configurations (the
   startup admission check);
@@ -222,6 +241,10 @@ namespace, the `enrol` verb on the Hosts they enrol (`hosts` in
 `infra.virtrigaud.io`, in each Host's namespace), and, for the external-PKI
 return, `update` on `certificaterequests/status`. Never give them `approve`
 on the signer.
+
+Before adding anyone to the enrolment administrator group, audit the roles
+that grant wildcard verbs (`*`) on `hosts`, or on every resource: a wildcard
+verb satisfies `enrol`, so whoever holds one can enrol any Host in its scope.
 
 ## Not done yet
 
