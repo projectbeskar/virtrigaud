@@ -70,7 +70,7 @@ spec:
         {{- if eq (include "virtrigaud.secretsScope" .) "namespaced" }}
         # Secret informer limited to the namespaces the manager holds a Secret
         # list/watch Role in (rbac.secrets.scope=namespaced).
-        - --secret-cache-namespaces={{ include "virtrigaud.secretProviderNamespaces" . }}
+        - --secret-cache-namespaces={{ include "virtrigaud.secretCacheNamespaces" . }}
         {{- end }}
         {{- if .Values.webhooks.enabled }}
         # Webhook serving certs are mounted at this path; the manager's certwatcher

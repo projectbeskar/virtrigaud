@@ -77,7 +77,8 @@ func TestRBAC_GeneratedRoleSecretVerbs(t *testing.T) {
 func secretRuleVerbs(rules []rbacv1.PolicyRule) [][]string {
 	var out [][]string
 	for _, r := range rules {
-		if slices.Contains(r.APIGroups, "") && (slices.Contains(r.Resources, "secrets") || slices.Contains(r.Resources, "*")) {
+		coreGroup := slices.Contains(r.APIGroups, "") || slices.Contains(r.APIGroups, "*")
+		if coreGroup && (slices.Contains(r.Resources, "secrets") || slices.Contains(r.Resources, "*")) {
 			v := slices.Clone(r.Verbs)
 			slices.Sort(v)
 			out = append(out, v)
@@ -184,6 +185,15 @@ func TestRBAC_ChartSecretGrantDefaultIsClusterWide(t *testing.T) {
 	assert.False(t, ok, "the default caches Secrets in every namespace")
 	assert.NotContains(t, out, "manager-secrets")
 
+	// An older values file without rbac.secrets (helm upgrade --reuse-values)
+	// renders the same cluster-wide default.
+	out, err = secretRBACRender(t, "--set", "rbac.secrets=null")
+	require.NoError(t, err, out)
+	reused, args := renderedSecretGrants(t, out)
+	assert.Equal(t, grants, reused)
+	_, ok = secretCacheArg(args)
+	assert.False(t, ok)
+
 	// The release-namespace Role (rbac.scope=namespace) keeps both rules too.
 	out, err = secretRBACRender(t, "--set", "rbac.scope=namespace")
 	require.NoError(t, err, out)
@@ -232,6 +242,30 @@ func TestRBAC_ChartSecretGrantNamespaced(t *testing.T) {
 			assert.Equal(t, 3, bindings)
 		})
 	}
+}
+
+func TestRBAC_ChartSecretGrantNamespacedEnrolmentNamespaceIsCacheOnly(t *testing.T) {
+	// The per-host agent enrolment namespace joins the Secret informer (its
+	// pins Secrets are read through the cache), but this chart grants nothing
+	// there: the enrolment feature's own Role does.
+	out, err := secretRBACRender(t, "--set", "rbac.secrets.scope=namespaced",
+		"--set", "rbac.secrets.providerNamespaces={virt-a}",
+		"--set", "experimental.hostEnrolment.enabled=true", "--set", "experimental.hostEnrolment.namespace=agent-pki")
+	require.NoError(t, err, out)
+	grants, args := renderedSecretGrants(t, out)
+	for name := range grants {
+		assert.NotContains(t, name, "agent-pki/", "no manager Secret Role in the enrolment namespace")
+	}
+	assert.Contains(t, grants, "Role virt-a/rel-virtrigaud-manager-secrets")
+	v, ok := secretCacheArg(args)
+	require.True(t, ok)
+	assert.Equal(t, "agent-pki,virt-a", v)
+
+	out, err = secretRBACRender(t, "--set", "rbac.secrets.scope=namespaced",
+		"--set", "rbac.secrets.providerNamespaces={virt-a}",
+		"--set", "experimental.hostEnrolment.enabled=true", "--set", "experimental.hostEnrolment.namespace=Agent_PKI")
+	require.Error(t, err, out)
+	assert.Contains(t, out, "experimental.hostEnrolment.namespace")
 }
 
 func TestRBAC_ChartSecretGrantNamespacedWithoutRBAC(t *testing.T) {

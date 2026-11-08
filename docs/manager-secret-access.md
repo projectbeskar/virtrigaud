@@ -21,9 +21,9 @@ kubelet mounts for them.
 | Host credential Secrets of a clustered Provider (`Host.spec.credentialSecretRef`, otherwise the Provider's `spec.credentialSecretRef`) | Provider's (a reference to another namespace is not read) | chosen by the user | `get` | informer cache | `internal/controller/provider_hostinventory.go` (`resolveHostCredentials`) |
 | Host-inventory Secret of a clustered Provider | Provider's | `<provider>-hosts` | `get`, `create`, `update` (no `delete`: owned by the Provider and garbage-collected with it) | informer cache | `internal/controller/provider_hostinventory.go` (`reconcileHostInventorySecret`) |
 | Operation-intent Secrets (only for a Provider whose type requires operation identity; development builds only) | Provider's | `vrtg-op-<op_id>` | `create`, `get`, `list`, `delete` | `get`: API server (`APIReader`). `list` (the sweep): informer cache, by label, in the Provider's namespace | `internal/controller/operation_intent.go` |
-| Cloud-init user data and metadata (`spec.userData.cloudInit.secretRef`, `spec.metaData.cloudInit.secretRef`) | VirtualMachine's | chosen by the user | `get` | API server (`APIReader`) | `internal/controller/cloudinit.go` |
-| S3 staging credentials (`spec.storage.s3.credentialsSecretRef`) | VMMigration's | chosen by the user | `get` | API server (`APIReader`) | `internal/controller/vmmigration_controller.go` (`loadS3Credentials`) |
-| Per-host agent pins Secrets (the experimental per-host agent enrolment, development builds only, where present) | the enrolment namespace | derived from the Host's namespace and name | `get`, `list`, `watch`, `create`, `update`, `delete` | informer cache | granted by that feature's own Role, never by the rules on this page |
+| Cloud-init user data and metadata (`spec.userData.cloudInit.secretRef`, `spec.metaData.cloudInit.secretRef`) | VirtualMachine's | chosen by the user | `get` | informer cache when it covers the namespace, otherwise API server (`APIReader`) | `internal/controller/cloudinit.go`, `secret_access.go` (`getWorkloadSecret`) |
+| S3 staging credentials (`spec.storage.s3.credentialsSecretRef`) | VMMigration's | chosen by the user | `get` | informer cache when it covers the namespace, otherwise API server (`APIReader`) | `internal/controller/vmmigration_controller.go` (`loadS3Credentials`) |
+| Per-host agent pins Secrets (the experimental per-host agent enrolment, development builds only, where present) | the enrolment namespace | derived from the Host's namespace and name | `get`, `list`, `watch`, `create`, `update`, `delete` | informer cache | granted by that feature's own Role, never by the rules on this page (the chart only adds the namespace to the informer) |
 
 The manager does **not** read the Provider's `spec.credentialSecretRef` for a
 single-host Provider, nor the chart's `providerTLS.secretName`. It mounts them
@@ -97,14 +97,30 @@ The chart then renders:
 | Manager ClusterRole (or the release-namespace Role with `rbac.scope: namespace`) | no Secret rule | none |
 | Each `providerNamespaces` entry | Role and RoleBinding `<release>-virtrigaud-manager-secrets` | `get`, `list`, `watch`, `create`, `update`, `delete` |
 | Each `workloadNamespaces` entry that is not also a Provider namespace | Role and RoleBinding `<release>-virtrigaud-manager-secrets-read` | `get` |
-| Manager Deployment | `--secret-cache-namespaces=<providerNamespaces>` | (informer limited to those namespaces) |
+| Manager Deployment | `--secret-cache-namespaces=<providerNamespaces>` (plus the enrolment namespace, see below) | (informer limited to those namespaces) |
 
 Each binding names only the manager's ServiceAccount. When the per-host agent
 enrolment is enabled, the chart adds its namespace to
 `--secret-cache-namespaces`, because pins Secrets are read through the cache.
-The Secret verbs in that namespace still come from the enrolment feature's own
-Role. With `rbac.create: false` the chart renders no RBAC but still sets
-`--secret-cache-namespaces`. You must then create the equivalent Roles yourself.
+This chart renders no Secret Role there: the Secret verbs in that namespace come
+from the enrolment feature's own Role. With `rbac.create: false` the chart
+renders no RBAC but still sets `--secret-cache-namespaces`. You must then
+create the equivalent Roles yourself.
+
+At startup, a manager with `--secret-cache-namespaces` checks, with
+SelfSubjectAccessReviews, that it may `list` and `watch` Secrets in each of
+those namespaces. If it may not, it logs the namespaces and verbs it lacks and
+exits. Without the check, a cached Secret read in such a namespace would wait
+for the informer to sync and never return an error, so the Provider and its
+VMs would hang without one. The check needs `create` on
+`selfsubjectaccessreviews`, which Kubernetes grants every authenticated user
+through the default `system:basic-user` ClusterRole.
+
+`workloadNamespaces` must list every namespace where a VirtualMachine with a
+cloud-init Secret, or a VMMigration with S3 storage, can appear. That includes
+the target namespaces where VMClone, VMSet and VMMigration create
+VirtualMachines: the created VM reads its cloud-init Secret in its own
+namespace.
 
 Rendering fails if `providerNamespaces` is empty, if a name is not a valid
 namespace name, or if `scope` is anything other than `cluster` or `namespaced`.
@@ -133,8 +149,21 @@ To add a namespace, add it to the list and run `helm upgrade`. The changed
 
 ### What remains
 
-Even in namespaced mode, the manager can read, create, update and delete any
-Secret in each Provider namespace, and read any Secret in each workload
+Namespaced mode removes the manager's direct Secret access outside the listed
+namespaces: no API read or list there, and no in-memory copy of those Secrets.
+It does **not** make those Secrets unreachable to a compromised manager. The
+manager keeps its cluster-wide grant on Deployments, Services and
+ServiceAccounts, which it needs to run provider pods. With that grant it could
+create a Deployment in any namespace that mounts a Secret of that namespace as
+a volume, or runs under an existing ServiceAccount there. The kubelet mounts
+the Secret, so no Secret RBAC is involved. To close that path, use an admission
+policy (a ValidatingAdmissionPolicy, Kyverno or Gatekeeper) that allows the
+manager's ServiceAccount to create Deployments only in the Provider namespaces,
+with only the provider ServiceAccounts the manager creates. Narrowing the
+workload grants themselves is separate work.
+
+Within the listed namespaces, the manager can read, create, update and delete
+any Secret in each Provider namespace, and read any Secret in each workload
 namespace if it knows the name. So:
 
 - Keep Provider namespaces for Provider objects and their own Secrets. Do not
@@ -144,20 +173,24 @@ namespace if it knows the name. So:
   the Provider namespace (see [operation-grants-manager.md](operation-grants-manager.md#intent-secrets)).
   Restrict Secret read in Provider namespaces to the manager and the
   administrators.
-- The per-host agent enrolment namespace grants the manager full Secret access
-  there. Keep the cert-manager signing CA's key out of that namespace (for
+- The per-host agent enrolment feature's own Role grants the manager full
+  Secret access in its namespace. Keep the cert-manager signing CA's key out of that namespace (for
   example, a ClusterIssuer whose key lives in cert-manager's cluster resource
   namespace).
 - Enable encryption at rest for Secrets in etcd.
 
 ### Performance
 
-In namespaced mode the informer holds only the Provider namespaces' Secrets,
-instead of every Secret in the cluster. Cloud-init and S3 credential Secrets are
-read from the API server in both modes: each time a VM's create or reconfigure
-request is built, and on each S3 migration step that needs the credentials. That adds a few
-API requests per create or migration step, counted against the manager's client
-rate limit (`manager.clientQPS`).
+In the default mode nothing changes: every Secret read is a cache read, as
+before. In namespaced mode the informer holds only the Provider namespaces'
+Secrets, instead of every Secret in the cluster. A cloud-init or S3 credential
+Secret in a workload namespace is then read from the API server: each time a
+VM's create or reconfigure request is built, and on each S3 migration step that
+needs the credentials. That adds a few API requests per create or migration
+step, counted against the manager's client rate limit (`manager.clientQPS`).
+A failed read is treated like any other credential error. A brief API-server
+outage during an S3 migration step can therefore fail that migration, which a
+cache read would have avoided.
 
 ## Kustomize
 
@@ -165,7 +198,8 @@ rate limit (`manager.clientQPS`).
 `internal/controller/` and holds the cluster-scope grant. To run namespaced with
 kustomize:
 
-1. Remove the two `secrets` rules from the ClusterRole.
+1. Remove the `secrets` rule from the ClusterRole with a kustomize patch, not a
+   hand edit: `make manifests` regenerates `config/rbac/role.yaml`.
 2. Create the Roles and RoleBindings from the table above.
 3. Add `--secret-cache-namespaces=<provider namespaces>` to the manager's
    arguments.

@@ -116,6 +116,10 @@ var _ = Describe("Manager Secret access with the namespaced grant (envtest)", fu
 			return live.Get(ctx, types.NamespacedName{Namespace: provNS, Name: "absent"}, &corev1.Secret{})
 		}, "30s", "200ms").Should(Satisfy(apierrors.IsNotFound))
 
+		By("The startup check accepts the Provider namespace and refuses a read-only one")
+		Expect(CheckSecretCacheAccess(ctx, cl, []string{provNS})).To(Succeed())
+		Expect(CheckSecretCacheAccess(ctx, cl, []string{provNS, workNS})).To(MatchError(ContainSubstring(workNS + ":list")))
+
 		By("Provider namespace: the TLS Secret is read through the informer cache")
 		secret(provNS, "provider-tls", map[string]string{"tls.crt": "c", "tls.key": "k", "ca.crt": "a"})
 		Eventually(func() error {

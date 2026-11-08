@@ -413,24 +413,32 @@ list) and "name" (the values key, for the error message).
 {{/*
 Returns the comma-joined namespaces where the manager reads and writes Secrets
 with rbac.secrets.scope=namespaced: rbac.secrets.providerNamespaces (the
-namespaces of the Provider objects), plus the per-host agent enrolment
-namespace when that experimental feature is enabled (its pins Secrets are
-read through the cache). These are also the namespaces of the manager's
-Secret informer (--secret-cache-namespaces). Fails the render when the list is
-empty.
+namespaces of the Provider objects). Fails the render when the list is empty.
 */}}
 {{- define "virtrigaud.secretProviderNamespaces" -}}
 {{- $secrets := (dig "secrets" dict (.Values.rbac | default dict)) | default dict -}}
-{{- $list := concat (list) ($secrets.providerNamespaces | default list) -}}
-{{- $he := (dig "hostEnrolment" dict (.Values.experimental | default dict)) | default dict -}}
-{{- if and $he.enabled $he.namespace -}}
-{{- $list = append $list $he.namespace -}}
-{{- end -}}
-{{- $joined := include "virtrigaud.secretNamespaceList" (dict "value" $list "name" "rbac.secrets.providerNamespaces") -}}
+{{- $joined := include "virtrigaud.secretNamespaceList" (dict "value" $secrets.providerNamespaces "name" "rbac.secrets.providerNamespaces") -}}
 {{- if eq $joined "" -}}
 {{- fail "rbac.secrets.providerNamespaces must list the namespaces of the Provider objects when rbac.secrets.scope is namespaced" -}}
 {{- end -}}
 {{- $joined -}}
+{{- end }}
+
+{{/*
+Returns the comma-joined namespaces of the manager's Secret informer with
+rbac.secrets.scope=namespaced (--secret-cache-namespaces): the Provider
+namespaces, plus the per-host agent enrolment namespace when that experimental
+feature is enabled (its pins Secrets are read through the cache). The Secret
+verbs in the enrolment namespace come from that feature's own Role, never from
+manager-secrets-rbac.yaml.
+*/}}
+{{- define "virtrigaud.secretCacheNamespaces" -}}
+{{- $list := splitList "," (include "virtrigaud.secretProviderNamespaces" .) -}}
+{{- $he := (dig "hostEnrolment" dict (.Values.experimental | default dict)) | default dict -}}
+{{- if and $he.enabled $he.namespace -}}
+{{- $list = append $list (include "virtrigaud.secretNamespaceList" (dict "value" (list $he.namespace) "name" "experimental.hostEnrolment.namespace")) -}}
+{{- end -}}
+{{- $list | uniq | sortAlpha | join "," -}}
 {{- end }}
 
 {{/*

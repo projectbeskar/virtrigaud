@@ -304,7 +304,9 @@ rbac:
     # namespace listed below, and its Secret informer covers only
     # providerNamespaces (--secret-cache-namespaces). A Secret in any other
     # namespace is refused, so a VM, migration or Provider there fails with a
-    # Secret access error until its namespace is added here.
+    # Secret access error until its namespace is added here. This removes
+    # direct Secret access elsewhere; the manager's Deployment grant remains
+    # (see docs/manager-secret-access.md, "What remains").
     scope: cluster
     # namespaced only. Namespaces of the Provider objects: Secret
     # get/list/watch/create/update/delete (TLS and host credential Secrets,

@@ -72,8 +72,9 @@ func mergeCloudConfigParts(parts []string) string {
 
 // resolveCloudInitUserData resolves cloud-init user data from inline content,
 // a Secret reference, or both (merged as MIME multipart when both are set).
-// The Secret is read live (liveReader), never through the informer cache: a
-// workload namespace needs only Secret get (docs/manager-secret-access.md).
+// The Secret is read through the cache, or live when the cache does not cover
+// its namespace (getWorkloadSecret): a workload namespace needs only Secret
+// get (docs/manager-secret-access.md).
 func (r *VirtualMachineReconciler) resolveCloudInitUserData(ctx context.Context, namespace string, ci *infravirtrigaudiov1beta1.CloudInit) (string, error) {
 	var parts []string
 
@@ -83,7 +84,7 @@ func (r *VirtualMachineReconciler) resolveCloudInitUserData(ctx context.Context,
 
 	if ci.SecretRef != nil {
 		secret := &corev1.Secret{}
-		if err := r.liveReader().Get(ctx, types.NamespacedName{Name: ci.SecretRef.Name, Namespace: namespace}, secret); err != nil {
+		if err := getWorkloadSecret(ctx, r.Client, r.APIReader, types.NamespacedName{Name: ci.SecretRef.Name, Namespace: namespace}, secret); err != nil {
 			return "", fmt.Errorf("fetching cloud-init secret %q: %w", ci.SecretRef.Name, err)
 		}
 		data, err := extractCloudInitFromSecret(secret)
@@ -105,7 +106,7 @@ func (r *VirtualMachineReconciler) resolveCloudInitUserData(ctx context.Context,
 
 // resolveCloudInitMetaData resolves cloud-init metadata from inline content,
 // a Secret reference, or both (concatenated with a newline when both are set).
-// The Secret is read live, like the user data's.
+// The Secret is read like the user data's.
 func (r *VirtualMachineReconciler) resolveCloudInitMetaData(ctx context.Context, namespace string, meta *infravirtrigaudiov1beta1.CloudInitMetaData) (string, error) {
 	var parts []string
 
@@ -115,7 +116,7 @@ func (r *VirtualMachineReconciler) resolveCloudInitMetaData(ctx context.Context,
 
 	if meta.SecretRef != nil {
 		secret := &corev1.Secret{}
-		if err := r.liveReader().Get(ctx, types.NamespacedName{Name: meta.SecretRef.Name, Namespace: namespace}, secret); err != nil {
+		if err := getWorkloadSecret(ctx, r.Client, r.APIReader, types.NamespacedName{Name: meta.SecretRef.Name, Namespace: namespace}, secret); err != nil {
 			return "", fmt.Errorf("fetching metadata secret %q: %w", meta.SecretRef.Name, err)
 		}
 		data, err := extractMetaDataFromSecret(secret)

@@ -17,10 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -37,8 +39,9 @@ import (
 //     for the last two, written.
 //   - Workload namespaces: the cloud-init user-data and metadata Secrets of a
 //     VirtualMachine and the S3 credentials Secret of a VMMigration. These
-//     are read live (APIReader), get only, so a namespace that holds only
-//     workloads needs no list, watch or write on Secrets.
+//     are read through the cache when it covers the namespace and live
+//     (APIReader) otherwise (getWorkloadSecret), so a namespace that holds
+//     only workloads needs Secret get only.
 //
 // By default the Secret informer covers every namespace, which needs a
 // cluster-wide list/watch grant. SecretCacheNamespacesFlagName restricts it to
@@ -82,4 +85,50 @@ func SecretCacheByObject(namespaces []string) map[client.Object]cache.ByObject {
 		nsConfig[ns] = cache.Config{}
 	}
 	return map[client.Object]cache.ByObject{&corev1.Secret{}: {Namespaces: nsConfig}}
+}
+
+// getWorkloadSecret reads the Secret key of a workload namespace (a cloud-init
+// or S3 credentials Secret) through cached, and live when cached cannot
+// answer: the informer does not cover the namespace (namespaced Secret
+// grant), or the Secret is not in the cache yet. With the default
+// cluster-wide informer this is a cache read, as before. live may be nil
+// (tests), and then the cached result is returned.
+func getWorkloadSecret(ctx context.Context, cached, live client.Reader, key client.ObjectKey, s *corev1.Secret) error {
+	err := cached.Get(ctx, key, s)
+	if err == nil || live == nil {
+		return err
+	}
+	return live.Get(ctx, key, s)
+}
+
+// secretCacheVerbs are the verbs the Secret informer needs in each namespace
+// it covers.
+var secretCacheVerbs = []string{"list", "watch"}
+
+// CheckSecretCacheAccess verifies, with SelfSubjectAccessReviews, that the
+// manager may list and watch Secrets in every namespace the Secret informer is
+// restricted to. Without them a cached Secret read in that namespace would
+// block until its context ends instead of failing, so the manager refuses to
+// start. It returns nil for no namespaces (the default informer).
+func CheckSecretCacheAccess(ctx context.Context, c client.Client, namespaces []string) error {
+	var denied []string
+	for _, ns := range namespaces {
+		for _, verb := range secretCacheVerbs {
+			review := &authorizationv1.SelfSubjectAccessReview{Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+				ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: ns, Verb: verb, Resource: "secrets"},
+			}}
+			if err := c.Create(ctx, review); err != nil {
+				return fmt.Errorf("check Secret %s access in namespace %s: %w", verb, ns, err)
+			}
+			if !review.Status.Allowed {
+				denied = append(denied, ns+":"+verb)
+			}
+		}
+	}
+	if len(denied) > 0 {
+		return fmt.Errorf("--%s lists namespaces where the manager may not list and watch Secrets (%s); "+
+			"grant them (Helm rbac.secrets.providerNamespaces) or remove the namespaces",
+			SecretCacheNamespacesFlagName, strings.Join(denied, ", "))
+	}
+	return nil
 }

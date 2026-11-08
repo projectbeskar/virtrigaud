@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -35,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -442,6 +444,24 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
+	}
+
+	// A restricted Secret informer needs list and watch in each of its
+	// namespaces; without them a cached read there would block, so refuse to
+	// start instead.
+	if len(secretCacheNamespaces) > 0 {
+		accessClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "unable to create the client for the Secret access check")
+			os.Exit(1)
+		}
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = controller.CheckSecretCacheAccess(checkCtx, accessClient, secretCacheNamespaces)
+		checkCancel()
+		if err != nil {
+			setupLog.Error(err, "the manager's Secret grant does not cover its Secret cache namespaces")
+			os.Exit(1)
+		}
 	}
 
 	// Create the per-Provider CircuitBreaker registry shared across all
