@@ -39,6 +39,59 @@ type BootIDSource interface {
 	BootID() (string, error)
 }
 
+// TimeNamespaceCheck verifies that the process runs in the host's initial
+// time namespace, or in one with no clock offset.
+type TimeNamespaceCheck interface {
+	// CheckTimeNamespace returns nil when no clock offset applies, and an
+	// error (ErrTimeNamespace for a non-zero offset) otherwise.
+	CheckTimeNamespace() error
+}
+
+// DefaultTimeNSOffsetsPath is the file Linux publishes a process's time
+// namespace offsets in (kernels with time namespaces).
+const DefaultTimeNSOffsetsPath = "/proc/self/timens_offsets"
+
+// ProcTimeNS refuses a time namespace with a non-zero monotonic or boottime
+// offset. A process can read its own offsets without privilege, which is why
+// this reads them rather than comparing the namespace links with those of
+// the init process (which needs privilege). A namespace whose offsets are all
+// zero is harmless and accepted; a kernel without the file has no time
+// namespaces.
+type ProcTimeNS struct {
+	// Path is the offsets file; empty means DefaultTimeNSOffsetsPath.
+	Path string
+}
+
+// CheckTimeNamespace reads and parses the offsets file.
+func (p ProcTimeNS) CheckTimeNamespace() error {
+	path := p.Path
+	if path == "" {
+		path = DefaultTimeNSOffsetsPath
+	}
+	b, err := os.ReadFile(path) // #nosec G304 -- a fixed kernel file or a test fixture
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read time namespace offsets: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		if len(f) != 3 {
+			return errors.New("read time namespace offsets: malformed line")
+		}
+		for _, v := range f[1:] {
+			if v != "0" {
+				return fmt.Errorf("%w: %s", ErrTimeNamespace, f[0])
+			}
+		}
+	}
+	return nil
+}
+
 // DefaultBootIDPath is where Linux publishes the boot_id.
 const DefaultBootIDPath = "/proc/sys/kernel/random/boot_id"
 

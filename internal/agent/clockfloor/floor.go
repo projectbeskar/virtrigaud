@@ -29,8 +29,9 @@ import (
 // Defaults of Config.
 const (
 	// DefaultPersistInterval is how far the floor may advance beyond the
-	// persisted one before Observe saves it again.
-	DefaultPersistInterval = time.Minute
+	// persisted one before Observe saves it again. A save is one small
+	// fsync, so the interval is short.
+	DefaultPersistInterval = 10 * time.Second
 	// DefaultMaxAhead is how far the floor may be ahead of the wall clock
 	// before the Floor reports StateClockFloorAhead.
 	DefaultMaxAhead = grantverify.DefaultMaxClockSkew
@@ -67,6 +68,9 @@ type Config struct {
 	Boot BootClock
 	// BootID reads the boot_id; nil means ProcBootID with the default path.
 	BootID BootIDSource
+	// TimeNS checks that the process is not in a time namespace with a clock
+	// offset; nil means ProcTimeNS with the default path.
+	TimeNS TimeNamespaceCheck
 	// FirstUse permits Open to create the floor when none is stored. Only
 	// the code that has just created an enrolment sets it; every later start
 	// leaves it false, so a deleted floor is refused (ErrFloorMissing) and is
@@ -76,8 +80,12 @@ type Config struct {
 	// StateClockFloorAhead; 0 means DefaultMaxAhead.
 	MaxAhead time.Duration
 	// PersistInterval is how far the floor advances before Observe saves it;
-	// 0 means DefaultPersistInterval. A reboot loses at most this much boot-time
-	// credit.
+	// 0 means DefaultPersistInterval. A restart in another boot loses the
+	// boot-time credit accumulated since the last successful save: this
+	// interval plus the period at which the agent calls Observe, and all of
+	// the time since the last save if the process is killed without Flush or
+	// the host loses power. The agent must call Observe at a period no longer
+	// than this interval, and Flush on graceful shutdown.
 	PersistInterval time.Duration
 }
 
@@ -101,7 +109,10 @@ type Floor struct {
 	cfg    Config
 	bootID string
 
-	mu sync.Mutex
+	// saveMu serialises saves, so that mu is not held across Store.Save: a
+	// slow fsync does not block Now, and therefore verification.
+	saveMu sync.Mutex
+	mu     sync.Mutex
 	// floor is the highest time observed, in memory.
 	floor time.Time
 	// anchor is the (floor, boot time) pair boot-time credit is computed
@@ -139,6 +150,12 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 	if cfg.PersistInterval == 0 {
 		cfg.PersistInterval = DefaultPersistInterval
 	}
+	if cfg.TimeNS == nil {
+		cfg.TimeNS = ProcTimeNS{}
+	}
+	if err := cfg.TimeNS.CheckTimeNamespace(); err != nil {
+		return nil, fmt.Errorf("open clock floor: %w", err)
+	}
 	bootID, err := cfg.BootID.BootID()
 	if err != nil {
 		return nil, fmt.Errorf("open clock floor: %w", err)
@@ -151,6 +168,11 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 		return nil, fmt.Errorf("open clock floor: %w", err)
 	}
 	wall := cfg.Wall.Now().UTC()
+	if wall.After(maxFloor) {
+		// Never raise the floor to a reading beyond the bound; a stepped
+		// clock is a source failure, and the persisted floor is untouched.
+		return nil, fmt.Errorf("open clock floor: wall clock: %w", ErrClockOutOfRange)
+	}
 
 	persisted, err := cfg.Store.Load(ctx)
 	var floor time.Time
@@ -174,6 +196,9 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 				return nil, fmt.Errorf("open clock floor: %w", ErrBootTimeRegressed)
 			}
 			if credited := persisted.Floor.Add(boot - persisted.BootTime); credited.After(floor) {
+				if credited.After(maxFloor) {
+					return nil, fmt.Errorf("open clock floor: boot-time credit: %w", ErrClockOutOfRange)
+				}
 				floor = credited
 			}
 		}
@@ -202,7 +227,15 @@ func (f *Floor) observeLocked() (wall time.Time, boot time.Duration, ok bool) {
 		f.failed = fmt.Errorf("read boot clock: %w", ErrBootTimeRegressed)
 		return wall, 0, false
 	}
+	if wall.After(maxFloor) {
+		f.failed = fmt.Errorf("read wall clock: %w", ErrClockOutOfRange)
+		return wall, 0, false
+	}
 	if credited := f.anchor.Floor.Add(boot - f.anchor.BootTime); credited.After(f.floor) {
+		if credited.After(maxFloor) {
+			f.failed = fmt.Errorf("boot-time credit: %w", ErrClockOutOfRange)
+			return wall, 0, false
+		}
 		f.floor = credited
 	}
 	if wall.After(f.floor) {
@@ -244,20 +277,32 @@ func (f *Floor) Flush(ctx context.Context) error {
 }
 
 func (f *Floor) observe(ctx context.Context, force bool) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.failed != nil {
-		return f.failed
+		err := f.failed
+		f.mu.Unlock()
+		return err
 	}
 	_, boot, ok := f.observeLocked()
 	if !ok {
-		return f.failed
+		err := f.failed
+		f.mu.Unlock()
+		return err
 	}
 	if !force && f.floor.Sub(f.saved) < f.cfg.PersistInterval {
+		f.mu.Unlock()
 		return nil
 	}
 	next := State{Floor: f.floor, BootID: f.bootID, BootTime: boot}
-	if err := f.cfg.Store.Save(ctx, next); err != nil {
+	f.mu.Unlock()
+
+	err := f.cfg.Store.Save(ctx, next) // without f.mu: Now keeps answering
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err != nil {
 		f.failed = fmt.Errorf("save clock floor: %w", err)
 		return f.failed
 	}

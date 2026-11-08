@@ -43,7 +43,30 @@ var (
 	// ErrUnsupported is returned by the boot clock and boot_id sources on a
 	// platform without them.
 	ErrUnsupported = errors.New("boot clock is not supported on this platform")
+	// ErrClockOutOfRange means a clock reading, or a floor derived from one,
+	// is outside the range the floor represents (after MaxFloor). It is a
+	// source failure: the floor is never raised to such a value.
+	ErrClockOutOfRange = errors.New("clock reading is outside the range the floor represents")
+	// ErrTimeNamespace means the process runs in a time namespace with a
+	// non-zero clock offset, which would let the namespace's creator inflate
+	// the floor.
+	ErrTimeNamespace = errors.New("process runs in a time namespace with a clock offset")
 )
+
+// MaxFloorYear is the year after which no floor is represented. The floor is
+// bounded (after the epoch and not after the start of this year) so that no
+// encoding can wrap: a reading beyond the bound is a source failure
+// (ErrClockOutOfRange), not a value to raise the floor to.
+const MaxFloorYear = 2200
+
+// minFloor and maxFloor are the bounds of State.Floor.
+var (
+	minFloor = time.Unix(1, 0).UTC()
+	maxFloor = time.Date(MaxFloorYear, time.January, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// inRange reports whether t is a floor the package represents.
+func inRange(t time.Time) bool { return !t.Before(minFloor) && !t.After(maxFloor) }
 
 // State is the persisted floor: the highest time known and the boot-time
 // reading it was anchored at.
@@ -58,15 +81,26 @@ type State struct {
 
 // Store persists the floor. Implementations must be safe for use by one
 // Floor at a time.
+//
+// Rollback resistance: the floor is only as hard to roll back as the Store
+// is. The record's CRC-32 detects accidental corruption and nothing else;
+// anyone who can write the record can forge a floor, and replacing the whole
+// store with an older consistent copy is not detected here. That is defended
+// by the Store the agent will use (a hash-chained, anchored operation store)
+// together with the manager checking that a host's reported position never
+// goes backwards, not by this package.
 type Store interface {
 	// Load returns the persisted State. It returns an error that matches
 	// ErrNotFound when none was ever saved and any other error (ErrCorrupt
 	// for undecodable content) when the floor cannot be read. A Load error
 	// other than ErrNotFound is never treated as "no floor".
 	Load(ctx context.Context) (State, error)
-	// Save durably replaces the persisted State: it returns nil only after
-	// the new value would survive power loss. After an error the caller does
-	// not assume either value is stored.
+	// Save atomically and durably replaces the persisted State: a reader
+	// after any crash sees the whole old value or the whole new one, never a
+	// torn mix (write a temporary file, fsync it, rename it over the old one,
+	// fsync the directory; or one committed transaction). It returns nil only
+	// after the new value would survive power loss. After an error the caller
+	// does not assume either value is stored.
 	Save(ctx context.Context, s State) error
 }
 
@@ -130,8 +164,8 @@ func (s *State) UnmarshalBinary(b []byte) error {
 
 // validate checks the values a State may hold.
 func (s State) validate() error {
-	if s.Floor.UnixNano() <= 0 {
-		return errors.New("floor is not after the epoch")
+	if !inRange(s.Floor) {
+		return fmt.Errorf("floor is outside (epoch, year %d]", MaxFloorYear)
 	}
 	if s.BootTime < 0 {
 		return errors.New("boot time is negative")
