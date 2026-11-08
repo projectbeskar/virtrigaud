@@ -969,8 +969,8 @@
   },
   "task-status-empty-ref": {
     "calls": null,
-    "resp": "{\"done\":true}",
-    "err": ""
+    "resp": "null",
+    "err": "rpc error: code = InvalidArgument desc = task reference is required"
   },
   "task-status-host-looking-ref": {
     "calls": null,

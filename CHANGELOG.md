@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `internal/providers/proxmox/server.go`, `internal/providers/mock/provider.go`, `internal/providers/libvirt/server.go`: a `TaskStatusRequest` with no `task`, or with an empty task id, is refused with `codes.InvalidArgument` ("task reference is required") instead of dereferencing a nil task reference (Proxmox, mock and the single-host libvirt path). The provider binaries' recovery interceptor turned that panic into `codes.Internal` with a stack trace in the log; a server embedded without the interceptor would have crashed. Single-host libvirt no longer answers an empty task id as done. The clustered libvirt path already refused such a request.
-- `internal/providers/{proxmox,mock,libvirt}/taskstatus_no_task_test.go`: a request with no task and one with an empty id are `InvalidArgument` on each provider. `internal/providers/libvirt/routed_tasks_test.go`: the single-host reference test no longer expects an empty id to be answered.
+- `internal/providers/{proxmox,mock,libvirt}/taskstatus_no_task_test.go`: a request with no task and one with an empty id are `InvalidArgument` on each provider. `internal/providers/libvirt/routed_tasks_test.go`, `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: the single-host reference test and the single-host golden scenario `task-status-empty-ref` now expect the refusal instead of `done`.
 
 ### Why
 Every caller in the manager polls only a non-empty task reference, so no reconcile path changes, but a malformed request from any client must get a clean refusal, not a nil dereference.
