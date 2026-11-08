@@ -96,6 +96,7 @@ func (ca *CA) Issue(t T, csrPEM []byte, o IssueOptions) []byte {
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
 		t.Fatalf("decode CSR PEM")
+		return nil
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {

@@ -141,7 +141,8 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 			Namespace: e.issuerNS, GenerateName: "enrol-" + hostName + "-", HostNamespace: e.hostNS, HostName: hostName,
 			IssuerRef: o.issuer, CSRPEM: csr, Duration: o.duration,
 		})
-		spec := cr.Object["spec"].(map[string]any)
+		spec, ok := cr.Object["spec"].(map[string]any)
+		Expect(ok).To(BeTrue())
 		spec["username"] = o.username
 		groups := make([]any, 0, len(o.groups))
 		for _, g := range o.groups {

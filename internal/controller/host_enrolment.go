@@ -595,7 +595,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	changed := l.reset
 	if l.reset {
 		log.FromContext(ctx).Info("Discarded the enrolment state of a previous Host object or identity; no pin is inherited",
-			"host", req.NamespacedName.String())
+			"host", req.String())
 	}
 	if !host.Spec.Revoked && l.state.Current == nil {
 		if p := l.state.Pending; p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID) {

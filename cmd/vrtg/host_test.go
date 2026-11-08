@@ -153,7 +153,8 @@ func TestHostEnrolAndRevokeAgainstAPIServer(t *testing.T) {
 		obj := map[string]any{}
 		require.NoError(t, yaml.Unmarshal(data, &obj))
 		cr := &unstructured.Unstructured{Object: obj}
-		spec := cr.Object["spec"].(map[string]any)
+		spec, ok := cr.Object["spec"].(map[string]any)
+		require.True(t, ok)
 		spec["username"] = "alice"
 		spec["groups"] = []any{"system:authenticated", testAdminGroup}
 		require.NoError(t, env.Client.Create(ctx, cr))
