@@ -97,7 +97,6 @@ func (s *signedAnswerGuardServer) Describe(_ context.Context, r *providerv1.Desc
 	return &providerv1.DescribeResponse{
 		Exists:     true,
 		PowerState: "On",
-		Ips:        []string{"192.0.2.10"},
 		Vcpus:      2,
 		HostAnswer: s.answer(),
 	}, nil
