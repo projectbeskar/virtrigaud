@@ -33,6 +33,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -216,6 +217,12 @@ func main() {
 			"enrolment id) for Providers whose type requires operation identity. Empty (the default) loads none, and "+
 			"nothing is sent to such a Provider. Honoured only by a manager built with the "+devgate.BuildTag+
 			" build tag; a release build refuses to start when it is set.")
+	var secretCacheNamespacesFlag string
+	flag.StringVar(&secretCacheNamespacesFlag, controller.SecretCacheNamespacesFlagName, "",
+		"Comma-separated namespaces the Secret informer cache is restricted to: the namespaces of the Provider "+
+			"objects. Empty (the default) caches Secrets in every namespace, which needs a cluster-wide Secret "+
+			"list/watch grant. Set it when the manager's Secret access is granted per namespace "+
+			"(Helm rbac.secrets.scope=namespaced); see docs/manager-secret-access.md.")
 	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
@@ -281,6 +288,14 @@ func main() {
 	if err := clientLimits.validate(); err != nil {
 		setupLog.Error(err, "invalid Kubernetes API client rate limits")
 		os.Exit(1)
+	}
+	secretCacheNamespaces, err := controller.ParseSecretCacheNamespaces(secretCacheNamespacesFlag)
+	if err != nil {
+		setupLog.Error(err, "invalid Secret cache namespaces")
+		os.Exit(1)
+	}
+	if len(secretCacheNamespaces) > 0 {
+		setupLog.Info("Secret informer cache restricted to namespaces", "namespaces", secretCacheNamespaces)
 	}
 
 	// Emit a virtrigaud_build_info{version,git_sha,go_version,component} sample
@@ -409,6 +424,9 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "8da97394.virtrigaud.io",
+		// Secrets are cached in every namespace unless --secret-cache-namespaces
+		// restricts the informer (per-namespace Secret grants).
+		Cache: cache.Options{ByObject: controller.SecretCacheByObject(secretCacheNamespaces)},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

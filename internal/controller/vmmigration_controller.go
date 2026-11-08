@@ -3588,9 +3588,11 @@ func (r *VMMigrationReconciler) loadS3Credentials(ctx context.Context, migration
 	}
 
 	// The Secret lives in the migration's namespace (namespaced get only; #152).
+	// It is read live, never through the informer cache: a workload namespace
+	// needs only Secret get (docs/manager-secret-access.md).
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Namespace: migration.Namespace, Name: s3.CredentialsSecretRef.Name}
-	if err := r.Get(ctx, key, secret); err != nil {
+	if err := r.liveReader().Get(ctx, key, secret); err != nil {
 		return nil, fmt.Errorf("get s3 credentials secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
 

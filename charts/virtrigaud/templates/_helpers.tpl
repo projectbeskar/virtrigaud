@@ -378,3 +378,75 @@ with "value" and "name" (see virtrigaud.tmpSizeLimitValue).
 {}
 {{- end -}}
 {{- end }}
+
+{{/*
+Returns the scope of the manager's Secret grant (rbac.secrets.scope):
+"cluster" (the default, also for an older values file under --reuse-values
+that has no rbac.secrets) or "namespaced". Any other value fails the render.
+See docs/manager-secret-access.md.
+*/}}
+{{- define "virtrigaud.secretsScope" -}}
+{{- $scope := (dig "secrets" "scope" "cluster" (.Values.rbac | default dict)) | default "cluster" -}}
+{{- if not (has $scope (list "cluster" "namespaced")) -}}
+{{- fail (printf "rbac.secrets.scope: invalid value %q; use cluster or namespaced" $scope) -}}
+{{- end -}}
+{{- $scope -}}
+{{- end }}
+
+{{/*
+Validates a list of namespace names for the namespaced Secret grant and returns
+it sorted, without duplicates, comma-joined. Takes a dict with "value" (the
+list) and "name" (the values key, for the error message).
+*/}}
+{{- define "virtrigaud.secretNamespaceList" -}}
+{{- $out := list -}}
+{{- range (.value | default list) -}}
+{{- $ns := toString . -}}
+{{- if or (gt (len $ns) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $ns)) -}}
+{{- fail (printf "%s: %q is not a namespace name" $.name $ns) -}}
+{{- end -}}
+{{- $out = append $out $ns -}}
+{{- end -}}
+{{- $out | uniq | sortAlpha | join "," -}}
+{{- end }}
+
+{{/*
+Returns the comma-joined namespaces where the manager reads and writes Secrets
+with rbac.secrets.scope=namespaced: rbac.secrets.providerNamespaces (the
+namespaces of the Provider objects), plus the per-host agent enrolment
+namespace when that experimental feature is enabled (its pins Secrets are
+read through the cache). These are also the namespaces of the manager's
+Secret informer (--secret-cache-namespaces). Fails the render when the list is
+empty.
+*/}}
+{{- define "virtrigaud.secretProviderNamespaces" -}}
+{{- $secrets := (dig "secrets" dict (.Values.rbac | default dict)) | default dict -}}
+{{- $list := concat (list) ($secrets.providerNamespaces | default list) -}}
+{{- $he := (dig "hostEnrolment" dict (.Values.experimental | default dict)) | default dict -}}
+{{- if and $he.enabled $he.namespace -}}
+{{- $list = append $list $he.namespace -}}
+{{- end -}}
+{{- $joined := include "virtrigaud.secretNamespaceList" (dict "value" $list "name" "rbac.secrets.providerNamespaces") -}}
+{{- if eq $joined "" -}}
+{{- fail "rbac.secrets.providerNamespaces must list the namespaces of the Provider objects when rbac.secrets.scope is namespaced" -}}
+{{- end -}}
+{{- $joined -}}
+{{- end }}
+
+{{/*
+Returns the comma-joined namespaces where the manager only reads Secrets (get)
+with rbac.secrets.scope=namespaced: rbac.secrets.workloadNamespaces (the
+namespaces of VirtualMachines with a cloud-init Secret reference and of
+VMMigrations with S3 storage), less those already in the Provider list.
+*/}}
+{{- define "virtrigaud.secretWorkloadNamespaces" -}}
+{{- $secrets := (dig "secrets" dict (.Values.rbac | default dict)) | default dict -}}
+{{- $providers := splitList "," (include "virtrigaud.secretProviderNamespaces" .) -}}
+{{- $out := list -}}
+{{- range splitList "," (include "virtrigaud.secretNamespaceList" (dict "value" $secrets.workloadNamespaces "name" "rbac.secrets.workloadNamespaces")) -}}
+{{- if and . (not (has . $providers)) -}}
+{{- $out = append $out . -}}
+{{- end -}}
+{{- end -}}
+{{- $out | join "," -}}
+{{- end }}

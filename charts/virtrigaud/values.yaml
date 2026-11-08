@@ -295,6 +295,25 @@ rbac:
   scope: cluster
   # Additional rules
   additionalRules: []
+  # The manager's Secret grant. See docs/manager-secret-access.md.
+  secrets:
+    # cluster (default): Secret get/list/watch/create/update/delete in every
+    # namespace, as before. Works for any namespace layout, but a compromised
+    # manager can read any Secret in the cluster.
+    # namespaced: no cluster-wide Secret rule. The manager gets a Role per
+    # namespace listed below, and its Secret informer covers only
+    # providerNamespaces (--secret-cache-namespaces). A Secret in any other
+    # namespace is refused, so a VM, migration or Provider there fails with a
+    # Secret access error until its namespace is added here.
+    scope: cluster
+    # namespaced only. Namespaces of the Provider objects: Secret
+    # get/list/watch/create/update/delete (TLS and host credential Secrets,
+    # host-inventory Secrets, operation-intent Secrets). Required.
+    providerNamespaces: []
+    # namespaced only. Namespaces of VirtualMachines with a cloud-init
+    # user-data or metadata secretRef and of VMMigrations with S3 storage:
+    # Secret get only.
+    workloadNamespaces: []
 
 # Security configuration
 security:
