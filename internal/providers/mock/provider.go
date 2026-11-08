@@ -555,6 +555,10 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 	}, nil
 }
 
+// taskReferenceRequiredMessage is the refusal of a TaskStatus request that
+// carries no task reference.
+const taskReferenceRequiredMessage = "task reference is required"
+
 // TaskStatus checks the status of an async task.
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	p.simulateDelay()
@@ -563,8 +567,14 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 		return nil, errors.NewInternal("mock provider configured to fail task status operations", nil)
 	}
 
+	// A request without a task reference is refused, never answered.
+	taskID := req.GetTask().GetId()
+	if taskID == "" {
+		return nil, errors.NewInvalidSpec(taskReferenceRequiredMessage)
+	}
+
 	p.mu.RLock()
-	task, exists := p.tasks[req.Task.Id]
+	task, exists := p.tasks[taskID]
 	p.mu.RUnlock()
 
 	if !exists {
