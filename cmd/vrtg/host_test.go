@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -97,6 +98,47 @@ func TestHostEnrollOfflineWritesAManifestFromFilesOnly(t *testing.T) {
 	assert.Error(t, err, "a lifetime over thirty days is refused locally")
 }
 
+// TestHostEnrollFileHandling: the CSR must be a bounded regular file, and
+// an output is never written through a symbolic link and always ends up
+// mode 0600.
+func TestHostEnrollFileHandling(t *testing.T) {
+	dir := t.TempDir()
+	offline := filepath.Join(dir, "no-kubeconfig")
+	args := func(csr, out string) []string {
+		return []string{"host", "enroll", "--host", "host-a", "--csr", csr, "--issuer-namespace", testIssuerNS,
+			"--issuer", "Issuer/host-agent-ca", "--manifest-out", out}
+	}
+	if _, err := os.Stat("/dev/zero"); err == nil {
+		_, err := runVrtg(t, offline, args("/dev/zero", filepath.Join(dir, "x.yaml"))...)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not a regular file")
+	}
+	big := filepath.Join(dir, "big.csr")
+	require.NoError(t, os.WriteFile(big, bytes.Repeat([]byte("a"), maxEnrolFileSize+1), 0o600))
+	_, err := runVrtg(t, offline, args(big, filepath.Join(dir, "x.yaml"))...)
+	require.Error(t, err)
+
+	csrFile := filepath.Join(dir, "host-a.csr")
+	require.NoError(t, os.WriteFile(csrFile, hostidentitytest.NewCSR(t, hostidentitytest.NewKey(t), hostidentitytest.CSROptions{}), 0o600))
+	victim := filepath.Join(dir, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o600))
+	link := filepath.Join(dir, "link.yaml")
+	require.NoError(t, os.Symlink(victim, link))
+	_, err = runVrtg(t, offline, args(csrFile, link)...)
+	require.Error(t, err, "a symbolic link is never written through")
+	data, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	assert.Equal(t, "keep", string(data))
+
+	existing := filepath.Join(dir, "existing.yaml")
+	require.NoError(t, os.WriteFile(existing, []byte("old"), 0o644)) // #nosec G306 -- the test checks the mode is tightened
+	_, err = runVrtg(t, offline, args(csrFile, existing)...)
+	require.NoError(t, err)
+	st, err := os.Stat(existing)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), st.Mode().Perm())
+}
+
 // TestHostEnrolAndRevokeAgainstAPIServer runs the offline flow end to end
 // against a real apiserver: the manager's enrolment reconcilers draw the
 // record and decide the request, the test plays the agent (key and CSR
@@ -135,8 +177,19 @@ func TestHostEnrolAndRevokeAgainstAPIServer(t *testing.T) {
 		Namespace: testIssuerNS, CertManagerIssuer: &cm, ExternalPKIIssuer: &ext, AdminGroup: testAdminGroup,
 		TrustDomain: testTrustDomain, CABundle: ca.PEM, InstallID: bytes.Repeat([]byte{7}, 16),
 	}
-	hostR := &controller.HostEnrolmentReconciler{Client: env.Client, Scheme: env.Client.Scheme(), Config: cfg}
-	reqR := &controller.HostEnrolmentRequestReconciler{Client: env.Client, Scheme: env.Client.Scheme(), Config: cfg}
+	hostR := &controller.HostEnrolmentReconciler{Client: env.Client, Config: cfg}
+	reqR := &controller.HostEnrolmentRequestReconciler{Client: env.Client, Config: cfg}
+	// The administrator "alice" may enrol the Hosts in "infra".
+	require.NoError(t, env.Client.Create(ctx, &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: "host-enrolers", Namespace: "infra"},
+		Rules: []rbacv1.PolicyRule{{APIGroups: []string{infrav1beta1.GroupVersion.Group}, Resources: []string{"hosts"},
+			Verbs: []string{infrav1beta1.HostEnrolVerb}}},
+	}))
+	require.NoError(t, env.Client.Create(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "host-enrolers", Namespace: "infra"},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "host-enrolers"},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "alice"}},
+	}))
 	getHost := func(name string) *infrav1beta1.Host {
 		_, err := hostR.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "infra", Name: name}})
 		require.NoError(t, err)

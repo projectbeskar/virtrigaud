@@ -24,23 +24,30 @@ package controller
 //  1. An administrator sets Host.spec.identity (immutable once set).
 //  2. The HostEnrolmentReconciler draws an enrolment record for the host
 //     (enrolment id, Provider UID, install id, mode identity), stores it in
-//     the host's manager-owned pins Secret and mirrors the exact URI subject
-//     alternative names a request must carry into Host.status.agent.
+//     the host's pins Secret and mirrors the exact URI subject alternative
+//     names a request must carry into Host.status.agent.
 //  3. The agent generates its key on the host and writes a CSR carrying
 //     those URIs; an administrator submits it as a cert-manager
 //     CertificateRequest in the enrolment namespace (vrtg host enroll).
-//  4. The HostEnrolmentRequestReconciler authorises the request against the
-//     rules in hostidentity.Authorise plus the Host checks here (the Host
-//     exists, runs an agent, has an identity, is not revoked, has a pending
-//     record and no other request in flight). It records the authorisation in
-//     the pins Secret first, then sets cert-manager's Approved condition; any
-//     failure sets Denied with a reason. cert-manager's default approver must
-//     be disabled for the enrolment issuer, or it would approve first.
+//  4. The HostEnrolmentRequestReconciler checks the requester first (the
+//     administrator group, then a SubjectAccessReview of the "enrol" verb on
+//     the Host) without reading anything else, then the Host (exists, runs an
+//     agent, has an identity, is not revoked, has a pending record, no
+//     request in flight) and the request (hostidentity.Authorise). It records
+//     the authorisation in the pins Secret first, then sets cert-manager's
+//     Approved condition; any failure sets Denied with a reason.
 //  5. Once a certificate is issued (by the cert-manager issuer, or returned
 //     by an operator from an external PKI), the manager validates it against
 //     the authorisation (hostidentity.ValidateIssued) and only then pins its
-//     key in the Secret. The Secret is authoritative; Host.status.agent only
-//     mirrors it and is rewritten from it when lost.
+//     key.
+//
+// The pins Secrets live in the enrolment namespace, never in a Host's
+// (tenant) namespace: a tenant's Secret write access is not enrolment
+// authority. A pins Secret is named by a hash of the Host's namespace and
+// name and bound to the Host UID and identity inside; it is deleted when the
+// Host is deleted or goes away. The inventory render takes only the key pins
+// from it: the CA bundle comes from the manager's configuration and the
+// expected SAN is recomputed from the Host.
 //
 // Nothing here logs or records key material; CSRs and certificates are
 // public but are kept out of logs and events too.
@@ -48,6 +55,7 @@ package controller
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -55,6 +63,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -63,14 +72,16 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
@@ -83,15 +94,16 @@ import (
 // virtrigaud_dev build tag accepts them; a release build refuses to start
 // when any is set.
 const (
-	// DevHostEnrolmentNamespaceFlagName names the namespace enrolment
-	// CertificateRequests are created in (the issuer namespace). Setting it
-	// enables host-agent enrolment.
+	// DevHostEnrolmentNamespaceFlagName names the enrolment namespace: the
+	// issuer namespace, where enrolment CertificateRequests and the pins
+	// Secrets live. Setting it enables host-agent enrolment.
 	DevHostEnrolmentNamespaceFlagName = "dev-host-enrolment-namespace"
 	// DevHostEnrolmentIssuerFlagName names the cert-manager issuer of the
 	// host-agent subordinate CA, as kind/name or group/kind/name.
 	DevHostEnrolmentIssuerFlagName = "dev-host-enrolment-issuer"
 	// DevHostEnrolmentExternalPKIIssuerFlagName names the issuer reference
-	// that marks a request for an external PKI, as group/kind/name.
+	// that marks a request for an external PKI, as group/kind/name with a
+	// group other than cert-manager.io.
 	DevHostEnrolmentExternalPKIIssuerFlagName = "dev-host-enrolment-external-pki-issuer"
 	// DevHostEnrolmentAdminGroupFlagName names the group whose members may
 	// request an enrolment.
@@ -108,12 +120,24 @@ const (
 // enrolment state document.
 const hostEnrolmentStateKey = "enrolment.json"
 
-// hostEnrolmentSecretPrefix prefixes a Host's pins Secret name.
+// hostEnrolmentSecretPrefix prefixes a pins Secret name.
 const hostEnrolmentSecretPrefix = "virtrigaud-agent-pins-"
 
 // hostEnrolmentComponent is the app.kubernetes.io/component label of a pins
 // Secret.
 const hostEnrolmentComponent = "host-agent-pins"
+
+// maxRetiredEnrolmentIDs bounds the never-reuse list kept per Host (oldest
+// dropped first; ids are 16 random bytes, so a dropped id is not redrawn in
+// practice).
+const maxRetiredEnrolmentIDs = 256
+
+// Label keys and values of manager-owned objects.
+const (
+	k8sLabelComponent      = "app.kubernetes.io/component"
+	k8sLabelManagedBy      = "app.kubernetes.io/managed-by"
+	k8sManagedByVirtRigaud = "virtrigaud"
+)
 
 // Event reasons of host-agent enrolment, emitted on the Host.
 const (
@@ -121,39 +145,14 @@ const (
 	eventReasonAgentEnrolmentApproved = "AgentEnrolmentApproved"
 	eventReasonAgentEnrolled          = "AgentEnrolled"
 	eventReasonAgentCertRejected      = "AgentCertificateRejected"
-)
-
-// Denial reasons of the Host checks (the request checks are hostidentity's
-// Reason* constants). Each is set on the CertificateRequest's Denied
-// condition.
-const (
-	// reasonEnrolHostUnnamed: the request does not name a Host.
-	reasonEnrolHostUnnamed = "HostNotNamed"
-	// reasonEnrolHostNotFound: the named Host does not exist or is deleting.
-	reasonEnrolHostNotFound = "HostNotFound"
-	// reasonEnrolHostNotAgent: the Host's Provider does not run a per-host
-	// agent.
-	reasonEnrolHostNotAgent = "HostNotAgentManaged"
-	// reasonEnrolIdentityMissing: the Host has no spec.identity.
-	reasonEnrolIdentityMissing = "HostIdentityMissing"
-	// reasonEnrolHostRevoked: the Host is revoked.
-	reasonEnrolHostRevoked = "HostRevoked"
-	// reasonEnrolNoPending: the manager drew no enrolment record for the Host.
-	reasonEnrolNoPending = "NoPendingEnrolment"
-	// reasonEnrolInFlight: another request for the Host is authorised and
-	// not finished.
-	reasonEnrolInFlight = "EnrolmentInFlight"
-	// reasonEnrolAlreadyEnrolled: the Host is already enrolled; re-enrolment
-	// is not supported by this manager.
-	reasonEnrolAlreadyEnrolled = "AlreadyEnrolled"
-	// reasonEnrolAuthorised is the Approved condition reason.
-	reasonEnrolAuthorised = "VirtRigaudHostEnrolmentAuthorised"
+	eventReasonAgentRevoked           = "AgentRevoked"
+	eventReasonAgentRecordRetired     = "AgentEnrolmentRecordRetired"
 )
 
 // errForeignPinsSecret is returned when a Secret with a Host's pins Secret
-// name exists but is not a manager-owned pins Secret. The manager never
-// overwrites it.
-var errForeignPinsSecret = errors.New("a Secret with the host's pins Secret name exists and is not managed by VirtRigaud")
+// name exists but is not a manager-written pins Secret for that Host. The
+// manager never reads it as pins nor overwrites it.
+var errForeignPinsSecret = errors.New("a Secret with the host's pins Secret name exists and is not a VirtRigaud pins Secret for this Host")
 
 // HostEnrolmentFlags are the raw values of the host-agent enrolment flags.
 type HostEnrolmentFlags struct {
@@ -179,7 +178,9 @@ func (f HostEnrolmentFlags) isSet() bool {
 
 // HostEnrolmentConfig configures host-agent enrolment.
 type HostEnrolmentConfig struct {
-	// Namespace is where enrolment CertificateRequests live.
+	// Namespace is the enrolment namespace: where enrolment
+	// CertificateRequests and the pins Secrets live. Only the manager may
+	// write Secrets there.
 	Namespace string
 	// CertManagerIssuer is the cert-manager issuer of the subordinate CA, or
 	// nil.
@@ -191,7 +192,8 @@ type HostEnrolmentConfig struct {
 	AdminGroup string
 	// TrustDomain is the trust domain of host URI identities.
 	TrustDomain string
-	// CABundle is the PEM bundle of the subordinate CA.
+	// CABundle is the PEM bundle of the subordinate CA. It is the only CA
+	// bundle ever rendered into an inventory.
 	CABundle []byte
 	// InstallID is the 16-byte install identifier (from the development
 	// operation signer).
@@ -202,13 +204,15 @@ type HostEnrolmentConfig struct {
 // flag set it returns nil and no error (enrolment disabled). A release build
 // refuses any flag. Otherwise the namespace, the admin group, the trust
 // domain, the CA bundle, at least one issuer and the install id (a loaded
-// development signer) are required.
+// development signer) are required, and an external-PKI reference must name
+// an explicit group other than cert-manager.io (cert-manager's controllers
+// would otherwise act on it).
 func ParseHostEnrolmentConfig(f HostEnrolmentFlags, installID []byte) (*HostEnrolmentConfig, error) {
 	if !f.isSet() {
 		return nil, nil
 	}
 	if !devgate.Compiled {
-		return nil, fmt.Errorf("the --%s* flags cannot be used with a release build: %w", "dev-host-enrolment-", devgate.ErrNotCompiled)
+		return nil, fmt.Errorf("the --dev-host-enrolment-* flags cannot be used with a release build: %w", devgate.ErrNotCompiled)
 	}
 	if f.Namespace == "" {
 		return nil, fmt.Errorf("--%s is required to enable host-agent enrolment", DevHostEnrolmentNamespaceFlagName)
@@ -236,17 +240,20 @@ func ParseHostEnrolmentConfig(f HostEnrolmentFlags, installID []byte) (*HostEnro
 		cfg.CertManagerIssuer = &ref
 	}
 	if f.ExternalPKIIssuer != "" {
+		if strings.Count(f.ExternalPKIIssuer, "/") != 2 {
+			return nil, fmt.Errorf("--%s must be group/kind/name with an explicit group", DevHostEnrolmentExternalPKIIssuerFlagName)
+		}
 		ref, err := certrequest.ParseIssuerRef(f.ExternalPKIIssuer)
 		if err != nil {
 			return nil, fmt.Errorf("--%s: %w", DevHostEnrolmentExternalPKIIssuerFlagName, err)
+		}
+		if ref.Group == certrequest.Group {
+			return nil, fmt.Errorf("--%s must not use the %s group: cert-manager's controllers act on it", DevHostEnrolmentExternalPKIIssuerFlagName, certrequest.Group)
 		}
 		cfg.ExternalPKIIssuer = &ref
 	}
 	if cfg.CertManagerIssuer == nil && cfg.ExternalPKIIssuer == nil {
 		return nil, fmt.Errorf("--%s or --%s is required", DevHostEnrolmentIssuerFlagName, DevHostEnrolmentExternalPKIIssuerFlagName)
-	}
-	if cfg.CertManagerIssuer != nil && cfg.ExternalPKIIssuer != nil && *cfg.CertManagerIssuer == *cfg.ExternalPKIIssuer {
-		return nil, errors.New("the cert-manager and external-PKI issuer references must differ")
 	}
 	if f.CABundleFile == "" {
 		return nil, fmt.Errorf("--%s is required", DevHostEnrolmentCABundleFileFlagName)
@@ -335,9 +342,12 @@ func (i externalPKIIssuer) Handles(cr *unstructured.Unstructured) bool {
 }
 
 // Issued implements HostCertificateIssuer: any returned certificate, until
-// the manager has recorded an outcome.
+// the manager has recorded an outcome (Ready with reason Issued or Failed;
+// a Ready condition with any other reason is not the manager's and does not
+// end the wait).
 func (externalPKIIssuer) Issued(cr *unstructured.Unstructured) ([]byte, error) {
-	if _, _, done := certrequest.Condition(cr, certrequest.ConditionReady); done {
+	if _, reason, found := certrequest.Condition(cr, certrequest.ConditionReady); found &&
+		(reason == certrequest.ReasonIssued || reason == certrequest.ReasonFailed) {
 		return nil, nil
 	}
 	return certrequest.Certificate(cr)
@@ -367,8 +377,8 @@ func (cfg *HostEnrolmentConfig) issuers() []HostCertificateIssuer {
 }
 
 // hostEnrolmentState is the authoritative enrolment state of one Host, kept
-// in its pins Secret. It holds public identifiers and public keys' pins
-// only.
+// in its pins Secret in the enrolment namespace. It holds public
+// identifiers and key pins only.
 type hostEnrolmentState struct {
 	// HostUID and Identity bind the state to one Host object and identity: a
 	// state for another UID or identity is discarded, never inherited.
@@ -380,12 +390,13 @@ type hostEnrolmentState struct {
 	Authorised *authorisedRequest `json:"authorised,omitempty"`
 	// Current is the enrolment whose key is pinned.
 	Current *currentEnrolment `json:"current,omitempty"`
-	// RetiredEnrolmentIDs are enrolment ids already used for the host; none
-	// is drawn again.
+	// RetiredEnrolmentIDs are enrolment ids already used or abandoned for
+	// the host; none is drawn again.
 	RetiredEnrolmentIDs []string `json:"retiredEnrolmentIDs,omitempty"`
-	// LastDenial is the last denied request, for the Host condition.
+	// LastDenial is the last denied request of an authorised requester, for
+	// the Host condition.
 	LastDenial *requestOutcome `json:"lastDenial,omitempty"`
-	// LastRejection is the last refused issued certificate, for the Host
+	// LastRejection is the last refused or abandoned issuance, for the Host
 	// condition.
 	LastRejection *requestOutcome `json:"lastRejection,omitempty"`
 }
@@ -411,13 +422,13 @@ type authorisedRequest struct {
 	KeyPin string `json:"keyPin"`
 }
 
-// currentEnrolment is a pinned enrolment.
+// currentEnrolment is a pinned enrolment. Only the key pins and the expiry
+// are used by the render; the CA bundle and the expected SAN are never read
+// from storage.
 type currentEnrolment struct {
-	Record      enrolmentRecord `json:"record"`
-	KeyPins     []string        `json:"keyPins"`
-	CABundle    []byte          `json:"caBundle"`
-	ExpectedSAN string          `json:"expectedSAN"`
-	NotAfter    metav1.Time     `json:"notAfter"`
+	Record   enrolmentRecord `json:"record"`
+	KeyPins  []string        `json:"keyPins"`
+	NotAfter metav1.Time     `json:"notAfter"`
 }
 
 // requestOutcome names a request and the reason of its outcome.
@@ -441,10 +452,41 @@ func (e enrolmentRecord) toRecord() (hostidentity.Record, error) {
 	return rec, rec.Validate()
 }
 
-// hostEnrolmentSecretName returns the name of a Host's pins Secret.
-func hostEnrolmentSecretName(hostName string) string {
-	return hostEnrolmentSecretPrefix + hostName
+// retire adds enrolment ids to the never-reuse list, bounded by
+// maxRetiredEnrolmentIDs.
+func (st *hostEnrolmentState) retire(ids ...string) {
+	for _, id := range ids {
+		if id != "" && !slices.Contains(st.RetiredEnrolmentIDs, id) {
+			st.RetiredEnrolmentIDs = append(st.RetiredEnrolmentIDs, id)
+		}
+	}
+	if n := len(st.RetiredEnrolmentIDs); n > maxRetiredEnrolmentIDs {
+		st.RetiredEnrolmentIDs = slices.Clone(st.RetiredEnrolmentIDs[n-maxRetiredEnrolmentIDs:])
+	}
 }
+
+// retireOpenRecords retires the pending and authorised records and clears
+// them (the next record is drawn fresh).
+func (st *hostEnrolmentState) retireOpenRecords() {
+	if st.Pending != nil {
+		st.retire(st.Pending.EnrolmentID)
+	}
+	if st.Authorised != nil {
+		st.retire(st.Authorised.Record.EnrolmentID)
+	}
+	st.Pending, st.Authorised = nil, nil
+}
+
+// hostEnrolmentSecretName returns the name of the pins Secret of the Host
+// namespace/name: a fixed prefix and a hash, so it is bounded whatever the
+// Host's name and never collides with another Host's.
+func hostEnrolmentSecretName(namespace, name string) string {
+	sum := sha256.Sum256([]byte(namespace + "/" + name))
+	return hostEnrolmentSecretPrefix + hex.EncodeToString(sum[:16])
+}
+
+// hostKey is "namespace/name" of a Host.
+func hostKey(namespace, name string) string { return namespace + "/" + name }
 
 // loadedEnrolment is a Host's state and the Secret it was read from (nil
 // when absent).
@@ -456,44 +498,46 @@ type loadedEnrolment struct {
 	reset bool
 }
 
-// loadHostEnrolment reads a Host's pins Secret. A missing Secret yields a
-// fresh state. A Secret owned by another Host object, or whose state names
-// another UID or identity (a replaced host), yields a fresh state with reset
-// set: the old pins are never inherited. A Secret not managed by VirtRigaud
-// is refused (errForeignPinsSecret).
-func loadHostEnrolment(ctx context.Context, c client.Reader, host *infravirtrigaudiov1beta1.Host) (loadedEnrolment, error) {
+// loadHostEnrolment reads a Host's pins Secret from the enrolment
+// namespace. A missing Secret yields a fresh state. A state that names
+// another UID or identity (a replaced host) yields a fresh state with reset
+// set: the old pins are never inherited. A Secret that is not a VirtRigaud
+// pins Secret for this Host is refused (errForeignPinsSecret).
+func loadHostEnrolment(ctx context.Context, c client.Reader, cfg *HostEnrolmentConfig, host *infravirtrigaudiov1beta1.Host) (loadedEnrolment, error) {
 	fresh := hostEnrolmentState{HostUID: string(host.UID), Identity: host.Spec.Identity}
 	sec := &corev1.Secret{}
-	err := c.Get(ctx, types.NamespacedName{Namespace: host.Namespace, Name: hostEnrolmentSecretName(host.Name)}, sec)
+	err := c.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: hostEnrolmentSecretName(host.Namespace, host.Name)}, sec)
 	if apierrors.IsNotFound(err) {
 		return loadedEnrolment{state: fresh}, nil
 	}
 	if err != nil {
 		return loadedEnrolment{}, fmt.Errorf("get pins Secret of Host %s/%s: %w", host.Namespace, host.Name, err)
 	}
-	if sec.Labels[k8sLabelComponent] != hostEnrolmentComponent || sec.Labels[k8sLabelManagedBy] != k8sManagedByVirtRigaud {
+	if !isPinsSecretFor(sec, host.Namespace, host.Name) {
 		return loadedEnrolment{}, fmt.Errorf("Host %s/%s: %w", host.Namespace, host.Name, errForeignPinsSecret)
 	}
 	var st hostEnrolmentState
 	if err := json.Unmarshal(sec.Data[hostEnrolmentStateKey], &st); err != nil ||
-		!metav1.IsControlledBy(sec, host) || st.HostUID != string(host.UID) || st.Identity != host.Spec.Identity {
+		st.HostUID != string(host.UID) || st.Identity != host.Spec.Identity {
 		return loadedEnrolment{state: fresh, secret: sec, reset: true}, nil
 	}
 	return loadedEnrolment{state: st, secret: sec}, nil
 }
 
-// Label keys and values of manager-owned objects.
-const (
-	k8sLabelComponent      = "app.kubernetes.io/component"
-	k8sLabelManagedBy      = "app.kubernetes.io/managed-by"
-	k8sManagedByVirtRigaud = "virtrigaud"
-)
+// isPinsSecretFor reports whether a Secret is the manager's pins Secret for
+// the Host namespace/name (labels and the Host annotation).
+func isPinsSecretFor(sec *corev1.Secret, namespace, name string) bool {
+	return sec.Labels[k8sLabelComponent] == hostEnrolmentComponent &&
+		sec.Labels[k8sLabelManagedBy] == k8sManagedByVirtRigaud &&
+		sec.Annotations[certrequest.AnnotationHost] == hostKey(namespace, name)
+}
 
-// saveHostEnrolment writes a Host's state to its pins Secret, creating it
-// when absent. The Secret is controlled by the Host (garbage-collected with
-// it), and an update carries the read resourceVersion, so a concurrent
-// writer makes it fail with a conflict instead of being overwritten.
-func saveHostEnrolment(ctx context.Context, c client.Client, scheme *runtime.Scheme, host *infravirtrigaudiov1beta1.Host, l *loadedEnrolment) error {
+// saveHostEnrolment writes a Host's state to its pins Secret in the
+// enrolment namespace, creating it when absent. An update carries the read
+// resourceVersion, so a concurrent writer makes it fail with a conflict
+// instead of being overwritten. No owner reference: the Secret is in
+// another namespace than the Host, and is deleted by the Host reconciler.
+func saveHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig, host *infravirtrigaudiov1beta1.Host, l *loadedEnrolment) error {
 	data, err := json.Marshal(l.state)
 	if err != nil {
 		return fmt.Errorf("marshal enrolment state of Host %s/%s: %w", host.Namespace, host.Name, err)
@@ -501,25 +545,15 @@ func saveHostEnrolment(ctx context.Context, c client.Client, scheme *runtime.Sch
 	sec := l.secret
 	create := sec == nil
 	if create {
-		sec = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: host.Namespace, Name: hostEnrolmentSecretName(host.Name)}}
+		sec = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: cfg.Namespace, Name: hostEnrolmentSecretName(host.Namespace, host.Name)}}
 	} else {
 		sec = sec.DeepCopy()
 	}
-	if sec.Labels == nil {
-		sec.Labels = map[string]string{}
-	}
-	sec.Labels[k8sLabelComponent] = hostEnrolmentComponent
-	sec.Labels[k8sLabelManagedBy] = k8sManagedByVirtRigaud
+	sec.Labels = map[string]string{k8sLabelComponent: hostEnrolmentComponent, k8sLabelManagedBy: k8sManagedByVirtRigaud}
+	sec.Annotations = map[string]string{certrequest.AnnotationHost: hostKey(host.Namespace, host.Name)}
+	sec.OwnerReferences = nil
 	sec.Type = corev1.SecretTypeOpaque
 	sec.Data = map[string][]byte{hostEnrolmentStateKey: data}
-	if !metav1.IsControlledBy(sec, host) {
-		// A Secret left by a replaced Host (same name, another UID) is taken
-		// over with its state discarded (loadHostEnrolment reset it).
-		sec.OwnerReferences = nil
-		if err := controllerutil.SetControllerReference(host, sec, scheme); err != nil {
-			return fmt.Errorf("own pins Secret of Host %s/%s: %w", host.Namespace, host.Name, err)
-		}
-	}
 	if create {
 		err = c.Create(ctx, sec)
 	} else {
@@ -530,6 +564,26 @@ func saveHostEnrolment(ctx context.Context, c client.Client, scheme *runtime.Sch
 	}
 	l.secret = sec
 	l.reset = false
+	return nil
+}
+
+// deleteHostEnrolment deletes the pins Secret of the Host namespace/name, if
+// it is the manager's.
+func deleteHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig, namespace, name string) error {
+	sec := &corev1.Secret{}
+	err := c.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: hostEnrolmentSecretName(namespace, name)}, sec)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get pins Secret of Host %s/%s: %w", namespace, name, err)
+	}
+	if !isPinsSecretFor(sec, namespace, name) {
+		return nil
+	}
+	if err := c.Delete(ctx, sec, client.Preconditions{UID: &sec.UID}); client.IgnoreNotFound(err) != nil {
+		return fmt.Errorf("delete pins Secret of Host %s/%s: %w", namespace, name, err)
+	}
 	return nil
 }
 
@@ -552,20 +606,40 @@ func providerRunsHostAgents(p *infravirtrigaudiov1beta1.Provider) bool {
 	return p.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor && isClusterTopology(p)
 }
 
+// enrolmentRequestLive reports whether an authorised request still exists
+// (same UID) and has not failed.
+func enrolmentRequestLive(ctx context.Context, c client.Reader, cfg *HostEnrolmentConfig, a *authorisedRequest) (bool, error) {
+	other := certrequest.NewObject()
+	_, name, _ := strings.Cut(a.Request, "/")
+	err := c.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: name}, other)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("get authorised request %s: %w", a.Request, err)
+	}
+	return string(other.GetUID()) == a.RequestUID && !certrequest.Failed(other), nil
+}
+
 // HostEnrolmentReconciler draws a Host's enrolment record, keeps its pins
-// Secret bound to the Host object and identity, and mirrors the Secret into
+// Secret bound to the Host object and identity, retires the enrolment of a
+// revoked Host, redraws the record after an abandoned issuance, deletes the
+// pins Secret of a deleted Host, and mirrors the Secret into
 // Host.status.agent and the AgentEnrolled condition. Development builds
 // only: the manager registers it only with a HostEnrolmentConfig.
 type HostEnrolmentReconciler struct {
 	client.Client
-	// Scheme sets owner references.
-	Scheme *runtime.Scheme
+	// APIReader confirms a Host is gone before its pins Secret is deleted
+	// (nil: the Client).
+	APIReader client.Reader
 	// Config is the enrolment configuration.
 	Config *HostEnrolmentConfig
 	// Recorder emits events on Hosts (nil: none).
 	Recorder record.EventRecorder
 	// Rand draws enrolment ids (nil: crypto/rand).
 	Rand io.Reader
+	// Now is the clock (nil: time.Now).
+	Now func() time.Time
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
@@ -576,10 +650,14 @@ type HostEnrolmentReconciler struct {
 func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	host := &infravirtrigaudiov1beta1.Host{}
 	if err := r.Get(ctx, req.NamespacedName, host); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, r.forgetGoneHost(ctx, req.NamespacedName)
 	}
 	if !host.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil
+		// A deleting Host is never enrolled again; its pins go first.
+		return ctrl.Result{}, deleteHostEnrolment(ctx, r.Client, r.Config, host.Namespace, host.Name)
 	}
 	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
 	if err != nil || !agent {
@@ -588,7 +666,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if host.Spec.Identity == "" {
 		return ctrl.Result{}, r.mirror(ctx, host, nil)
 	}
-	l, err := loadHostEnrolment(ctx, r.Client, host)
+	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -597,23 +675,88 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		log.FromContext(ctx).Info("Discarded the enrolment state of a previous Host object or identity; no pin is inherited",
 			"host", req.String())
 	}
-	if !host.Spec.Revoked && l.state.Current == nil {
-		if p := l.state.Pending; p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID) {
-			id, err := r.drawEnrolmentID(l.state.RetiredEnrolmentIDs)
+	st := &l.state
+	switch {
+	case host.Spec.Revoked:
+		if st.Current != nil || st.Pending != nil || st.Authorised != nil {
+			if st.Current != nil {
+				st.retire(st.Current.Record.EnrolmentID)
+			}
+			st.retireOpenRecords()
+			st.Current = nil
+			changed = true
+			log.FromContext(ctx).Info("Revoked a host agent: its enrolment is retired and its pins removed", "host", req.String())
+			r.event(host, corev1.EventTypeWarning, eventReasonAgentRevoked, "the agent enrolment is retired and its key pins removed")
+		}
+	default:
+		if a := st.Authorised; a != nil {
+			live, err := enrolmentRequestLive(ctx, r.Client, r.Config, a)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			l.state.Pending = &enrolmentRecord{EnrolmentID: id, ProviderUID: string(provider.UID), InstallID: hex.EncodeToString(r.Config.InstallID)}
-			l.state.Authorised = nil
-			changed = true
+			if !live {
+				st.LastRejection = &requestOutcome{Request: a.Request, Reason: infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected,
+					Message: "the authorised request was deleted or failed before a certificate was pinned"}
+				st.retireOpenRecords()
+				changed = true
+				r.event(host, corev1.EventTypeNormal, eventReasonAgentRecordRetired, "the enrolment record of abandoned request "+a.Request+" is retired")
+			}
+		}
+		if st.Current == nil {
+			if p := st.Pending; p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID) {
+				if p != nil {
+					st.retireOpenRecords()
+				}
+				id, err := r.drawEnrolmentID(st.RetiredEnrolmentIDs)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				st.Pending = &enrolmentRecord{EnrolmentID: id, ProviderUID: string(provider.UID), InstallID: hex.EncodeToString(r.Config.InstallID)}
+				changed = true
+			}
 		}
 	}
 	if changed {
-		if err := saveHostEnrolment(ctx, r.Client, r.Scheme, host, &l); err != nil {
+		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	return ctrl.Result{}, r.mirror(ctx, host, &l.state)
+	res := ctrl.Result{}
+	if c := st.Current; c != nil && !host.Spec.Revoked {
+		// Re-mirror at expiry so the condition and the render follow it.
+		if d := c.NotAfter.Sub(r.now()); d > 0 {
+			res.RequeueAfter = d + time.Second
+		}
+	}
+	return res, r.mirror(ctx, host, st)
+}
+
+// forgetGoneHost deletes the pins Secret of a Host that no longer exists,
+// once a live read confirms it is gone.
+func (r *HostEnrolmentReconciler) forgetGoneHost(ctx context.Context, key types.NamespacedName) error {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, key, &infravirtrigaudiov1beta1.Host{}); !apierrors.IsNotFound(err) {
+		return client.IgnoreNotFound(err)
+	}
+	return deleteHostEnrolment(ctx, r.Client, r.Config, key.Namespace, key.Name)
+}
+
+// now returns the current time.
+func (r *HostEnrolmentReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+// event emits an event on the Host when a recorder is set.
+func (r *HostEnrolmentReconciler) event(host *infravirtrigaudiov1beta1.Host, typ, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(host, typ, reason, msg)
+	}
 }
 
 // drawEnrolmentID draws an enrolment id not on the retired list.
@@ -664,7 +807,9 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 		}
 		switch {
 		case host.Spec.Revoked:
-			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentRevoked, "spec.revoked is true; no enrolment is authorised"
+			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentRevoked, "spec.revoked is true; the enrolment is retired and no enrolment is authorised"
+		case st.Current != nil && !st.Current.NotAfter.After(r.now()):
+			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired, "the pinned agent certificate has expired"
 		case st.Current != nil:
 			cond.Status = metav1.ConditionTrue
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentEnrolled, "the agent certificate is validated and its key is pinned"
@@ -673,7 +818,7 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 				fmt.Sprintf("certificate request %s is authorised; waiting for the issued certificate", st.Authorised.Request)
 		case st.LastRejection != nil:
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected,
-				fmt.Sprintf("the certificate issued for request %s was refused: %s", st.LastRejection.Request, st.LastRejection.Message)
+				fmt.Sprintf("the issuance for request %s was refused or abandoned (%s); a new record is drawn", st.LastRejection.Request, st.LastRejection.Message)
 		case st.LastDenial != nil:
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentRequestDenied,
 				fmt.Sprintf("certificate request %s was denied: %s", st.LastDenial.Request, st.LastDenial.Reason)
@@ -693,372 +838,76 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 	return nil
 }
 
-// SetupWithManager registers the reconciler: Hosts, and the pins Secrets they
-// own (so a Secret change is mirrored at once).
+// hostRequestFromAnnotation maps an object carrying the Host annotation
+// (a pins Secret or an enrolment request in the enrolment namespace) to its
+// Host.
+func (r *HostEnrolmentReconciler) hostRequestFromAnnotation(_ context.Context, obj client.Object) []reconcile.Request {
+	if obj.GetNamespace() != r.Config.Namespace {
+		return nil
+	}
+	ns, name, ok := strings.Cut(obj.GetAnnotations()[certrequest.AnnotationHost], "/")
+	if !ok || ns == "" || name == "" || strings.Contains(name, "/") {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}}
+}
+
+// SetupWithManager registers the reconciler: Hosts, the pins Secrets in the
+// enrolment namespace (so a Secret change is mirrored at once, and every
+// pins Secret is visited at start-up, which deletes those of Hosts gone
+// while the manager was down), and enrolment requests (so an abandoned
+// request's record is retired).
 func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	inEnrolmentNS := predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetNamespace() == r.Config.Namespace })
+	isPins := predicate.NewPredicateFuncs(func(o client.Object) bool {
+		return o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
+	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Host{}).
-		Owns(&corev1.Secret{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.hostRequestFromAnnotation),
+			builder.WithPredicates(inEnrolmentNS, isPins)).
+		Watches(certrequest.NewObject(), handler.EnqueueRequestsFromMapFunc(r.hostRequestFromAnnotation),
+			builder.WithPredicates(inEnrolmentNS)).
 		Named("host-enrolment").
 		Complete(r)
 }
 
-// HostEnrolmentRequestReconciler decides enrolment CertificateRequests
-// (approve or deny) and pins the key of a validated issued certificate.
-// Development builds only: the manager registers it only with a
-// HostEnrolmentConfig.
-type HostEnrolmentRequestReconciler struct {
-	client.Client
-	// Scheme sets owner references.
-	Scheme *runtime.Scheme
-	// Config is the enrolment configuration.
-	Config *HostEnrolmentConfig
-	// Recorder emits events on Hosts (nil: none).
-	Recorder record.EventRecorder
-	// Now is the clock (nil: time.Now).
-	Now func() time.Time
-}
-
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-
-// Reconcile implements reconcile.Reconciler.
-func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if req.Namespace != r.Config.Namespace {
-		return ctrl.Result{}, nil
-	}
-	cr := certrequest.NewObject()
-	if err := r.Get(ctx, req.NamespacedName, cr); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	if !certrequest.IsEnrolment(cr) || !cr.GetDeletionTimestamp().IsZero() {
-		return ctrl.Result{}, nil
-	}
-	var iss HostCertificateIssuer
-	for _, i := range r.Config.issuers() {
-		if i.Handles(cr) {
-			iss = i
-			break
-		}
-	}
-	if iss == nil {
-		return ctrl.Result{}, nil
-	}
-	switch {
-	case !certrequest.Decided(cr):
-		return ctrl.Result{}, r.decide(ctx, cr, iss)
-	case certrequest.IsTrue(cr, certrequest.ConditionApproved) && !certrequest.Failed(cr):
-		return ctrl.Result{}, r.complete(ctx, cr, iss)
-	}
-	return ctrl.Result{}, nil
-}
-
-// now returns the current time.
-func (r *HostEnrolmentRequestReconciler) now() time.Time {
-	if r.Now != nil {
-		return r.Now()
-	}
-	return time.Now()
-}
-
-// decide authorises an undecided request or denies it.
-func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstructured.Unstructured, iss HostCertificateIssuer) error {
-	reqName := cr.GetNamespace() + "/" + cr.GetName()
-	ns, name, ok := certrequest.HostOf(cr)
-	if !ok {
-		return r.deny(ctx, cr, nil, nil, reasonEnrolHostUnnamed, "the request does not name a Host in annotation "+certrequest.AnnotationHost)
-	}
-	host := &infravirtrigaudiov1beta1.Host{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
-		if apierrors.IsNotFound(err) {
-			return r.deny(ctx, cr, nil, nil, reasonEnrolHostNotFound, fmt.Sprintf("Host %s/%s does not exist", ns, name))
-		}
-		return fmt.Errorf("get Host of request %s: %w", reqName, err)
-	}
-	if !host.DeletionTimestamp.IsZero() {
-		return r.deny(ctx, cr, nil, nil, reasonEnrolHostNotFound, fmt.Sprintf("Host %s/%s is being deleted", ns, name))
-	}
-	_, agent, err := hostRunsAgent(ctx, r.Client, host)
-	if err != nil {
-		return err
-	}
-	if !agent {
-		return r.deny(ctx, cr, host, nil, reasonEnrolHostNotAgent, "the Host's Provider does not run a per-host agent")
-	}
-	if host.Spec.Identity == "" {
-		return r.deny(ctx, cr, host, nil, reasonEnrolIdentityMissing, "the Host has no spec.identity")
-	}
-	l, err := loadHostEnrolment(ctx, r.Client, host)
-	if err != nil {
-		return err
-	}
-	if host.Spec.Revoked {
-		if l.reset {
-			return r.deny(ctx, cr, host, nil, reasonEnrolHostRevoked, "the Host is revoked")
-		}
-		return r.deny(ctx, cr, host, &l, reasonEnrolHostRevoked, "the Host is revoked")
-	}
-	if l.reset {
-		// The Host reconciler discards the stale state; until then there is
-		// no pending record for this Host object.
-		return r.deny(ctx, cr, host, nil, reasonEnrolNoPending, "no enrolment record is drawn for this Host")
-	}
-	if l.state.Current != nil {
-		return r.deny(ctx, cr, host, &l, reasonEnrolAlreadyEnrolled, "the Host is already enrolled")
-	}
-	if l.state.Pending == nil {
-		return r.deny(ctx, cr, host, &l, reasonEnrolNoPending, "no enrolment record is drawn for this Host")
-	}
-	if a := l.state.Authorised; a != nil && a.RequestUID != string(cr.GetUID()) {
-		live, err := r.authorisedRequestLive(ctx, a)
-		if err != nil {
-			return err
-		}
-		if live {
-			return r.deny(ctx, cr, host, &l, reasonEnrolInFlight, "another request for this Host is authorised: "+a.Request)
-		}
-		l.state.Authorised = nil
-	}
-	rec, err := l.state.Pending.toRecord()
-	if err != nil {
-		return fmt.Errorf("pending record of Host %s/%s: %w", ns, name, err)
-	}
-	hostURI, err := hostidentity.HostURI(r.Config.TrustDomain, host.Namespace, host.Name)
-	if err != nil {
-		return r.deny(ctx, cr, host, &l, reasonEnrolHostNotFound, err.Error())
-	}
-	in, err := certrequest.RequestOf(cr)
-	if err != nil {
-		return r.deny(ctx, cr, host, &l, hostidentity.ReasonRequestInvalid, err.Error())
-	}
-	auth, err := hostidentity.Authorise(hostidentity.Policy{
-		AdminGroup: r.Config.AdminGroup, HostName: host.Name, HostURI: hostURI, Record: rec,
-	}, in)
-	if err != nil {
-		if d, ok := hostidentity.AsDenial(err); ok {
-			return r.deny(ctx, cr, host, &l, d.Reason, d.Message)
-		}
-		return err
-	}
-	// Record the authorisation first, then approve: a crash in between
-	// leaves an authorised, undecided request, which the next reconcile
-	// approves (its UID matches).
-	l.state.Authorised = &authorisedRequest{
-		Request: reqName, RequestUID: string(cr.GetUID()), Issuer: iss.Name(), Record: *l.state.Pending, KeyPin: auth.KeyPin,
-	}
-	l.state.LastDenial, l.state.LastRejection = nil, nil
-	if err := saveHostEnrolment(ctx, r.Client, r.Scheme, host, &l); err != nil {
-		return err
-	}
-	if err := certrequest.SetCondition(cr, certrequest.ConditionApproved, certrequest.StatusTrue, reasonEnrolAuthorised,
-		"authorised by VirtRigaud for Host "+ns+"/"+name, r.now()); err != nil {
-		return err
-	}
-	if err := r.Status().Update(ctx, cr); err != nil {
-		return fmt.Errorf("approve request %s: %w", reqName, err)
-	}
-	log.FromContext(ctx).Info("Approved a host-agent enrolment request", "request", reqName, "host", ns+"/"+name, "issuer", iss.Name())
-	r.event(host, corev1.EventTypeNormal, eventReasonAgentEnrolmentApproved, "certificate request "+reqName+" approved")
-	return nil
-}
-
-// authorisedRequestLive reports whether the authorised request still exists
-// and has not failed.
-func (r *HostEnrolmentRequestReconciler) authorisedRequestLive(ctx context.Context, a *authorisedRequest) (bool, error) {
-	other := certrequest.NewObject()
-	err := r.Get(ctx, types.NamespacedName{Namespace: r.Config.Namespace, Name: nameOf(a.Request)}, other)
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("get authorised request %s: %w", a.Request, err)
-	}
-	return string(other.GetUID()) == a.RequestUID && !certrequest.Failed(other), nil
-}
-
-// nameOf returns the name part of "namespace/name".
-func nameOf(nsName string) string {
-	for i := len(nsName) - 1; i >= 0; i-- {
-		if nsName[i] == '/' {
-			return nsName[i+1:]
-		}
-	}
-	return nsName
-}
-
-// deny sets the request's Denied condition and, when the Host's state is
-// loaded, records the denial in it (never touching the pins).
-func (r *HostEnrolmentRequestReconciler) deny(ctx context.Context, cr *unstructured.Unstructured, host *infravirtrigaudiov1beta1.Host, l *loadedEnrolment, reason, message string) error {
-	reqName := cr.GetNamespace() + "/" + cr.GetName()
-	if l != nil && host != nil {
-		l.state.LastDenial = &requestOutcome{Request: reqName, Reason: reason}
-		if err := saveHostEnrolment(ctx, r.Client, r.Scheme, host, l); err != nil {
-			return err
-		}
-	}
-	if err := certrequest.SetCondition(cr, certrequest.ConditionDenied, certrequest.StatusTrue, reason, message, r.now()); err != nil {
-		return err
-	}
-	if err := r.Status().Update(ctx, cr); err != nil {
-		return fmt.Errorf("deny request %s: %w", reqName, err)
-	}
-	log.FromContext(ctx).Info("Denied a host-agent enrolment request", "request", reqName, "reason", reason)
-	if host != nil {
-		r.event(host, corev1.EventTypeWarning, eventReasonAgentEnrolmentDenied, "certificate request "+reqName+" denied: "+reason)
-	}
-	return nil
-}
-
-// complete validates the issued certificate of the authorised request and
-// pins its key, or refuses it.
-func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstructured.Unstructured, iss HostCertificateIssuer) error {
-	reqName := cr.GetNamespace() + "/" + cr.GetName()
-	ns, name, ok := certrequest.HostOf(cr)
-	if !ok {
-		return nil
-	}
-	host := &infravirtrigaudiov1beta1.Host{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	l, err := loadHostEnrolment(ctx, r.Client, host)
-	if err != nil {
-		return err
-	}
-	a := l.state.Authorised
-	if l.reset || a == nil || a.RequestUID != string(cr.GetUID()) || a.Issuer != iss.Name() {
-		return nil
-	}
-	chain, err := iss.Issued(cr)
-	if err != nil || chain == nil {
-		return err
-	}
-	issued, verr := r.validateIssued(ctx, host, a, chain)
-	if verr != nil {
-		l.state.Authorised = nil
-		l.state.LastRejection = &requestOutcome{Request: reqName, Reason: infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected, Message: verr.Error()}
-	} else {
-		if l.state.Current != nil {
-			l.state.RetiredEnrolmentIDs = appendUnique(l.state.RetiredEnrolmentIDs, l.state.Current.Record.EnrolmentID)
-		}
-		l.state.Current = &currentEnrolment{
-			Record:      a.Record,
-			KeyPins:     []string{a.KeyPin},
-			CABundle:    append([]byte(nil), r.Config.CABundle...),
-			ExpectedSAN: issued.HostURI,
-			NotAfter:    metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second)),
-		}
-		l.state.RetiredEnrolmentIDs = appendUnique(l.state.RetiredEnrolmentIDs, a.Record.EnrolmentID)
-		l.state.Pending, l.state.Authorised, l.state.LastDenial, l.state.LastRejection = nil, nil, nil, nil
-	}
-	if err := saveHostEnrolment(ctx, r.Client, r.Scheme, host, &l); err != nil {
-		return err
-	}
-	changed, err := iss.Complete(cr, verr, r.now())
-	if err != nil {
-		return err
-	}
-	if changed {
-		if err := r.Status().Update(ctx, cr); err != nil {
-			return fmt.Errorf("record the outcome on request %s: %w", reqName, err)
-		}
-	}
-	if verr != nil {
-		log.FromContext(ctx).Info("Refused the certificate issued for a host-agent enrolment request", "request", reqName, "host", ns+"/"+name)
-		r.event(host, corev1.EventTypeWarning, eventReasonAgentCertRejected, "the certificate issued for request "+reqName+" was refused")
-		return nil
-	}
-	log.FromContext(ctx).Info("Pinned a host-agent key", "request", reqName, "host", ns+"/"+name, "enrolmentID", a.Record.EnrolmentID)
-	r.event(host, corev1.EventTypeNormal, eventReasonAgentEnrolled, "agent key pinned from request "+reqName)
-	return nil
-}
-
-// validateIssued re-checks the Host (still an approved, unrevoked agent
-// host) and validates the chain against the authorisation and the
-// subordinate CA.
-func (r *HostEnrolmentRequestReconciler) validateIssued(ctx context.Context, host *infravirtrigaudiov1beta1.Host, a *authorisedRequest, chain []byte) (issuedAgentCert, error) {
-	if host.Spec.Revoked || !host.DeletionTimestamp.IsZero() || host.Spec.Identity == "" {
-		return issuedAgentCert{}, errors.New("the Host is revoked, deleting or has no identity")
-	}
-	if _, agent, err := hostRunsAgent(ctx, r.Client, host); err != nil || !agent {
-		return issuedAgentCert{}, errors.New("the Host's Provider does not run a per-host agent")
-	}
-	rec, err := a.Record.toRecord()
-	if err != nil {
-		return issuedAgentCert{}, err
-	}
-	hostURI, err := hostidentity.HostURI(r.Config.TrustDomain, host.Namespace, host.Name)
-	if err != nil {
-		return issuedAgentCert{}, err
-	}
-	roots, err := hostidentity.RootPool(r.Config.CABundle)
-	if err != nil {
-		return issuedAgentCert{}, err
-	}
-	iss, err := hostidentity.ValidateIssued(hostidentity.Authorisation{HostURI: hostURI, Record: rec, KeyPin: a.KeyPin}, chain, roots, r.now())
-	if err != nil {
-		return issuedAgentCert{}, err
-	}
-	return issuedAgentCert{Issued: iss, HostURI: hostURI}, nil
-}
-
-// issuedAgentCert is a validated issued certificate and the host URI it was
-// validated for.
-type issuedAgentCert struct {
-	hostidentity.Issued
-	HostURI string
-}
-
-// appendUnique appends s unless present.
-func appendUnique(list []string, s string) []string {
-	if slices.Contains(list, s) {
-		return list
-	}
-	return append(list, s)
-}
-
-// event emits an event on the Host when a recorder is set.
-func (r *HostEnrolmentRequestReconciler) event(host *infravirtrigaudiov1beta1.Host, typ, reason, msg string) {
-	if r.Recorder != nil {
-		r.Recorder.Event(host, typ, reason, msg)
-	}
-}
-
-// SetupWithManager registers the reconciler on CertificateRequests. The
-// manager's cache must restrict CertificateRequests to the enrolment
-// namespace (HostEnrolmentCacheOptions).
-func (r *HostEnrolmentRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(certrequest.NewObject()).
-		Named("host-enrolment-request").
-		Complete(r)
-}
-
 // resolveHostAgentTLS returns the agentTLS credentials of a Host whose
-// Provider runs a per-host agent, read from its pins Secret, or a non-secret
-// skip reason. Release builds render no agent credentials.
-func resolveHostAgentTLS(ctx context.Context, c client.Reader, host *infravirtrigaudiov1beta1.Host) (hostsecret.Credentials, string) {
+// Provider runs a per-host agent, or a non-secret skip reason. Only the key
+// pins come from the pins Secret (in the enrolment namespace); the CA bundle
+// is the manager's configured subordinate CA and the expected SAN is
+// recomputed from the Host. Release builds, and managers without enrolment,
+// render no agent credentials.
+func resolveHostAgentTLS(ctx context.Context, c client.Reader, cfg *HostEnrolmentConfig, host *infravirtrigaudiov1beta1.Host, now time.Time) (hostsecret.Credentials, string) {
 	switch {
 	case !devgate.Compiled:
 		return hostsecret.Credentials{}, "per-host agent hosts are rendered only by development builds"
+	case cfg == nil:
+		return hostsecret.Credentials{}, "per-host agent enrolment is not enabled in this manager"
 	case host.Spec.Revoked:
 		return hostsecret.Credentials{}, "host is revoked"
 	case host.Spec.Identity == "":
 		return hostsecret.Credentials{}, "host has no spec.identity"
 	}
-	l, err := loadHostEnrolment(ctx, c, host)
+	l, err := loadHostEnrolment(ctx, c, cfg, host)
 	if err != nil {
 		if errors.Is(err, errForeignPinsSecret) {
-			return hostsecret.Credentials{}, "host pins Secret is not managed by VirtRigaud"
+			return hostsecret.Credentials{}, "host pins Secret is not a VirtRigaud pins Secret"
 		}
 		return hostsecret.Credentials{}, "host pins Secret unreadable"
 	}
 	if l.reset || l.state.Current == nil {
 		return hostsecret.Credentials{}, "host agent is not enrolled"
 	}
-	cur := l.state.Current
+	if !l.state.Current.NotAfter.After(now) {
+		return hostsecret.Credentials{}, "host agent certificate expired"
+	}
+	expected, err := hostidentity.HostURI(cfg.TrustDomain, host.Namespace, host.Name)
+	if err != nil {
+		return hostsecret.Credentials{}, "host has no valid URI identity"
+	}
 	creds := hostsecret.Credentials{AgentTLS: &hostsecret.AgentTLS{
-		CABundle: cur.CABundle, ExpectedSAN: cur.ExpectedSAN, KeyPins: append([]string(nil), cur.KeyPins...),
+		CABundle: append([]byte(nil), cfg.CABundle...), ExpectedSAN: expected, KeyPins: append([]string(nil), l.state.Current.KeyPins...),
 	}}
 	if err := creds.Validate(); err != nil {
 		return hostsecret.Credentials{}, "host pins are malformed"

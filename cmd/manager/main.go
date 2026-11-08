@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -521,7 +522,9 @@ func main() {
 		TmpSizeLimitMax:         providerTmpSizeLimitMax,
 		Recorder:                mgr.GetEventRecorderFor("provider-controller"),
 		EnabledDevProviderTypes: enabledDevProviderTypes,
-		OperationSignerLoaded:   devOperationSigner != nil,
+		// Development builds only: renders enrolled per-host agent hosts.
+		HostEnrolment:         hostEnrolment,
+		OperationSignerLoaded: devOperationSigner != nil,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
@@ -645,18 +648,26 @@ func main() {
 	// enrolment flags): draws enrolment records, decides enrolment
 	// CertificateRequests and pins validated agent keys.
 	if hostEnrolment != nil {
+		// Fail closed: the requester fields of a CertificateRequest are
+		// trustworthy only behind cert-manager's admission webhooks.
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = controller.CheckCertManagerAdmission(checkCtx, mgr.GetAPIReader(), hostEnrolment.Namespace)
+		checkCancel()
+		if err != nil {
+			setupLog.Error(err, "refusing to run per-host agent enrolment")
+			os.Exit(1)
+		}
 		if err = (&controller.HostEnrolmentReconciler{
-			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
-			Config:   hostEnrolment,
-			Recorder: mgr.GetEventRecorderFor("host-enrolment-controller"),
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config:    hostEnrolment,
+			Recorder:  mgr.GetEventRecorderFor("host-enrolment-controller"),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "HostEnrolment")
 			os.Exit(1)
 		}
 		if err = (&controller.HostEnrolmentRequestReconciler{
 			Client:   mgr.GetClient(),
-			Scheme:   mgr.GetScheme(),
 			Config:   hostEnrolment,
 			Recorder: mgr.GetEventRecorderFor("host-enrolment-controller"),
 		}).SetupWithManager(mgr); err != nil {

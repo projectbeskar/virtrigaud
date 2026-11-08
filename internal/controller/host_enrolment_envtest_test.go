@@ -20,11 +20,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
@@ -89,8 +92,21 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 			AdminGroup: enrolTestAdminGroup, TrustDomain: enrolTestTrustDomain,
 			CABundle: e.ca.PEM, InstallID: bytes.Repeat([]byte{0x42}, 16),
 		}
-		e.hostR = &HostEnrolmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Config: e.cfg}
-		e.reqR = &HostEnrolmentRequestReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Config: e.cfg}
+		e.hostR = &HostEnrolmentReconciler{Client: k8sClient, Config: e.cfg}
+		e.reqR = &HostEnrolmentRequestReconciler{Client: k8sClient, Config: e.cfg}
+		// The administrator "alice" may enrol Hosts in the hosts namespace
+		// (the enrol verb, checked by a SubjectAccessReview); "carol" is in
+		// the administrator group but has no such grant.
+		Expect(k8sClient.Create(ctx, &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{Name: "host-enrolers", Namespace: e.hostNS},
+			Rules: []rbacv1.PolicyRule{{APIGroups: []string{infravirtrigaudiov1beta1.GroupVersion.Group}, Resources: []string{"hosts"},
+				Verbs: []string{infravirtrigaudiov1beta1.HostEnrolVerb}}},
+		})).To(Succeed())
+		Expect(k8sClient.Create(ctx, &rbacv1.RoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "host-enrolers", Namespace: e.hostNS},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "host-enrolers"},
+			Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "alice"}},
+		})).To(Succeed())
 		return e
 	}
 
@@ -181,7 +197,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 
 	loadState := func(e *env, name string) (hostEnrolmentState, *corev1.Secret) {
 		sec := &corev1.Secret{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.hostNS, Name: hostEnrolmentSecretName(name)}, sec)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.issuerNS, Name: hostEnrolmentSecretName(e.hostNS, name)}, sec)).To(Succeed())
 		var st hostEnrolmentState
 		Expect(json.Unmarshal(sec.Data[hostEnrolmentStateKey], &st)).To(Succeed())
 		return st, sec
@@ -237,7 +253,8 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		pin, cert := enrol(e, "host-a")
 
 		st, sec := loadState(e, "host-a")
-		Expect(metav1.IsControlledBy(sec, h)).To(BeTrue(), "the pins Secret is owned by the Host")
+		Expect(sec.Namespace).To(Equal(e.issuerNS), "the pins Secret lives in the enrolment namespace, never the Host's")
+		Expect(sec.OwnerReferences).To(BeEmpty())
 		Expect(st.Current).NotTo(BeNil())
 		Expect(st.Current.KeyPins).To(Equal([]string{pin}))
 		Expect(st.Current.Record.EnrolmentID).To(Equal(pendingID))
@@ -248,7 +265,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		// pinned one: enrolment id, Provider UID, install id, mode.
 		certs, err := hostidentity.ParseCertificates(cert)
 		Expect(err).NotTo(HaveOccurred())
-		rec, err := hostidentity.RecordFromURIs(certs[0].URIs, st.Current.ExpectedSAN)
+		rec, err := hostidentity.RecordFromURIs(certs[0].URIs, h.Status.Agent.RequestURIs[0])
 		Expect(err).NotTo(HaveOccurred())
 		pinned, err := st.Current.Record.toRecord()
 		Expect(err).NotTo(HaveOccurred())
@@ -319,9 +336,12 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		o.username, o.groups = "bob", []string{"system:authenticated"}
 		cr := reconcileCR(e, submit(e, h.Name, csrFor(h, nil), o))
 		expectDenied(cr, hostidentity.ReasonRequesterNotAuthorised)
+		// A non-administrator's request leaves no trace on the Host.
 		h = reconcileHost(e, h.Name)
 		Expect(meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).
-			To(Equal(infravirtrigaudiov1beta1.HostReasonAgentRequestDenied))
+			To(Equal(infravirtrigaudiov1beta1.HostReasonAgentAwaitingRequest))
+		st, _ := loadState(e, h.Name)
+		Expect(st.LastDenial).To(BeNil())
 	})
 
 	It("denies a request for a revoked Host, even one carrying the pending record", func() {
@@ -370,7 +390,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		lv := reconcileHost(e, "lv")
 		Expect(lv.Status.Agent).To(BeNil())
 		Expect(meta.FindStatusCondition(lv.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled)).To(BeNil())
-		err := k8sClient.Get(ctx, types.NamespacedName{Namespace: e.hostNS, Name: hostEnrolmentSecretName("lv")}, &corev1.Secret{})
+		err := k8sClient.Get(ctx, types.NamespacedName{Namespace: e.issuerNS, Name: hostEnrolmentSecretName(e.hostNS, "lv")}, &corev1.Secret{})
 		Expect(client.IgnoreNotFound(err)).To(Succeed())
 		Expect(err).To(HaveOccurred())
 	})
@@ -398,8 +418,9 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		st, _ := loadState(e, h.Name)
 		Expect(st.Current).To(BeNil())
 		Expect(st.Authorised).To(BeNil())
-		Expect(st.Pending).NotTo(BeNil(), "the record stays pending for a new request")
+		Expect(st.Pending).To(BeNil(), "the record of a refused issuance is retired")
 		h = reconcileHost(e, h.Name)
+		Expect(h.Status.Agent.PendingEnrolmentID).NotTo(BeEmpty(), "a fresh record is drawn")
 		Expect(meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).
 			To(Equal(infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected))
 	})
@@ -433,7 +454,9 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		st, _ := loadState(e, h.Name)
 		Expect(st.Current).To(BeNil())
 
-		// A matching certificate is pinned and marked issued.
+		// A matching certificate, built for the freshly drawn record, is
+		// pinned and marked issued.
+		h = reconcileHost(e, h.Name)
 		key := hostidentitytest.NewKey(GinkgoT())
 		good := hostidentitytest.NewCSR(GinkgoT(), key, hostidentitytest.CSROptions{URIs: h.Status.Agent.RequestURIs})
 		cr = reconcileCR(e, submit(e, h.Name, good, o))
@@ -472,7 +495,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(k8sClient.Status().Update(ctx, h)).To(Succeed())
 		h = reconcileHost(e, "host-a")
 		Expect(h.Status.Agent.KeyPins).To(Equal([]string{pin}))
-		creds, reason := resolveHostAgentTLS(ctx, k8sClient, h)
+		creds, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
 		if reason == "" {
 			Expect(creds.AgentTLS.KeyPins).To(Equal([]string{pin}))
 		}
@@ -485,8 +508,8 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		oldState, _ := loadState(e, "host-a")
 
 		// The machine is replaced: the Host is deleted and created again
-		// with a new identity. envtest runs no garbage collector, so the old
-		// pins Secret (owned by the old Host UID) is still there.
+		// with a new identity before the manager saw the deletion, so the
+		// old pins Secret (bound to the old Host UID) is still there.
 		Expect(k8sClient.Delete(ctx, old)).To(Succeed())
 		Eventually(func() bool {
 			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(old), &infravirtrigaudiov1beta1.Host{})
@@ -502,10 +525,156 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(st.Current).To(BeNil())
 		Expect(st.HostUID).To(Equal(string(h.UID)))
 		Expect(st.Identity).To(Equal("serial-0002"))
-		Expect(metav1.IsControlledBy(sec, h)).To(BeTrue())
 		Expect(sec.Data[hostEnrolmentStateKey]).NotTo(ContainSubstring(oldPin))
-		_, reason := resolveHostAgentTLS(ctx, k8sClient, h)
+		_, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
 		Expect(reason).NotTo(BeEmpty(), "the replaced host renders no agent credentials")
+	})
+
+	It("denies an administrator-group member who may not enrol this Host, without reading or writing its state", func() {
+		e := newEnv()
+		h := reconcileHost(e, createHost(e, "host-a", "serial-0001", "ch").Name)
+		_, before := loadState(e, h.Name)
+		o := adminOpts()
+		o.username = "carol"
+		cr := reconcileCR(e, submit(e, h.Name, csrFor(h, nil), o))
+		expectDenied(cr, reasonEnrolNotAllowedForHost)
+		_, after := loadState(e, h.Name)
+		Expect(after.ResourceVersion).To(Equal(before.ResourceVersion), "no state write for an unauthorised requester")
+
+		// A non-administrator naming a Host that does not exist learns
+		// nothing about it: the denial is the requester's.
+		o = adminOpts()
+		o.username, o.groups = "mallory", []string{"system:authenticated"}
+		expectDenied(reconcileCR(e, submit(e, "ghost", csrFor(h, nil), o)), hostidentity.ReasonRequesterNotAuthorised)
+		_, after = loadState(e, h.Name)
+		Expect(after.ResourceVersion).To(Equal(before.ResourceVersion))
+	})
+
+	It("never trusts a tenant-written pins Secret in the Host's namespace", func() {
+		e := newEnv()
+		h := reconcileHost(e, createHost(e, "host-a", "serial-0001", "ch").Name)
+		// A tenant with Secret write access in the Host namespace forges a
+		// pins Secret with the right labels, annotation, an owner reference
+		// to the Host and a "current" enrolment with its own key pin, under
+		// both the hashed name and a guessable one.
+		forged, err := json.Marshal(hostEnrolmentState{HostUID: string(h.UID), Identity: h.Spec.Identity, Current: &currentEnrolment{
+			Record:   enrolmentRecord{EnrolmentID: strings.Repeat("ab", 16), ProviderUID: string(e.provider.UID), InstallID: strings.Repeat("42", 16)},
+			KeyPins:  []string{strings.Repeat("ee", 32)},
+			NotAfter: metav1.NewTime(time.Now().Add(time.Hour)),
+		}})
+		Expect(err).NotTo(HaveOccurred())
+		for _, name := range []string{hostEnrolmentSecretName(e.hostNS, h.Name), "virtrigaud-agent-pins-" + h.Name} {
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: e.hostNS,
+					Labels:          map[string]string{k8sLabelComponent: hostEnrolmentComponent, k8sLabelManagedBy: k8sManagedByVirtRigaud},
+					Annotations:     map[string]string{certrequest.AnnotationHost: e.hostNS + "/" + h.Name},
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: infravirtrigaudiov1beta1.GroupVersion.String(), Kind: "Host", Name: h.Name, UID: h.UID}}},
+				Data: map[string][]byte{hostEnrolmentStateKey: forged},
+			})).To(Succeed())
+		}
+		_, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
+		if devgate.Compiled {
+			Expect(reason).To(Equal("host agent is not enrolled"))
+		} else {
+			Expect(reason).NotTo(BeEmpty())
+		}
+		h = reconcileHost(e, h.Name)
+		Expect(h.Status.Agent.KeyPins).To(BeEmpty())
+		st, _ := loadState(e, h.Name)
+		Expect(st.Current).To(BeNil())
+	})
+
+	It("renders the configured CA bundle and a recomputed SAN, whatever the pins Secret holds", func() {
+		e := newEnv()
+		createHost(e, "host-a", "serial-0001", "ch")
+		pin, _ := enrol(e, "host-a")
+		h := reconcileHost(e, "host-a")
+		creds, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
+		if !devgate.Compiled {
+			Expect(reason).NotTo(BeEmpty())
+			return
+		}
+		Expect(reason).To(BeEmpty())
+		Expect(creds.AgentTLS.CABundle).To(Equal(e.ca.PEM))
+		Expect(creds.AgentTLS.ExpectedSAN).To(Equal("spiffe://cluster.test/virtrigaud/host/" + e.hostNS + "/host-a"))
+		Expect(creds.AgentTLS.KeyPins).To(Equal([]string{pin}))
+		_, reason = resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now().Add(31*24*time.Hour))
+		Expect(reason).To(Equal("host agent certificate expired"), "an expired enrolment is not rendered")
+		e.hostR.Now = func() time.Time { return time.Now().Add(31 * 24 * time.Hour) }
+		h = reconcileHost(e, "host-a")
+		Expect(meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).
+			To(Equal(infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired))
+	})
+
+	It("retires the enrolment of a revoked Host, removes its pins, and refuses un-revoking (CEL)", func() {
+		e := newEnv()
+		createHost(e, "host-a", "serial-0001", "ch")
+		pin, _ := enrol(e, "host-a")
+		before, _ := loadState(e, "host-a")
+		h := reconcileHost(e, "host-a")
+		h.Spec.Revoked = true
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		h = reconcileHost(e, "host-a")
+
+		st, sec := loadState(e, "host-a")
+		Expect(st.Current).To(BeNil(), "the pins are removed")
+		Expect(st.Pending).To(BeNil())
+		Expect(st.RetiredEnrolmentIDs).To(ContainElement(before.Current.Record.EnrolmentID))
+		Expect(sec.Data[hostEnrolmentStateKey]).NotTo(ContainSubstring(pin))
+		Expect(h.Status.Agent.KeyPins).To(BeEmpty())
+		_, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
+		Expect(reason).NotTo(BeEmpty(), "a revoked Host's old key is never rendered again")
+
+		h.Spec.Revoked = false
+		err := k8sClient.Update(ctx, h)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.revoked cannot be cleared once set"))
+		_, reason = resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
+		Expect(reason).NotTo(BeEmpty())
+	})
+
+	It("draws a fresh record and retires the old one after a rejected or abandoned issuance", func() {
+		e := newEnv()
+		h := reconcileHost(e, createHost(e, "host-a", "serial-0001", "ch").Name)
+		first := h.Status.Agent.PendingEnrolmentID
+
+		// Rejected: a certificate for a substituted key.
+		csr := csrFor(h, nil)
+		cr := reconcileCR(e, submit(e, h.Name, csr, adminOpts()))
+		issue(e, cr, csr, hostidentitytest.IssueOptions{PublicKey: &hostidentitytest.NewKey(GinkgoT()).PublicKey})
+		reconcileCR(e, cr)
+		h = reconcileHost(e, h.Name)
+		second := h.Status.Agent.PendingEnrolmentID
+		Expect(second).NotTo(BeEmpty())
+		Expect(second).NotTo(Equal(first))
+		st, _ := loadState(e, h.Name)
+		Expect(st.RetiredEnrolmentIDs).To(ContainElement(first))
+
+		// Abandoned: the authorised request is deleted before issuance.
+		cr = reconcileCR(e, submit(e, h.Name, csrFor(h, nil), adminOpts()))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+		h = reconcileHost(e, h.Name)
+		third := h.Status.Agent.PendingEnrolmentID
+		Expect(third).NotTo(BeEmpty())
+		Expect(third).NotTo(Equal(second))
+		st, _ = loadState(e, h.Name)
+		Expect(st.RetiredEnrolmentIDs).To(ContainElements(first, second))
+		Expect(st.Authorised).To(BeNil())
+	})
+
+	It("deletes the pins Secret when its Host is deleted", func() {
+		e := newEnv()
+		h := createHost(e, "host-a", "serial-0001", "ch")
+		enrol(e, "host-a")
+		Expect(k8sClient.Delete(ctx, h)).To(Succeed())
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(h), &infravirtrigaudiov1beta1.Host{}))
+		}).Should(BeTrue())
+		_, err := e.hostR.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(h)})
+		Expect(err).NotTo(HaveOccurred())
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: e.issuerNS, Name: hostEnrolmentSecretName(e.hostNS, "host-a")}, &corev1.Secret{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("keeps spec.identity immutable once set (CEL)", func() {

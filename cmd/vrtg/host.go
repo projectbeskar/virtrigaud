@@ -20,7 +20,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -143,16 +145,60 @@ func (o *options) hostEnroll(cmd *cobra.Command, eo *hostEnrollOptions) error {
 	return o.hostEnrollSubmit(cmd, eo)
 }
 
-// readBounded reads a file of at most maxEnrolFileSize bytes.
+// readBounded reads a regular file of at most maxEnrolFileSize bytes. The
+// size is checked on the opened file and the read is bounded, so a FIFO,
+// a device or a file that grows cannot make it read without limit.
 func readBounded(path string) ([]byte, error) {
-	st, err := os.Stat(path)
+	f, err := os.Open(path) // #nosec G304 -- a file the administrator names
 	if err != nil {
 		return nil, err
 	}
-	if st.Size() > maxEnrolFileSize {
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxEnrolFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxEnrolFileSize {
 		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxEnrolFileSize)
 	}
-	return os.ReadFile(path) // #nosec G304 -- a file the administrator names
+	return data, nil
+}
+
+// writeFileSafely writes data to path with mode 0600 through a temporary file
+// in the same directory and a rename, so it never follows a symbolic link at
+// path and never keeps the mode of a file already there. A symbolic link at
+// path is refused.
+func writeFileSafely(path string, data []byte) error {
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symbolic link; refusing to write through it", path)
+	} else if err == nil && !st.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 // hostEnrollSubmit checks a CSR file and creates (or writes) the
@@ -194,7 +240,7 @@ func (o *options) hostEnrollSubmit(cmd *cobra.Command, eo *hostEnrollOptions) er
 		if err != nil {
 			return fmt.Errorf("render CertificateRequest: %w", err)
 		}
-		if err := os.WriteFile(eo.manifestOut, data, 0o600); err != nil {
+		if err := writeFileSafely(eo.manifestOut, data); err != nil {
 			return fmt.Errorf("write --%s: %w", flagManifestOut, err)
 		}
 		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Wrote the enrolment request for Host %s/%s to %s (create it with kubectl create -f)\n",
@@ -276,7 +322,7 @@ func (o *options) hostEnrollBundle(cmd *cobra.Command, eo *hostEnrollOptions) er
 	if err != nil {
 		return fmt.Errorf("render bundle: %w", err)
 	}
-	if err := os.WriteFile(eo.bundleOut, append(data, '\n'), 0o600); err != nil {
+	if err := writeFileSafely(eo.bundleOut, append(data, '\n')); err != nil {
 		return fmt.Errorf("write --%s: %w", flagBundleOut, err)
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Wrote the authorised bundle of %s/%s to %s\n", eo.issuerNamespace, eo.request, eo.bundleOut)

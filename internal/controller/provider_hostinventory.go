@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -246,7 +247,7 @@ func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, p
 			// key (agentTLS), never by SSH material: the credential Secret
 			// is not read for it (development builds only).
 			kind = skipCredentialsUnresolved
-			creds, skipReason = resolveHostAgentTLS(ctx, r.Client, h)
+			creds, skipReason = resolveHostAgentTLS(ctx, r.Client, r.HostEnrolment, h, time.Now())
 		} else {
 			creds, kind, skipReason = r.resolveHostCredentials(ctx, provider, h)
 		}
