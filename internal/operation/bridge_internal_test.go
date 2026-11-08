@@ -28,8 +28,6 @@ import (
 var (
 	kindTable           = grantverify.Rows()
 	parseECDSASignature = grantverify.ParseECDSASignature
-	isLowS              = grantverify.IsLowS
 	normalizeLowS       = grantverify.NormalizeLowS
-	isGrantSigningLeaf  = grantverify.IsGrantSigningLeaf
 	envelopeFieldName   = protoreflect.Name("operation_envelope")
 )
