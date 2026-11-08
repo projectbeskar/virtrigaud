@@ -60,6 +60,9 @@ type FS interface {
 	// SyncDir fsyncs a directory, making the creation, removal and renaming
 	// of its entries durable.
 	SyncDir(path string) error
+	// ReadDir returns the names of the entries of a directory, sorted. A
+	// missing directory has no entries and is not an error.
+	ReadDir(name string) ([]string, error)
 }
 
 // OSFS is the FS of the operating system.
@@ -69,7 +72,7 @@ var _ FS = OSFS{}
 
 // OpenFile implements FS.
 func (OSFS) OpenFile(name string, flag int, perm fs.FileMode) (File, error) {
-	f, err := os.OpenFile(name, flag, perm) // #nosec G304 -- the path is built by the journal from its own directory
+	f, err := os.OpenFile(name, flag|noFollow, perm) // #nosec G304 -- the path is built by the journal from its own directory
 	if err != nil {
 		return nil, err
 	}
@@ -91,6 +94,22 @@ func (OSFS) Exists(name string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// ReadDir implements FS.
+func (OSFS) ReadDir(name string) ([]string, error) {
+	entries, err := os.ReadDir(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
 }
 
 // Remove implements FS.

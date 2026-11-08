@@ -94,6 +94,10 @@ message Enrolment {
   uint64 start_epoch = 4;
   // state is the enrolment's life-cycle state.
   EnrolmentState state = 5;
+  // host_id is the identity of the host the enrolment belongs to.
+  string host_id = 6;
+  // store_id is the store the enrolment was activated in.
+  bytes store_id = 7;
 }
 
 // AgentMeta is the store's pointer to the current enrolment.
@@ -103,6 +107,24 @@ message AgentMeta {
   bytes current_enrolment_id = 1;
   // last_start_epoch is the highest start_epoch of any enrolment so far.
   uint64 last_start_epoch = 2;
+  // retired_enrolment_ids are enrolments whose records were discarded after
+  // a confirmed freeze. They are never activated again, and an operation
+  // naming one is never answered as definitely not performed.
+  repeated bytes retired_enrolment_ids = 3;
+}
+
+// StoreMarker is the content of the store marker file. It binds the store to
+// the host and its enrolment, and tells a missing store from a fresh host.
+message StoreMarker {
+  // store_id is the store the marker belongs to.
+  bytes store_id = 1;
+  // host_id is the host identity of the active enrolment, if any.
+  string host_id = 2;
+  // enrolment_id is the active enrolment, if any.
+  bytes enrolment_id = 3;
+  // pending_enrolment_id is an enrolment being activated: written before
+  // its activation commit, cleared after it.
+  bytes pending_enrolment_id = 4;
 }
 
 // OpState is the state of one operation at the agent.
@@ -236,6 +258,8 @@ message VMTombstone {
   bytes delete_op_id = 1;
   // terminal_seq is the chain position of the Delete's terminal transaction.
   uint64 terminal_seq = 2;
+  // enrolment_id is the enrolment the Delete ran under.
+  bytes enrolment_id = 3;
 }
 
 // AttemptMark is the highest attempt the host has seen for one VM and kind in

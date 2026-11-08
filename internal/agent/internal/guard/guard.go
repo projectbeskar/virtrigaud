@@ -58,6 +58,24 @@ const (
 	QuarantinePersist Name = "quarantine-persist"
 	// RefuseNoSync: opening a store refuses unsynchronised bbolt options.
 	RefuseNoSync Name = "refuse-nosync"
+	// LockFile: Open takes the single-writer lock file before touching any
+	// other file.
+	LockFile Name = "lock-file"
+	// MarkerCheck: a missing or mismatched store marker is a loss, not
+	// rewritten.
+	MarkerCheck Name = "marker-check"
+	// QuarantineRewrite: an open that finds a loss re-writes every missing
+	// quarantine record.
+	QuarantineRewrite Name = "quarantine-rewrite"
+	// WitnessScan: recovery treats a witness of an unknown operation as an
+	// inconsistent store.
+	WitnessScan Name = "witness-scan"
+	// CommitErrorQuarantine: a bbolt commit error that did not come from the
+	// transaction function quarantines the store.
+	CommitErrorQuarantine Name = "commit-error-quarantine"
+	// KnownBeforeMismatch: admission answers a known op_id from its record
+	// or tombstone before refusing on the enrolment.
+	KnownBeforeMismatch Name = "known-before-mismatch"
 )
 
 // All lists every guard, in a fixed order.
@@ -65,5 +83,6 @@ func All() []Name {
 	return []Name{
 		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
+		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
 	}
 }

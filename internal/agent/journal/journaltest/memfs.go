@@ -32,6 +32,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -258,6 +259,28 @@ func (m *MemFS) Rename(oldpath, newpath string) error {
 	delete(m.names, oldpath)
 	m.names[newpath] = n
 	return nil
+}
+
+// ReadDir implements journal.FS: the first path components below name of
+// every file under it, sorted and without duplicates.
+func (m *MemFS) ReadDir(name string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	name = filepath.Clean(name) + string(filepath.Separator)
+	seen := map[string]bool{}
+	var out []string
+	for p := range m.names {
+		if !strings.HasPrefix(p, name) {
+			continue
+		}
+		first := strings.SplitN(p[len(name):], string(filepath.Separator), 2)[0]
+		if !seen[first] {
+			seen[first] = true
+			out = append(out, first)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // MkdirAll implements journal.FS. Directories are implicit.

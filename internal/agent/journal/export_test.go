@@ -19,9 +19,10 @@ import bolt "go.etcd.io/bbolt"
 
 // Test-only access to internals for the external test package.
 var (
-	BucketMetaForTest   = bucketMeta
-	BucketChainForTest  = bucketChain
-	KeyStoreMetaForTest = keyStoreMeta
+	BucketMetaForTest    = bucketMeta
+	BucketChainForTest   = bucketChain
+	KeyStoreMetaForTest  = keyStoreMeta
+	KeyQuarantineForTest = keyQuarantine
 )
 
 // SetTestBoltOptions installs f to adjust bbolt options in Open; nil removes

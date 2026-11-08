@@ -102,6 +102,9 @@ var (
 	// ErrLocked is returned (wrapped) by Open when another writer holds the
 	// store.
 	ErrLocked = errors.New("journal locked by another writer")
+	// ErrInsecureDir is returned (wrapped) by Open for a state directory that
+	// group or others may write.
+	ErrInsecureDir = errors.New("journal state directory is not private")
 )
 
 // LostError carries the reason of a lost store.

@@ -47,13 +47,13 @@ func (s *Store) Schema(ctx context.Context) (SchemaInfo, error) {
 	return info, err
 }
 
-// migrate brings the store to opts.SchemaVersion and creates missing client
+// migrateLocked brings the store to opts.SchemaVersion and creates missing client
 // buckets, in one chained transaction. It commits nothing when nothing is
 // due. Fields of the store meta that this binary does not know are kept.
-func (s *Store) migrate(ctx context.Context) error {
+func (s *Store) migrateLocked() error {
 	migrations := append([]Migration(nil), s.opts.Migrations...)
 	sort.Slice(migrations, func(i, j int) bool { return migrations[i].ToVersion < migrations[j].ToVersion })
-	_, err := s.Update(ctx, func(tx *Tx) error {
+	_, err := s.updateLocked(func(tx *Tx) error {
 		for _, b := range s.opts.Buckets {
 			if err := tx.createBucket(b); err != nil {
 				return err
@@ -92,6 +92,6 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		tx.writes = append(tx.writes, write{op: writePut, bucket: bucketMeta, key: keyStoreMeta, value: b})
 		return nil
-	})
+	}, true)
 	return err
 }

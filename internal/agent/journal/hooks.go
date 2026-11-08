@@ -38,9 +38,12 @@ type Hooks struct {
 	// process dying at that point: the store writes nothing more and every
 	// later call fails with ErrCrashed until it is closed and reopened.
 	Crash func(p Point) bool
-	// StoreCommitError, when it returns an error, makes the next bbolt commit
-	// fail as a failed fsync would: the transaction is rolled back and the
-	// store is quarantined with LostIOError.
+	// StoreCommitError, when it returns an error, makes the next commit fail
+	// at the end of the transaction function, before bbolt writes anything.
+	// The journal treats it as a failed commit and quarantines the store with
+	// LostIOError. It does not reproduce what a real fdatasync failure leaves
+	// behind (written pages, bbolt's in-memory meta); a test that needs that
+	// makes bbolt's own fdatasync fail (see commit_linux_test.go).
 	StoreCommitError func() error
 }
 

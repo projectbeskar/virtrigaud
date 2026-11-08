@@ -47,28 +47,47 @@ limitations under the License.
 //     record is a torn, unacknowledged append and is cut off. This detects a
 //     bbolt meta-page fallback after an acknowledged commit, a restore of the
 //     store file alone, and a lost or damaged anchor log.
-//   - A store that fails a check, or whose write or fsync fails, is lost: it
-//     refuses every commit and serves reads only. A loss is recorded in a
-//     quarantine marker file, in the anchor log and, when it still accepts
-//     writes, in the store; any one of them keeps it quarantined across a
-//     restart. A failed fsync is never retried.
+//   - A store that fails a check, or whose commit, write or fsync fails, is
+//     lost: it refuses every commit and serves reads only. Any error of a
+//     bbolt commit that did not come from the transaction function counts
+//     (bbolt returns a failed fdatasync as a bare errno). A loss is recorded
+//     in a quarantine marker file, in the anchor log and in the store; any
+//     one of them keeps it quarantined across a restart, and every open that
+//     finds a loss writes the missing ones again (the store record is not
+//     written into a rolled-back, corrupt or inconsistent store, which is
+//     kept as evidence). A failed fsync is never retried.
+//   - A store marker binds the store_id to the host and its enrolment
+//     (written by the operation store). A store that has committed and whose
+//     marker is missing, or names another store, is inconsistent_store.
 //   - No commit happens before continuity is established
 //     (EstablishContinuity); schema migrations run after it, so a migration
 //     never hides a rollback.
 //   - bbolt is never opened without fsync; a corrupt store surfaces as
 //     journal_corrupt, never as a panic of the caller.
-//   - One writer at a time (bbolt's file lock).
+//   - One writer at a time: Open takes an exclusive lock on state.db.lock
+//     before it reads or changes any other file, and holds it until Close; a
+//     second Open fails with ErrLocked and changes nothing. bbolt's own file
+//     lock is a second guard. A state directory writable by group or others
+//     is refused.
+//   - Position.MarshalBinary gives (store_id, seq, head) in the fixed form an
+//     agent can sign and a manager can compare.
 //
 // # Limits
 //
 //   - A simultaneous restore of both the store and the anchor log to an
 //     earlier consistent pair (a disk snapshot revert, a re-imaged host) is
-//     undetectable locally. Only a party outside the host that remembers a
-//     later chain position can detect it.
+//     undetectable locally. So is the loss of the whole state set (store,
+//     anchor log, markers and quarantine record together): it looks like a
+//     fresh host. Only a party outside the host that remembers a later chain
+//     position, or this store's store_id, can detect either.
 //   - An attacker with root on the host can rewrite both files.
 //   - Storage that acknowledges a flush it did not perform defeats the
 //     durability guarantee.
 //   - The checks rest on the file-system semantics of fsync on the file and
-//     on its directory; torn writes inside bbolt pages are detected only to
-//     the extent bbolt's own checksums and the chain catch them.
+//     on its directory. bbolt checksums its meta pages only; the chain hashes
+//     each transaction's writes when they are made and is verified from its
+//     stored digests, never against the live buckets. A damaged data page,
+//     or a record edited in place, that still decodes is not detected.
+//   - Options.Events is called with the store lock held: it must not call
+//     back into the store.
 package journal

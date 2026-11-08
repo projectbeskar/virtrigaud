@@ -18,11 +18,15 @@ limitations under the License.
 
 package guard
 
-import "os"
+import (
+	"os"
+	"testing"
+)
 
 // EnvVar names the environment variable that selects the guard a mutation
 // test build switches off.
 const EnvVar = "VIRTRIGAUD_MUTATION"
 
-// Off reports whether guard n is the one VIRTRIGAUD_MUTATION names.
-func Off(n Name) bool { return os.Getenv(EnvVar) == string(n) }
+// Off reports whether guard n is the one VIRTRIGAUD_MUTATION names. Outside
+// a test binary it is always false, even in a mutation build.
+func Off(n Name) bool { return testing.Testing() && os.Getenv(EnvVar) == string(n) }
