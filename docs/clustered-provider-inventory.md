@@ -671,6 +671,9 @@ The controller extracts the libvirt credential-Secret keys `ssh-privatekey`
 the rendered document. The **operator** performs these Secret reads with the RBAC
 it already holds (`secrets: get;list;watch`); **no new RBAC is added**, and the
 provider still reads only the mounted file — never the Kubernetes API (#297).
+With the chart's `rbac.secrets.scope: namespaced`, the Provider's namespace must
+be listed in `rbac.secrets.providerNamespaces` (see
+[manager-secret-access.md](manager-secret-access.md)).
 
 #### Missing or malformed credentials → skip that host, never fail the reconcile
 

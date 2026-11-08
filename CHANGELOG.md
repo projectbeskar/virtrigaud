@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-08 13:18] - Opt-in namespaced Secret grant for the manager
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- Helm `rbac.secrets.scope` (default `cluster`, unchanged). With `namespaced`, the manager's ClusterRole (or release-namespace Role) has no Secret rule. `charts/virtrigaud/templates/manager-secrets-rbac.yaml` renders a Role and RoleBinding per `rbac.secrets.providerNamespaces` entry (`get`, `list`, `watch`, `create`, `update`, `delete`) and per `rbac.secrets.workloadNamespaces` entry (`get` only). Rendering fails on an empty Provider list, an invalid namespace name or an unknown scope.
+- Manager flag `--secret-cache-namespaces` (`internal/controller/secret_access.go`, `cmd/manager/main.go`): restricts the Secret informer cache to the listed namespaces, so the manager needs no cluster-wide Secret `list`/`watch`. The chart sets it to the Provider namespaces (plus the per-host agent enrolment namespace when that experimental feature is enabled) in namespaced mode.
+- `docs/manager-secret-access.md`: every Secret the manager touches (namespace, name pattern, verbs, cache or API reader), the two modes, why nothing narrower is possible (`resourceNames`, label selectors), what fails outside the listed namespaces, the access that remains, and kustomize steps.
+- Tests: `internal/controller/rbac_secrets_test.go` pins the Secret markers, the generated `config/rbac/role.yaml` and the chart output in both modes. `internal/controller/secret_access_envtest_test.go` applies the chart's namespaced RBAC to an API server and runs every Secret access as the manager's ServiceAccount, through a manager with the restricted informer. It also checks the refusals.
+
+### Changed
+- `internal/controller/cloudinit.go`, `internal/controller/vmmigration_controller.go`: cloud-init user-data/metadata Secrets and VMMigration S3 credential Secrets are read from the API server (`APIReader`), not the informer cache, in both modes. A workload namespace then needs only Secret `get`. These reads add a few API requests per VM create/reconfigure request build and per S3 migration step.
+
+### Why
+The manager's cluster-wide Secret grant lets a compromised manager read any Secret in the cluster, including unrelated high-value Secrets such as a CA key. Namespaced mode limits it to the namespaces that hold Providers (read/write) and workloads (read by name). The default stays cluster-wide because the chart cannot know an existing installation's namespaces, and narrowing them would break VMs, migrations and Providers in namespaces that are not listed.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-11-08 00:53] - Operation store library: second round of review fixes (not used by any binary yet)
 **Author:** @wrkode (William Rizzo)
 
