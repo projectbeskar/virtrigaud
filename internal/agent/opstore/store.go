@@ -234,6 +234,10 @@ type Enrolment struct {
 	HostID string
 	// InstallID is the installation identifier.
 	InstallID []byte
+	// Predecessors are earlier enrolment ids of this host that the store
+	// never held (for example those of a store that was lost). They are
+	// recorded as retired: never activated, and answered UNKNOWN_TO_AGENT.
+	Predecessors [][]byte
 	// StartEpoch is the epoch counter the enrolment starts at. It must be
 	// greater than every earlier enrolment's.
 	StartEpoch uint64
@@ -320,6 +324,14 @@ func activate(tx *journal.Tx, e Enrolment, storeID []byte) error {
 	}
 	m.CurrentEnrolmentId = append([]byte(nil), e.ID...)
 	m.LastStartEpoch = e.StartEpoch
+	for _, p := range e.Predecessors {
+		if len(p) != idLen || sameBytes(p, e.ID) {
+			return fmt.Errorf("%w: invalid predecessor enrolment id", ErrEnrolment)
+		}
+		if tx.Get(bucketEnrolments, p) == nil {
+			m.RetiredEnrolmentIds = append(m.RetiredEnrolmentIds, append([]byte(nil), p...))
+		}
+	}
 	return put(tx, bucketMeta, keyAgentMeta, m)
 }
 

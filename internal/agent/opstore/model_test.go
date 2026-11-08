@@ -180,7 +180,6 @@ type model struct {
 	order     []string
 	vms       map[string]*mVM
 	vmTomb    map[string]bool
-	retired   map[string]bool
 	attempts  map[string]uint64
 	bindings  map[string][]byte
 	crash     *journaltest.Crasher // the model's own counter, armed like the store's
@@ -209,7 +208,7 @@ func runModel(seed uint64) (err error) {
 	t := &tb{}
 	h := &harness{t: t, dir: dir, mem: journaltest.NewMemFS(), exec: newTestExec(), provider: "provider-model"}
 	m := &model{h: h, rnd: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), ops: map[string]*mOp{},
-		vms: map[string]*mVM{}, vmTomb: map[string]bool{}, retired: map[string]bool{}, attempts: map[string]uint64{}, bindings: map[string][]byte{}}
+		vms: map[string]*mVM{}, vmTomb: map[string]bool{}, attempts: map[string]uint64{}, bindings: map[string][]byte{}}
 	h.enrol, h.holder, h.start = m.newID(), m.newID(), 2
 	defer func() {
 		if h.s != nil {
@@ -380,11 +379,13 @@ func (m *model) expect(r opstore.Request) (opstore.Outcome, opstore.Refusal, *mO
 		}
 		return opstore.OutcomeKnown, opstore.RefusalNone, op
 	}
-	if m.retired[string(r.EnrolmentID)] {
-		return opstore.OutcomeRefused, opstore.RefusalUnknownToAgent, nil
-	}
 	if m.active == nil || !bytes.Equal(m.active, r.EnrolmentID) {
-		return opstore.OutcomeRefused, opstore.RefusalGrantMismatch, nil
+		for _, f := range m.frozen {
+			if bytes.Equal(f, r.EnrolmentID) {
+				return opstore.OutcomeRefused, opstore.RefusalGrantMismatch, nil
+			}
+		}
+		return opstore.OutcomeRefused, opstore.RefusalUnknownToAgent, nil
 	}
 	if r.MintEpoch.Counter < m.start {
 		return opstore.OutcomeRefused, opstore.RefusalGrantMismatch, nil
@@ -739,7 +740,6 @@ func (m *model) confirm() {
 				m.vms[vmUID].busy = ""
 			}
 		}
-		m.retired[string(prev)] = true
 		for k := range m.attempts {
 			if len(k) > 32 && k[:32] == fmt.Sprintf("%x", prev) {
 				delete(m.attempts, k)

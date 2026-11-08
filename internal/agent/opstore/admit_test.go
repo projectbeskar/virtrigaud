@@ -58,13 +58,13 @@ func TestAdmit_UnattestedStoreRefuses(t *testing.T) {
 func TestAdmit_EnrolmentAndProviderBinding(t *testing.T) {
 	h := newHarness(t)
 	h.boot()
-	wantRefusal(t, h.admit(h.req("vm", rid(), kCreate, 1)), opstore.RefusalGrantMismatch) // no enrolment
+	wantRefusal(t, h.admit(h.req("vm", rid(), kCreate, 1)), opstore.RefusalUnknownToAgent) // no enrolment the store knows
 	if err := h.s.Enrol(context.Background(), opstore.Enrolment{HostID: "host-1", ID: h.enrol, ProviderUID: h.provider, StartEpoch: h.start}); err != nil {
 		t.Fatal(err)
 	}
 	r := h.req("vm", rid(), kCreate, 1)
 	r.EnrolmentID = rid()
-	wantRefusal(t, h.admit(r), opstore.RefusalGrantMismatch)
+	wantRefusal(t, h.admit(r), opstore.RefusalUnknownToAgent)
 	r = h.req("vm", rid(), kCreate, 1)
 	r.ProviderUID = "another-provider"
 	wantRefusal(t, h.admit(r), opstore.RefusalProviderMismatch)

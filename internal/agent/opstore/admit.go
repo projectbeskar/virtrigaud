@@ -45,10 +45,10 @@ const (
 	// RefusalProviderMismatch: the grant names another Provider than the
 	// active enrolment, for an op_id the store has no trace of. Definite.
 	RefusalProviderMismatch
-	// RefusalGrantMismatch: the grant names an enrolment that is not active,
-	// or the op_id was minted before the enrolment started, for an op_id the
-	// store has no trace of and an enrolment whose records the store still
-	// holds. Definite.
+	// RefusalGrantMismatch: the grant names a frozen enrolment whose records
+	// the store holds, or the op_id was minted before the active enrolment
+	// started, for an op_id the store has no trace of. Definite: the store can
+	// prove the op_id was never accepted.
 	RefusalGrantMismatch
 	// RefusalOpIDConflict: the op_id is known with other identity fields, or
 	// the attempt does not increase. Not definite.
@@ -63,9 +63,10 @@ const (
 	// RefusalVMNotOwned: a non-Create operation for a VM with no record. Not
 	// definite.
 	RefusalVMNotOwned
-	// RefusalUnknownToAgent: the grant names an enrolment whose records were
-	// discarded after a confirmed freeze; the store can no longer say whether
-	// the op_id ran. Not definite.
+	// RefusalUnknownToAgent: the grant names an enrolment the store has no
+	// record of: discarded after a confirmed freeze, a predecessor of the
+	// enrolment this store was made for, or one of a store that was lost or
+	// wiped. The store cannot say whether the op_id ran. Not definite.
 	RefusalUnknownToAgent
 	// RefusalStoreFull: the store is above its size threshold. Definite (the
 	// op_id is not known, as known op_ids are answered first); a server
@@ -171,11 +172,12 @@ type Decision struct {
 //     with the same identity fields ⇒ its terminal state, never executed
 //     again; with any field different ⇒ OP_ID_CONFLICT;
 //  3. a record likewise ⇒ its current state, or OP_ID_CONFLICT;
-//  4. the grant names an enrolment whose records were discarded ⇒
-//     UNKNOWN_TO_AGENT (not definite);
-//  5. no active enrolment, or the grant names another one ⇒
-//     GRANT_MISMATCH; another Provider ⇒ PROVIDER_MISMATCH (definite: the
-//     store holds every record of the enrolments it can still name);
+//  4. the grant names an enrolment the store has no record of ⇒
+//     UNKNOWN_TO_AGENT (not definite: it may have run elsewhere, for example
+//     in a store this one replaced);
+//  5. the grant names a frozen enrolment the store holds ⇒ GRANT_MISMATCH;
+//     the active enrolment with another Provider ⇒ PROVIDER_MISMATCH
+//     (definite: the store holds every record of these enrolments);
 //  6. an op_id minted before the enrolment's start epoch ⇒ GRANT_MISMATCH;
 //  7. the VM has another operation that holds it ⇒ VM_BUSY;
 //  8. not a Create: no VM record ⇒ VM_NOT_OWNED, another binding ⇒
@@ -286,8 +288,12 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 	}
 	enrolmentCheck := func() (Decision, bool) {
 		if enr == nil || !sameBytes(enr.GetEnrolmentId(), r.EnrolmentID) {
-			retired, err := isRetired(tx, r.EnrolmentID)
-			if err == nil && retired {
+			// Definite only for an enrolment whose records this store holds
+			// (the active one, or a frozen predecessor): then the op_id was
+			// provably never accepted. An enrolment the store has no record of
+			// (discarded, a predecessor of the enrolment this store was made
+			// for, or one of a store that was lost or wiped) may have run it.
+			if tx.Get(bucketEnrolments, r.EnrolmentID) == nil && !guard.Off(guard.UnknownEnrolmentNotDefinite) {
 				return refused(RefusalUnknownToAgent), true
 			}
 			return refused(RefusalGrantMismatch), true

@@ -48,7 +48,10 @@ limitations under the License.
 //   - Only GRANT_MISMATCH, PROVIDER_MISMATCH and a full store are definite
 //     not-performed refusals, as in the provider contract, and only for an
 //     op_id the store has no trace of in an enrolment whose records it still
-//     holds. An op_id of a discarded enrolment is refused UNKNOWN_TO_AGENT.
+//     holds. An op_id of an enrolment the store has no record of (discarded,
+//     a predecessor, or one of a store that was lost or wiped) is refused
+//     UNKNOWN_TO_AGENT. Answers across stores are safe only with a manager
+//     that tracks the host's store_id.
 //   - At most one operation holds a VM at a time (VM_BUSY); an operation
 //     whose outcome is unknown, and a dirty failure, keep holding it.
 //   - A non-Create operation needs the VM's record with the same binding;
@@ -62,7 +65,8 @@ limitations under the License.
 //     irreversible step is never run twice: its goal state decides.
 //   - Recovery runs once, only after continuity is established. It first
 //     checks every witness file: a witness of an operation or enrolment the
-//     store has no record of quarantines it (inconsistent_store). It then
+//     store has no record of quarantines it (inconsistent_store);
+//     nothing else may write in the witness directory. It then
 //     resolves every in-doubt step by the recovery table (Classify) and never
 //     guesses. A writer never overwrites a record that left the runnable
 //     states behind its back.
