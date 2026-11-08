@@ -84,3 +84,23 @@ func TestDevEnrolmentFileFlag_ReleaseBuildRefusesAtStartup(t *testing.T) {
 	assert.Contains(t, string(out), "invalid --dev-operation-enrolment-file")
 	assert.Contains(t, string(out), "no operation-grant signer is compiled into this build")
 }
+
+// TestDevHostEnrolmentFlags_ReleaseBuildRefusesAtStartup: a release build
+// refuses the per-host agent enrolment flags at once, like the signer flag,
+// before any cluster connection.
+func TestDevHostEnrolmentFlags_ReleaseBuildRefusesAtStartup(t *testing.T) {
+	if os.Getenv(managerSubprocessEnv) == "1" {
+		os.Args = []string{"manager", "--dev-host-enrolment-namespace=enrolment"}
+		main()
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDevHostEnrolmentFlags_ReleaseBuildRefusesAtStartup$") // #nosec G204 -- re-runs this test binary
+	cmd.Env = append(os.Environ(), managerSubprocessEnv+"=1",
+		"KUBECONFIG="+t.TempDir()+"/none", "KUBERNETES_SERVICE_HOST=", "HOME="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr, "the manager must exit: %s", out)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	assert.Contains(t, string(out), "invalid per-host agent enrolment flags")
+	assert.Contains(t, string(out), "cannot be used with a release build")
+}

@@ -1,0 +1,7 @@
+{{- $he := ((.Values.experimental | default dict).hostEnrolment | default dict) }}
+{{- if $he.enabled }}
+WARNING: experimental.hostEnrolment is enabled. This grants the manager approve
+on the cert-manager signer(s) {{ join ", " $he.signerNames }} and Secret access in
+namespace {{ $he.namespace }}. It is for DEVELOPMENT BUILDS ONLY (a manager built with
+the virtrigaud_dev tag); a release manager cannot use it. Do not use it in production.
+{{- end }}

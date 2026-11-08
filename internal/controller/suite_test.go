@@ -64,7 +64,12 @@ var _ = BeforeSuite(func() {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases"),
+			// A stand-in cert-manager CertificateRequest CRD for the per-host
+			// agent enrolment specs.
+			filepath.Join("..", "..", "test", "crds", "cert-manager"),
+		},
 		ErrorIfCRDPathMissing: true,
 	}
 
