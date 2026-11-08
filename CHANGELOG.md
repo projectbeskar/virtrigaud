@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-08 14:00] - TaskStatus without a task reference is refused, not dereferenced
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/server.go`, `internal/providers/mock/provider.go`, `internal/providers/libvirt/server.go`: a `TaskStatusRequest` with no `task`, or with an empty task id, is refused with `codes.InvalidArgument` ("task reference is required") instead of dereferencing a nil task reference (Proxmox, mock and the single-host libvirt path). The provider binaries' recovery interceptor turned that panic into `codes.Internal` with a stack trace in the log; a server embedded without the interceptor would have crashed. Single-host libvirt no longer answers an empty task id as done. The clustered libvirt path already refused such a request.
+- `internal/providers/{proxmox,mock,libvirt}/taskstatus_no_task_test.go`: a request with no task and one with an empty id are `InvalidArgument` on each provider. `internal/providers/libvirt/routed_tasks_test.go`: the single-host reference test no longer expects an empty id to be answered.
+
+### Why
+Every caller in the manager polls only a non-empty task reference, so no reconcile path changes, but a malformed request from any client must get a clean refusal, not a nil dereference.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-08 00:53] - Operation store library: second round of review fixes (not used by any binary yet)
 **Author:** @wrkode (William Rizzo)
 
