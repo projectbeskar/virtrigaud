@@ -17,6 +17,9 @@ limitations under the License.
 package clockfloor_test
 
 import (
+	"encoding/binary"
+	"hash/crc32"
+	"math"
 	"testing"
 	"time"
 
@@ -48,6 +51,20 @@ func TestState_RefusesInvalid(t *testing.T) {
 	} {
 		_, err := s.MarshalBinary()
 		assert.Error(t, err, name)
+	}
+}
+
+// TestState_RefusesOutOfRangeValues: a record with a valid checksum whose
+// floor or boot time does not fit in int64 is corrupt, not a wrapped value.
+func TestState_RefusesOutOfRangeValues(t *testing.T) {
+	good, err := clockfloor.State{Floor: t0, BootID: "a", BootTime: time.Minute}.MarshalBinary()
+	require.NoError(t, err)
+	for name, off := range map[string]int{"floor": 5, "boot time": 13} {
+		b := append([]byte(nil), good...)
+		binary.BigEndian.PutUint64(b[off:], math.MaxUint64)
+		binary.BigEndian.PutUint32(b[len(b)-4:], crc32.ChecksumIEEE(b[:len(b)-4]))
+		var out clockfloor.State
+		assert.ErrorIs(t, out.UnmarshalBinary(b), clockfloor.ErrCorrupt, name)
 	}
 }
 

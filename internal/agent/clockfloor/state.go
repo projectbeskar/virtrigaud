@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"math"
 	"time"
 )
 
@@ -123,9 +124,9 @@ func (s State) MarshalBinary() ([]byte, error) {
 	buf := make([]byte, 0, stateFixed+len(s.BootID))
 	buf = append(buf, stateMagic...)
 	buf = append(buf, stateVersion)
-	buf = binary.BigEndian.AppendUint64(buf, uint64(s.Floor.UnixNano()))
-	buf = binary.BigEndian.AppendUint64(buf, uint64(s.BootTime))
-	buf = append(buf, byte(len(s.BootID)))
+	buf = binary.BigEndian.AppendUint64(buf, uint64(s.Floor.UnixNano())) // #nosec G115 -- validate: floor is after the epoch, so UnixNano is positive
+	buf = binary.BigEndian.AppendUint64(buf, uint64(s.BootTime))         // #nosec G115 -- validate: boot time is not negative
+	buf = append(buf, byte(len(s.BootID)))                               // #nosec G115 -- validate: boot_id is at most maxBootIDLen (64) bytes
 	buf = append(buf, s.BootID...)
 	buf = binary.BigEndian.AppendUint32(buf, crc32.ChecksumIEEE(buf))
 	return buf, nil
@@ -150,9 +151,13 @@ func (s *State) UnmarshalBinary(b []byte) error {
 		return fmt.Errorf("%w: checksum mismatch", ErrCorrupt)
 	}
 	off := len(stateMagic) + 1
+	floorNanos, bootNanos := binary.BigEndian.Uint64(b[off:]), binary.BigEndian.Uint64(b[off+8:])
+	if floorNanos > math.MaxInt64 || bootNanos > math.MaxInt64 {
+		return fmt.Errorf("%w: value out of range", ErrCorrupt)
+	}
 	out := State{
-		Floor:    time.Unix(0, int64(binary.BigEndian.Uint64(b[off:]))).UTC(),
-		BootTime: time.Duration(binary.BigEndian.Uint64(b[off+8:])),
+		Floor:    time.Unix(0, int64(floorNanos)).UTC(), // #nosec G115 -- checked against math.MaxInt64 above
+		BootTime: time.Duration(int64(bootNanos)),       // #nosec G115 -- checked against math.MaxInt64 above
 		BootID:   string(b[off+17 : off+17+idLen]),
 	}
 	if err := out.validate(); err != nil {
