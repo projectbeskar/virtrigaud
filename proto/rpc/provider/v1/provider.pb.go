@@ -1699,8 +1699,10 @@ type TaskStatusRequest struct {
 	// bytes, fresh for each request. Set together with op_id, op_enrolment_id and
 	// target_host_id, with task unset; a provider routes such a request by
 	// target_host_id, and refuses one that also sets task. Set only for a
-	// Provider whose type requires operation identity; other Providers ignore it.
-	// No built-in provider reads it. Additive and backward-compatible.
+	// Provider whose type requires operation identity. The fields carry no
+	// meaning for other Providers, which answer from task alone: a request
+	// without task is refused or fails there as it does today. No built-in
+	// provider reads it. Additive and backward-compatible.
 	AnswerNonce []byte `protobuf:"bytes,2,opt,name=answer_nonce,json=answerNonce,proto3" json:"answer_nonce,omitempty"`
 	// op_id is the 16-byte op_id of the operation asked about. Set only together
 	// with answer_nonce.

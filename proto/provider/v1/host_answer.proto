@@ -15,8 +15,8 @@ option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1;p
 // fresh random nonce in the read request; the agent signs an answer body that
 // echoes the nonce and names its enrolment and the position of its operation
 // store; the Provider relays the SignedBlob unchanged. No built-in provider
-// sets or reads these messages, and a manager reads them only from a Provider
-// whose type requires operation identity.
+// sets or reads these messages, and a manager will read them only from a
+// Provider whose type requires operation identity.
 // ---------------------------------------------------------------------------
 
 // SignedBlob carries a signed message as the exact bytes that were signed.
