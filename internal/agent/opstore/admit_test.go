@@ -59,7 +59,7 @@ func TestAdmit_EnrolmentAndProviderBinding(t *testing.T) {
 	h := newHarness(t)
 	h.boot()
 	wantRefusal(t, h.admit(h.req("vm", rid(), kCreate, 1)), opstore.RefusalGrantMismatch) // no enrolment
-	if err := h.s.Enrol(context.Background(), opstore.Enrolment{ID: h.enrol, ProviderUID: h.provider, StartEpoch: h.start}); err != nil {
+	if err := h.s.Enrol(context.Background(), opstore.Enrolment{HostID: "host-1", ID: h.enrol, ProviderUID: h.provider, StartEpoch: h.start}); err != nil {
 		t.Fatal(err)
 	}
 	r := h.req("vm", rid(), kCreate, 1)
@@ -181,7 +181,7 @@ func TestAdmit_CreateAgainstVMTombstoneIsStale(t *testing.T) {
 	b := rid()
 	h.do(h.req("vm", b, kCreate, 1))
 	h.do(h.req("vm", b, kDelete, 1))
-	if _, ok, _ := h.s.VMDeleted(context.Background(), h.enrol, "vm", b); !ok {
+	if _, ok, _ := h.s.VMDeleted(context.Background(), "vm", b); !ok {
 		t.Fatal("no VM tombstone after a completed Delete")
 	}
 	wantRefusal(t, h.admit(h.req("vm", b, kCreate, 2)), opstore.RefusalVMBindingStale)

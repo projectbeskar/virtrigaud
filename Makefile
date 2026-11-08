@@ -161,6 +161,10 @@ test: gen-crds generate fmt vet setup-envtest ## Run tests.
 test-agent-mutation: ## Mutation test of the per-host agent's operation store: every safety guard switched off in turn must fail a test; reports surviving mutants
 	./hack/agent-mutation.sh
 
+.PHONY: test-agent-model
+test-agent-model: ## Reference-model run of the per-host agent's operation store with 100000 seeds (VIRTRIGAUD_MODEL_RUNS overrides)
+	VIRTRIGAUD_MODEL_RUNS=$${VIRTRIGAUD_MODEL_RUNS:-100000} go test -count=1 -timeout 30m -run '^TestReferenceModel$$' ./internal/agent/opstore/
+
 .PHONY: test-agent-model-long
 test-agent-model-long: ## Long reference-model run of the per-host agent's operation store (VIRTRIGAUD_MODEL_RUNS, default 10000000)
 	VIRTRIGAUD_MODEL_RUNS=$${VIRTRIGAUD_MODEL_RUNS:-10000000} go test -count=1 -timeout 0 -run '^TestReferenceModel$$' ./internal/agent/opstore/

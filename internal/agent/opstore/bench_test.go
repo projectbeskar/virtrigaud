@@ -48,7 +48,7 @@ func benchStore(b *testing.B) (*opstore.Store, *harness) {
 	if _, err := s.Recover(context.Background()); err != nil {
 		b.Fatal(err)
 	}
-	if err := s.Enrol(context.Background(), opstore.Enrolment{ID: h.enrol, ProviderUID: h.provider, StartEpoch: h.start}); err != nil {
+	if err := s.Enrol(context.Background(), opstore.Enrolment{HostID: "host-1", ID: h.enrol, ProviderUID: h.provider, StartEpoch: h.start}); err != nil {
 		b.Fatal(err)
 	}
 	return s, h

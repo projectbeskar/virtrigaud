@@ -42,6 +42,8 @@ const (
 	idLen              = 16
 	digestLen          = 32
 	witnessDirName     = "witness"
+	maxNameLen         = 256
+	maxHolderLen       = 64
 )
 
 // keyAgentMeta is the key of the AgentMeta record in bucketMeta.
@@ -102,10 +104,10 @@ func lp(s string) []byte {
 	return append(b, s...)
 }
 
-// vmTombstoneKey is enrolment_id || lp(vm_uid) || binding_id.
-func vmTombstoneKey(enrolment []byte, vmUID string, binding []byte) []byte {
-	k := append(append([]byte(nil), enrolment...), lp(vmUID)...)
-	return append(k, binding...)
+// vmTombstoneKey is lp(vm_uid) || binding_id. VM tombstones are not scoped
+// to an enrolment: a deleted placement stays deleted across re-enrolments.
+func vmTombstoneKey(vmUID string, binding []byte) []byte {
+	return append(lp(vmUID), binding...)
 }
 
 // attemptKey is enrolment_id || lp(vm_uid) || be32(kind).
@@ -184,8 +186,12 @@ var ErrInvalidRequest = errors.New("operation request malformed")
 
 func (r Request) validate() error {
 	switch {
-	case r.ProviderUID == "":
-		return fmt.Errorf("%w: no provider uid", ErrInvalidRequest)
+	case r.ProviderUID == "" || len(r.ProviderUID) > maxNameLen:
+		return fmt.Errorf("%w: provider uid empty or too long", ErrInvalidRequest)
+	case len(r.Actor) > maxNameLen:
+		return fmt.Errorf("%w: actor too long", ErrInvalidRequest)
+	case len(r.MintEpoch.Holder) > maxHolderLen:
+		return fmt.Errorf("%w: mint epoch holder too long", ErrInvalidRequest)
 	case len(r.EnrolmentID) != idLen:
 		return fmt.Errorf("%w: enrolment id must be %d bytes", ErrInvalidRequest, idLen)
 	case len(r.OpID) != idLen:

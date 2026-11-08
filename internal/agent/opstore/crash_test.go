@@ -196,7 +196,7 @@ func TestCrashPoint_MidReenrolment(t *testing.T) {
 	h.do(h.req("vm", b, kCreate, 1))
 	open := h.req("vm", b, kPowerOn, 1)
 	h.mustAccept(open)
-	next := opstore.Enrolment{ID: rid(), ProviderUID: h.provider, StartEpoch: h.start + 1}
+	next := opstore.Enrolment{HostID: "host-1", ID: rid(), ProviderUID: h.provider, StartEpoch: h.start + 1}
 	h.crash = &journaltest.Crasher{Point: opstore.PointMidReenrolment, N: 1}
 	if err := h.s.Reenrol(context.Background(), next); !errors.Is(err, journal.ErrCrashed) {
 		t.Fatalf("reenrol: %v", err)

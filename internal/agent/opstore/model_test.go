@@ -51,14 +51,15 @@ import (
 //   - at most one operation holds a VM;
 //   - the irrev flag survives compaction and re-enrolment.
 //
-// Runs: VIRTRIGAUD_MODEL_RUNS (default 100000; 10000 with -short).
-// One seed: VIRTRIGAUD_MODEL_SEED. Long run: make test-agent-model-long.
+// Runs: VIRTRIGAUD_MODEL_RUNS (default 15000, 3000 with -short, so that a
+// normal go test stays short). make test-agent-model runs 100000 seeds and
+// make test-agent-model-long 10 million. One seed: VIRTRIGAUD_MODEL_SEED.
 
 const (
 	modelRunsEnv     = "VIRTRIGAUD_MODEL_RUNS"
 	modelSeedEnv     = "VIRTRIGAUD_MODEL_SEED"
-	modelDefaultRuns = 100000
-	modelShortRuns   = 10000
+	modelDefaultRuns = 15000
+	modelShortRuns   = 3000
 	modelEvents      = 14
 )
 
@@ -179,6 +180,7 @@ type model struct {
 	order     []string
 	vms       map[string]*mVM
 	vmTomb    map[string]bool
+	retired   map[string]bool
 	attempts  map[string]uint64
 	bindings  map[string][]byte
 	crash     *journaltest.Crasher // the model's own counter, armed like the store's
@@ -207,7 +209,7 @@ func runModel(seed uint64) (err error) {
 	t := &tb{}
 	h := &harness{t: t, dir: dir, mem: journaltest.NewMemFS(), exec: newTestExec(), provider: "provider-model"}
 	m := &model{h: h, rnd: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), ops: map[string]*mOp{},
-		vms: map[string]*mVM{}, vmTomb: map[string]bool{}, attempts: map[string]uint64{}, bindings: map[string][]byte{}}
+		vms: map[string]*mVM{}, vmTomb: map[string]bool{}, retired: map[string]bool{}, attempts: map[string]uint64{}, bindings: map[string][]byte{}}
 	h.enrol, h.holder, h.start = m.newID(), m.newID(), 2
 	defer func() {
 		if h.s != nil {
@@ -311,8 +313,8 @@ func (m *model) step() {
 
 func key(enrol, op []byte) string { return string(enrol) + string(op) }
 
-func (m *model) tombKey(enrol []byte, vm string, binding []byte) string {
-	return string(enrol) + "|" + vm + "|" + string(binding)
+func (m *model) tombKey(vm string, binding []byte) string {
+	return vm + "|" + string(binding)
 }
 
 func (m *model) attemptKey(enrol []byte, vm string, k providerv1.OperationKind) string {
@@ -371,14 +373,18 @@ func sameRequest(a, b opstore.Request) bool {
 
 // expect is the model's admission table.
 func (m *model) expect(r opstore.Request) (opstore.Outcome, opstore.Refusal, *mOp) {
-	if m.active == nil || !bytes.Equal(m.active, r.EnrolmentID) {
-		return opstore.OutcomeRefused, opstore.RefusalGrantMismatch, nil
-	}
+	// A known op_id is answered from its record, whatever its enrolment.
 	if op := m.ops[key(r.EnrolmentID, r.OpID)]; op != nil && op.recorded && !op.gone {
 		if !sameRequest(op.r, r) {
 			return opstore.OutcomeRefused, opstore.RefusalOpIDConflict, nil
 		}
 		return opstore.OutcomeKnown, opstore.RefusalNone, op
+	}
+	if m.retired[string(r.EnrolmentID)] {
+		return opstore.OutcomeRefused, opstore.RefusalUnknownToAgent, nil
+	}
+	if m.active == nil || !bytes.Equal(m.active, r.EnrolmentID) {
+		return opstore.OutcomeRefused, opstore.RefusalGrantMismatch, nil
 	}
 	if r.MintEpoch.Counter < m.start {
 		return opstore.OutcomeRefused, opstore.RefusalGrantMismatch, nil
@@ -388,7 +394,7 @@ func (m *model) expect(r opstore.Request) (opstore.Outcome, opstore.Refusal, *mO
 		return opstore.OutcomeRefused, opstore.RefusalVMBusy, nil
 	}
 	if r.Kind == kCreate {
-		if vm != nil && !bytes.Equal(vm.binding, r.BindingID) || m.vmTomb[m.tombKey(r.EnrolmentID, r.VMUID, r.BindingID)] {
+		if vm != nil && (!bytes.Equal(vm.binding, r.BindingID) || vm.present) || m.vmTomb[m.tombKey(r.VMUID, r.BindingID)] {
 			return opstore.OutcomeRefused, opstore.RefusalVMBindingStale, nil
 		}
 	} else {
@@ -493,7 +499,7 @@ func (m *model) finish(op *mOp, state opstore.OpState, reason string) {
 	switch {
 	case op.r.Kind == kDelete && state == opstore.StateCompleted:
 		delete(m.vms, op.r.VMUID)
-		m.vmTomb[m.tombKey(op.r.EnrolmentID, op.r.VMUID, op.r.BindingID)] = true
+		m.vmTomb[m.tombKey(op.r.VMUID, op.r.BindingID)] = true
 	case op.r.Kind == kCreate && state == opstore.StateCompleted:
 		vm.present, vm.creating = true, false
 	case op.r.Kind == kCreate && vm.creating && (state == opstore.StateFailedClean || state == opstore.StateRetired):
@@ -675,7 +681,7 @@ func (m *model) compact() {
 }
 
 func (m *model) reenrol() {
-	next := opstore.Enrolment{ID: m.newID(), ProviderUID: m.h.provider, StartEpoch: m.lastStart + 1}
+	next := opstore.Enrolment{HostID: "host-1", ID: m.newID(), ProviderUID: m.h.provider, StartEpoch: m.lastStart + 1}
 	m.arm(0.3)
 	err := m.h.s.Reenrol(context.Background(), next)
 	prev := m.active
@@ -733,12 +739,7 @@ func (m *model) confirm() {
 				m.vms[vmUID].busy = ""
 			}
 		}
-		pfx := string(prev) + "|"
-		for k := range m.vmTomb {
-			if len(k) >= len(pfx) && k[:len(pfx)] == pfx {
-				delete(m.vmTomb, k)
-			}
-		}
+		m.retired[string(prev)] = true
 		for k := range m.attempts {
 			if len(k) > 32 && k[:32] == fmt.Sprintf("%x", prev) {
 				delete(m.attempts, k)

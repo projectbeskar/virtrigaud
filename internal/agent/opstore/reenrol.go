@@ -37,8 +37,10 @@ import (
 // A crash between the two leaves the host with no active enrolment, which
 // refuses every operation; calling Reenrol again completes it. The frozen
 // enrolment's tombstones, VM tombstones, attempt marks and witnesses are kept,
-// read-only, until ConfirmFreeze. e.StartEpoch must exceed every earlier
-// start epoch. No runner may be active.
+// read-only, until ConfirmFreeze, and their op_ids are answered from them.
+// e.StartEpoch must exceed every earlier start epoch. No runner may be
+// active. The freeze is one transaction over every open operation of the
+// predecessor.
 func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -53,6 +55,14 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 			return err
 		}
 		last, prev = m.GetLastStartEpoch(), m.GetCurrentEnrolmentId()
+		// Refuse a used id before freezing anything.
+		retired, err := isRetired(tx, e.ID)
+		if err != nil {
+			return err
+		}
+		if retired || tx.Get(bucketEnrolments, e.ID) != nil {
+			return fmt.Errorf("%w: enrolment id already used", ErrEnrolment)
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("re-enrol: %w", err)
@@ -73,8 +83,8 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 			return err
 		}
 	}
-	if _, err := s.j.Update(ctx, func(tx *journal.Tx) error { return activate(tx, e) }); err != nil {
-		return fmt.Errorf("re-enrol: activate: %w", err)
+	if err := s.activateBound(ctx, e, prev); err != nil {
+		return fmt.Errorf("re-enrol: %w", err)
 	}
 	return nil
 }
@@ -144,12 +154,12 @@ func anyIntent(rec *pb.OpRecord) bool {
 
 // ConfirmFreeze discards a frozen enrolment's records, once the manager has
 // confirmed that it holds every operation of that enrolment: the operation
-// records, op_id tombstones, VM tombstones, attempt marks, the enrolment
-// record and the witness directory. VM records that the discarded operations
-// held are released (the manager now holds those operations). Every grant
-// for the discarded enrolment is refused afterwards, because the enrolment is
-// no longer active. It fails unless prev is frozen and another enrolment is
-// active.
+// records, op_id tombstones, attempt marks, the enrolment record and the
+// witness directory. VM tombstones are kept. VM records that the discarded
+// operations held are released (the manager now holds those operations). The
+// enrolment id is remembered as retired: it is never activated again, and a
+// grant naming it is refused UNKNOWN_TO_AGENT, never as definitely not
+// performed. It fails unless prev is frozen and another enrolment is active.
 func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,7 +179,7 @@ func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 		if act == nil {
 			return fmt.Errorf("%w: no successor enrolment is active", ErrEnrolment)
 		}
-		for _, b := range []string{bucketOps, bucketTombstones, bucketVMTombstones, bucketAttempts} {
+		for _, b := range []string{bucketOps, bucketTombstones, bucketAttempts} {
 			var keys [][]byte
 			if err := tx.ForEach(b, prev, func(k, _ []byte) error {
 				keys = append(keys, k)
@@ -201,6 +211,14 @@ func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 			if err := put(tx, bucketVMs, []byte(vm.GetVmUid()), vm); err != nil {
 				return err
 			}
+		}
+		m, err := readAgentMeta(tx)
+		if err != nil {
+			return err
+		}
+		m.RetiredEnrolmentIds = append(m.RetiredEnrolmentIds, append([]byte(nil), prev...))
+		if err := put(tx, bucketMeta, keyAgentMeta, m); err != nil {
+			return err
 		}
 		return tx.Delete(bucketEnrolments, prev)
 	})

@@ -26,37 +26,50 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// Refusal is why admission refused an operation. Every refusal is definite:
-// the operation was not recorded and will not run.
+// Refusal is why admission refused an operation. A refusal records nothing.
+// Only some refusals are definite not-performed answers, which allow the
+// manager to start a new attempt (see DefiniteNotPerformed); the classification
+// is the provider contract's.
 type Refusal int
 
 // The refusals.
 const (
 	// RefusalNone: not refused.
 	RefusalNone Refusal = iota
-	// RefusalQuarantined: the store lost its persistence guarantee.
+	// RefusalQuarantined: the store lost its persistence guarantee. Not
+	// definite: the store cannot say what ran.
 	RefusalQuarantined
 	// RefusalUnattested: continuity is not established or recovery has not
-	// run.
+	// run. Not definite.
 	RefusalUnattested
 	// RefusalProviderMismatch: the grant names another Provider than the
-	// active enrolment.
+	// active enrolment, for an op_id the store has no trace of. Definite.
 	RefusalProviderMismatch
-	// RefusalGrantMismatch: the grant names another enrolment, no enrolment
-	// is active, or the op_id was minted before the enrolment started.
+	// RefusalGrantMismatch: the grant names an enrolment that is not active,
+	// or the op_id was minted before the enrolment started, for an op_id the
+	// store has no trace of and an enrolment whose records the store still
+	// holds. Definite.
 	RefusalGrantMismatch
 	// RefusalOpIDConflict: the op_id is known with other identity fields, or
-	// the attempt does not increase.
+	// the attempt does not increase. Not definite.
 	RefusalOpIDConflict
-	// RefusalVMBusy: the VM has another non-terminal operation.
+	// RefusalVMBusy: the VM has another operation that holds it. Not
+	// definite.
 	RefusalVMBusy
-	// RefusalVMBindingStale: the binding does not match the VM's record, or
-	// a Delete of this placement completed.
+	// RefusalVMBindingStale: the binding does not match the VM's record, a
+	// Create names a placement that exists or whose Delete completed. Not
+	// definite.
 	RefusalVMBindingStale
-	// RefusalVMNotOwned: a non-Create operation for a VM with no record.
+	// RefusalVMNotOwned: a non-Create operation for a VM with no record. Not
+	// definite.
 	RefusalVMNotOwned
-	// RefusalStoreFull: the store is above its size threshold. A server
-	// answers RESOURCE_EXHAUSTED; it has no reason string.
+	// RefusalUnknownToAgent: the grant names an enrolment whose records were
+	// discarded after a confirmed freeze; the store can no longer say whether
+	// the op_id ran. Not definite.
+	RefusalUnknownToAgent
+	// RefusalStoreFull: the store is above its size threshold. Definite (the
+	// op_id is not known, as known op_ids are answered first); a server
+	// answers RESOURCE_EXHAUSTED, with no reason string.
 	RefusalStoreFull
 )
 
@@ -72,7 +85,21 @@ const (
 	ReasonVMBusy           = "VM_BUSY"
 	ReasonVMBindingStale   = "VM_BINDING_STALE"
 	ReasonVMNotOwned       = "VM_NOT_OWNED"
+	ReasonUnknownToAgent   = "UNKNOWN_TO_AGENT"
 )
+
+// DefiniteNotPerformed reports whether the refusal says the operation was
+// definitely not performed and never will be: GRANT_MISMATCH,
+// PROVIDER_MISMATCH and store full. Every other refusal leaves the outcome to
+// a later answer for the same op_id. It matches the provider contract's
+// classification of the reason strings; a test checks that.
+func (r Refusal) DefiniteNotPerformed() bool {
+	switch r {
+	case RefusalGrantMismatch, RefusalProviderMismatch, RefusalStoreFull:
+		return true
+	}
+	return false
+}
 
 // Reason returns the refusal's reason string ("" for RefusalNone and
 // RefusalStoreFull).
@@ -94,6 +121,8 @@ func (r Refusal) Reason() string {
 		return ReasonVMBindingStale
 	case RefusalVMNotOwned:
 		return ReasonVMNotOwned
+	case RefusalUnknownToAgent:
+		return ReasonUnknownToAgent
 	}
 	return ""
 }
@@ -136,26 +165,30 @@ type Decision struct {
 // Admit decides on one delivery of an operation, under the store lock, by the
 // admission table:
 //
-//  1. store lost ⇒ QUARANTINED; continuity or recovery pending ⇒ UNATTESTED;
-//  2. no active enrolment, or the grant's enrolment differs ⇒ GRANT_MISMATCH;
-//     the grant's Provider differs ⇒ PROVIDER_MISMATCH;
-//  3. a tombstone with the same identity fields ⇒ its terminal state, never
-//     executed again; with any field different ⇒ OP_ID_CONFLICT;
-//  4. a record with the same identity fields ⇒ its current state; with any
-//     field different ⇒ OP_ID_CONFLICT;
-//  5. an unknown op_id minted before the enrolment's start epoch ⇒
-//     GRANT_MISMATCH;
-//  6. the VM has another operation that holds it ⇒ VM_BUSY;
-//  7. not a Create: no VM record ⇒ VM_NOT_OWNED, another binding ⇒
-//     VM_BINDING_STALE; a Create: a VM record with another binding, or a VM
-//     tombstone for this placement ⇒ VM_BINDING_STALE;
-//  8. an attempt not above the highest seen for the VM and kind in this
+//  1. store lost ⇒ QUARANTINED; continuity or recovery pending ⇒ UNATTESTED
+//     (neither is definite: nothing is said about the op_id);
+//  2. a tombstone for (enrolment, op_id), whatever the enrolment's state,
+//     with the same identity fields ⇒ its terminal state, never executed
+//     again; with any field different ⇒ OP_ID_CONFLICT;
+//  3. a record likewise ⇒ its current state, or OP_ID_CONFLICT;
+//  4. the grant names an enrolment whose records were discarded ⇒
+//     UNKNOWN_TO_AGENT (not definite);
+//  5. no active enrolment, or the grant names another one ⇒
+//     GRANT_MISMATCH; another Provider ⇒ PROVIDER_MISMATCH (definite: the
+//     store holds every record of the enrolments it can still name);
+//  6. an op_id minted before the enrolment's start epoch ⇒ GRANT_MISMATCH;
+//  7. the VM has another operation that holds it ⇒ VM_BUSY;
+//  8. not a Create: no VM record ⇒ VM_NOT_OWNED, another binding ⇒
+//     VM_BINDING_STALE; a Create: a VM record with another binding or a
+//     completed Create of this placement, or a VM tombstone for this
+//     placement ⇒ VM_BINDING_STALE;
+//  9. an attempt not above the highest accepted for the VM and kind in this
 //     enrolment ⇒ OP_ID_CONFLICT;
-//  9. the store above its size threshold ⇒ store full;
-//  10. otherwise the operation, its VM record and its attempt mark are
+//  10. the store's live size above its threshold ⇒ store full;
+//  11. otherwise the operation, its VM record and its attempt mark are
 //     written in one transaction, anchored, and only then reported accepted.
 //
-// Decisions 1–9 write nothing. An error means the store could not decide
+// Decisions 1–10 write nothing. An error means the store could not decide
 // (for example it failed while writing, and is then quarantined); the caller
 // must treat the operation as not admitted and must not answer "not
 // performed" unless a later Lookup says so.
@@ -208,7 +241,7 @@ func (s *Store) admitLocked(ctx context.Context, r Request) (Decision, *auditBuf
 	if !accept {
 		return d, buf, nil
 	}
-	if s.j.Size() > s.opts.MaxStoreBytes {
+	if s.j.LiveSize() > s.opts.MaxStoreBytes {
 		return refused(RefusalStoreFull), buf, nil
 	}
 	if err := s.j.CrashPoint(PointBeforeAccept); err != nil {
@@ -244,18 +277,30 @@ func (s *Store) admitLocked(ctx context.Context, r Request) (Decision, *auditBuf
 	return Decision{Outcome: OutcomeAccepted, Op: viewOfRecord(rec)}, buf, nil
 }
 
-// decide runs rows 2–8 of the admission table in a read transaction. accept
+// decide runs rows 2–9 of the admission table in a read transaction. accept
 // is true when the operation is to be recorded.
 func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision, bool, error) {
 	enr, err := activeEnrolment(tx)
 	if err != nil {
 		return Decision{}, false, err
 	}
-	if enr == nil || !sameBytes(enr.GetEnrolmentId(), r.EnrolmentID) {
-		return refused(RefusalGrantMismatch), false, nil
+	enrolmentCheck := func() (Decision, bool) {
+		if enr == nil || !sameBytes(enr.GetEnrolmentId(), r.EnrolmentID) {
+			retired, err := isRetired(tx, r.EnrolmentID)
+			if err == nil && retired {
+				return refused(RefusalUnknownToAgent), true
+			}
+			return refused(RefusalGrantMismatch), true
+		}
+		if enr.GetProviderUid() != r.ProviderUID {
+			return refused(RefusalProviderMismatch), true
+		}
+		return Decision{}, false
 	}
-	if enr.GetProviderUid() != r.ProviderUID {
-		return refused(RefusalProviderMismatch), false, nil
+	if guard.Off(guard.KnownBeforeMismatch) {
+		if d, done := enrolmentCheck(); done {
+			return d, false, nil
+		}
 	}
 
 	if !guard.Off(guard.TombstoneLookup) {
@@ -284,6 +329,9 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 		}
 		return Decision{Outcome: OutcomeKnown, Op: viewOfRecord(rec)}, false, nil
 	}
+	if d, done := enrolmentCheck(); done {
+		return d, false, nil
+	}
 
 	if r.MintEpoch.Counter < enr.GetStartEpoch() && !guard.Off(guard.MintEpoch) {
 		return refused(RefusalGrantMismatch), false, nil
@@ -300,10 +348,10 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 
 	if !guard.Off(guard.Binding) {
 		if r.Kind == providerv1.OperationKind_OPERATION_KIND_CREATE {
-			if hasVM && !sameBytes(vm.GetBindingId(), r.BindingID) {
+			if hasVM && (!sameBytes(vm.GetBindingId(), r.BindingID) || vm.GetLifecycle() == pb.VMLifecycle_VM_LIFECYCLE_PRESENT) {
 				return refused(RefusalVMBindingStale), false, nil
 			}
-			if tx.Get(bucketVMTombstones, vmTombstoneKey(r.EnrolmentID, r.VMUID, r.BindingID)) != nil {
+			if tx.Get(bucketVMTombstones, vmTombstoneKey(r.VMUID, r.BindingID)) != nil {
 				return refused(RefusalVMBindingStale), false, nil
 			}
 		} else {

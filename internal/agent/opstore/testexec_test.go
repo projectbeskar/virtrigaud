@@ -242,7 +242,7 @@ func (h *harness) boot() []opstore.OpRef {
 func (h *harness) fresh() {
 	h.t.Helper()
 	h.boot()
-	if err := h.s.Enrol(context.Background(), opstore.Enrolment{ID: h.enrol, ProviderUID: h.provider, InstallID: rid(), StartEpoch: h.start}); err != nil {
+	if err := h.s.Enrol(context.Background(), opstore.Enrolment{HostID: "host-1", ID: h.enrol, ProviderUID: h.provider, InstallID: rid(), StartEpoch: h.start}); err != nil {
 		h.t.Fatalf("enrol: %v", err)
 	}
 }

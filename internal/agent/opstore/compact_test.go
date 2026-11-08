@@ -62,7 +62,7 @@ func TestCompact_KeepsTombstonesWitnessesAndVMTombstones(t *testing.T) {
 			t.Fatalf("witness of %s removed by compaction", label)
 		}
 	}
-	if _, ok, _ := h.s.VMDeleted(context.Background(), h.enrol, "vm", b); !ok {
+	if _, ok, _ := h.s.VMDeleted(context.Background(), "vm", b); !ok {
 		t.Fatal("VM tombstone dropped by compaction")
 	}
 	if h.exec.effects(power.OpID, "power") != 1 || h.exec.effects(create.OpID, "start") != 1 {

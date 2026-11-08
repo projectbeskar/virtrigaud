@@ -60,8 +60,8 @@ func TestReenrol_FreezeRetiresOrHolds(t *testing.T) {
 	}
 
 	oldEnrol := h.enrol
-	next := opstore.Enrolment{ID: rid(), ProviderUID: h.provider, StartEpoch: h.start + 1}
-	if err := h.s.Reenrol(ctx, opstore.Enrolment{ID: rid(), ProviderUID: h.provider, StartEpoch: h.start}); !errors.Is(err, opstore.ErrEnrolment) {
+	next := opstore.Enrolment{HostID: "host-1", ID: rid(), ProviderUID: h.provider, StartEpoch: h.start + 1}
+	if err := h.s.Reenrol(ctx, opstore.Enrolment{HostID: "host-1", ID: rid(), ProviderUID: h.provider, StartEpoch: h.start}); !errors.Is(err, opstore.ErrEnrolment) {
 		t.Fatalf("start epoch reused: %v", err)
 	}
 	if err := h.s.Reenrol(ctx, next); err != nil {
@@ -77,8 +77,16 @@ func TestReenrol_FreezeRetiresOrHolds(t *testing.T) {
 		t.Fatal("a retired op ran")
 	}
 
-	// Old grants are refused; the old tombstones are still readable.
-	wantRefusal(t, h.admit(done), opstore.RefusalGrantMismatch)
+	// An op_id that ran under the old enrolment is answered from its
+	// tombstone, never refused as definitely not performed.
+	if d := h.admit(done); d.Outcome != opstore.OutcomeKnown || d.Op.State != opstore.StateCompleted {
+		t.Fatalf("re-delivery of a completed op after re-enrolment: %+v", d)
+	}
+	// A new op_id for the frozen enrolment is a definite refusal.
+	old := h.req("vm1", b1, kReconfig, 9)
+	if d := h.admit(old); !d.IsRefusal(opstore.RefusalGrantMismatch) || !d.Refusal.DefiniteNotPerformed() {
+		t.Fatalf("new op for the frozen enrolment: %+v", d)
+	}
 	if !h.tombstoned(done) {
 		t.Fatal("old tombstone dropped before the freeze was confirmed")
 	}
@@ -97,6 +105,18 @@ func TestReenrol_FreezeRetiresOrHolds(t *testing.T) {
 	}
 	if h.tombstoned(done) {
 		t.Fatal("old tombstone kept after the confirmed freeze")
+	}
+	// After the discard the store can no longer say whether it ran: never a
+	// definite not-performed.
+	if d := h.admit(done); !d.IsRefusal(opstore.RefusalUnknownToAgent) || d.Refusal.DefiniteNotPerformed() {
+		t.Fatalf("re-delivery after the confirmed freeze: %+v", d)
+	}
+	if _, ok, _ := h.s.VMDeleted(ctx, "vm2", b2); ok {
+		t.Fatal("unexpected VM tombstone")
+	}
+	// A discarded enrolment id is never activated again.
+	if err := h.s.Reenrol(ctx, opstore.Enrolment{HostID: "host-1", ID: oldEnrol, ProviderUID: h.provider, StartEpoch: next.StartEpoch + 1}); !errors.Is(err, opstore.ErrEnrolment) {
+		t.Fatalf("re-using a discarded enrolment id: %v", err)
 	}
 	if ok, _ := h.mem.Exists(witnessPathFor(h, withIntent, 0)); ok {
 		t.Fatal("old witness kept after the confirmed freeze")
@@ -119,7 +139,7 @@ func TestReenrol_RefusedWhileRunning(t *testing.T) {
 		close(done)
 	}()
 	<-h.exec.started
-	err := h.s.Reenrol(context.Background(), opstore.Enrolment{ID: rid(), ProviderUID: h.provider, StartEpoch: h.start + 1})
+	err := h.s.Reenrol(context.Background(), opstore.Enrolment{HostID: "host-1", ID: rid(), ProviderUID: h.provider, StartEpoch: h.start + 1})
 	close(h.exec.block)
 	<-done
 	if !errors.Is(err, opstore.ErrRunning) {
@@ -130,7 +150,7 @@ func TestReenrol_RefusedWhileRunning(t *testing.T) {
 func TestEnrol_OnlyOnce(t *testing.T) {
 	h := newHarness(t)
 	h.fresh()
-	if err := h.s.Enrol(context.Background(), opstore.Enrolment{ID: rid(), ProviderUID: h.provider, StartEpoch: 9}); !errors.Is(err, opstore.ErrEnrolment) {
+	if err := h.s.Enrol(context.Background(), opstore.Enrolment{HostID: "host-1", ID: rid(), ProviderUID: h.provider, StartEpoch: 9}); !errors.Is(err, opstore.ErrEnrolment) {
 		t.Fatalf("second enrol: %v", err)
 	}
 }

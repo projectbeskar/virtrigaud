@@ -18,7 +18,11 @@ package opstore
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
@@ -129,6 +133,87 @@ func Classify(f StepFacts) Action {
 	return ActionReRun
 }
 
+// ErrAlreadyRecovered is returned by a second Recover: recovery runs once,
+// before any runner.
+var ErrAlreadyRecovered = errors.New("operation store already recovered")
+
+// scanWitnesses checks every witness file before recovery: each must belong to
+// a known enrolment and to an operation the store has a record or tombstone
+// of. A witness of an unknown operation means the store lost records the
+// witnesses outlived (for example a store restored with its anchor log), so
+// the store is quarantined (inconsistent_store). Directories of discarded
+// enrolments are left-overs of an interrupted discard and are removed.
+func (s *Store) scanWitnesses(ctx context.Context) error {
+	if guard.Off(guard.WitnessScan) {
+		return nil
+	}
+	root := filepath.Join(s.j.Dir(), witnessDirName)
+	dirs, err := s.fsys.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("list witnesses: %w", err)
+	}
+	anomaly := ""
+	for _, d := range dirs {
+		enrol, err := hex.DecodeString(d)
+		if err != nil || len(enrol) != idLen {
+			anomaly = "witness directory with a malformed name"
+			break
+		}
+		var known, retired bool
+		if err := s.j.View(ctx, func(tx *journal.Tx) error {
+			known = tx.Get(bucketEnrolments, enrol) != nil
+			var err error
+			retired, err = isRetired(tx, enrol)
+			return err
+		}); err != nil {
+			return err
+		}
+		if retired {
+			if err := s.fsys.RemoveAll(filepath.Join(root, d)); err != nil {
+				return fmt.Errorf("remove discarded witnesses: %w", err)
+			}
+			continue
+		}
+		if !known {
+			anomaly = "witness directory of an unknown enrolment"
+			break
+		}
+		files, err := s.fsys.ReadDir(filepath.Join(root, d))
+		if err != nil {
+			return fmt.Errorf("list witnesses: %w", err)
+		}
+		for _, f := range files {
+			opHex, _, ok := strings.Cut(f, ".")
+			op, err := hex.DecodeString(opHex)
+			if !ok || err != nil || len(op) != idLen {
+				anomaly = "witness file with a malformed name"
+				break
+			}
+			var found bool
+			if err := s.j.View(ctx, func(tx *journal.Tx) error {
+				k := opKey(enrol, op)
+				found = tx.Get(bucketOps, k) != nil || tx.Get(bucketTombstones, k) != nil
+				return nil
+			}); err != nil {
+				return err
+			}
+			if !found {
+				anomaly = "witness of an operation the store has no record of"
+				break
+			}
+		}
+		if anomaly != "" {
+			break
+		}
+	}
+	if anomaly == "" {
+		return nil
+	}
+	s.j.Quarantine(journal.LostInconsistentStore, anomaly)
+	s.emit(AuditEvent{Event: "quarantined", Reason: string(journal.LostInconsistentStore)})
+	return &journal.LostError{Reason: journal.LostInconsistentStore}
+}
+
 // Recover resolves every non-terminal operation's in-doubt steps by the
 // recovery table, then makes the store ready and returns the operations that
 // still need a runner (call Execute for each). It refuses to run before
@@ -143,6 +228,11 @@ func (s *Store) Recover(ctx context.Context) ([]OpRef, error) {
 		return nil, fmt.Errorf("recover: %w", &journal.LostError{Reason: reason})
 	case st != journal.StateReady && !guard.Off(guard.CommitAfterContinuity):
 		return nil, fmt.Errorf("recover: %w", journal.ErrUnattested)
+	case s.ready:
+		return nil, fmt.Errorf("recover: %w", ErrAlreadyRecovered)
+	}
+	if err := s.scanWitnesses(ctx); err != nil {
+		return nil, fmt.Errorf("recover: %w", err)
 	}
 	var open []*pb.OpRecord
 	if err := s.j.View(ctx, func(tx *journal.Tx) error {

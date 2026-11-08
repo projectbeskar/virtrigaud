@@ -92,11 +92,27 @@ func (s *Store) loadOp(ctx context.Context, ref OpRef) (*pb.OpRecord, error) {
 	return rec, nil
 }
 
-// saveOp writes rec (and, through extra, more writes) in one transaction.
+// ErrConcurrentChange is returned when an operation's stored record left the
+// runnable states while a writer held an older copy of it.
+var ErrConcurrentChange = errors.New("operation record changed concurrently")
+
+// saveOp writes rec (and, through extra, more writes) in one transaction. The
+// stored record must still be runnable (Accepted or Executing): every caller
+// writes over a runnable record, so a record that recovery or a freeze moved
+// on is never overwritten by a stale copy.
 func (s *Store) saveOp(ctx context.Context, rec *pb.OpRecord, extra func(tx *journal.Tx) error) error {
 	id := rec.GetIdentity()
 	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
-		if err := put(tx, bucketOps, opKey(id.GetEnrolmentId(), id.GetOpId()), rec); err != nil {
+		key := opKey(id.GetEnrolmentId(), id.GetOpId())
+		cur := &pb.OpRecord{}
+		ok, err := get(tx, bucketOps, key, cur)
+		if err != nil {
+			return err
+		}
+		if !ok || (cur.GetState() != StateAccepted && cur.GetState() != StateExecuting) {
+			return ErrConcurrentChange
+		}
+		if err := put(tx, bucketOps, key, rec); err != nil {
 			return err
 		}
 		if extra != nil {
@@ -371,8 +387,8 @@ func terminalWrites(tx *journal.Tx, rec *pb.OpRecord, buf *auditBuf) error {
 			if err := tx.Delete(bucketVMs, []byte(id.GetVmUid())); err != nil {
 				return err
 			}
-			if err := put(tx, bucketVMTombstones, vmTombstoneKey(id.GetEnrolmentId(), id.GetVmUid(), id.GetBindingId()),
-				&pb.VMTombstone{DeleteOpId: id.GetOpId(), TerminalSeq: tx.Seq()}); err != nil {
+			if err := put(tx, bucketVMTombstones, vmTombstoneKey(id.GetVmUid(), id.GetBindingId()),
+				&pb.VMTombstone{DeleteOpId: id.GetOpId(), TerminalSeq: tx.Seq(), EnrolmentId: id.GetEnrolmentId()}); err != nil {
 				return err
 			}
 			hasVM = false
