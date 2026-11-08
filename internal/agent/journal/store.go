@@ -276,6 +276,9 @@ func Open(ctx context.Context, opts Options) (st *Store, err error) {
 	if err := checkDirMode(opts.Dir); err != nil {
 		return nil, fmt.Errorf("open journal: %w", err)
 	}
+	if err := checkLocalFS(opts.Dir); err != nil {
+		return nil, fmt.Errorf("open journal: %w", err)
+	}
 	s := &Store{opts: opts, fsys: opts.FS}
 	// The single-writer lock comes first: a second process must not touch
 	// any file of a store another one runs.
@@ -356,26 +359,38 @@ func (s *Store) recordOpenLossSafe() {
 }
 
 // storeWriteSafe reports whether a quarantine record may be written into the
-// store at open for reason. A rolled-back, corrupt or inconsistent store is
-// kept as it is, as evidence: a write could reuse the pages of a lost commit.
+// store at open for reason. A rolled-back, corrupt or inconsistent store, and
+// one whose anchor log is missing (which may be an older store restored
+// without its anchor), is kept as it is, as evidence: a write could reuse the
+// pages of a lost commit. For a missing anchor log, the anchor's own
+// quarantine record is written into a new anchor log instead.
 func storeWriteSafe(reason LostReason) bool {
 	switch reason {
-	case LostRolledBack, LostJournalCorrupt, LostInconsistentStore:
+	case LostRolledBack, LostJournalCorrupt, LostInconsistentStore, LostAnchorMissing:
 		return false
 	}
 	return true
 }
 
-// appendQuarantineByPath appends a quarantine record to the anchor log, if
-// the log exists, through a fresh descriptor, and fsyncs it.
+// appendQuarantineByPath appends a quarantine record to the anchor log
+// through a fresh descriptor, and fsyncs it. A missing anchor log is created
+// holding only that record (and its directory fsynced), so that the loss stays
+// recorded without writing into the store.
 func (s *Store) appendQuarantineByPath(reason LostReason) error {
 	ok, err := s.fsys.Exists(s.path(AnchorFile))
-	if err != nil || !ok {
+	if err != nil {
 		return err
 	}
-	f, err := s.fsys.OpenFile(s.path(AnchorFile), os.O_WRONLY|os.O_APPEND, 0o600)
+	flags := os.O_WRONLY | os.O_APPEND
+	if !ok {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	f, err := s.fsys.OpenFile(s.path(AnchorFile), flags, 0o600)
 	if err != nil {
 		return fmt.Errorf("open anchor log: %w", err)
+	}
+	if !ok {
+		defer func() { _ = s.fsys.SyncDir(s.opts.Dir) }()
 	}
 	rec := AnchorRecord{Type: AnchorQuarantine, Reason: reason, StoreID: s.storeID, Seq: s.seq, Head: s.head}
 	if _, err := f.Write(rec.Encode()); err != nil {
@@ -1146,6 +1161,7 @@ func (s *Store) Quarantine(reason LostReason, detail string) {
 }
 
 func (s *Store) quarantineLocked(reason LostReason, detail string) {
+	ioFailure := reason == LostIOError
 	if s.state == StateLost && s.lost != reason {
 		reason = s.lost
 	}
@@ -1172,6 +1188,13 @@ func (s *Store) quarantineLocked(reason LostReason, detail string) {
 			d = fmt.Sprintf("%s (not every quarantine record was written: %v)", detail, errors.Join(errs...))
 		}
 		s.opts.Events(Event{Kind: EventQuarantine, Reason: reason, Seq: s.seq, Detail: d})
+	}
+	if ioFailure && s.db != nil && !guard.Off(guard.CloseAfterIOError) {
+		// After a failed commit, bbolt's in-memory meta may show a
+		// transaction that never reached the disk. Stop reading through it:
+		// reads of this store are refused until it is reopened from disk.
+		_ = s.db.Close()
+		s.db = nil
 	}
 }
 
@@ -1210,7 +1233,11 @@ func (s *Store) View(ctx context.Context, fn func(tx *Tx) error) (err error) {
 		return ErrClosed
 	}
 	if db == nil {
-		return &LostError{Reason: LostJournalCorrupt}
+		_, reason := s.State()
+		if reason == "" {
+			reason = LostJournalCorrupt
+		}
+		return &LostError{Reason: reason}
 	}
 	defer func() {
 		if r := recover(); r != nil {

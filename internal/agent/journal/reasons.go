@@ -102,6 +102,9 @@ var (
 	// ErrLocked is returned (wrapped) by Open when another writer holds the
 	// store.
 	ErrLocked = errors.New("journal locked by another writer")
+	// ErrNetworkFS is returned (wrapped) by Open for a state directory on a
+	// network or user-space file system.
+	ErrNetworkFS = errors.New("journal state directory is not on a local file system")
 	// ErrInsecureDir is returned (wrapped) by Open for a state directory that
 	// group or others may write.
 	ErrInsecureDir = errors.New("journal state directory is not private")

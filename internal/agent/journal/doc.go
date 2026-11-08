@@ -54,8 +54,9 @@ limitations under the License.
 //     in a quarantine marker file, in the anchor log and in the store; any
 //     one of them keeps it quarantined across a restart, and every open that
 //     finds a loss writes the missing ones again (the store record is not
-//     written into a rolled-back, corrupt or inconsistent store, which is
-//     kept as evidence). A failed fsync is never retried.
+//     written into a rolled-back, corrupt or inconsistent store, nor one
+//     whose anchor log is missing, which are kept as evidence; a missing
+//     anchor log is re-created holding only the quarantine record). A failed fsync is never retried.
 //   - A store marker binds the store_id to the host and its enrolment
 //     (written by the operation store). A store that has committed and whose
 //     marker is missing, or names another store, is inconsistent_store.
@@ -64,11 +65,20 @@ limitations under the License.
 //     never hides a rollback.
 //   - bbolt is never opened without fsync; a corrupt store surfaces as
 //     journal_corrupt, never as a panic of the caller.
-//   - One writer at a time: Open takes an exclusive lock on state.db.lock
-//     before it reads or changes any other file, and holds it until Close; a
-//     second Open fails with ErrLocked and changes nothing. bbolt's own file
-//     lock is a second guard. A state directory writable by group or others
-//     is refused.
+//   - One writer at a time: Open takes an exclusive flock on the state
+//     directory itself and then on state.db.lock (re-checked against the
+//     file at the path) before it reads or changes any other file, and holds
+//     both until Close; a second Open fails with ErrLocked and changes
+//     nothing, also when the lock file was deleted. bbolt's own file lock is
+//     a third guard. A state directory writable by group or others is
+//     refused.
+//   - The state directory must be on a local file system. On Linux, Open
+//     refuses NFS, SMB/CIFS, Ceph, AFS, Coda, 9p and FUSE (statfs), whose
+//     fsync, flock and O_EXCL semantics the journal cannot rely on; on other
+//     systems this is the operator's responsibility.
+//   - After an I/O failure the store serves no more reads (bbolt's in-memory
+//     state may show a commit that never reached the disk); a reopen reads
+//     what is on disk and stays quarantined.
 //   - Position.MarshalBinary gives (store_id, seq, head) in the fixed form an
 //     agent can sign and a manager can compare.
 //

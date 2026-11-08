@@ -73,6 +73,12 @@ const (
 	// CommitErrorQuarantine: a bbolt commit error that did not come from the
 	// transaction function quarantines the store.
 	CommitErrorQuarantine Name = "commit-error-quarantine"
+	// CloseAfterIOError: after an I/O failure the store stops serving reads
+	// through bbolt's in-memory state.
+	CloseAfterIOError Name = "close-after-io-error"
+	// UnknownEnrolmentNotDefinite: a grant naming an enrolment the store has
+	// no record of is not refused as definitely not performed.
+	UnknownEnrolmentNotDefinite Name = "unknown-enrolment-not-definite"
 	// KnownBeforeMismatch: admission answers a known op_id from its record
 	// or tombstone before refusing on the enrolment.
 	KnownBeforeMismatch Name = "known-before-mismatch"
@@ -84,5 +90,6 @@ func All() []Name {
 		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
+		CloseAfterIOError, UnknownEnrolmentNotDefinite,
 	}
 }
