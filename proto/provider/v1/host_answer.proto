@@ -1,0 +1,269 @@
+syntax = "proto3";
+
+package provider.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1;providerv1";
+
+// ---------------------------------------------------------------------------
+// Signed host answers
+//
+// A per-host agent behind a Provider can sign what it answers about one
+// operation, one VM placement or itself, so that a manager can act on the
+// answer without trusting the Provider that relays it. The manager puts a
+// fresh random nonce in the read request; the agent signs an answer body that
+// echoes the nonce and names its enrolment and the position of its operation
+// store; the Provider relays the SignedBlob unchanged. No built-in provider
+// sets or reads these messages, and a manager reads them only from a Provider
+// whose type requires operation identity.
+// ---------------------------------------------------------------------------
+
+// SignedBlob carries a signed message as the exact bytes that were signed.
+//
+// A verifier checks signature over the signature input built from body_type
+// and body, and only then decodes body as the message body_type names. It
+// never re-encodes body, and it never verifies a re-encoded copy.
+//
+// For a message signed by a host, the signature input is the 25 ASCII bytes
+// "virtrigaud.host-signed.v1" followed by one zero byte, then the length of
+// body_type as a 2-byte big-endian unsigned integer, then body_type, then the
+// length of body as a 4-byte big-endian unsigned integer, then body. The
+// signature is ECDSA over the SHA-256 digest of that input, by the key of
+// signer_certificate, ASN.1 DER encoded, with s at most half the curve order.
+// The signature algorithm is fixed by the type of that key; the only type
+// accepted is ECDSA P-256. body_type separates what the host signs.
+message SignedBlob {
+  // body is the serialised message that body_type names.
+  bytes body = 1;
+  // signature is the signature over the signature input (see above).
+  bytes signature = 2;
+  // signer_certificate is the DER-encoded X.509 certificate of the signing
+  // key: for a host answer, the host's current identity certificate. Its
+  // issuer is a trust anchor the verifier is configured with, and is never
+  // sent.
+  bytes signer_certificate = 3;
+  // body_type is the full protobuf name of the message in body, from a
+  // closed set: "provider.v1.OperationAnswer", "provider.v1.VMAnswer" or
+  // "provider.v1.HostAnswer". A verifier refuses any other value.
+  string body_type = 4;
+}
+
+// AgentState is the trust state of a host's operation store.
+enum AgentState {
+  // AGENT_STATE_UNSPECIFIED is never valid in an answer.
+  AGENT_STATE_UNSPECIFIED = 0;
+  // AGENT_STATE_UNATTESTED: the store opened and its local continuity checks
+  // passed, but the agent has not finished establishing continuity and
+  // recovering interrupted operations. It refuses every mutation
+  // (UNATTESTED).
+  AGENT_STATE_UNATTESTED = 1;
+  // AGENT_STATE_READY: the store's continuity is established and the
+  // recovery of interrupted operations has run; the agent accepts mutations.
+  AGENT_STATE_READY = 2;
+  // AGENT_STATE_QUARANTINED: the store lost its persistence guarantee
+  // (state_reason says why). The agent refuses every mutation (QUARANTINED)
+  // until the host is enrolled again.
+  AGENT_STATE_QUARANTINED = 3;
+}
+
+// AnswerContext binds a host answer to one request and to the host's state.
+// Every answer body carries one.
+message AnswerContext {
+  // nonce is the answer_nonce of the request this answer answers, echoed
+  // byte for byte: exactly 16 bytes.
+  bytes nonce = 1;
+  // provider_uid is the metadata.uid of the Provider the host is enrolled
+  // with.
+  string provider_uid = 2;
+  // host_id is the identity of the Host.
+  string host_id = 3;
+  // install_id is the random 16-byte identifier of the installation.
+  bytes install_id = 4;
+  // enrolment_id is the random 16-byte identifier of the host's current
+  // enrolment with the Provider: the enrolment that signer_certificate
+  // certifies.
+  bytes enrolment_id = 5;
+  // chain_position is the position of the host's operation store that the
+  // answer reflects: the 16-byte store identifier, then the sequence number
+  // as an 8-byte big-endian unsigned integer, then the 32-byte chain head at
+  // that sequence number (56 bytes). The sequence number counts from 1.
+  bytes chain_position = 6;
+  // agent_state is the trust state of the store when the answer was made.
+  AgentState agent_state = 7;
+  // state_reason qualifies a QUARANTINED agent_state (for example
+  // rolled_back or io_error); empty otherwise. Lower-case words joined by
+  // underscores; never a secret, a path or an address.
+  string state_reason = 8;
+  // agent_time is the host's clock when it made the answer. Informational:
+  // it is never used to decide freshness or validity.
+  google.protobuf.Timestamp agent_time = 9;
+  // continuity_head is the store's 32-byte chain head at the request's
+  // continuity_seq, from the same store as chain_position; empty when the
+  // request set no continuity_seq, or when the store holds no head at that
+  // sequence number (it keeps the heads of recent commits and of every
+  // checkpoint).
+  bytes continuity_head = 10;
+  // checkpoint_seq is the sequence number of the store's newest checkpoint
+  // at or below the sequence number in chain_position; 0 when the store has
+  // none yet. The store keeps the head of every checkpoint for its life.
+  uint64 checkpoint_seq = 11;
+  // checkpoint_head is the 32-byte chain head at checkpoint_seq; empty when
+  // checkpoint_seq is 0.
+  bytes checkpoint_head = 12;
+}
+
+// OperationRecordState is what a host's operation store records for one
+// operation. Values 1 to 7 are the states of an operation the store holds a
+// record or tombstone of; 8 and 9 say that it holds neither.
+enum OperationRecordState {
+  // OPERATION_RECORD_STATE_UNSPECIFIED is never valid in an answer.
+  OPERATION_RECORD_STATE_UNSPECIFIED = 0;
+  // OPERATION_RECORD_STATE_ACCEPTED: accepted and recorded; no step has
+  // started.
+  OPERATION_RECORD_STATE_ACCEPTED = 1;
+  // OPERATION_RECORD_STATE_EXECUTING: at least one step has started.
+  OPERATION_RECORD_STATE_EXECUTING = 2;
+  // OPERATION_RECORD_STATE_COMPLETED: every step is done. Terminal.
+  OPERATION_RECORD_STATE_COMPLETED = 3;
+  // OPERATION_RECORD_STATE_FAILED_CLEAN: a definite failure before any step
+  // that must happen at most once, or cannot be undone, started. Terminal.
+  OPERATION_RECORD_STATE_FAILED_CLEAN = 4;
+  // OPERATION_RECORD_STATE_FAILED_DIRTY: a definite failure after such a
+  // step started; something may have happened. Terminal.
+  OPERATION_RECORD_STATE_FAILED_DIRTY = 5;
+  // OPERATION_RECORD_STATE_OUTCOME_UNKNOWN: the store has too little
+  // evidence to tell whether the effect happened. Not terminal.
+  OPERATION_RECORD_STATE_OUTCOME_UNKNOWN = 6;
+  // OPERATION_RECORD_STATE_RETIRED: provably never started and never will.
+  // Terminal.
+  OPERATION_RECORD_STATE_RETIRED = 7;
+  // OPERATION_RECORD_STATE_NO_RECORD: the store holds the records of the
+  // named enrolment and has no record or tombstone of the op_id. This proves
+  // nothing about the operation: a delivery may still be in flight.
+  OPERATION_RECORD_STATE_NO_RECORD = 8;
+  // OPERATION_RECORD_STATE_UNKNOWN_TO_AGENT: the store does not hold the
+  // records of the named enrolment (they were discarded after the host was
+  // enrolled again, or belong to a store this one replaced). This proves
+  // nothing about the operation.
+  OPERATION_RECORD_STATE_UNKNOWN_TO_AGENT = 9;
+}
+
+// OperationAnswer is a host's signed answer about one operation, the body of
+// the SignedBlob in TaskStatusResponse.host_answer.
+message OperationAnswer {
+  // context binds the answer to the request and the host.
+  AnswerContext context = 1;
+  // op_id is the TaskStatusRequest.op_id asked about, echoed.
+  bytes op_id = 2;
+  // op_enrolment_id is the TaskStatusRequest.op_enrolment_id asked about,
+  // echoed. It can differ from context.enrolment_id when the operation
+  // belongs to an earlier enrolment whose records the store still holds.
+  bytes op_enrolment_id = 3;
+  // state is what the store records for the operation.
+  OperationRecordState state = 4;
+  // tombstoned is set when state was read from the operation's tombstone,
+  // the record kept after its step journal was dropped.
+  bool tombstoned = 5;
+  // kind, attempt, vm_uid, binding_id and intent_digest are the identity
+  // fields of the recorded operation, as its accepted grant named them. They
+  // are set for states 1 to 7 and unset for NO_RECORD and UNKNOWN_TO_AGENT.
+  // kind is the number of the recorded OperationKind (an int32, not the enum
+  // type, because provider.proto imports this file).
+  int32 kind = 6;
+  // attempt is the recorded attempt number.
+  uint64 attempt = 7;
+  // vm_uid is the recorded VirtualMachine metadata.uid.
+  string vm_uid = 8;
+  // binding_id is the recorded 16-byte placement identifier.
+  bytes binding_id = 9;
+  // intent_digest is the recorded salted digest of the request bytes.
+  bytes intent_digest = 10;
+  // outcome_reason qualifies state (for example witness_no_effect or
+  // provider_changed); empty when there is nothing to add. Lower-case words
+  // joined by underscores; never a secret, a path or an address.
+  string outcome_reason = 11;
+}
+
+// VMPresence is what a host's operation store records about one VM
+// placement.
+enum VMPresence {
+  // VM_PRESENCE_UNSPECIFIED is never valid in an answer.
+  VM_PRESENCE_UNSPECIFIED = 0;
+  // VM_PRESENCE_CREATING: a Create of this placement was accepted and has
+  // not completed.
+  VM_PRESENCE_CREATING = 1;
+  // VM_PRESENCE_PRESENT: a Create of this placement completed and no Delete
+  // of it has completed.
+  VM_PRESENCE_PRESENT = 2;
+  // VM_PRESENCE_DELETED: a Delete of this placement completed. The store
+  // wrote this record in the Delete's terminal transaction and never drops
+  // it.
+  VM_PRESENCE_DELETED = 3;
+  // VM_PRESENCE_OTHER_BINDING: the store records the VM under another
+  // placement.
+  VM_PRESENCE_OTHER_BINDING = 4;
+  // VM_PRESENCE_NO_RECORD: the store records nothing about the VM. This
+  // never means that the VM was deleted.
+  VM_PRESENCE_NO_RECORD = 5;
+}
+
+// VMAnswer is a host's signed answer about one VM placement, the body of the
+// SignedBlob in DescribeResponse.host_answer.
+message VMAnswer {
+  // context binds the answer to the request and the host.
+  AnswerContext context = 1;
+  // vm_uid is the DescribeRequest.owner.uid asked about, echoed.
+  string vm_uid = 2;
+  // binding_id is the DescribeRequest.binding_id asked about, echoed.
+  bytes binding_id = 3;
+  // presence is what the store records about the placement.
+  VMPresence presence = 4;
+  // delete_op_id is the op_id of the Delete that completed. Set only for
+  // DELETED.
+  bytes delete_op_id = 5;
+  // delete_enrolment_id is the enrolment the Delete ran under. Set only for
+  // DELETED.
+  bytes delete_enrolment_id = 6;
+  // delete_seq is the sequence number of the store's transaction that
+  // completed the Delete. Set only for DELETED.
+  uint64 delete_seq = 7;
+}
+
+// AgentMode is the protection mode a host is enrolled in, from its signed
+// enrolment.
+enum AgentMode {
+  // AGENT_MODE_UNSPECIFIED is never valid in an answer.
+  AGENT_MODE_UNSPECIFIED = 0;
+  // AGENT_MODE_IDENTITY: the host enforces operation identity (signed
+  // grants, at most one execution per operation) and no fencing.
+  AGENT_MODE_IDENTITY = 1;
+}
+
+// HostAnswer is a host's signed answer about itself, the body of the
+// SignedBlob in HostInfo.host_answer and in the per-host agent service.
+message HostAnswer {
+  // context binds the answer to the request and the host.
+  AnswerContext context = 1;
+  // agent_version is the agent's build version. Informational.
+  string agent_version = 2;
+  // agent_api_version is the version of the agent's RPC surface, from 1.
+  uint32 agent_api_version = 3;
+  // grant_versions are the operation grant versions the host implements,
+  // in ascending order, each at least 1. A manager never sends a grant whose
+  // grant_version is not in this list.
+  repeated uint32 grant_versions = 4;
+  // mode is the protection mode of the host's current enrolment.
+  AgentMode mode = 5;
+  // journal_schema_version is the schema version of the host's operation
+  // store.
+  uint32 journal_schema_version = 6;
+  // clock_floor is the lowest time the host accepts as now: it never
+  // checks a validity period against an earlier time. Informational for the
+  // manager, which compares it with its own clock.
+  google.protobuf.Timestamp clock_floor = 7;
+  // staged_certificate_sha256 is the SHA-256 digest of the DER encoding of
+  // a renewed identity certificate the host has staged and not yet put in
+  // use; empty when none is staged.
+  bytes staged_certificate_sha256 = 8;
+}

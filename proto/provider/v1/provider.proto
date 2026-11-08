@@ -1,6 +1,7 @@
 syntax = "proto3";
 package provider.v1;
 import "google/protobuf/timestamp.proto";
+import "provider/v1/host_answer.proto";
 option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1;providerv1";
 
 // Power operations enum
@@ -258,6 +259,22 @@ message DescribeRequest {
   // VirtualMachine that has a uid, single-host included. Additive and
   // backward-compatible.
   ObjectIdentity owner = 3;
+
+  // answer_nonce asks the per-host agent for a signed answer about the
+  // placement binding_id of the VM owner names (DescribeResponse.host_answer):
+  // exactly 16 random bytes, fresh for each request. Set together with
+  // binding_id. Set only for a Provider whose type requires operation identity;
+  // other Providers ignore it. No built-in provider reads it. Additive and
+  // backward-compatible.
+  bytes answer_nonce = 4;
+  // binding_id is the 16-byte identifier of the VM placement asked about. Set
+  // only together with answer_nonce.
+  bytes binding_id = 5;
+  // continuity_seq is a sequence number of the host's operation store at which
+  // the manager has seen a signed chain head: the agent answers with its own
+  // chain head at that sequence number in AnswerContext.continuity_head. 0 asks
+  // for nothing. Set only together with answer_nonce.
+  uint64 continuity_seq = 6;
 }
 
 message DescribeResponse {
@@ -286,16 +303,23 @@ message DescribeResponse {
   // (status.currentResources) to it when it is higher, so a VM is never
   // counted below the vCPUs it has. Additive and backward-compatible.
   int32 vcpus = 7;
+
+  // host_answer is the host's signed answer about the VM placement asked about:
+  // a SignedBlob of a VMAnswer, set only when the request carried answer_nonce.
+  // No built-in provider sets it. Additive and backward-compatible.
+  SignedBlob host_answer = 8;
 }
 
 // Check async task status.
 //
-// TaskStatus is not per-VM, so the request carries no target_host_id. A
+// TaskStatus is not per-VM, so a plain request carries no target_host_id. A
 // clustered provider therefore encodes the host into every task reference a
 // routed call returns, and routes TaskStatus by it; the reference stays opaque
-// to the manager. A clustered provider refuses a reference it did not issue:
-// one that is not host-encoded, or that names a host that is not in its own
-// host registry, is rejected with an error and its host is never contacted.
+// to the manager. (A request that asks for a signed answer names its host in
+// target_host_id instead; see answer_nonce.) A clustered provider refuses a
+// reference it did not issue: one that is not host-encoded, or that names a
+// host that is not in its own host registry, is rejected with an error and
+// its host is never contacted.
 // A clustered provider answers a well-formed reference to a host it fronts,
 // but to a task that host never issued, with codes.NotFound and the
 // google.rpc.ErrorInfo reason UNKNOWN_TO_AGENT (domain
@@ -304,6 +328,29 @@ message DescribeResponse {
 // The task references of single-host and thin-client providers are unchanged.
 message TaskStatusRequest {
   TaskRef task = 1;
+
+  // answer_nonce asks the per-host agent for a signed answer about the
+  // operation op_id names (TaskStatusResponse.host_answer): exactly 16 random
+  // bytes, fresh for each request. Set together with op_id, op_enrolment_id and
+  // target_host_id, with task unset; a provider routes such a request by
+  // target_host_id, and refuses one that also sets task. Set only for a
+  // Provider whose type requires operation identity; other Providers ignore it.
+  // No built-in provider reads it. Additive and backward-compatible.
+  bytes answer_nonce = 2;
+  // op_id is the 16-byte op_id of the operation asked about. Set only together
+  // with answer_nonce.
+  bytes op_id = 3;
+  // op_enrolment_id is the 16-byte enrolment_id that the operation's grants
+  // named. Set only together with answer_nonce.
+  bytes op_enrolment_id = 4;
+  // target_host_id is the host that ran, or was sent, the operation. Set only
+  // together with answer_nonce.
+  string target_host_id = 5;
+  // continuity_seq is a sequence number of the host's operation store at which
+  // the manager has seen a signed chain head: the agent answers with its own
+  // chain head at that sequence number in AnswerContext.continuity_head. 0 asks
+  // for nothing. Set only together with answer_nonce.
+  uint64 continuity_seq = 6;
 }
 
 // TaskOutcome is the typed result of an asynchronous task (ADR-0016 A7). A
@@ -357,6 +404,12 @@ message TaskStatusResponse {
   // for logs and operators. Empty otherwise. It is never a secret, an
   // endpoint or a credential. Additive and backward-compatible.
   string outcome_reason = 4;
+
+  // host_answer is the host's signed answer about the operation that the
+  // request's op_id names: a SignedBlob of an OperationAnswer, set only when
+  // the request carried answer_nonce. No built-in provider sets it. Additive
+  // and backward-compatible.
+  SignedBlob host_answer = 5;
 }
 
 // Snapshot operations
@@ -947,6 +1000,12 @@ message HostInfo {
   repeated string cpu_features = 9;    // CPU feature flags.
   repeated string machine_types = 10;  // Supported machine types.
   string emulator_version = 11;        // Emulator/hypervisor version.
+
+  // host_answer is the host's signed answer about itself: a SignedBlob of a
+  // HostAnswer, set only in the answer to a GetHostInfoRequest that carried
+  // answer_nonce (never in ListHosts). No built-in provider sets it. Additive
+  // and backward-compatible.
+  SignedBlob host_answer = 12;
 }
 
 // HostHealth is the health of a host as reported by a clustered provider. How
@@ -962,6 +1021,18 @@ enum HostHealth {
 // reconciling one Host resource. Returns a HostInfo.
 message GetHostInfoRequest {
   string host_id = 1;
+
+  // answer_nonce asks the host's per-host agent for a signed answer about
+  // itself (HostInfo.host_answer): exactly 16 random bytes, fresh for each
+  // request. Set only for a Provider whose type requires operation identity;
+  // other Providers ignore it. No built-in provider reads it. Additive and
+  // backward-compatible.
+  bytes answer_nonce = 2;
+  // continuity_seq is a sequence number of the host's operation store at which
+  // the manager has seen a signed chain head: the agent answers with its own
+  // chain head at that sequence number in AnswerContext.continuity_head. 0 asks
+  // for nothing. Set only together with answer_nonce.
+  uint64 continuity_seq = 3;
 }
 
 // Capability check - what features does this provider support

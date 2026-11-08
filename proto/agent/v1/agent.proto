@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+// Package agent.v1 is the service a per-host agent offers to the Provider
+// that routes to it. It is internal to VirtRigaud: it is not part of the
+// provider contract, and external Provider implementations neither serve nor
+// call it. Changes to it are additive, like every message in this module.
+package agent.v1;
+
+import "provider/v1/host_answer.proto";
+
+option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1;agentv1";
+
+// AgentService is served by a per-host agent, next to the provider.v1
+// Provider methods it serves for its host, and called only by the Provider
+// that routes to the host, over the mutually authenticated connection that
+// Provider holds to the agent. Every answer carries a host-signed HostAnswer
+// that echoes the caller's answer_nonce.
+service AgentService {
+  // Hello is the first call on each connection: the caller states its own
+  // API version and learns the agent's (HostAnswer.agent_api_version).
+  rpc Hello(HelloRequest) returns (HelloResponse);
+  // InstallRenewedCertificate stages, or puts in use, a renewed identity
+  // certificate for the new key the host generated for its renewal. It
+  // needs no grant: the agent accepts only a certificate that chains to the
+  // identity issuer it pinned at enrolment, certifies exactly the identities
+  // of its current certificate, and certifies the key of the renewal it
+  // requested itself.
+  rpc InstallRenewedCertificate(InstallRenewedCertificateRequest) returns (InstallRenewedCertificateResponse);
+  // AgentStatus reports the agent's state. It is a plain read.
+  rpc AgentStatus(AgentStatusRequest) returns (AgentStatusResponse);
+}
+
+// HelloRequest opens a connection.
+message HelloRequest {
+  // answer_nonce is exactly 16 random bytes, fresh for each request,
+  // echoed in the HostAnswer.
+  bytes answer_nonce = 1;
+  // caller_api_version is the caller's version of this service, from 1.
+  uint32 caller_api_version = 2;
+}
+
+// HelloResponse answers Hello.
+message HelloResponse {
+  // host_answer is a SignedBlob of a HostAnswer.
+  provider.v1.SignedBlob host_answer = 1;
+}
+
+// InstallRenewedCertificateRequest carries a renewed certificate.
+message InstallRenewedCertificateRequest {
+  // answer_nonce is exactly 16 random bytes, fresh for each request,
+  // echoed in the HostAnswer.
+  bytes answer_nonce = 1;
+  // certificate is the DER-encoded renewed certificate.
+  bytes certificate = 2;
+  // activate puts the staged certificate in use. When false, the agent
+  // validates certificate and stages it. When true, certificate must equal
+  // the staged certificate byte for byte, and the agent uses it, and its
+  // key, from then on; the answer is signed with the new key.
+  bool activate = 3;
+}
+
+// InstallRenewedCertificateResponse answers InstallRenewedCertificate.
+message InstallRenewedCertificateResponse {
+  // host_answer is a SignedBlob of a HostAnswer; its
+  // staged_certificate_sha256 names the staged certificate, or is empty
+  // once the certificate is in use.
+  provider.v1.SignedBlob host_answer = 1;
+}
+
+// AgentStatusRequest asks for the agent's state.
+message AgentStatusRequest {
+  // answer_nonce is exactly 16 random bytes, fresh for each request,
+  // echoed in the HostAnswer.
+  bytes answer_nonce = 1;
+}
+
+// AgentStatusResponse answers AgentStatus.
+message AgentStatusResponse {
+  // host_answer is a SignedBlob of a HostAnswer.
+  provider.v1.SignedBlob host_answer = 1;
+}
