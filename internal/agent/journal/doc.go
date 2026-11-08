@@ -73,9 +73,14 @@ limitations under the License.
 //     a third guard. A state directory writable by group or others is
 //     refused.
 //   - The state directory must be on a local file system. On Linux, Open
-//     refuses NFS, SMB/CIFS, Ceph, AFS, Coda, 9p and FUSE (statfs), whose
-//     fsync, flock and O_EXCL semantics the journal cannot rely on; on other
-//     systems this is the operator's responsibility.
+//     refuses, best-effort by statfs magic number, NFS, SMB/CIFS, Ceph, AFS,
+//     Coda, 9p, FUSE (which includes virtiofs), Lustre, GPFS, GFS2, OCFS2,
+//     BeeGFS and OrangeFS, whose fsync, flock and O_EXCL semantics the journal
+//     cannot rely on; on other systems, and for file systems the list does not
+//     name, this is the operator's responsibility. Shared volumes in some
+//     development setups (virtiofs, WSL2 drive mounts) are refused.
+//   - The state directory must not be renamed or moved while a Store holds
+//     it: the lock follows the directory, but files are opened by path.
 //   - After an I/O failure the store serves no more reads (bbolt's in-memory
 //     state may show a commit that never reached the disk); a reopen reads
 //     what is on disk and stays quarantined.

@@ -1220,7 +1220,9 @@ func (s *Store) writeStoreQuarantine(reason LostReason, detail string) (err erro
 }
 
 // View runs fn in a read transaction. Reads are served in every state in
-// which the store could be opened, including StateLost.
+// which the store could be opened, including StateLost. fn must not call
+// back into the Store: an I/O failure closes the database while the read is
+// in flight, and that close waits for fn to return.
 func (s *Store) View(ctx context.Context, fn func(tx *Tx) error) (err error) {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("journal view: %w", err)

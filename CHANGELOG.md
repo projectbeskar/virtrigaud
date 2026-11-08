@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/agent/journal/fstype_linux.go`: on Linux, a state directory on NFS, SMB/CIFS, Ceph, AFS, Coda, 9p or FUSE is refused; elsewhere a local file system is documented as required.
 - `internal/agent/journal/store.go`: after an I/O failure the bbolt handle is closed, so a quarantined store no longer serves reads that may include a commit that never reached the disk. A missing anchor log is recorded by re-creating the anchor log with only the quarantine record, never by writing into the store, which stays untouched as evidence.
 - Tests for each, plus the stale-record write refusal and a rotation failure after the rename. Two more mutation guards (21 in all).
+- `internal/agent/journal/fstype_linux.go`: file-system magic numbers are compared as 32-bit unsigned values, so CIFS and SMB2 are also refused where `Statfs_t.Type` is a signed 32-bit integer; Lustre, GPFS, GFS2, OCFS2, BeeGFS and OrangeFS are refused too, and the list is documented as best-effort. `doc.go`, `store.go`: the state directory must not be moved while held, and a `View` callback must not call back into the store.
 
 ### Why
 A second automated security review found that an operation could still be answered as definitely not performed after a store was replaced, and three smaller gaps. No human security review has happened yet.

@@ -23,10 +23,14 @@ import (
 	"syscall"
 )
 
-// networkFilesystems are the statfs magic numbers of network and cluster file
-// systems, on which fsync, flock and O_EXCL do not give the guarantees the
-// journal relies on.
-var networkFilesystems = map[int64]string{
+// networkFilesystems are the statfs magic numbers of network, cluster and
+// user-space file systems, on which fsync, flock and O_EXCL do not give the
+// guarantees the journal relies on. The list is best-effort: a file system it
+// does not name is not refused, so a local file system stays the operator's
+// responsibility. Magic numbers are 32-bit; they are compared as uint32 so that
+// values with the top bit set also match where Statfs_t.Type is a signed 32-bit
+// integer.
+var networkFilesystems = map[uint32]string{
 	0x6969:     "nfs",
 	0x517b:     "smb",
 	0xff534d42: "cifs",
@@ -36,6 +40,12 @@ var networkFilesystems = map[int64]string{
 	0x73757245: "coda",
 	0x01021997: "9p",
 	0x65735546: "fuse",
+	0x0bd00bd0: "lustre",
+	0x47504653: "gpfs",
+	0x01161970: "gfs2",
+	0x7461636f: "ocfs2",
+	0x19830326: "beegfs",
+	0x20030528: "orangefs",
 }
 
 // checkLocalFS refuses a state directory on a network or user-space file
@@ -45,11 +55,11 @@ func checkLocalFS(dir string) error {
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return fmt.Errorf("statfs %s: %w", dir, err)
 	}
-	return classifyFS(int64(st.Type), dir) //nolint:unconvert // Statfs_t.Type is narrower than int64 on some architectures
+	return classifyFS(uint32(st.Type), dir) //nolint:gosec,unconvert // magic numbers are 32-bit; Statfs_t.Type is int32 or int64 depending on the architecture
 }
 
 // classifyFS refuses the network and user-space file-system magic numbers.
-func classifyFS(magic int64, dir string) error {
+func classifyFS(magic uint32, dir string) error {
 	if name, ok := networkFilesystems[magic]; ok {
 		return fmt.Errorf("%w: %s is on %s", ErrNetworkFS, dir, name)
 	}
