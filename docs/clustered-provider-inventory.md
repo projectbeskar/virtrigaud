@@ -156,12 +156,23 @@ right now*.
 | `credentialSecretRef` | Optional per-host credential override; defaults to the Provider's. **Namespace-local**: the Secret must be in the Host's (= the Provider's) namespace. |
 | `labels` | Placement facts consumed as **hard scheduling constraints** (ADR-0007 D6): storage-pool visibility, network/bridge visibility, zone/rack. |
 | `schedulable` | Defaults `true`; set `false` to cordon (no new placement, existing VMs stay). |
+| `identity` | Used only by development builds. The host's identity anchor for per-host agent enrolment (for example a TPM endorsement-key hash, a hardware serial number or an administrator-assigned UUID; 1–256 characters of `[A-Za-z0-9._:-]`, starting with a letter or digit). Set once: a CEL rule refuses any change or removal after it is set. Ignored by libvirt hosts. See [host-agent-enrolment.md](host-agent-enrolment.md). |
+| `revoked` | Used only by development builds. When `true`, the manager never approves a certificate request for the host's agent, and the host is not rendered into its Provider's inventory with agent credentials. Ignored by libvirt hosts. |
 
 `status` (populated later by the inventory-sync controller) reports `health`
 (`Ready`\|`NotReady`\|`Unknown`), allocatable CPU/memory/storage, CPU
 model/features, machine types, emulator version, bound-VM count, and last
 heartbeat. It carries capacity and health only — **never connection secrets**
 (ADR-0007 Security).
+
+`status.agent` is used only by development builds, and only for a host whose
+Provider runs a per-host agent (`spec.type: cloudhypervisor`). It mirrors the
+host's manager-owned pins Secret: `mode` (`identity`), `enrolmentID`,
+`pendingEnrolmentID`, `requestURIs` (the exact URI subject alternative names a
+certificate request must carry), `keyPins` (SHA-256 of each pinned key's
+SubjectPublicKeyInfo, hex) and `certificateExpiry`, with an `AgentEnrolled`
+condition. It holds public identifiers only. See
+[host-agent-enrolment.md](host-agent-enrolment.md).
 
 ### Same-namespace model (security)
 
