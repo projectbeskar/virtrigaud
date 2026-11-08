@@ -5,6 +5,79 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-08 00:53] - Operation store library: second round of review fixes (not used by any binary yet)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/agent/opstore/admit.go`: a grant naming an enrolment the store has no record of (discarded, a predecessor of the enrolment the store was made for, or one of a store that was lost or wiped) is refused `UNKNOWN_TO_AGENT`, not `GRANT_MISMATCH`, so an operation that ran under that enrolment is never answered as definitely not performed. `GRANT_MISMATCH` remains only where the store can prove the op_id was never accepted (a frozen enrolment it holds, an early mint epoch on the active one). `Enrolment.Predecessors` records earlier enrolment ids as retired.
+- `internal/agent/journal/lock_unix.go`: `Open` flocks the state directory itself before the lock file and re-opens the lock file when the file at its path is not the inode it locked; deleting the lock file no longer lets a second `Open` change files of a running store.
+- `internal/agent/journal/fstype_linux.go`: on Linux, a state directory on NFS, SMB/CIFS, Ceph, AFS, Coda, 9p or FUSE is refused; elsewhere a local file system is documented as required.
+- `internal/agent/journal/store.go`: after an I/O failure the bbolt handle is closed, so a quarantined store no longer serves reads that may include a commit that never reached the disk. A missing anchor log is recorded by re-creating the anchor log with only the quarantine record, never by writing into the store, which stays untouched as evidence.
+- Tests for each, plus the stale-record write refusal and a rotation failure after the rename. Two more mutation guards (21 in all).
+- `internal/agent/journal/fstype_linux.go`: file-system magic numbers are compared as 32-bit unsigned values, so CIFS and SMB2 are also refused where `Statfs_t.Type` is a signed 32-bit integer; Lustre, GPFS, GFS2, OCFS2, BeeGFS and OrangeFS are refused too, and the list is documented as best-effort. `doc.go`, `store.go`: the state directory must not be moved while held, and a `View` callback must not call back into the store.
+
+### Why
+A second automated security review found that an operation could still be answered as definitely not performed after a store was replaced, and three smaller gaps. No human security review has happened yet.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-11-08 00:33] - Operation store library hardening after an automated security review (not used by any binary yet)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/agent/journal/store.go`: any bbolt commit error that did not come from the transaction function quarantines the store (`io_error`); before, a failed fdatasync, which bbolt returns as a bare errno, left the store committing. A test makes bbolt's own fdatasync fail and pins that error shape.
+- `internal/agent/journal/store.go`: every open that finds a loss writes the missing quarantine records again (marker file, anchor log, and the store record, including for `io_error`), so removing one record never lifts a quarantine. The store record is not written into a rolled-back, corrupt or inconsistent store, which is kept as evidence. A loss found through a bbolt panic is recorded too.
+- `internal/agent/journal/store.go`, `lock_unix.go`: `Open` takes an exclusive lock on `state.db.lock` before it reads or changes any other file and holds it until `Close`; a refused second `Open` changes nothing on disk. A state directory writable by group or others is refused, and file opens do not follow symbolic links.
+- `internal/agent/journal/store.go`, `journalpb/journal.proto`: the store marker binds the store_id to the host and the active enrolment; a store that has committed and whose marker is missing, or names another store, is `inconsistent_store` (it was silently rewritten). `internal/agent/opstore/store.go`: activation writes the binding (pending, commit, active), and a store whose marker names another host or enrolment is quarantined at open.
+- `internal/agent/opstore/admit.go`: a known op_id is answered from its record or tombstone before any enrolment check, so an operation that ran under a predecessor enrolment, or during a re-enrolment, gets its recorded state, never `GRANT_MISMATCH`. A grant naming a discarded enrolment is refused `UNKNOWN_TO_AGENT`; discarded enrolment ids are never activated again. `Refusal.DefiniteNotPerformed` follows the provider contract (only `GRANT_MISMATCH`, `PROVIDER_MISMATCH` and a full store are definite); the documentation no longer calls every refusal definite.
+- `internal/agent/opstore/recover.go`: recovery runs once and first scans the witness files; a witness of an operation or enrolment the store has no record of quarantines the store. A record that left the runnable states is never overwritten by a stale copy.
+- `internal/agent/opstore/admit.go`, `journal/store.go`: the store-full threshold uses the live size (`LiveSize`), so compaction clears it.
+- `internal/agent/journal`: migrations run under the store lock and the store becomes ready only when they succeed; a first boot that left an empty anchor log starts again; a rotation failure after the rename records the quarantine in the new log; anchor commit records must increase; the anchor log read is bounded.
+- `internal/agent/opstore`: VM tombstones are kept across re-enrolments; a Create of an existing placement is refused `VM_BINDING_STALE`; a re-enrolment checks the new id before freezing; audit keys use a 32-bit index; request field lengths are bounded.
+- `internal/agent/internal/guard`: six more mutation guards (lock file, marker check, quarantine re-write, witness scan, commit-error classification, known-op lookup); `Off` is false outside a test binary even in a mutation build.
+
+### Added
+- `internal/agent/journal`: `Position.MarshalBinary` and `UnmarshalBinary`, the fixed (store_id, seq, head) form an agent can sign; `opstore.Store.Position`; `journal.FS.ReadDir`.
+- `Makefile`: `make test-agent-model` (100000 reference-model seeds). The default count in a normal test run is now 15000 (3000 with `-short`).
+
+### Changed
+- Package documentation: only bbolt's meta pages are checksummed (a damaged data page or a record edited in place that still decodes is not detected); losing the whole state set looks like a fresh host and is undetectable on the host, so an enrolment id must never be re-used for a new store and the defence is a manager that remembers the host's store_id and chain position; the event and audit callbacks run under the store lock.
+
+### Why
+An automated security review of the library found that a real fdatasync failure inside bbolt did not quarantine the store, that a quarantine could be lifted by deleting one file, that a second process could change files before taking the lock, and that an operation that had run could be answered as definitely not performed after a re-enrolment. Each could allow an operation to run twice. No human security review has happened yet.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-11-07 23:55] - Durable operation store library for a per-host agent (not used by any binary yet)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/journal`: the durable journal of a per-host agent's operation store. A bbolt store opened with full fsync (unsynchronised options are refused), a hash chain inside it (every write transaction is one chain step, counting from 1, over the exact bytes written), a separately fsynced append-only anchor log written after each commit and before the commit returns, chain checkpoints, and a schema with a minimum reader version (a store that needs a newer reader refuses to open and names the version). At open, before any commit, it verifies the chain and compares the store with the anchor log under a tail rule: a store behind its anchor is `rolled_back`, more than one ahead or diverging is `inconsistent_store`, a missing store or anchor is `journal_missing` or `anchor_missing`, an invalid anchor record before the last is `anchor_corrupt`; exactly one unacknowledged commit is accepted and re-anchored, and a torn last anchor record is cut off. A lost store refuses commits and serves reads; the loss is recorded durably in a quarantine marker file, the anchor log and, when writable, the store. A failed fsync quarantines and is never retried. Migrations run only after continuity is established. `journal.FS` is the fault-injection interface for every file other than the bbolt store; `journaltest` provides an in-memory implementation that drops unsynchronised data on a simulated crash.
+- `internal/agent/journal/journalpb/journal.proto` and generated code: the internal record schema (not part of the public proto module, never on a wire); `make proto-agent-journal` lints and regenerates it.
+- `internal/agent/opstore`: operation records, op_id tombstones, VM records, attempt marks and VM tombstones kept for the life of the enrolment; O_EXCL witness files made durable before a once step's effect and never removed while the enrolment lasts; the admission decision table (dedup by op_id with every identity field and the intent digest, VM busy, binding check, attempts that only increase, the first-delivery mint epoch rule, a size threshold); the step journal (intent, witness, effect, done, then one terminal transaction with the tombstone, the VM update and, for a completed Delete, the VM tombstone); per-kind step deadlines resolved by inspection; the recovery classifier (`Classify`), which never runs a once or irreversible step twice and answers OutcomeUnknown when the evidence cannot decide; payload-only compaction; the re-enrolment freeze and its confirmation. No request bytes are stored, journalled or audited.
+- `internal/agent/executor`: the executor interface (steps with an idempotent, once or irreversible class, launch-identity inspection, goal check). No implementation.
+- `internal/agent/importboundary_test.go`: nothing under `internal/agent` links Kubernetes, controller-runtime, the API types, the controllers or the provider contract package.
+- `go.mod`: `go.etcd.io/bbolt` v1.4.3 as a direct dependency (checked with govulncheck and the OSV database: no known vulnerabilities); `github.com/spf13/pflag` (indirect) moves from v1.0.5 to v1.0.6, the minimum bbolt v1.4.3 requires.
+- `hack/agent-mutation.sh`, `Makefile`: `make test-agent-mutation` switches off each safety guard of the store in a `virtrigaud_mutation` test build and fails if no test notices; `make test-agent-model` and `make test-agent-model-long` run the reference-model test for 100000 and 10 million seeds; `make fuzz-agent` runs the fuzz targets.
+- Tests: crash points across admission, steps, terminal writes, compaction, anchor rotation and re-enrolment with a fault-injecting file system and commit hooks (one effect, the terminal answer, the tombstone and a verifying chain after recovery); every rollback-detection case, including the documented undetectable joint restore; quarantine durability under injected fsync and commit errors; one test per admission row and twelve concurrent duplicates producing one record and one effect; the recovery table; compaction and the freeze; a redaction canary over the store, the anchor log, witnesses, markers and audit events; a reference-model test with 15000 seeded runs in the normal test run (3000 with `-short`; `make test-agent-model` runs 100000); fuzz targets for anchor parsing and record decoding; benchmarks (report only).
+
+### Why
+A per-host agent must execute each signed operation at most once and answer for it truthfully across crashes, restarts and storage faults. This library is that store, built and tested on its own before any agent binary or wire change uses it. The package documentation states its guarantees and its limits: in particular, a simultaneous restore of both the store and its anchor log is undetectable on the host alone.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-07 17:30] - Signed power and Reconfigure, one attempt at a time, a Delete that supersedes held attempts, and the identity Delete rule for Providers that require operation identity (development builds only)
 **Author:** @wrkode (William Rizzo)
 

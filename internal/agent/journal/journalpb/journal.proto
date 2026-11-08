@@ -1,0 +1,291 @@
+// Copyright 2026.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Record schema of the per-host agent's durable operation store.
+//
+// INTERNAL AND UNSTABLE. This file is not part of the public proto module, the
+// provider SDK or any wire protocol. The messages are the values the agent
+// writes into its local store. They never leave the host.
+//
+// Evolution rules:
+//   - Changes are additive: new fields and new enum values only. A field number
+//     is never reused and never changes type.
+//   - A reader keeps fields it does not know: a record it rewrites carries them
+//     unchanged.
+//   - A change that alters the meaning of an existing record raises the store's
+//     min_reader_version, so that an older agent refuses to open the store.
+//   - No message holds request bytes, user data, metadata documents or grant
+//     bytes. Records hold identity fields and the salted intent digest only.
+//
+// Regenerate with `make proto-agent-journal`.
+syntax = "proto3";
+
+package virtrigaud.agent.journal.v1;
+
+option go_package = "github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb";
+
+// StoreMeta identifies a store and its schema.
+message StoreMeta {
+  // store_id is the random 16-byte identifier drawn when the store was made.
+  bytes store_id = 1;
+  // schema_version is the schema the store was last written with.
+  uint32 schema_version = 2;
+  // min_reader_version is the lowest reader schema that may open the store.
+  uint32 min_reader_version = 3;
+  // writer_version is the writer schema of the binary that last migrated the
+  // store.
+  uint32 writer_version = 4;
+}
+
+// Quarantine records why the store lost its persistence guarantee.
+message Quarantine {
+  // reason is one of the journal's lost reasons, for example "rolled_back".
+  string reason = 1;
+  // seq is the chain position the store held when the loss was detected.
+  uint64 seq = 2;
+  // detail is a short operator-facing explanation. It never quotes request
+  // bytes.
+  string detail = 3;
+}
+
+// Epoch is an epoch reference: a monotone counter and the holder that issued
+// it.
+message Epoch {
+  // counter counts from 1.
+  uint64 counter = 1;
+  // holder identifies the issuer of the counter.
+  bytes holder = 2;
+}
+
+// EnrolmentState is the life-cycle state of one enrolment of the host.
+enum EnrolmentState {
+  // ENROLMENT_STATE_UNSPECIFIED is never written.
+  ENROLMENT_STATE_UNSPECIFIED = 0;
+  // ENROLMENT_STATE_ACTIVE is the enrolment the host accepts operations for.
+  ENROLMENT_STATE_ACTIVE = 1;
+  // ENROLMENT_STATE_FROZEN is a predecessor enrolment whose open operations
+  // were frozen. Its records are kept, read-only, until the freeze is
+  // confirmed.
+  ENROLMENT_STATE_FROZEN = 2;
+}
+
+// Enrolment is one enrolment of the host with a Provider.
+message Enrolment {
+  // enrolment_id is the random 16-byte identifier of the enrolment.
+  bytes enrolment_id = 1;
+  // provider_uid is the metadata.uid of the Provider the host is enrolled
+  // with.
+  string provider_uid = 2;
+  // install_id is the random 16-byte identifier of the installation.
+  bytes install_id = 3;
+  // start_epoch is the epoch counter at which the enrolment started. It is
+  // strictly greater than every earlier enrolment's.
+  uint64 start_epoch = 4;
+  // state is the enrolment's life-cycle state.
+  EnrolmentState state = 5;
+  // host_id is the identity of the host the enrolment belongs to.
+  string host_id = 6;
+  // store_id is the store the enrolment was activated in.
+  bytes store_id = 7;
+}
+
+// AgentMeta is the store's pointer to the current enrolment.
+message AgentMeta {
+  // current_enrolment_id is the active enrolment, or empty while none is
+  // active.
+  bytes current_enrolment_id = 1;
+  // last_start_epoch is the highest start_epoch of any enrolment so far.
+  uint64 last_start_epoch = 2;
+  // retired_enrolment_ids are enrolments whose records were discarded after
+  // a confirmed freeze. They are never activated again, and an operation
+  // naming one is never answered as definitely not performed.
+  repeated bytes retired_enrolment_ids = 3;
+}
+
+// StoreMarker is the content of the store marker file. It binds the store to
+// the host and its enrolment, and tells a missing store from a fresh host.
+message StoreMarker {
+  // store_id is the store the marker belongs to.
+  bytes store_id = 1;
+  // host_id is the host identity of the active enrolment, if any.
+  string host_id = 2;
+  // enrolment_id is the active enrolment, if any.
+  bytes enrolment_id = 3;
+  // pending_enrolment_id is an enrolment being activated: written before
+  // its activation commit, cleared after it.
+  bytes pending_enrolment_id = 4;
+}
+
+// OpState is the state of one operation at the agent.
+enum OpState {
+  // OP_STATE_UNSPECIFIED is never written.
+  OP_STATE_UNSPECIFIED = 0;
+  // OP_STATE_ACCEPTED: admitted and recorded; no step intent yet.
+  OP_STATE_ACCEPTED = 1;
+  // OP_STATE_EXECUTING: at least one step intent is durable.
+  OP_STATE_EXECUTING = 2;
+  // OP_STATE_COMPLETED: every step is done. Terminal.
+  OP_STATE_COMPLETED = 3;
+  // OP_STATE_FAILED_CLEAN: definite failure before any once or irreversible
+  // step intent. Terminal.
+  OP_STATE_FAILED_CLEAN = 4;
+  // OP_STATE_FAILED_DIRTY: definite failure after a once or irreversible step
+  // intent. Terminal; the VM is held for inspection.
+  OP_STATE_FAILED_DIRTY = 5;
+  // OP_STATE_OUTCOME_UNKNOWN: not enough evidence to say whether the effect
+  // happened. Not terminal: the VM stays held.
+  OP_STATE_OUTCOME_UNKNOWN = 6;
+  // OP_STATE_RETIRED: provably never started and never will. Terminal.
+  OP_STATE_RETIRED = 7;
+}
+
+// Step is one step of an operation's step journal.
+message Step {
+  // name is the executor's step name.
+  string name = 1;
+  // once marks a step whose effect must happen at most once; it is guarded
+  // by a witness file.
+  bool once = 2;
+  // irreversible marks a step whose effect cannot be undone.
+  bool irreversible = 3;
+  // intent is set, durably, before the step's witness and effect.
+  bool intent = 4;
+  // done is set after the step's effect is known to have happened.
+  bool done = 5;
+  // evidence says how done was established: "effect", "inspection" or
+  // "goal".
+  string evidence = 6;
+}
+
+// OpIdentity holds the identity fields of an operation, taken from its
+// verified grant. Two deliveries name the same operation only when every
+// field is equal.
+message OpIdentity {
+  // provider_uid is the Provider metadata.uid the grant names.
+  string provider_uid = 1;
+  // enrolment_id is the enrolment the grant names.
+  bytes enrolment_id = 2;
+  // op_id is the operation's random 16-byte identifier.
+  bytes op_id = 3;
+  // vm_uid is the VirtualMachine metadata.uid.
+  string vm_uid = 4;
+  // binding_id is the VM's placement identifier on this host.
+  bytes binding_id = 5;
+  // kind is the provider.v1 OperationKind number.
+  int32 kind = 6;
+  // attempt is the attempt number for the VM and kind.
+  uint64 attempt = 7;
+  // intent_digest is the salted digest of the request bytes. The request
+  // bytes themselves are never stored.
+  bytes intent_digest = 8;
+  // mint_epoch is the epoch at which op_id was minted.
+  Epoch mint_epoch = 9;
+}
+
+// OpRecord is the full record of one operation.
+message OpRecord {
+  // identity holds the operation's identity fields.
+  OpIdentity identity = 1;
+  // state is the operation's state.
+  OpState state = 2;
+  // irrev is set once any once or irreversible step intent is durable. It
+  // never clears.
+  bool irrev = 3;
+  // steps is the step journal. Compaction drops it after the operation is
+  // over; the tombstone keeps the outcome.
+  repeated Step steps = 4;
+  // reason qualifies state, for example "witness_no_effect".
+  string reason = 5;
+  // accepted_seq is the chain position of the accepting transaction.
+  uint64 accepted_seq = 6;
+  // compacted is set when the step journal was dropped.
+  bool compacted = 7;
+}
+
+// Tombstone is the never-dropped trace of a finished operation, kept for the
+// life of the enrolment.
+message Tombstone {
+  // identity holds the operation's identity fields.
+  OpIdentity identity = 1;
+  // state is the operation's terminal state.
+  OpState state = 2;
+  // irrev is the record's irrev flag.
+  bool irrev = 3;
+  // reason qualifies state.
+  string reason = 4;
+}
+
+// VMLifecycle is the agent's view of a VM's existence on this host.
+enum VMLifecycle {
+  // VM_LIFECYCLE_UNSPECIFIED is never written.
+  VM_LIFECYCLE_UNSPECIFIED = 0;
+  // VM_LIFECYCLE_CREATING: a Create for the binding was accepted and has not
+  // completed.
+  VM_LIFECYCLE_CREATING = 1;
+  // VM_LIFECYCLE_PRESENT: a Create for the binding completed.
+  VM_LIFECYCLE_PRESENT = 2;
+}
+
+// VMRecord is the agent's record of one VM placement.
+message VMRecord {
+  // vm_uid is the VirtualMachine metadata.uid.
+  string vm_uid = 1;
+  // binding_id is the placement the record belongs to.
+  bytes binding_id = 2;
+  // busy_op_id is the VM's non-terminal mutating operation, or empty.
+  bytes busy_op_id = 3;
+  // busy_enrolment_id is the enrolment of busy_op_id.
+  bytes busy_enrolment_id = 4;
+  // lifecycle is the VM's existence state.
+  VMLifecycle lifecycle = 5;
+}
+
+// VMTombstone records that a Delete of a VM placement completed. It is
+// written in the Delete's terminal transaction.
+message VMTombstone {
+  // delete_op_id is the op_id of the completed Delete.
+  bytes delete_op_id = 1;
+  // terminal_seq is the chain position of the Delete's terminal transaction.
+  uint64 terminal_seq = 2;
+  // enrolment_id is the enrolment the Delete ran under.
+  bytes enrolment_id = 3;
+}
+
+// AttemptMark is the highest attempt the host has seen for one VM and kind in
+// one enrolment.
+message AttemptMark {
+  // attempt is the highest attempt number seen.
+  uint64 attempt = 1;
+}
+
+// AuditEvent is one entry of the append-only audit bucket. It never holds
+// request bytes.
+message AuditEvent {
+  // event names what happened, for example "accepted" or "terminal".
+  string event = 1;
+  // op_id is the operation concerned, if any.
+  bytes op_id = 2;
+  // vm_uid is the VM concerned, if any.
+  string vm_uid = 3;
+  // kind is the provider.v1 OperationKind number, if any.
+  int32 kind = 4;
+  // actor names who caused the event, for example the Provider identity.
+  string actor = 5;
+  // reason qualifies the event.
+  string reason = 6;
+  // state is the operation's state after the event.
+  OpState state = 7;
+  // enrolment_id is the enrolment concerned, if any.
+  bytes enrolment_id = 8;
+}

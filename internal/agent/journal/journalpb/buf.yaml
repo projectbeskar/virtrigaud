@@ -1,0 +1,12 @@
+# buf module for the per-host agent's internal journal record schema.
+# Not part of the public proto module; see journal.proto.
+version: v1
+lint:
+  use:
+    - STANDARD
+  except:
+    # The package name is not a directory path in this repository.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE

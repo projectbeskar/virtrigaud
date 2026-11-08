@@ -1,0 +1,8 @@
+# Code generation for the per-host agent's internal journal record schema.
+# Run with `make proto-agent-journal`.
+version: v1
+plugins:
+  - plugin: buf.build/protocolbuffers/go:v1.34.2
+    out: .
+    opt:
+      - paths=source_relative
