@@ -324,7 +324,10 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Entry("the CA bit in the request spec", nil, func(o *crOpts) { o.isCA = true }, hostidentity.ReasonCARequested),
 		Entry("the CA bit in the CSR", func(c *hostidentitytest.CSROptions) { c.RequestCA = true }, nil, hostidentity.ReasonCARequested),
 		Entry("usages without server authentication", nil, func(o *crOpts) {
-			o.usages = []string{hostidentity.UsageClientAuth}
+			o.usages = []string{hostidentity.UsageDigitalSignature}
+		}, hostidentity.ReasonUsages),
+		Entry("client authentication requested", nil, func(o *crOpts) {
+			o.usages = []string{hostidentity.UsageClientAuth, hostidentity.UsageServerAuth}
 		}, hostidentity.ReasonUsages),
 	)
 

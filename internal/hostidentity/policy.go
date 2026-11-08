@@ -38,7 +38,8 @@ const MaxLifetime = 30 * 24 * time.Hour
 // Certificate usages, spelled as cert-manager's CertificateRequest
 // spec.usages spells them.
 const (
-	// UsageClientAuth is the TLS client authentication usage.
+	// UsageClientAuth is the TLS client authentication usage. It is refused for
+	// a per-host agent certificate.
 	UsageClientAuth = "client auth"
 	// UsageServerAuth is the TLS server authentication usage.
 	UsageServerAuth = "server auth"
@@ -116,7 +117,7 @@ func AsDenial(err error) (*Denial, bool) {
 type Request struct {
 	// CSRPEM is the PEM-encoded PKCS #10 certificate signing request.
 	CSRPEM []byte
-	// Usages are the requested usages (UsageClientAuth, ...).
+	// Usages are the requested usages (UsageServerAuth, ...).
 	Usages []string
 	// Duration is the requested lifetime; zero means none was requested.
 	Duration time.Duration
@@ -244,14 +245,15 @@ func trimSpace(b []byte) []byte {
 	return b
 }
 
-// checkUsages requires client and server authentication and tolerates only
-// digital signature and key encipherment besides.
+// checkUsages requires server authentication, refuses client authentication
+// (the per-host agent is only ever a TLS server) and tolerates only digital
+// signature and key encipherment besides.
 func checkUsages(usages []string) error {
-	var client, server bool
+	var server bool
 	for _, u := range usages {
 		switch u {
 		case UsageClientAuth:
-			client = true
+			return deny(ReasonUsages, "usage %q is refused: the agent certificate is for server authentication only", u)
 		case UsageServerAuth:
 			server = true
 		case UsageDigitalSignature, UsageKeyEncipherment:
@@ -259,8 +261,8 @@ func checkUsages(usages []string) error {
 			return deny(ReasonUsages, "usage %q is not allowed", u)
 		}
 	}
-	if !client || !server {
-		return deny(ReasonUsages, "usages must include %q and %q", UsageClientAuth, UsageServerAuth)
+	if !server {
+		return deny(ReasonUsages, "usages must include %q", UsageServerAuth)
 	}
 	return nil
 }

@@ -84,7 +84,7 @@ state write, no event, no hint whether the Host exists).
 | The subject is empty or a common name equal to the host name | `SubjectRefused` |
 | The CSR asks for no extension other than the subject alternative names (and basic constraints with the CA bit clear) | `ExtensionRefused` |
 | No CA certificate (`spec.isCA` false, no CA bit in the CSR) | `CARequested` |
-| `spec.usages` include `client auth` and `server auth` (`digital signature` and `key encipherment` are tolerated, nothing else) | `UsagesRefused` |
+| `spec.usages` include `server auth` and not `client auth`: the per-host agent is only ever a TLS server (`digital signature` and `key encipherment` are tolerated, nothing else) | `UsagesRefused` |
 | `spec.duration` is set and at most 30 days (`720h`) | `LifetimeRefused` |
 
 Before approving, the manager records the authorisation (request UID, record,
@@ -112,8 +112,9 @@ enrolment namespace, so the API server authenticates the requester.
 
 In both paths the manager pins the key only after the issued certificate
 passes these checks against the authorisation: it chains to the configured
-subordinate CA bundle (`--dev-host-enrolment-ca-bundle-file`) for client and
-server authentication; it is not a CA; its lifetime is at most 30 days; its
+subordinate CA bundle (`--dev-host-enrolment-ca-bundle-file`) for server
+authentication; its only extended key usage is server authentication (client
+authentication is refused); it is not a CA; its lifetime is at most 30 days; its
 subject is empty or a common name equal to the host name; its subject
 alternative names are exactly the authorised URIs; and its key is the
 authorised key. A certificate issued after the Host was revoked is refused.

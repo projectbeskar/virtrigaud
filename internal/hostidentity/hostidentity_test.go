@@ -60,7 +60,7 @@ func testPolicy(t *testing.T) hostidentity.Policy {
 func goodRequest(csr []byte) hostidentity.Request {
 	return hostidentity.Request{
 		CSRPEM:   csr,
-		Usages:   []string{hostidentity.UsageClientAuth, hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature},
+		Usages:   []string{hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature},
 		Duration: 30 * 24 * time.Hour,
 		Username: "alice",
 		Groups:   []string{"system:authenticated", testAdminGroup},
@@ -156,7 +156,11 @@ func TestAuthoriseDeniesEachBrokenRule(t *testing.T) {
 		{"CA bit in the CSR", func(r *hostidentity.Request) {
 			r.CSRPEM = hostidentitytest.NewCSR(t, key, hostidentitytest.CSROptions{URIs: uris, RequestCA: true})
 		}, hostidentity.ReasonCARequested},
-		{"usages without server auth", func(r *hostidentity.Request) { r.Usages = []string{hostidentity.UsageClientAuth} }, hostidentity.ReasonUsages},
+		{"usages without server auth", func(r *hostidentity.Request) { r.Usages = []string{hostidentity.UsageDigitalSignature} }, hostidentity.ReasonUsages},
+		{"client auth only", func(r *hostidentity.Request) { r.Usages = []string{hostidentity.UsageClientAuth} }, hostidentity.ReasonUsages},
+		{"client auth with server auth", func(r *hostidentity.Request) {
+			r.Usages = []string{hostidentity.UsageClientAuth, hostidentity.UsageServerAuth}
+		}, hostidentity.ReasonUsages},
 		{"an extra usage", func(r *hostidentity.Request) { r.Usages = append(r.Usages, "cert sign") }, hostidentity.ReasonUsages},
 		{"default usages", func(r *hostidentity.Request) { r.Usages = nil }, hostidentity.ReasonUsages},
 		{"a subject other than the host name", func(r *hostidentity.Request) {
@@ -199,15 +203,17 @@ func TestValidateIssued(t *testing.T) {
 	otherHost, err := hostidentity.HostURI("cluster.test", "infra", "host-b")
 	require.NoError(t, err)
 	cases := map[string][]byte{
-		"another CA":         otherCA.Issue(t, csr, hostidentitytest.IssueOptions{}),
-		"another key":        ca.Issue(t, csr, hostidentitytest.IssueOptions{PublicKey: &hostidentitytest.NewKey(t).PublicKey}),
-		"another host's SAN": ca.Issue(t, csr, hostidentitytest.IssueOptions{URIs: hostidentity.RequestURIs(otherHost, testRecord())}),
-		"lifetime too long":  ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: 40 * 24 * time.Hour}),
-		"client auth only":   ca.Issue(t, csr, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}),
-		"a CA":               ca.Issue(t, csr, hostidentitytest.IssueOptions{IsCA: true}),
-		"another subject":    ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: "host-b"}}),
-		"extra subject RDNs": ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: testHostName, Organization: []string{"x"}}}),
-		"not PEM":            []byte("nope"),
+		"another CA":             otherCA.Issue(t, csr, hostidentitytest.IssueOptions{}),
+		"another key":            ca.Issue(t, csr, hostidentitytest.IssueOptions{PublicKey: &hostidentitytest.NewKey(t).PublicKey}),
+		"another host's SAN":     ca.Issue(t, csr, hostidentitytest.IssueOptions{URIs: hostidentity.RequestURIs(otherHost, testRecord())}),
+		"lifetime too long":      ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: 40 * 24 * time.Hour}),
+		"client and server auth": ca.Issue(t, csr, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}}),
+		"server auth and any":    ca.Issue(t, csr, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageAny}}),
+		"client auth only":       ca.Issue(t, csr, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}),
+		"a CA":                   ca.Issue(t, csr, hostidentitytest.IssueOptions{IsCA: true}),
+		"another subject":        ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: "host-b"}}),
+		"extra subject RDNs":     ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: testHostName, Organization: []string{"x"}}}),
+		"not PEM":                []byte("nope"),
 	}
 	for name, chain := range cases {
 		t.Run(name, func(t *testing.T) {

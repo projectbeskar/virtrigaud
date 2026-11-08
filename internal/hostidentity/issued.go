@@ -102,18 +102,19 @@ func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, n
 	for _, c := range certs[1:] {
 		inter.AddCert(c)
 	}
-	for _, usage := range []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth} {
-		if _, err := leaf.Verify(x509.VerifyOptions{
-			Roots: roots, Intermediates: inter, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{usage},
-		}); err != nil {
-			return Issued{}, fmt.Errorf("%w: it does not chain to the CA bundle for client and server authentication", ErrIssued)
-		}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots: roots, Intermediates: inter, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return Issued{}, fmt.Errorf("%w: it does not chain to the CA bundle for server authentication", ErrIssued)
 	}
 	if leaf.IsCA {
 		return Issued{}, fmt.Errorf("%w: it is a CA certificate", ErrIssued)
 	}
-	if !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageClientAuth) || !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
-		return Issued{}, fmt.Errorf("%w: it lacks client or server authentication", ErrIssued)
+	if !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
+		return Issued{}, fmt.Errorf("%w: it lacks server authentication", ErrIssued)
+	}
+	if len(leaf.ExtKeyUsage) != 1 || len(leaf.UnknownExtKeyUsage) > 0 {
+		return Issued{}, fmt.Errorf("%w: its extended key usage is not server authentication only", ErrIssued)
 	}
 	if leaf.NotAfter.Sub(leaf.NotBefore) > MaxLifetime {
 		return Issued{}, fmt.Errorf("%w: its lifetime exceeds %s", ErrIssued, MaxLifetime)

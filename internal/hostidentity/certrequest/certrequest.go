@@ -153,7 +153,7 @@ func New(s Spec) *unstructured.Unstructured {
 		"request":  base64.StdEncoding.EncodeToString(s.CSRPEM),
 		"duration": s.Duration.String(),
 		"isCA":     false,
-		"usages":   []any{hostidentity.UsageDigitalSignature, hostidentity.UsageClientAuth, hostidentity.UsageServerAuth},
+		"usages":   []any{hostidentity.UsageDigitalSignature, hostidentity.UsageServerAuth},
 		"issuerRef": map[string]any{
 			"group": s.IssuerRef.Group,
 			"kind":  s.IssuerRef.Kind,

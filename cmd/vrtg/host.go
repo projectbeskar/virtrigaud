@@ -366,7 +366,7 @@ func buildBundle(cr *unstructured.Unstructured) (certrequest.Bundle, error) {
 		Request:            cr.GetNamespace() + "/" + cr.GetName(),
 		CSR:                string(csrPEM),
 		SubjectAltNameURIs: uris,
-		ExtendedKeyUsages:  []string{hostidentity.UsageClientAuth, hostidentity.UsageServerAuth},
+		ExtendedKeyUsages:  []string{hostidentity.UsageServerAuth},
 		MaxLifetime:        lifetime.String(),
 		CA:                 false,
 	}, nil

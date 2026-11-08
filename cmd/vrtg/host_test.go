@@ -81,7 +81,7 @@ func TestHostEnrollOfflineWritesAManifestFromFilesOnly(t *testing.T) {
 	in, err := certrequest.RequestOf(cr)
 	require.NoError(t, err)
 	assert.Equal(t, hostidentity.MaxLifetime, in.Duration)
-	assert.ElementsMatch(t, []string{hostidentity.UsageDigitalSignature, hostidentity.UsageClientAuth, hostidentity.UsageServerAuth}, in.Usages)
+	assert.ElementsMatch(t, []string{hostidentity.UsageDigitalSignature, hostidentity.UsageServerAuth}, in.Usages)
 	assert.Empty(t, in.Username, "the requester is recorded by cert-manager's webhook, never by the client")
 
 	// A CSR whose signature does not verify is refused before anything is

@@ -108,7 +108,7 @@ func (ca *CA) Issue(t T, csrPEM []byte, o IssueOptions) []byte {
 		o.Lifetime = 30 * 24 * time.Hour
 	}
 	if o.ExtKeyUsage == nil {
-		o.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
+		o.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 	}
 	uris := csr.URIs
 	if o.URIs != nil {
