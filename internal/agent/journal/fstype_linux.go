@@ -55,7 +55,7 @@ func checkLocalFS(dir string) error {
 	if err := syscall.Statfs(dir, &st); err != nil {
 		return fmt.Errorf("statfs %s: %w", dir, err)
 	}
-	return classifyFS(uint32(st.Type), dir) //nolint:gosec,unconvert // magic numbers are 32-bit; Statfs_t.Type is int32 or int64 depending on the architecture
+	return classifyFS(uint32(st.Type), dir) //nolint:gosec,unconvert // #nosec G115 -- file-system magic numbers are 32-bit; Statfs_t.Type is int32 or int64 depending on the architecture
 }
 
 // classifyFS refuses the network and user-space file-system magic numbers.
