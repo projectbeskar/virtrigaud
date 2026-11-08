@@ -35,6 +35,8 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
+	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 )
 
 // SignerCompiled reports whether a signer is compiled into this build: true,
@@ -333,7 +335,7 @@ func (s *DevSigner) Sign(ctx context.Context, body []byte, notAfter time.Time) (
 		return Signature{}, fmt.Errorf("development signer: sign: %w", err)
 	}
 	// Verifiers accept the low-S form only.
-	if sig, err = normalizeLowS(sig, s.leafKey.Curve); err != nil {
+	if sig, err = grantverify.NormalizeLowS(sig, s.leafKey.Curve); err != nil {
 		return Signature{}, fmt.Errorf("development signer: sign: %w", err)
 	}
 	return Signature{Signature: sig, Chain: [][]byte{s.leafCert.Raw, s.issuerCert.Raw}}, nil
