@@ -42,6 +42,11 @@ limitations under the License.
 //     source failure (ErrClockOutOfRange): the floor is not raised to it, the
 //     Floor fails closed (StateFailed, Now returns the zero time) and the
 //     persisted floor is untouched, so no encoding can wrap and roll it back.
+//     StateFailed is sticky for the life of the process: it ends when the
+//     process restarts and Open succeeds (the wall clock back in range), and
+//     needs no re-enrolment because the saved floor was never changed. The
+//     agent wiring should report StateFailed with its error and rely on its
+//     supervisor to restart the process.
 //   - There is no reset path. If the floor is ahead of the wall clock by more
 //     than Config.MaxAhead (the clock jumped forward and was corrected), the
 //     host refuses every grant and reports StateClockFloorAhead until the wall
@@ -56,7 +61,11 @@ limitations under the License.
 //     to StateFailed. In a failed or ahead state Floor.Now returns the zero
 //     time, which grantverify refuses.
 //   - Open refuses a process in a time namespace with a non-zero clock offset
-//     (ProcTimeNS reads /proc/self/timens_offsets, which needs no privilege):
+//     (ProcTimeNS reads /proc/self/timens_offsets, which needs no privilege,
+//     and requires exactly one well-formed monotonic and boottime line; a
+//     missing file is accepted only on a kernel without /proc/self/ns/time).
+//     The agent must run in the host's own time and mount namespaces, so that
+//     /proc is the host's:
 //     the namespace's creator could otherwise inflate the CLOCK_BOOTTIME
 //     credit, which is keyed on boot_id and boot_id is not namespaced.
 //

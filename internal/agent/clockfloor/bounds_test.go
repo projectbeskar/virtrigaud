@@ -98,17 +98,34 @@ func TestOpen_TimeNamespace(t *testing.T) {
 		require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
 		return p
 	}
-	check := func(p string) error { return clockfloor.ProcTimeNS{Path: p}.CheckTimeNamespace() }
+	link := filepath.Join(dir, "ns_time")
+	require.NoError(t, os.WriteFile(link, nil, 0o600))
+	check := func(p string) error { return clockfloor.ProcTimeNS{Path: p, LinkPath: link}.CheckTimeNamespace() }
 
 	require.NoError(t, check(write("monotonic 0 0\nboottime 0 0\n")))
-	require.NoError(t, check(filepath.Join(dir, "missing")))
+	require.NoError(t, check(write("boottime 0 0\nmonotonic 0 0")), "order and a final newline do not matter")
+	// A missing file is fine only on a kernel without the namespace link.
+	require.Error(t, check(filepath.Join(dir, "missing")), "link present, offsets missing")
+	require.NoError(t, clockfloor.ProcTimeNS{Path: filepath.Join(dir, "missing"), LinkPath: filepath.Join(dir, "no-link")}.CheckTimeNamespace())
+	for name, content := range map[string]string{
+		"empty":         "",
+		"blank":         "\n",
+		"partial":       "monotonic 0 0\n",
+		"duplicated":    "monotonic 0 0\nmonotonic 0 0\n",
+		"duplicate+one": "monotonic 0 0\nboottime 0 0\nboottime 0 0\n",
+		"unknown clock": "monotonic 0 0\nrealtime 0 0\n",
+		"extra field":   "monotonic 0 0 0\nboottime 0 0\n",
+		"blank between": "monotonic 0 0\n\nboottime 0 0\n",
+	} {
+		assert.Error(t, check(write(content)), name)
+	}
 	require.ErrorIs(t, check(write("monotonic 0 0\nboottime 315360000 0\n")), clockfloor.ErrTimeNamespace)
 	require.ErrorIs(t, check(write("monotonic 0 5\nboottime 0 0\n")), clockfloor.ErrTimeNamespace)
 	require.Error(t, check(write("garbage\n")))
 
 	c, s := newClocks(), &clockfloor.MemStore{}
 	cfg := cfgFor(c, s)
-	cfg.TimeNS = clockfloor.ProcTimeNS{Path: write("boottime 1 0\n")}
+	cfg.TimeNS = clockfloor.ProcTimeNS{Path: write("monotonic 0 0\nboottime 1 0\n"), LinkPath: link}
 	_, err := clockfloor.Open(context.Background(), cfg)
 	require.ErrorIs(t, err, clockfloor.ErrTimeNamespace)
 	assert.Equal(t, 0, s.Saves)

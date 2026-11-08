@@ -51,43 +51,71 @@ type TimeNamespaceCheck interface {
 // namespace offsets in (kernels with time namespaces).
 const DefaultTimeNSOffsetsPath = "/proc/self/timens_offsets"
 
+// DefaultTimeNSLinkPath is the link Linux publishes a process's time
+// namespace in; its existence tells whether the kernel has time namespaces.
+const DefaultTimeNSLinkPath = "/proc/self/ns/time"
+
 // ProcTimeNS refuses a time namespace with a non-zero monotonic or boottime
 // offset. A process can read its own offsets without privilege, which is why
 // this reads them rather than comparing the namespace links with those of
 // the init process (which needs privilege). A namespace whose offsets are all
-// zero is harmless and accepted; a kernel without the file has no time
-// namespaces.
+// zero is harmless and accepted.
+//
+// The offsets file must hold exactly one well-formed monotonic line and one
+// boottime line; an empty, partial, duplicated or otherwise malformed file is
+// refused. A missing offsets file is accepted only when the namespace link is
+// missing too (a kernel without time namespaces, checked with Lstat, which
+// needs no privilege); a missing file beside a present link is refused.
+//
+// The check reads the process's own /proc, so the agent must run in the
+// host's own mount and PID-visible /proc (not a container or mount namespace
+// whose /proc is not the host's) as well as the host's time namespace.
 type ProcTimeNS struct {
 	// Path is the offsets file; empty means DefaultTimeNSOffsetsPath.
 	Path string
+	// LinkPath is the time namespace link; empty means DefaultTimeNSLinkPath.
+	LinkPath string
 }
 
 // CheckTimeNamespace reads and parses the offsets file.
 func (p ProcTimeNS) CheckTimeNamespace() error {
-	path := p.Path
+	path, link := p.Path, p.LinkPath
 	if path == "" {
 		path = DefaultTimeNSOffsetsPath
 	}
+	if link == "" {
+		link = DefaultTimeNSLinkPath
+	}
 	b, err := os.ReadFile(path) // #nosec G304 -- a fixed kernel file or a test fixture
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		if _, lerr := os.Lstat(link); errors.Is(lerr, os.ErrNotExist) {
+			return nil // no time namespaces on this kernel
+		} else if lerr != nil {
+			return fmt.Errorf("read time namespace link: %w", lerr)
+		}
+		return errors.New("read time namespace offsets: file missing but the kernel has time namespaces")
 	}
 	if err != nil {
 		return fmt.Errorf("read time namespace offsets: %w", err)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(b), "\n"), "\n") {
 		f := strings.Fields(line)
-		if len(f) == 0 {
-			continue
-		}
-		if len(f) != 3 {
+		if len(f) != 3 || (f[0] != "monotonic" && f[0] != "boottime") {
 			return errors.New("read time namespace offsets: malformed line")
 		}
+		if seen[f[0]] {
+			return errors.New("read time namespace offsets: duplicated line")
+		}
+		seen[f[0]] = true
 		for _, v := range f[1:] {
 			if v != "0" {
 				return fmt.Errorf("%w: %s", ErrTimeNamespace, f[0])
 			}
 		}
+	}
+	if len(seen) != 2 {
+		return errors.New("read time namespace offsets: expected a monotonic and a boottime line")
 	}
 	return nil
 }
