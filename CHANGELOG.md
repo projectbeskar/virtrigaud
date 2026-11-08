@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-08 00:53] - Operation store library: second round of review fixes (not used by any binary yet)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/agent/opstore/admit.go`: a grant naming an enrolment the store has no record of (discarded, a predecessor of the enrolment the store was made for, or one of a store that was lost or wiped) is refused `UNKNOWN_TO_AGENT`, not `GRANT_MISMATCH`, so an operation that ran under that enrolment is never answered as definitely not performed. `GRANT_MISMATCH` remains only where the store can prove the op_id was never accepted (a frozen enrolment it holds, an early mint epoch on the active one). `Enrolment.Predecessors` records earlier enrolment ids as retired.
+- `internal/agent/journal/lock_unix.go`: `Open` flocks the state directory itself before the lock file and re-opens the lock file when the file at its path is not the inode it locked; deleting the lock file no longer lets a second `Open` change files of a running store.
+- `internal/agent/journal/fstype_linux.go`: on Linux, a state directory on NFS, SMB/CIFS, Ceph, AFS, Coda, 9p or FUSE is refused; elsewhere a local file system is documented as required.
+- `internal/agent/journal/store.go`: after an I/O failure the bbolt handle is closed, so a quarantined store no longer serves reads that may include a commit that never reached the disk. A missing anchor log is recorded by re-creating the anchor log with only the quarantine record, never by writing into the store, which stays untouched as evidence.
+- Tests for each, plus the stale-record write refusal and a rotation failure after the rename. Two more mutation guards (21 in all).
+
+### Why
+A second automated security review found that an operation could still be answered as definitely not performed after a store was replaced, and three smaller gaps. No human security review has happened yet.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-08 00:33] - Operation store library hardening after an automated security review (not used by any binary yet)
 **Author:** @wrkode (William Rizzo)
 
