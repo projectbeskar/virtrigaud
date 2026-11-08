@@ -108,7 +108,11 @@ func hostInventoryChanged() predicate.Funcs {
 				!equality.Semantic.DeepEqual(oldHost.Spec, newHost.Spec) ||
 				!oldHost.DeletionTimestamp.Equal(newHost.DeletionTimestamp) ||
 				!maps.Equal(oldHost.Labels, newHost.Labels) ||
-				!maps.Equal(oldHost.Annotations, newHost.Annotations)
+				!maps.Equal(oldHost.Annotations, newHost.Annotations) ||
+				// The agent pins mirror changes when a per-host agent key is
+				// pinned (development builds only); the render reads the
+				// authoritative pins Secret, this only triggers it.
+				!equality.Semantic.DeepEqual(oldHost.Status.Agent, newHost.Status.Agent)
 		},
 	}
 }

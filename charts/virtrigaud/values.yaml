@@ -296,6 +296,27 @@ rbac:
   # Additional rules
   additionalRules: []
 
+# DEVELOPMENT ONLY. Per-host agent enrolment RBAC, for a manager built with
+# the virtrigaud_dev build tag and started with the --dev-host-enrolment-*
+# flags (which this chart does not set). A release manager refuses those
+# flags. Off by default; see docs/host-agent-enrolment.md.
+experimental:
+  hostEnrolment:
+    # Render the enrolment Role/ClusterRole and their bindings.
+    enabled: false
+    # Must be set to true together with enabled: an explicit statement that
+    # the manager image is a development build. Rendering fails otherwise.
+    developmentBuild: false
+    # Namespace of the host-agent issuer, of the enrolment
+    # CertificateRequests and of the pins Secrets
+    # (--dev-host-enrolment-namespace). Grant nobody but the manager Secret
+    # write access in it.
+    namespace: ""
+    # Exact cert-manager signer names the manager may approve for, e.g.
+    # issuers.cert-manager.io/<namespace>.<name> or
+    # clusterissuers.cert-manager.io/<name>. No wildcard is accepted.
+    signerNames: []
+
 # Security configuration
 security:
   # Pod Security Profile: strict, baseline, or privileged

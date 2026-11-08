@@ -61,6 +61,10 @@ spec:
               declares which hosts exist; the provider reports what they can do right now
               (see HostStatus).
 
+              spec.identity, once set, cannot be changed or removed (a replaced machine is
+              a new Host identity and never inherits the old host's pinned keys), and
+              spec.revoked, once true, cannot be cleared.
+
               Same-namespace model (security): a Host, its HostPool, its optional credential
               Secret, and the clustered Provider it names all live in ONE namespace — the
               Provider's. Every reference on this spec is therefore a LocalObjectReference
@@ -102,6 +106,19 @@ spec:
                 maxLength: 512
                 minLength: 1
                 pattern: ^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$
+                type: string
+              identity:
+                description: |-
+                  Identity is the host's identity anchor for per-host agent enrolment: for
+                  example a TPM endorsement-key hash, a hardware serial number or an
+                  administrator-assigned host UUID. It is set once and is immutable
+                  afterwards. A host whose Provider runs a per-host agent can enrol only
+                  once it is set; a replaced machine gets a new identity (a new Host) and
+                  never inherits the old host's pinned keys. Used only by development
+                  builds; ignored by libvirt hosts.
+                maxLength: 256
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]*$
                 type: string
               labels:
                 additionalProperties:
@@ -145,6 +162,15 @@ spec:
                 required:
                 - name
                 type: object
+              revoked:
+                description: |-
+                  Revoked, when true, revokes the host's per-host agent identity: the
+                  manager retires its enrolment and removes its pinned keys, never
+                  authorises a certificate request for the host again, and does not
+                  render the host into its Provider's inventory with agent credentials.
+                  It cannot be cleared once set (enrol a replacement as a new Host). Used
+                  only by development builds; ignored by libvirt hosts.
+                type: boolean
               schedulable:
                 default: true
                 description: |-
@@ -157,12 +183,70 @@ spec:
             - poolRef
             - providerRef
             type: object
+            x-kubernetes-validations:
+            - fieldPath: .identity
+              message: spec.identity is immutable once set
+              rule: '!has(oldSelf.identity) || (has(self.identity) && self.identity
+                == oldSelf.identity)'
+            - fieldPath: .revoked
+              message: spec.revoked cannot be cleared once set; enrol a replacement
+                as a new Host
+              rule: '!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked)
+                && self.revoked)'
           status:
             description: |-
               HostStatus is operator-synced observed state from the provider's ListHosts and
               GetHostInfo calls. It carries capacity and health only, never connection
               secrets.
             properties:
+              agent:
+                description: |-
+                  Agent is the per-host agent enrolment state, mirrored from the
+                  manager-owned pins Secret. Set only for hosts of a Provider that runs a
+                  per-host agent. Used only by development builds.
+                properties:
+                  certificateExpiry:
+                    description: CertificateExpiry is when the pinned agent certificate
+                      expires.
+                    format: date-time
+                    type: string
+                  enrolmentID:
+                    description: |-
+                      EnrolmentID is the current enrolment identifier: 32 lowercase
+                      hexadecimal characters, carried in the agent certificate.
+                    pattern: ^[0-9a-f]{32}$
+                    type: string
+                  keyPins:
+                    description: |-
+                      KeyPins are the pinned agent keys: the SHA-256 of each certificate's
+                      DER SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
+                    items:
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                    maxItems: 4
+                    type: array
+                  mode:
+                    description: Mode is the enrolment mode. Only "identity" exists.
+                    enum:
+                    - identity
+                    type: string
+                  pendingEnrolmentID:
+                    description: |-
+                      PendingEnrolmentID is the enrolment identifier drawn for the next
+                      enrolment, waiting for a certificate request that carries it.
+                    pattern: ^[0-9a-f]{32}$
+                    type: string
+                  requestURIs:
+                    description: |-
+                      RequestURIs are the exact URI subject alternative names a certificate
+                      request for the pending enrolment must carry, and nothing else: the
+                      host's URI identity and the enrolment record.
+                    items:
+                      maxLength: 512
+                      type: string
+                    maxItems: 8
+                    type: array
+                type: object
               allocatableCPU:
                 description: AllocatableCPU is the schedulable vCPU capacity the provider
                   reports live.

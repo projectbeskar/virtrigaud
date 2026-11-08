@@ -17,9 +17,17 @@ limitations under the License.
 package hostsecret
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,4 +106,50 @@ func TestMarshal_RejectsDuplicateHostIDs(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrDuplicateHostID))
 	assert.Contains(t, err.Error(), "host-a")
+}
+
+func testAgentCA(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "ca"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func TestCredentialsValidateRefusesMixingSSHAndAgentTLS(t *testing.T) {
+	agent := &AgentTLS{
+		CABundle:    testAgentCA(t),
+		ExpectedSAN: "spiffe://cluster.test/virtrigaud/host/infra/host-a",
+		KeyPins:     []string{strings.Repeat("ab", 32)},
+	}
+	require.NoError(t, Credentials{AgentTLS: agent}.Validate())
+	require.NoError(t, Credentials{SSHPrivateKey: []byte("k")}.Validate(), "libvirt credentials are unchanged")
+
+	for name, c := range map[string]Credentials{
+		"ssh key and agent TLS":     {SSHPrivateKey: []byte("k"), AgentTLS: agent},
+		"known_hosts and agent TLS": {KnownHosts: []byte("h"), AgentTLS: agent},
+		"no pins":                   {AgentTLS: &AgentTLS{CABundle: agent.CABundle, ExpectedSAN: agent.ExpectedSAN}},
+		"bad pin":                   {AgentTLS: &AgentTLS{CABundle: agent.CABundle, ExpectedSAN: agent.ExpectedSAN, KeyPins: []string{"AB"}}},
+		"bad SAN":                   {AgentTLS: &AgentTLS{CABundle: agent.CABundle, ExpectedSAN: "https://x", KeyPins: agent.KeyPins}},
+		"no CA":                     {AgentTLS: &AgentTLS{ExpectedSAN: agent.ExpectedSAN, KeyPins: agent.KeyPins}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.ErrorIs(t, c.Validate(), ErrInvalidCredentials)
+		})
+	}
+
+	_, err := Marshal(Inventory{SchemaVersion: SchemaVersion, Hosts: []Host{{
+		ID: "host-a", Endpoint: "grpc://host-a:7443", Credentials: Credentials{SSHPrivateKey: []byte("k"), AgentTLS: agent},
+	}}})
+	assert.ErrorIs(t, err, ErrInvalidCredentials, "Marshal refuses a host mixing SSH and agent material")
+	data, err := Marshal(Inventory{SchemaVersion: SchemaVersion, Hosts: []Host{{
+		ID: "host-a", Endpoint: "grpc://host-a:7443", Credentials: Credentials{AgentTLS: agent},
+	}}})
+	require.NoError(t, err)
+	inv, err := Unmarshal(data)
+	require.NoError(t, err)
+	assert.Equal(t, agent.KeyPins, inv.Hosts[0].Credentials.AgentTLS.KeyPins)
 }

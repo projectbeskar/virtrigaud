@@ -29,12 +29,17 @@ limitations under the License.
 package hostsecret
 
 import (
+	"bytes"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // ErrDuplicateHostID is returned (wrapped) by Marshal when two hosts in an
@@ -42,6 +47,11 @@ import (
 // duplicate means an inventory was assembled from more than one namespace or
 // hand-edited — never something to resolve by "keep the first".
 var ErrDuplicateHostID = errors.New("hostsecret: duplicate host id")
+
+// ErrInvalidCredentials is returned (wrapped) by Credentials.Validate and by
+// Marshal for a host whose credentials mix SSH material with agent TLS
+// material, or whose agent TLS material is malformed.
+var ErrInvalidCredentials = errors.New("hostsecret: invalid host credentials")
 
 // ErrInvalidEndpoint is returned (wrapped) by ValidateEndpoint for an endpoint
 // outside the accepted shapes (see EndpointPattern).
@@ -203,6 +213,85 @@ type Credentials struct {
 	// (hard-fail unless the audit-flagged insecure escape hatch is set), so the
 	// operator does not second-guess that policy here.
 	KnownHosts []byte `json:"knownHosts,omitempty"`
+
+	// AgentTLS is the material a Provider that runs a per-host agent needs to
+	// authenticate the host's agent over mutual TLS. A host carries either SSH
+	// material (SSHPrivateKey, KnownHosts) or AgentTLS, never both (Validate).
+	// Omitted for libvirt hosts, whose rendering is unchanged. Rendered only by
+	// development builds.
+	AgentTLS *AgentTLS `json:"agentTLS,omitempty"`
+}
+
+// AgentTLS is the public material that authenticates one host's agent: the
+// subordinate CA its certificate must chain to, the URI subject alternative
+// name it must carry, and the pinned keys it may use. None of it is secret,
+// but it is integrity-critical: whoever can change it can make the Provider
+// trust another key.
+type AgentTLS struct {
+	// CABundle is the PEM bundle of the subordinate CA the agent certificate
+	// must chain to.
+	CABundle []byte `json:"caBundle"`
+	// ExpectedSAN is the host's URI identity the agent certificate must
+	// carry (spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>).
+	ExpectedSAN string `json:"expectedSAN"`
+	// KeyPins are the pinned agent keys: the SHA-256 of each certificate's
+	// DER SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters. The
+	// agent's certificate key must be one of them.
+	KeyPins []string `json:"keyPins"`
+}
+
+// keyPinRE is the shape of an AgentTLS key pin.
+var keyPinRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// Validate checks that the credentials do not mix SSH material with agent TLS
+// material and that agent TLS material, when present, is well formed: a CA
+// bundle of PEM CA certificates, a spiffe:// expected SAN, and at least one
+// key pin. The error never echoes a value.
+func (c Credentials) Validate() error {
+	if c.AgentTLS == nil {
+		return nil
+	}
+	if len(c.SSHPrivateKey) > 0 || len(c.KnownHosts) > 0 {
+		return fmt.Errorf("%w: SSH material and agent TLS material are mixed", ErrInvalidCredentials)
+	}
+	a := c.AgentTLS
+	if err := validateCABundle(a.CABundle); err != nil {
+		return err
+	}
+	u, err := url.Parse(a.ExpectedSAN)
+	if err != nil || u.Scheme != "spiffe" || u.Host == "" || !strings.HasPrefix(u.Path, "/virtrigaud/host/") {
+		return fmt.Errorf("%w: agent expected SAN is not a host URI identity", ErrInvalidCredentials)
+	}
+	if len(a.KeyPins) == 0 {
+		return fmt.Errorf("%w: agent TLS material has no key pin", ErrInvalidCredentials)
+	}
+	for _, pin := range a.KeyPins {
+		if !keyPinRE.MatchString(pin) {
+			return fmt.Errorf("%w: an agent key pin is not 64 lowercase hexadecimal characters", ErrInvalidCredentials)
+		}
+	}
+	return nil
+}
+
+// validateCABundle requires one or more PEM certificates, each a CA.
+func validateCABundle(data []byte) error {
+	rest := bytes.TrimSpace(data)
+	if len(rest) == 0 {
+		return fmt.Errorf("%w: agent CA bundle is empty", ErrInvalidCredentials)
+	}
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil || block.Type != "CERTIFICATE" {
+			return fmt.Errorf("%w: agent CA bundle is not PEM certificates", ErrInvalidCredentials)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || !cert.IsCA || !cert.BasicConstraintsValid {
+			return fmt.Errorf("%w: agent CA bundle holds a certificate that is not a CA", ErrInvalidCredentials)
+		}
+		rest = bytes.TrimSpace(rest)
+	}
+	return nil
 }
 
 // Marshal serializes inv into the bytes stored under SecretDataKey. It is
@@ -211,6 +300,9 @@ type Credentials struct {
 //   - hosts are sorted by ID (a stable, total order over unique Host CR names);
 //   - a nil/empty host slice is rendered as [] (never JSON null);
 //   - encoding/json emits map keys (labels) in sorted order.
+//
+// Every host's credentials must pass Credentials.Validate (no mixing of SSH
+// and agent TLS material); Marshal refuses the document otherwise.
 //
 // Host IDs must be unique: a duplicate ID is an ambiguous inventory (which
 // endpoint/credentials does the provider route that id to?), so Marshal refuses
@@ -230,6 +322,11 @@ func Marshal(inv Inventory) ([]byte, error) {
 	for i := 1; i < len(hosts); i++ {
 		if hosts[i].ID == hosts[i-1].ID {
 			return nil, fmt.Errorf("%w: %q", ErrDuplicateHostID, hosts[i].ID)
+		}
+	}
+	for _, h := range hosts {
+		if err := h.Credentials.Validate(); err != nil {
+			return nil, fmt.Errorf("host %q: %w", h.ID, err)
 		}
 	}
 
