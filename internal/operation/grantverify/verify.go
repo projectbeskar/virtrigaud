@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package operation
+package grantverify
 
 import (
 	"bytes"
@@ -30,7 +30,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -47,6 +46,34 @@ const maxEnforceableGeneration = 1
 // DefaultMaxClockSkew is how far in the future issued_at may be by the
 // verifier's clock when VerifierConfig.MaxClockSkew is 0.
 const DefaultMaxClockSkew = 5 * time.Minute
+
+// Clock is the verifier's source of the current time. Every validity check of
+// a call (certificate validity, grant validity, issued_at skew) is made
+// against one Now reading of it.
+//
+// A Clock that cannot vouch for its reading returns the zero time. Verify then
+// refuses every call with GRANT_UNAUTHENTICATED (rule validity) and never
+// consults the grant, so an untrustworthy clock fails closed instead of
+// accepting everything. A per-host agent supplies a Clock that never returns
+// a time before a persisted floor; the manager and the fake Provider use
+// WallClock.
+type Clock interface {
+	// Now returns the current time, or the zero time when the clock is not
+	// trustworthy.
+	Now() time.Time
+}
+
+// ClockFunc adapts a function to a Clock.
+type ClockFunc func() time.Time
+
+// Now calls f.
+func (f ClockFunc) Now() time.Time { return f() }
+
+// WallClock is the operating system's wall clock, the default Clock.
+type WallClock struct{}
+
+// Now returns time.Now().
+func (WallClock) Now() time.Time { return time.Now() }
 
 // VerifierConfig is what a verifier pins and expects: the trust anchors, and
 // the installation, Provider, host and enrolment it verifies grants for.
@@ -69,7 +96,11 @@ type VerifierConfig struct {
 	// MaxClockSkew bounds how far in the future issued_at may be; 0 means
 	// DefaultMaxClockSkew.
 	MaxClockSkew time.Duration
-	// Now is the verifier's clock; nil means time.Now.
+	// Clock is the verifier's clock. When nil and Now is nil, WallClock is
+	// used. Setting both Clock and Now is an error.
+	Clock Clock
+	// Now is the verifier's clock as a function; it is kept for callers that
+	// predate Clock. nil means Clock, or WallClock when Clock is nil too.
 	Now func() time.Time
 }
 
@@ -83,7 +114,7 @@ type Verifier struct {
 	enrolmentID   []byte
 	minGeneration uint64
 	maxSkew       time.Duration
-	now           func() time.Time
+	clock         Clock
 }
 
 // Verified is a call that passed every rule.
@@ -132,7 +163,7 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 		enrolmentID:   append([]byte(nil), cfg.EnrolmentID...),
 		minGeneration: cfg.MinAuthorityGeneration,
 		maxSkew:       cfg.MaxClockSkew,
-		now:           cfg.Now,
+		clock:         cfg.Clock,
 	}
 	if v.minGeneration == 0 {
 		v.minGeneration = 1
@@ -140,8 +171,14 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 	if v.maxSkew == 0 {
 		v.maxSkew = DefaultMaxClockSkew
 	}
-	if v.now == nil {
-		v.now = time.Now
+	if cfg.Clock != nil && cfg.Now != nil {
+		return nil, errors.New("new operation-grant verifier: set Clock or Now, not both")
+	}
+	switch {
+	case cfg.Now != nil:
+		v.clock = ClockFunc(cfg.Now)
+	case v.clock == nil:
+		v.clock = WallClock{}
 	}
 	return v, nil
 }
@@ -195,7 +232,10 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 	if refusal := checkSizes(env); refusal != nil {
 		return nil, refusal
 	}
-	now := v.now()
+	now := v.clock.Now()
+	if now.IsZero() {
+		return nil, unauthenticated(RuleValidity, "the verifier's clock is not trustworthy")
+	}
 	if refusal := v.authenticate(grant, now); refusal != nil {
 		return nil, refusal
 	}
@@ -206,7 +246,7 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 	if err := proto.Unmarshal(grant.GetBody(), body); err != nil {
 		return nil, mismatch(RuleMalformedField, "the grant body does not decode")
 	}
-	if refusal := checkOperationBody(body); refusal != nil {
+	if refusal := CheckOperationBody(body); refusal != nil {
 		return nil, refusal
 	}
 	if body.GetAuthorityGeneration() < v.minGeneration {
@@ -231,7 +271,7 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 	if row.FullMethod != fullMethod || row.RequestType() != outerType {
 		return nil, mismatch(RuleWrongRPC, "kind %s does not name %s with %s", body.GetKind(), fullMethod, outerType)
 	}
-	req, refusal := decodeRequest(row, env.GetRequest())
+	req, refusal := DecodeRequestFor(row, env.GetRequest())
 	if refusal != nil {
 		return nil, refusal
 	}
@@ -280,7 +320,7 @@ func envelopeOf(outer proto.Message) (*providerv1.OperationEnvelope, *Refusal) {
 		return nil, mismatch(RuleNotMutatingRequest, "%s has no operation_envelope field", m.Descriptor().FullName())
 	}
 	if !m.Has(fd) {
-		return nil, &Refusal{Reason: contracts.IdentityRequiredReason, Rule: RuleEnvelopeMissing,
+		return nil, &Refusal{Reason: ReasonIdentityRequired, Rule: RuleEnvelopeMissing,
 			detail: "the call carries no operation_envelope"}
 	}
 	outerSet := len(m.GetUnknown()) > 0
@@ -291,7 +331,7 @@ func envelopeOf(outer proto.Message) (*providerv1.OperationEnvelope, *Refusal) {
 		return !outerSet
 	})
 	if outerSet {
-		return nil, &Refusal{Reason: contracts.GrantMismatchReason, Rule: RuleOuterFieldSet, InvalidArgument: true,
+		return nil, &Refusal{Reason: ReasonGrantMismatch, Rule: RuleOuterFieldSet, InvalidArgument: true,
 			detail: "a field of the outer request is set beside operation_envelope"}
 	}
 	env, ok := m.Get(fd).Message().Interface().(*providerv1.OperationEnvelope)
@@ -315,7 +355,7 @@ func (v *Verifier) authenticate(g *providerv1.OperationGrant, now time.Time) *Re
 	if err != nil {
 		return unauthenticated(RuleChain, "the issuer certificate does not parse")
 	}
-	if !isGrantSigningLeaf(leaf) {
+	if !IsGrantSigningLeaf(leaf) {
 		return unauthenticated(RuleChain, "the leaf is not a grant-signing certificate (profile: not a CA, key usage "+
 			"digitalSignature only, no extended key usage, ECDSA P-256 key)")
 	}
@@ -323,7 +363,7 @@ func (v *Verifier) authenticate(g *providerv1.OperationGrant, now time.Time) *Re
 		issuer.KeyUsage&x509.KeyUsageCertSign == 0 || !isP256(issuer.PublicKey) {
 		return unauthenticated(RuleChain, "the issuer is not a path length 0 CA with an ECDSA P-256 key")
 	}
-	// The leaf has no extended key usage (isGrantSigningLeaf), so
+	// The leaf has no extended key usage (IsGrantSigningLeaf), so
 	// ExtKeyUsageAny only stops x509.Verify from demanding serverAuth; it
 	// admits no certificate with an EKU.
 	intermediates := x509.NewCertPool()
@@ -353,19 +393,19 @@ func (v *Verifier) authenticate(g *providerv1.OperationGrant, now time.Time) *Re
 	if !ecdsa.VerifyASN1(pub, digest[:], g.GetSignature()) {
 		return unauthenticated(RuleSignature, "the signature over the body does not verify")
 	}
-	if !isLowS(g.GetSignature(), pub.Curve) {
+	if !IsLowS(g.GetSignature(), pub.Curve) {
 		return unauthenticated(RuleSignature, "the signature is not in low-S form")
 	}
 	return nil
 }
 
-// isGrantSigningLeaf reports whether c has the grant-signing leaf profile:
+// IsGrantSigningLeaf reports whether c has the grant-signing leaf profile:
 // not a CA, key usage exactly digitalSignature, no extended key usage of any
 // kind (known or unknown OID), and an ECDSA P-256 key. A certificate issued
 // for another purpose under the same anchor, such as a TLS server or client
 // certificate, does not have it and cannot sign grants. A dedicated
 // grant-signing extended key usage OID may replace the "no EKU" rule later.
-func isGrantSigningLeaf(c *x509.Certificate) bool {
+func IsGrantSigningLeaf(c *x509.Certificate) bool {
 	return !c.IsCA && c.KeyUsage == x509.KeyUsageDigitalSignature &&
 		len(c.ExtKeyUsage) == 0 && len(c.UnknownExtKeyUsage) == 0 && isP256(c.PublicKey)
 }

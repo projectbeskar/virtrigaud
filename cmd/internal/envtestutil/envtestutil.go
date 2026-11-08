@@ -45,13 +45,19 @@ type Env struct {
 // Start starts an apiserver with the CRDs from config/crd/bases and registers
 // its shutdown with t.Cleanup. It skips the test when no envtest binaries are
 // available (KUBEBUILDER_ASSETS unset and no bin/k8s/* in the repository).
-func Start(t testing.TB) *Env {
+//
+// extraCRDDirs are further CRD directories, relative to the repository root
+// (for example test/crds/cert-manager).
+func Start(t testing.TB, extraCRDDirs ...string) *Env {
 	t.Helper()
 
 	root := repoRoot(t)
 	env := &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join(root, "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
+	}
+	for _, d := range extraCRDDirs {
+		env.CRDDirectoryPaths = append(env.CRDDirectoryPaths, filepath.Join(root, d))
 	}
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
 		dir := firstAssetsDir(filepath.Join(root, "bin", "k8s"))

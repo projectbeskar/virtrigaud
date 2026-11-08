@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package operation
+package grantverify
 
 import (
 	"crypto/elliptic"
@@ -23,27 +23,27 @@ import (
 	"math/big"
 )
 
-// ecdsaSignature is the ASN.1 DER form of an ECDSA signature.
-type ecdsaSignature struct {
+// ECDSASignature is the ASN.1 DER form of an ECDSA signature.
+type ECDSASignature struct {
 	R, S *big.Int
 }
 
-// parseECDSASignature decodes sig as one DER ECDSA signature with nothing
+// ParseECDSASignature decodes sig as one DER ECDSA signature with nothing
 // after it and both values positive.
-func parseECDSASignature(sig []byte) (ecdsaSignature, error) {
-	var s ecdsaSignature
+func ParseECDSASignature(sig []byte) (ECDSASignature, error) {
+	var s ECDSASignature
 	rest, err := asn1.Unmarshal(sig, &s)
 	if err != nil || len(rest) != 0 || s.R == nil || s.S == nil || s.R.Sign() <= 0 || s.S.Sign() <= 0 {
-		return ecdsaSignature{}, errors.New("not a DER ECDSA signature")
+		return ECDSASignature{}, errors.New("not a DER ECDSA signature")
 	}
 	return s, nil
 }
 
-// isLowS reports whether sig is a DER ECDSA signature whose s is at most
+// IsLowS reports whether sig is a DER ECDSA signature whose s is at most
 // half the order of curve. Grant signatures are low-S only, so a signature
 // has one accepted encoding: (r, n-s) is refused.
-func isLowS(sig []byte, curve elliptic.Curve) bool {
-	s, err := parseECDSASignature(sig)
+func IsLowS(sig []byte, curve elliptic.Curve) bool {
+	s, err := ParseECDSASignature(sig)
 	if err != nil {
 		return false
 	}
@@ -51,10 +51,10 @@ func isLowS(sig []byte, curve elliptic.Curve) bool {
 	return s.S.Cmp(half) <= 0
 }
 
-// normalizeLowS returns sig with s replaced by n-s when s is above half the
+// NormalizeLowS returns sig with s replaced by n-s when s is above half the
 // order of curve, so a signer always emits the low-S form.
-func normalizeLowS(sig []byte, curve elliptic.Curve) ([]byte, error) {
-	s, err := parseECDSASignature(sig)
+func NormalizeLowS(sig []byte, curve elliptic.Curve) ([]byte, error) {
+	s, err := ParseECDSASignature(sig)
 	if err != nil {
 		return nil, err
 	}

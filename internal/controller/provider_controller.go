@@ -212,6 +212,12 @@ type ProviderReconciler struct {
 	// never deployed or updated (refuseDisabledDevProviderType). Read only.
 	EnabledDevProviderTypes map[infravirtrigaudiov1beta1.ProviderType]struct{}
 
+	// HostEnrolment is the per-host agent enrolment configuration
+	// (development builds only; nil: none). The host-inventory render reads
+	// enrolled hosts' key pins from it, and renders its CA bundle; without
+	// it, no host of a Provider that runs per-host agents is rendered.
+	HostEnrolment *HostEnrolmentConfig
+
 	// OperationSignerLoaded reports whether the manager has an operation
 	// signer (development builds started with one; never a release build). A
 	// Provider whose type requires operation identity reports Ready=False

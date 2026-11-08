@@ -14,9 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package operation
+package grantverify
 
 import (
+	"crypto/sha256"
+	"time"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -39,6 +42,36 @@ const (
 	// DigestLen is the length of intent_digest (SHA-256).
 	DigestLen = 32
 )
+
+// MaxGrantLifetime is the longest validity the grant packages mint or accept:
+// not_after is defence in depth only, and never decides what a host has
+// executed.
+const MaxGrantLifetime = time.Hour
+
+// IntentDigest is SHA-256(salt || request), the GrantBody.intent_digest over
+// the exact request bytes.
+func IntentDigest(salt, request []byte) []byte {
+	h := sha256.New()
+	_, _ = h.Write(salt) // hash.Hash.Write never returns an error
+	_, _ = h.Write(request)
+	return h.Sum(nil)
+}
+
+// DecodeRequest decodes requestBytes as the request type kind names and
+// applies the verifier's request rules (no unknown fields or enum values, no
+// envelope of its own, the kind's fixed field). The error never quotes the
+// request.
+func DecodeRequest(kind providerv1.OperationKind, requestBytes []byte) (proto.Message, error) {
+	row, ok := RowFor(kind)
+	if !ok {
+		return nil, mismatch(RuleUnknownEnum, "kind %d is not implemented", kind)
+	}
+	m, refusal := DecodeRequestFor(row, requestBytes)
+	if refusal != nil {
+		return nil, refusal
+	}
+	return m, nil
+}
 
 // Size caps, checked before anything is parsed, so a refused call costs
 // bounded work.
@@ -125,11 +158,11 @@ func checkEpoch(e *providerv1.Epoch, what string) *Refusal {
 	return nil
 }
 
-// checkOperationBody applies every rule that a version 1 OPERATION grant body
+// CheckOperationBody applies every rule that a version 1 OPERATION grant body
 // must satisfy on its own, independent of the call it arrives with and of the
 // verifier's clock and expectations. The minter runs it on every body it
 // builds, so a minted grant always passes it.
-func checkOperationBody(b *providerv1.GrantBody) *Refusal {
+func CheckOperationBody(b *providerv1.GrantBody) *Refusal {
 	if r := walkMessage(b.ProtoReflect(), "GrantBody"); r != nil {
 		return r
 	}
@@ -218,11 +251,14 @@ func checkOperationBody(b *providerv1.GrantBody) *Refusal {
 	return nil
 }
 
-// decodeRequest decodes requestBytes as the request type row names and
+// DecodeRequestFor decodes requestBytes as the request type row names and
 // applies the request rules: no unknown fields or enum values anywhere in it,
 // no operation_envelope of its own, and the kind's fixed field.
-func decodeRequest(row KindRow, requestBytes []byte) (proto.Message, *Refusal) {
+func DecodeRequestFor(row KindRow, requestBytes []byte) (proto.Message, *Refusal) {
 	m := row.NewRequest()
+	if m == nil {
+		return nil, mismatch(RuleUnknownEnum, "the kind row names no request type")
+	}
 	if err := proto.Unmarshal(requestBytes, m); err != nil {
 		// The decode error can quote request content; it is not returned.
 		return nil, mismatch(RuleMalformedRequest, "request does not decode as %s", row.RequestType())

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -236,7 +237,20 @@ func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, p
 			skipped = append(skipped, skippedHost{id: h.Name, kind: skipInvalidEntry, reason: err.Error()})
 			continue
 		}
-		creds, kind, skipReason := r.resolveHostCredentials(ctx, provider, h)
+		var (
+			creds      hostsecret.Credentials
+			kind       skipKind
+			skipReason string
+		)
+		if providerRunsHostAgents(provider) {
+			// A per-host agent host is authenticated by its pinned agent
+			// key (agentTLS), never by SSH material: the credential Secret
+			// is not read for it (development builds only).
+			kind = skipCredentialsUnresolved
+			creds, skipReason = resolveHostAgentTLS(ctx, r.Client, r.HostEnrolment, h, time.Now())
+		} else {
+			creds, kind, skipReason = r.resolveHostCredentials(ctx, provider, h)
+		}
 		if skipReason != "" {
 			// Fail-safe: drop this one host from the inventory and record a
 			// non-secret reason. Do NOT fail the reconcile — the other hosts
