@@ -42,11 +42,21 @@ type KindRow struct {
 }
 
 // NewRequest returns an empty request message of the type the kind names.
-func (r KindRow) NewRequest() proto.Message { return r.newRequest() }
+// A zero KindRow (for example the result of a RowFor whose ok was ignored)
+// has no type; NewRequest then returns nil.
+func (r KindRow) NewRequest() proto.Message {
+	if r.newRequest == nil {
+		return nil
+	}
+	return r.newRequest()
+}
 
 // RequestType is the full name of the request message type the kind names,
 // for example "provider.v1.CreateRequest".
 func (r KindRow) RequestType() protoreflect.FullName {
+	if r.newRequest == nil {
+		return ""
+	}
 	return r.newRequest().ProtoReflect().Descriptor().FullName()
 }
 

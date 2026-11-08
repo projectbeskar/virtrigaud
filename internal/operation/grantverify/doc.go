@@ -32,6 +32,12 @@ limitations under the License.
 // (see internal/agent/clockfloor), so a rolled-back wall clock cannot revive
 // an expired signing key.
 //
+// The exported helpers beside the verifier (ParseECDSASignature, IsLowS,
+// NormalizeLowS, ECDSASignature, IsGrantSigningLeaf, CheckOperationBody,
+// DecodeRequestFor) exist for the minter and the development signer in
+// internal/operation and for its tests. They are not part of the verification
+// contract and may change with it.
+//
 // internal/operation re-exports this package's identifiers, so existing
 // callers keep their import path.
 package grantverify

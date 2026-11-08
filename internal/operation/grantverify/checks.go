@@ -256,6 +256,9 @@ func CheckOperationBody(b *providerv1.GrantBody) *Refusal {
 // no operation_envelope of its own, and the kind's fixed field.
 func DecodeRequestFor(row KindRow, requestBytes []byte) (proto.Message, *Refusal) {
 	m := row.NewRequest()
+	if m == nil {
+		return nil, mismatch(RuleUnknownEnum, "the kind row names no request type")
+	}
 	if err := proto.Unmarshal(requestBytes, m); err != nil {
 		// The decode error can quote request content; it is not returned.
 		return nil, mismatch(RuleMalformedRequest, "request does not decode as %s", row.RequestType())
