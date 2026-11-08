@@ -88,6 +88,8 @@ type IssueOptions struct {
 	URIs []string
 	// PublicKey overrides the CSR's key when non-nil.
 	PublicKey crypto.PublicKey
+	// Subject overrides the CSR's subject when non-nil.
+	Subject *pkix.Name
 }
 
 // Issue signs csrPEM as the CA would and returns the certificate in PEM.
@@ -116,10 +118,14 @@ func (ca *CA) Issue(t T, csrPEM []byte, o IssueOptions) []byte {
 	if o.PublicKey != nil {
 		pub = o.PublicKey
 	}
+	subject := csr.Subject
+	if o.Subject != nil {
+		subject = *o.Subject
+	}
 	now := time.Now().Add(-time.Minute)
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
-		Subject:               csr.Subject,
+		Subject:               subject,
 		NotBefore:             now,
 		NotAfter:              now.Add(o.Lifetime),
 		URIs:                  uris,

@@ -19,6 +19,7 @@ package hostidentity_test
 import (
 	"bytes"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"strings"
 	"testing"
 	"time"
@@ -191,6 +192,8 @@ func TestValidateIssued(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, auth.KeyPin, issued.KeyPin)
 	assert.True(t, issued.Record.Equal(testRecord()), "the enrolment record is derived from the certificate's SANs")
+	_, err = hostidentity.ValidateIssued(auth, ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: testHostName}}), roots, time.Now())
+	require.NoError(t, err, "a common name equal to the host name is allowed")
 
 	otherCA := hostidentitytest.NewCA(t)
 	otherHost, err := hostidentity.HostURI("cluster.test", "infra", "host-b")
@@ -202,6 +205,8 @@ func TestValidateIssued(t *testing.T) {
 		"lifetime too long":  ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: 40 * 24 * time.Hour}),
 		"client auth only":   ca.Issue(t, csr, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}),
 		"a CA":               ca.Issue(t, csr, hostidentitytest.IssueOptions{IsCA: true}),
+		"another subject":    ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: "host-b"}}),
+		"extra subject RDNs": ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: testHostName, Organization: []string{"x"}}}),
 		"not PEM":            []byte("nope"),
 	}
 	for name, chain := range cases {

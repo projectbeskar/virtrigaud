@@ -22,6 +22,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
@@ -126,6 +127,12 @@ type Request struct {
 	// Groups are the authenticated requester's groups, as the API server
 	// recorded them.
 	Groups []string
+	// UID is the authenticated requester's UID, as the API server recorded
+	// it.
+	UID string
+	// Extra is the authenticated requester's extra attributes, as the API
+	// server recorded them.
+	Extra map[string][]string
 }
 
 // Policy is what a request for one host must match.
@@ -145,6 +152,9 @@ type Policy struct {
 // the record and the key. An issued certificate is pinned only if it
 // matches it (ValidateIssued).
 type Authorisation struct {
+	// HostName is the Host's name; the only subject an issued certificate
+	// may carry is a common name equal to it.
+	HostName string
 	// HostURI is the Host's URI identity.
 	HostURI string
 	// Record is the enrolment record.
@@ -206,7 +216,7 @@ func Authorise(p Policy, req Request) (Authorisation, error) {
 	if err != nil {
 		return Authorisation{}, deny(ReasonKeyUnsupported, "%v", err)
 	}
-	return Authorisation{HostURI: p.HostURI, Record: rec, KeyPin: pin}, nil
+	return Authorisation{HostName: p.HostName, HostURI: p.HostURI, Record: rec, KeyPin: pin}, nil
 }
 
 // ParseCSR parses exactly one PEM "CERTIFICATE REQUEST" block with nothing
@@ -301,11 +311,20 @@ func checkExtensions(csr *x509.CertificateRequest) error {
 // checkSubject allows an empty subject or a lone common name equal to the
 // host name.
 func checkSubject(csr *x509.CertificateRequest, hostName string) error {
-	for _, atv := range csr.Subject.Names {
-		v, ok := atv.Value.(string)
-		if !atv.Type.Equal(oidCommonName) || !ok || v != hostName {
-			return deny(ReasonSubject, "the subject may only be a common name equal to the host name")
-		}
+	if !subjectAllowed(csr.Subject.Names, hostName) {
+		return deny(ReasonSubject, "the subject may only be a common name equal to the host name")
 	}
 	return nil
+}
+
+// subjectAllowed reports whether a subject is empty or a lone common name
+// equal to the host name.
+func subjectAllowed(names []pkix.AttributeTypeAndValue, hostName string) bool {
+	for _, atv := range names {
+		v, ok := atv.Value.(string)
+		if !atv.Type.Equal(oidCommonName) || !ok || v != hostName {
+			return false
+		}
+	}
+	return true
 }

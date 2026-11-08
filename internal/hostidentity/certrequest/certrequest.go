@@ -225,6 +225,23 @@ func RequestOf(u *unstructured.Unstructured) (hostidentity.Request, error) {
 	if req.Groups, _, err = unstructured.NestedStringSlice(u.Object, "spec", "groups"); err != nil {
 		return req, errors.New("spec.groups is not a list of strings")
 	}
+	if req.UID, _, err = unstructured.NestedString(u.Object, "spec", "uid"); err != nil {
+		return req, errors.New("spec.uid is not a string")
+	}
+	extra, found, err := unstructured.NestedMap(u.Object, "spec", "extra")
+	if err != nil {
+		return req, errors.New("spec.extra is not a map")
+	}
+	if found {
+		req.Extra = make(map[string][]string, len(extra))
+		for k := range extra {
+			vals, _, err := unstructured.NestedStringSlice(extra, k)
+			if err != nil {
+				return req, errors.New("spec.extra values are not lists of strings")
+			}
+			req.Extra[k] = vals
+		}
+	}
 	return req, nil
 }
 

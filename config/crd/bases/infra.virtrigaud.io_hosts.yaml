@@ -62,7 +62,8 @@ spec:
               (see HostStatus).
 
               spec.identity, once set, cannot be changed or removed (a replaced machine is
-              a new Host identity and never inherits the old host's pinned keys).
+              a new Host identity and never inherits the old host's pinned keys), and
+              spec.revoked, once true, cannot be cleared.
 
               Same-namespace model (security): a Host, its HostPool, its optional credential
               Secret, and the clustered Provider it names all live in ONE namespace — the
@@ -164,9 +165,11 @@ spec:
               revoked:
                 description: |-
                   Revoked, when true, revokes the host's per-host agent identity: the
-                  manager never authorises a certificate request for the host, and the
-                  host is not rendered into its Provider's inventory with agent
-                  credentials. Used only by development builds; ignored by libvirt hosts.
+                  manager retires its enrolment and removes its pinned keys, never
+                  authorises a certificate request for the host again, and does not
+                  render the host into its Provider's inventory with agent credentials.
+                  It cannot be cleared once set (enrol a replacement as a new Host). Used
+                  only by development builds; ignored by libvirt hosts.
                 type: boolean
               schedulable:
                 default: true
@@ -185,6 +188,11 @@ spec:
               message: spec.identity is immutable once set
               rule: '!has(oldSelf.identity) || (has(self.identity) && self.identity
                 == oldSelf.identity)'
+            - fieldPath: .revoked
+              message: spec.revoked cannot be cleared once set; enrol a replacement
+                as a new Host
+              rule: '!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked)
+                && self.revoked)'
           status:
             description: |-
               HostStatus is operator-synced observed state from the provider's ListHosts and
@@ -213,6 +221,7 @@ spec:
                       KeyPins are the pinned agent keys: the SHA-256 of each certificate's
                       DER SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
                     items:
+                      pattern: ^[0-9a-f]{64}$
                       type: string
                     maxItems: 4
                     type: array
@@ -233,6 +242,7 @@ spec:
                       request for the pending enrolment must carry, and nothing else: the
                       host's URI identity and the enrolment record.
                     items:
+                      maxLength: 512
                       type: string
                     maxItems: 8
                     type: array

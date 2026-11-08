@@ -95,7 +95,17 @@ const (
 	// HostReasonAgentCertificateRejected: an issued certificate did not match
 	// the authorised request and was not pinned.
 	HostReasonAgentCertificateRejected = "CertificateRejected"
+	// HostReasonAgentCertificateExpired: the pinned agent certificate has
+	// expired; the host is not rendered with agent credentials.
+	HostReasonAgentCertificateExpired = "CertificateExpired"
 )
+
+// HostEnrolVerb is the verb a requester must be allowed on the Host
+// (resource hosts in group infra.virtrigaud.io, the Host's namespace and
+// name) for the manager to approve an agent enrolment request for it. It is
+// checked with a SubjectAccessReview of the request's recorded requester.
+// Used only by development builds.
+const HostEnrolVerb = "enrol"
 
 // HostAgentModeIdentity is the only agent enrolment mode: the agent proves its
 // identity, and operation epochs carry no fencing meaning.
@@ -107,7 +117,8 @@ const HostAgentModeIdentity = "identity"
 // (see HostStatus).
 //
 // spec.identity, once set, cannot be changed or removed (a replaced machine is
-// a new Host identity and never inherits the old host's pinned keys).
+// a new Host identity and never inherits the old host's pinned keys), and
+// spec.revoked, once true, cannot be cleared.
 //
 // Same-namespace model (security): a Host, its HostPool, its optional credential
 // Secret, and the clustered Provider it names all live in ONE namespace — the
@@ -117,6 +128,7 @@ const HostAgentModeIdentity = "identity"
 // a namespace its author does not control: the inventory render lists Hosts and
 // resolves credential Secrets in the Provider's namespace only.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.identity) || (has(self.identity) && self.identity == oldSelf.identity)",message="spec.identity is immutable once set",fieldPath=".identity"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.revoked) || !oldSelf.revoked || (has(self.revoked) && self.revoked)",message="spec.revoked cannot be cleared once set; enrol a replacement as a new Host",fieldPath=".revoked"
 type HostSpec struct {
 	// ProviderRef is the clustered Provider that executes on this host. It must
 	// be in the Host's own namespace: a Host can only be fronted by a Provider in
@@ -191,9 +203,11 @@ type HostSpec struct {
 	Identity string `json:"identity,omitempty"`
 
 	// Revoked, when true, revokes the host's per-host agent identity: the
-	// manager never authorises a certificate request for the host, and the
-	// host is not rendered into its Provider's inventory with agent
-	// credentials. Used only by development builds; ignored by libvirt hosts.
+	// manager retires its enrolment and removes its pinned keys, never
+	// authorises a certificate request for the host again, and does not
+	// render the host into its Provider's inventory with agent credentials.
+	// It cannot be cleared once set (enrol a replacement as a new Host). Used
+	// only by development builds; ignored by libvirt hosts.
 	// +optional
 	Revoked bool `json:"revoked,omitempty"`
 }
@@ -226,12 +240,14 @@ type HostAgentStatus struct {
 	// host's URI identity and the enrolment record.
 	// +optional
 	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MaxLength=512
 	RequestURIs []string `json:"requestURIs,omitempty"`
 
 	// KeyPins are the pinned agent keys: the SHA-256 of each certificate's
 	// DER SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
 	// +optional
 	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:Pattern=`^[0-9a-f]{64}$`
 	KeyPins []string `json:"keyPins,omitempty"`
 
 	// CertificateExpiry is when the pinned agent certificate expires.

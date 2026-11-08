@@ -85,7 +85,8 @@ func RootPool(caBundlePEM []byte) (*x509.CertPool, error) {
 // ValidateIssued checks an issued certificate (chainPEM: the leaf first, then
 // any intermediates) against the authorisation before its key is pinned: it
 // chains to roots for client and server authentication at now; it is not a
-// CA; its lifetime is at most MaxLifetime; its subject alternative names are
+// CA; its lifetime is at most MaxLifetime; its subject is empty or the host
+// name; its subject alternative names are
 // exactly the authorised host URI and record; and its key is the authorised
 // key.
 func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, now time.Time) (Issued, error) {
@@ -116,6 +117,9 @@ func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, n
 	}
 	if leaf.NotAfter.Sub(leaf.NotBefore) > MaxLifetime {
 		return Issued{}, fmt.Errorf("%w: its lifetime exceeds %s", ErrIssued, MaxLifetime)
+	}
+	if !subjectAllowed(leaf.Subject.Names, auth.HostName) {
+		return Issued{}, fmt.Errorf("%w: its subject is not empty or the host name", ErrIssued)
 	}
 	if len(leaf.DNSNames) > 0 || len(leaf.IPAddresses) > 0 || len(leaf.EmailAddresses) > 0 {
 		return Issued{}, fmt.Errorf("%w: it carries non-URI subject alternative names", ErrIssued)
