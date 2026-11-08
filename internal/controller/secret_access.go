@@ -18,12 +18,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -99,6 +101,17 @@ func getWorkloadSecret(ctx context.Context, cached, live client.Reader, key clie
 		return err
 	}
 	return live.Get(ctx, key, s)
+}
+
+// isTransientReadError reports whether a failed read is the API server's
+// passing trouble (timed out, throttled, failed internally, unavailable) or
+// an ended context, rather than an answer about the object. A workload Secret
+// read live (namespaced Secret grant) is retried on such an error, never
+// treated as a missing or forbidden Secret.
+func isTransientReadError(err error) bool {
+	return apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) || apierrors.IsTimeout(err) ||
+		apierrors.IsInternalError(err) || apierrors.IsServiceUnavailable(err) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // secretCacheVerbs are the verbs the Secret informer needs in each namespace

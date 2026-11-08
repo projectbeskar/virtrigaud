@@ -188,9 +188,9 @@ Secret in a workload namespace is then read from the API server: each time a
 VM's create or reconfigure request is built, and on each S3 migration step that
 needs the credentials. That adds a few API requests per create or migration
 step, counted against the manager's client rate limit (`manager.clientQPS`).
-A failed read is treated like any other credential error. A brief API-server
-outage during an S3 migration step can therefore fail that migration, which a
-cache read would have avoided.
+A read the API server cannot answer for the moment (throttled, timed out,
+unavailable, internal error) is retried. A missing or forbidden Secret fails
+the migration as before.
 
 ## Kustomize
 

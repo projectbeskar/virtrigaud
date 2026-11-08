@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -125,4 +126,26 @@ func TestCheckSecretCacheAccess(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "virt-b:list, virt-b:watch")
 	assert.NotContains(t, err.Error(), "virt-a:")
+}
+
+func TestIsTransientReadError(t *testing.T) {
+	gr := corev1.Resource("secrets")
+	for _, err := range []error{
+		apierrors.NewTooManyRequests("slow down", 1),
+		apierrors.NewServerTimeout(gr, "get", 1),
+		apierrors.NewTimeoutError("timeout", 1),
+		apierrors.NewInternalError(errors.New("boom")),
+		apierrors.NewServiceUnavailable("restarting"),
+		fmt.Errorf("get s3 credentials secret: %w", context.DeadlineExceeded),
+	} {
+		assert.True(t, isTransientReadError(err), err.Error())
+	}
+	for _, err := range []error{
+		nil,
+		apierrors.NewNotFound(gr, "s3-creds"),
+		apierrors.NewForbidden(gr, "s3-creds", errors.New("denied")),
+		errors.New("s3 credentials secret must contain keys"),
+	} {
+		assert.False(t, isTransientReadError(err), "%v", err)
+	}
 }
