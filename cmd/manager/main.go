@@ -33,6 +33,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -216,6 +217,23 @@ func main() {
 			"enrolment id) for Providers whose type requires operation identity. Empty (the default) loads none, and "+
 			"nothing is sent to such a Provider. Honoured only by a manager built with the "+devgate.BuildTag+
 			" build tag; a release build refuses to start when it is set.")
+	var hostEnrolmentFlags controller.HostEnrolmentFlags
+	devOnly := "DEVELOPMENT ONLY. Honoured only by a manager built with the " + devgate.BuildTag +
+		" build tag; a release build refuses to start when it is set. "
+	flag.StringVar(&hostEnrolmentFlags.Namespace, controller.DevHostEnrolmentNamespaceFlagName, "",
+		devOnly+"Namespace of the per-host agent enrolment CertificateRequests (the host-agent issuer's namespace). "+
+			"Setting it enables per-host agent enrolment; it needs the development operation signer.")
+	flag.StringVar(&hostEnrolmentFlags.Issuer, controller.DevHostEnrolmentIssuerFlagName, "",
+		devOnly+"cert-manager issuer of the host-agent subordinate CA, as kind/name or group/kind/name. "+
+			"cert-manager's default approver must be disabled for it.")
+	flag.StringVar(&hostEnrolmentFlags.ExternalPKIIssuer, controller.DevHostEnrolmentExternalPKIIssuerFlagName, "",
+		devOnly+"Issuer reference (group/kind/name) that marks an enrolment request for an external PKI.")
+	flag.StringVar(&hostEnrolmentFlags.AdminGroup, controller.DevHostEnrolmentAdminGroupFlagName, "",
+		devOnly+"Group whose members may request a per-host agent enrolment.")
+	flag.StringVar(&hostEnrolmentFlags.TrustDomain, controller.DevHostEnrolmentTrustDomainFlagName, "",
+		devOnly+"Trust domain of host URI identities (spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>).")
+	flag.StringVar(&hostEnrolmentFlags.CABundleFile, controller.DevHostEnrolmentCABundleFileFlagName, "",
+		devOnly+"PEM file of the host-agent subordinate CA that issued agent certificates must chain to.")
 	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
@@ -273,6 +291,23 @@ func main() {
 	}
 	if devOperationEnrolments != nil {
 		setupLog.Info("WARNING: a development operation-identity enrolment file is loaded; this manager is not for production use")
+	}
+
+	// Per-host agent enrolment, refused by a release build like the signer.
+	// It needs the development signer (its install id goes into every
+	// enrolment record).
+	var installID []byte
+	if devOperationSigner != nil {
+		installID = devOperationSigner.InstallID()
+	}
+	hostEnrolment, err := controller.ParseHostEnrolmentConfig(hostEnrolmentFlags, installID)
+	if err != nil {
+		setupLog.Error(err, "invalid per-host agent enrolment flags")
+		os.Exit(1)
+	}
+	if hostEnrolment != nil {
+		setupLog.Info("WARNING: per-host agent enrolment is enabled; this manager is not for production use",
+			"namespace", hostEnrolment.Namespace)
 	}
 
 	// The client rate limits, checked before the manager connects to the
@@ -409,6 +444,9 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "8da97394.virtrigaud.io",
+		// CertificateRequests are cached in the enrolment namespace only
+		// (development builds with enrolment enabled); nil otherwise.
+		Cache: cache.Options{ByObject: controller.HostEnrolmentCacheOptions(hostEnrolment)},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -601,6 +639,30 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Host")
 		os.Exit(1)
+	}
+
+	// Per-host agent enrolment (development builds only, and only with the
+	// enrolment flags): draws enrolment records, decides enrolment
+	// CertificateRequests and pins validated agent keys.
+	if hostEnrolment != nil {
+		if err = (&controller.HostEnrolmentReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Config:   hostEnrolment,
+			Recorder: mgr.GetEventRecorderFor("host-enrolment-controller"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "HostEnrolment")
+			os.Exit(1)
+		}
+		if err = (&controller.HostEnrolmentRequestReconciler{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Config:   hostEnrolment,
+			Recorder: mgr.GetEventRecorderFor("host-enrolment-controller"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "HostEnrolmentRequest")
+			os.Exit(1)
+		}
 	}
 
 	// Register HostPool controller (ADR-0007 D3): writes HostPool.status

@@ -30,9 +30,14 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net/url"
-	"testing"
 	"time"
 )
+
+// T is the part of testing.TB the helpers use (GinkgoT satisfies it too).
+type T interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
 
 // CA is a test subordinate CA.
 type CA struct {
@@ -45,7 +50,7 @@ type CA struct {
 }
 
 // NewCA returns a self-signed test CA.
-func NewCA(t testing.TB) *CA {
+func NewCA(t T) *CA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -86,7 +91,7 @@ type IssueOptions struct {
 }
 
 // Issue signs csrPEM as the CA would and returns the certificate in PEM.
-func (ca *CA) Issue(t testing.TB, csrPEM []byte, o IssueOptions) []byte {
+func (ca *CA) Issue(t T, csrPEM []byte, o IssueOptions) []byte {
 	t.Helper()
 	block, _ := pem.Decode(csrPEM)
 	if block == nil {
@@ -130,7 +135,7 @@ func (ca *CA) Issue(t testing.TB, csrPEM []byte, o IssueOptions) []byte {
 }
 
 // NewKey returns an ECDSA P-256 agent key.
-func NewKey(t testing.TB) *ecdsa.PrivateKey {
+func NewKey(t T) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -155,7 +160,7 @@ type CSROptions struct {
 }
 
 // NewCSR returns a PEM certificate signing request signed by key.
-func NewCSR(t testing.TB, key crypto.Signer, o CSROptions) []byte {
+func NewCSR(t T, key crypto.Signer, o CSROptions) []byte {
 	t.Helper()
 	tmpl := &x509.CertificateRequest{
 		Subject:  pkix.Name{CommonName: o.CommonName},
@@ -184,7 +189,7 @@ func NewCSR(t testing.TB, key crypto.Signer, o CSROptions) []byte {
 }
 
 // ParseURIs parses each string as a URI.
-func ParseURIs(t testing.TB, ss []string) []*url.URL {
+func ParseURIs(t T, ss []string) []*url.URL {
 	t.Helper()
 	out := make([]*url.URL, 0, len(ss))
 	for _, s := range ss {
