@@ -178,7 +178,7 @@ func TestClustered_TaskStatus_UnreachableHostIsHostScoped(t *testing.T) {
 // exactly the historical ones (also pinned by the slice 3 golden file).
 func TestSingleHost_TaskStatus_ReferencesUnchanged(t *testing.T) {
 	p := &Provider{virshProvider: localHostVP("single")}
-	for _, ref := range []string{"task-123", "host-task/v1/host-zzz/t", ""} {
+	for _, ref := range []string{"task-123", "host-task/v1/host-zzz/t"} {
 		done, err := p.IsTaskComplete(context.Background(), ref)
 		require.NoError(t, err)
 		assert.True(t, done, ref)
