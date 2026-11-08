@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-08 06:00] - Operation-grant verifier split into its own package, and a clock floor library for the per-host agent (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/clockfloor/`: a clock floor library for the per-host agent, not used by any binary yet. The floor is a persisted lower bound on time that never moves backwards. It is raised only from the agent's own wall clock and `CLOCK_BOOTTIME`, never from a grant timestamp; within one boot the floor also advances with `CLOCK_BOOTTIME`, and that credit is keyed on the kernel `boot_id`, so a boot-time reading from another boot is never replayed. `Floor.Now` is a `grantverify.Clock` that never returns a time before the floor, so a wall clock rolled back past the expiry of a grant-signing key does not revive the expired key. A floor ahead of the wall clock by more than a tolerance refuses every grant and reports `ClockFloorAhead`; a floor that is unreadable, corrupt, missing for an enrolment that has used it, or that fails to persist fails closed. There is no reset path: recovery is re-enrolment (a documented residual). Persistence goes through a small `Store` interface (fsync-durable `Save`) with an in-memory implementation for tests; the adapter onto the agent's operation store comes with that store. Linux implementations of the boot clock and `boot_id` sources, with stubs that build elsewhere.
+- `internal/operation/grantverify/`, `internal/agent/clockfloor/`: import-boundary tests that fail if either package links controller-runtime, Kubernetes client packages, the API types or the provider contract package.
+- Tests: a wall clock rolled back past a signing-key expiry is refused (with real grants); the floor survives a restart; a reboot with the clock behind keeps the floor and refuses grants until the clock is corrected; a floor ahead refuses and reports `ClockFloorAhead`; boot-time credit is not replayed across a `boot_id`; a corrupt, truncated or unreadable floor fails closed; a fuzz and a seeded property test of floor monotonicity across restarts and reboots; a fuzz of the floor record decoder.
+
+### Changed
+- `internal/operation/grantverify/` (new), `internal/operation/`: the stateless grant verifier and the OperationKind table moved out of `internal/operation` into a package that imports neither the API types nor the provider contract package, so a host binary can link it without Kubernetes. `internal/operation` re-exports every identifier, so callers, tests and fuzz targets are unchanged. The refusal reasons are duplicated there as plain strings; a test asserts they equal the contract package's values. No behaviour change: the identity envtests and the clustered conformance suite give identical pass and skip counts before and after.
+- `internal/operation/grantverify/verify.go`: verification reads the time from a `Clock` (`VerifierConfig.Clock`; the wall clock by default, and the existing `Now` function still works). A `Clock` that returns the zero time makes `Verify` refuse every call with `GRANT_UNAUTHENTICATED` (rule `validity`), so an untrustworthy clock fails closed.
+
+### Why
+The per-host agent must verify grants without linking Kubernetes types, and must not accept a revived expired signing key after a wall-clock rollback. The split and the floor are the groundwork; nothing uses the floor yet.
+
 ## [2026-11-08 00:53] - Operation store library: second round of review fixes (not used by any binary yet)
 **Author:** @wrkode (William Rizzo)
 
