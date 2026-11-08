@@ -124,7 +124,7 @@ func splitYAMLDocs(t *testing.T, raw []byte) [][]byte {
 func TestRBAC_HostEnrolmentKustomizeManifests(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "rbac", "host-enrolment", "role.yaml"))
 	require.NoError(t, err)
-	assertHostEnrolmentRBAC(t, splitYAMLDocs(t, raw), "host-agent-pki", []string{"issuers.cert-manager.io/host-agent-pki.host-agent-ca"})
+	assertHostEnrolmentRBAC(t, splitYAMLDocs(t, raw), "host-agent-pki", []string{"clusterissuers.cert-manager.io/host-agent-ca"})
 
 	// Not part of the default RBAC set.
 	k, err := os.ReadFile(filepath.Join("..", "..", "config", "rbac", "kustomization.yaml"))
@@ -147,9 +147,9 @@ func TestRBAC_HostEnrolmentChartTemplate(t *testing.T) {
 		"--set", "experimental.hostEnrolment.enabled=true",
 		"--set", "experimental.hostEnrolment.developmentBuild=true",
 		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
-		"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/host-agent-pki.host-agent-ca}").CombinedOutput()
+		"--set", "experimental.hostEnrolment.signerNames={clusterissuers.cert-manager.io/host-agent-ca}").CombinedOutput()
 	require.NoError(t, err, string(out))
-	assertHostEnrolmentRBAC(t, splitYAMLDocs(t, out), "host-agent-pki", []string{"issuers.cert-manager.io/host-agent-pki.host-agent-ca"})
+	assertHostEnrolmentRBAC(t, splitYAMLDocs(t, out), "host-agent-pki", []string{"clusterissuers.cert-manager.io/host-agent-ca"})
 
 	noDev, err := exec.Command(helm, "template", "t", chart, // #nosec G204 -- test-controlled arguments
 		"--set", "experimental.hostEnrolment.enabled=true",

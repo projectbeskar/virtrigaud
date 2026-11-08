@@ -84,7 +84,14 @@ type HostEnrolmentRequestReconciler struct {
 	Recorder record.EventRecorder
 	// Now is the clock (nil: time.Now).
 	Now func() time.Time
+	// Admission gates approvals on the periodic admission check (nil: no
+	// gate; tests only — the manager always sets it).
+	Admission *AdmissionGate
 }
+
+// admissionSuspendedRequeue is how soon an undecided request is retried
+// while approvals are suspended.
+const admissionSuspendedRequeue = time.Minute
 
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -113,6 +120,12 @@ func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 	switch {
 	case !certrequest.Decided(cr):
+		if r.Admission != nil && !r.Admission.OK() {
+			// The requester fields cannot be trusted without the admission
+			// webhooks: decide nothing until the check passes again.
+			log.FromContext(ctx).Info("Not deciding a host-agent enrolment request while approvals are suspended", "request", req.String())
+			return ctrl.Result{RequeueAfter: admissionSuspendedRequeue}, nil
+		}
 		return ctrl.Result{}, r.decide(ctx, cr, iss)
 	case certrequest.IsTrue(cr, certrequest.ConditionApproved) && !certrequest.Failed(cr):
 		return ctrl.Result{}, r.complete(ctx, cr, iss)

@@ -149,6 +149,14 @@ func (o *options) hostEnroll(cmd *cobra.Command, eo *hostEnrollOptions) error {
 // size is checked on the opened file and the read is bounded, so a FIFO,
 // a device or a file that grows cannot make it read without limit.
 func readBounded(path string) ([]byte, error) {
+	// Refuse a FIFO or device before opening it: opening a FIFO blocks.
+	pre, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
 	f, err := os.Open(path) // #nosec G304 -- a file the administrator names
 	if err != nil {
 		return nil, err

@@ -650,11 +650,18 @@ func main() {
 	if hostEnrolment != nil {
 		// Fail closed: the requester fields of a CertificateRequest are
 		// trustworthy only behind cert-manager's admission webhooks.
+		// The check is re-run periodically; while it fails, no request is
+		// decided.
+		admissionGate := &controller.AdmissionGate{Reader: mgr.GetAPIReader(), Namespace: hostEnrolment.Namespace}
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err = controller.CheckCertManagerAdmission(checkCtx, mgr.GetAPIReader(), hostEnrolment.Namespace)
+		err = admissionGate.Check(checkCtx)
 		checkCancel()
 		if err != nil {
 			setupLog.Error(err, "refusing to run per-host agent enrolment")
+			os.Exit(1)
+		}
+		if err = mgr.Add(admissionGate); err != nil {
+			setupLog.Error(err, "unable to add the enrolment admission check")
 			os.Exit(1)
 		}
 		if err = (&controller.HostEnrolmentReconciler{
@@ -667,9 +674,10 @@ func main() {
 			os.Exit(1)
 		}
 		if err = (&controller.HostEnrolmentRequestReconciler{
-			Client:   mgr.GetClient(),
-			Config:   hostEnrolment,
-			Recorder: mgr.GetEventRecorderFor("host-enrolment-controller"),
+			Client:    mgr.GetClient(),
+			Config:    hostEnrolment,
+			Admission: admissionGate,
+			Recorder:  mgr.GetEventRecorderFor("host-enrolment-controller"),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "HostEnrolmentRequest")
 			os.Exit(1)

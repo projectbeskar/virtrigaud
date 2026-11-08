@@ -37,6 +37,7 @@ import (
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/devgate"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
 )
 
@@ -48,6 +49,10 @@ func TestParseHostEnrolmentConfig(t *testing.T) {
 	ca := hostidentitytest.NewCA(t)
 	caFile := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(caFile, ca.PEM, 0o600))
+	clusterIssuer := HostEnrolmentFlags{
+		Namespace: "host-agent-pki", Issuer: "ClusterIssuer/host-agent-ca", AdminGroup: "enrolment-admins",
+		TrustDomain: "cluster.test",
+	}
 	full := HostEnrolmentFlags{
 		Namespace: "host-agent-pki", Issuer: "Issuer/host-agent-ca", AdminGroup: "enrolment-admins",
 		TrustDomain: "cluster.test", CABundleFile: caFile,
@@ -62,6 +67,10 @@ func TestParseHostEnrolmentConfig(t *testing.T) {
 	cfg, err = ParseHostEnrolmentConfig(full, installID)
 	require.NoError(t, err)
 	assert.Equal(t, "cert-manager.io/Issuer/host-agent-ca", cfg.CertManagerIssuer.String())
+	clusterIssuer.CABundleFile = caFile
+	cfg, err = ParseHostEnrolmentConfig(clusterIssuer, installID)
+	require.NoError(t, err, "a cert-manager ClusterIssuer is accepted (and recommended)")
+	assert.Equal(t, certrequest.IssuerRef{Group: certrequest.Group, Kind: "ClusterIssuer", Name: "host-agent-ca"}, *cfg.CertManagerIssuer)
 	assert.Nil(t, cfg.ExternalPKIIssuer)
 
 	_, err = ParseHostEnrolmentConfig(full, nil)
@@ -187,7 +196,7 @@ func TestLoadHostEnrolment_RefusesAForeignSecret(t *testing.T) {
 	require.ErrorIs(t, err, errForeignPinsSecret)
 	_, reason := resolveHostAgentTLS(ctx, cli, cfg, h, time.Now())
 	assert.NotEmpty(t, reason)
-	require.NoError(t, deleteHostEnrolment(ctx, cli, cfg, "default", "host-a"))
+	require.NoError(t, deleteHostEnrolment(ctx, cli, cli, cfg, "default", "host-a", ""))
 	require.NoError(t, cli.Get(ctx, client.ObjectKeyFromObject(foreign), &corev1.Secret{}), "a foreign Secret is never deleted")
 }
 
@@ -225,11 +234,17 @@ func TestCheckCertManagerAdmission(t *testing.T) {
 					Key: "cert-manager.io/disable-validation", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"true"}}}},
 				Rules: rule(ops...)}}}
 	}
+	withMatchCondition := func(m *admissionregistrationv1.MutatingWebhookConfiguration) *admissionregistrationv1.MutatingWebhookConfiguration {
+		m.Webhooks[0].MatchConditions = []admissionregistrationv1.MatchCondition{{Name: "skip-some", Expression: "true"}}
+		return m
+	}
 	for name, tc := range map[string]struct {
 		objs []client.Object
 		ok   bool
 	}{
-		"cert-manager's webhooks":     {objs: []client.Object{mut(nil, nil), val(admissionregistrationv1.Create, admissionregistrationv1.Update)}, ok: true},
+		"cert-manager's webhooks": {objs: []client.Object{mut(nil, nil), val(admissionregistrationv1.Create, admissionregistrationv1.Update)}, ok: true},
+		"mutating webhook with match conditions": {objs: []client.Object{withMatchCondition(mut(&fail, nil)),
+			val(admissionregistrationv1.Create, admissionregistrationv1.Update)}},
 		"no webhook at all":           {},
 		"mutating webhook only":       {objs: []client.Object{mut(&fail, nil)}},
 		"validating without update":   {objs: []client.Object{mut(&fail, nil), val(admissionregistrationv1.Create)}},
@@ -247,4 +262,42 @@ func TestCheckCertManagerAdmission(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAdmissionGate: the gate follows the last check, and Start returns when
+// its context is cancelled.
+func TestAdmissionGate(t *testing.T) {
+	ctx := context.Background()
+	sch := newProviderTLSScheme(t)
+	require.NoError(t, admissionregistrationv1.AddToScheme(sch))
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "host-agent-pki"}}
+	rules := []admissionregistrationv1.RuleWithOperations{{Operations: []admissionregistrationv1.OperationType{admissionregistrationv1.OperationAll},
+		Rule: admissionregistrationv1.Rule{APIGroups: []string{"cert-manager.io"}, APIVersions: []string{"v1"}, Resources: []string{"*/*"}}}}
+	mut := &admissionregistrationv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "m"},
+		Webhooks: []admissionregistrationv1.MutatingWebhook{{Name: "m.cert-manager.io", Rules: rules}}}
+	val := &admissionregistrationv1.ValidatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "v"},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{{Name: "v.cert-manager.io", Rules: rules}}}
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(ns, mut, val).Build()
+
+	var nilGate *AdmissionGate
+	assert.False(t, nilGate.OK())
+	g := &AdmissionGate{Reader: cli, Namespace: ns.Name, Interval: time.Millisecond}
+	assert.False(t, g.OK(), "closed until a check passes")
+	require.NoError(t, g.Check(ctx))
+	assert.True(t, g.OK())
+	require.NoError(t, cli.Delete(ctx, val))
+	require.ErrorIs(t, g.Check(ctx), ErrNoCertManagerAdmission)
+	assert.False(t, g.OK(), "a failed re-check suspends approvals")
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- g.Start(runCtx) }()
+	cancel()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after its context was cancelled")
+	}
+	assert.False(t, g.NeedLeaderElection())
 }

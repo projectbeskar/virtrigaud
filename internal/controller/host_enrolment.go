@@ -567,11 +567,14 @@ func saveHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentC
 	return nil
 }
 
-// deleteHostEnrolment deletes the pins Secret of the Host namespace/name, if
-// it is the manager's.
-func deleteHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig, namespace, name string) error {
+// deleteHostEnrolment deletes the pins Secret of the Host namespace/name,
+// if it is the manager's and its stored Host UID is ownerUID (empty: any
+// stored UID). The Secret is read through reader (pass a live reader, so a
+// stale cache never decides a deletion) and deleted with UID and
+// resourceVersion preconditions, so a Secret rewritten in between is kept.
+func deleteHostEnrolment(ctx context.Context, c client.Client, reader client.Reader, cfg *HostEnrolmentConfig, namespace, name string, ownerUID types.UID) error {
 	sec := &corev1.Secret{}
-	err := c.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: hostEnrolmentSecretName(namespace, name)}, sec)
+	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: hostEnrolmentSecretName(namespace, name)}, sec)
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -581,7 +584,17 @@ func deleteHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmen
 	if !isPinsSecretFor(sec, namespace, name) {
 		return nil
 	}
-	if err := c.Delete(ctx, sec, client.Preconditions{UID: &sec.UID}); client.IgnoreNotFound(err) != nil {
+	if ownerUID != "" {
+		var st hostEnrolmentState
+		if err := json.Unmarshal(sec.Data[hostEnrolmentStateKey], &st); err == nil && st.HostUID != string(ownerUID) {
+			return nil
+		}
+	}
+	rv := sec.ResourceVersion
+	if err := c.Delete(ctx, sec, client.Preconditions{UID: &sec.UID, ResourceVersion: &rv}); client.IgnoreNotFound(err) != nil {
+		if apierrors.IsConflict(err) {
+			return nil
+		}
 		return fmt.Errorf("delete pins Secret of Host %s/%s: %w", namespace, name, err)
 	}
 	return nil
@@ -657,7 +670,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if !host.DeletionTimestamp.IsZero() {
 		// A deleting Host is never enrolled again; its pins go first.
-		return ctrl.Result{}, deleteHostEnrolment(ctx, r.Client, r.Config, host.Namespace, host.Name)
+		return ctrl.Result{}, deleteHostEnrolment(ctx, r.Client, r.liveReader(), r.Config, host.Namespace, host.Name, host.UID)
 	}
 	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
 	if err != nil || !agent {
@@ -731,17 +744,24 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return res, r.mirror(ctx, host, st)
 }
 
-// forgetGoneHost deletes the pins Secret of a Host that no longer exists,
-// once a live read confirms it is gone.
+// forgetGoneHost deletes the pins Secret of a Host that no longer exists.
+// Everything is re-read through the live reader: the Secret, its stored Host
+// UID, and the Host; a Host that exists (under any UID) keeps the Secret, and
+// the delete carries UID and resourceVersion preconditions.
 func (r *HostEnrolmentReconciler) forgetGoneHost(ctx context.Context, key types.NamespacedName) error {
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
+	reader := r.liveReader()
 	if err := reader.Get(ctx, key, &infravirtrigaudiov1beta1.Host{}); !apierrors.IsNotFound(err) {
 		return client.IgnoreNotFound(err)
 	}
-	return deleteHostEnrolment(ctx, r.Client, r.Config, key.Namespace, key.Name)
+	return deleteHostEnrolment(ctx, r.Client, reader, r.Config, key.Namespace, key.Name, "")
+}
+
+// liveReader returns the APIReader, or the Client when none is set.
+func (r *HostEnrolmentReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // now returns the current time.

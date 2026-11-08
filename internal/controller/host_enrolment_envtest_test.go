@@ -663,6 +663,40 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(st.Authorised).To(BeNil())
 	})
 
+	It("keeps the pins Secret when a gone-Host sweep finds the Host alive", func() {
+		e := newEnv()
+		h := createHost(e, "host-a", "serial-0001", "ch")
+		enrol(e, "host-a")
+		// A stale cache reported the Host gone; the live re-read finds it.
+		e.hostR.APIReader = k8sClient
+		Expect(e.hostR.forgetGoneHost(ctx, client.ObjectKeyFromObject(h))).To(Succeed())
+		st, _ := loadState(e, "host-a")
+		Expect(st.Current).NotTo(BeNil())
+
+		// A deleting Host whose pins Secret holds another Host UID's state
+		// does not delete it.
+		other := h.DeepCopy()
+		other.UID = "00000000-0000-0000-0000-000000000000"
+		Expect(deleteHostEnrolment(ctx, k8sClient, k8sClient, e.cfg, h.Namespace, h.Name, other.UID)).To(Succeed())
+		st, _ = loadState(e, "host-a")
+		Expect(st.Current).NotTo(BeNil())
+	})
+
+	It("decides nothing while the admission check fails, and decides once it passes", func() {
+		e := newEnv()
+		h := reconcileHost(e, createHost(e, "host-a", "serial-0001", "ch").Name)
+		e.reqR.Admission = &AdmissionGate{Reader: k8sClient, Namespace: e.issuerNS}
+		cr := submit(e, h.Name, csrFor(h, nil), adminOpts())
+		res, err := e.reqR.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cr)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(BeNumerically(">", 0))
+		got := certrequest.NewObject()
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), got)).To(Succeed())
+		Expect(certrequest.Decided(got)).To(BeFalse(), "no approval while the webhooks are not verified")
+		e.reqR.Admission.ok.Store(true)
+		Expect(certrequest.IsTrue(reconcileCR(e, cr), certrequest.ConditionApproved)).To(BeTrue())
+	})
+
 	It("deletes the pins Secret when its Host is deleted", func() {
 		e := newEnv()
 		h := createHost(e, "host-a", "serial-0001", "ch")

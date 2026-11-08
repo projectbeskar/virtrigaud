@@ -14,7 +14,7 @@ rules:
   verbs:
   - approve
   resourceNames:
-  - issuers.cert-manager.io/host-agent-pki.host-agent-ca
+  - clusterissuers.cert-manager.io/host-agent-ca
 - apiGroups:
   - authorization.k8s.io
   resources:

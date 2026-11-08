@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
+	"time"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -28,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
 )
@@ -43,8 +46,9 @@ const certificateRequestsResource = "certificaterequests"
 // CheckCertManagerAdmission fails closed unless the cluster registers, for
 // CertificateRequests in the enrolment namespace, a mutating admission
 // webhook on CREATE and a validating admission webhook on CREATE and UPDATE,
-// each with failurePolicy Fail and selectors that match the namespace and an
-// enrolment request. The requester fields (spec.username, spec.groups,
+// each with failurePolicy Fail, no matchConditions (which could skip the
+// request; they are not evaluated here) and selectors that match the
+// namespace and an enrolment request. The requester fields (spec.username, spec.groups,
 // spec.uid, spec.extra) are trustworthy only because cert-manager's webhooks
 // overwrite them on create and keep them immutable; without such webhooks,
 // whoever creates a request would choose them.
@@ -66,7 +70,7 @@ func CheckCertManagerAdmission(ctx context.Context, c client.Reader, namespace s
 	var mutOK bool
 	for _, cfg := range mutating.Items {
 		for _, w := range cfg.Webhooks {
-			if webhookCovers(w.Rules, w.FailurePolicy, w.NamespaceSelector, w.ObjectSelector, ns.Labels, objLabels,
+			if len(w.MatchConditions) == 0 && webhookCovers(w.Rules, w.FailurePolicy, w.NamespaceSelector, w.ObjectSelector, ns.Labels, objLabels,
 				admissionregistrationv1.Create) {
 				mutOK = true
 			}
@@ -79,7 +83,7 @@ func CheckCertManagerAdmission(ctx context.Context, c client.Reader, namespace s
 	var valOK bool
 	for _, cfg := range validating.Items {
 		for _, w := range cfg.Webhooks {
-			if webhookCovers(w.Rules, w.FailurePolicy, w.NamespaceSelector, w.ObjectSelector, ns.Labels, objLabels,
+			if len(w.MatchConditions) == 0 && webhookCovers(w.Rules, w.FailurePolicy, w.NamespaceSelector, w.ObjectSelector, ns.Labels, objLabels,
 				admissionregistrationv1.Create, admissionregistrationv1.Update) {
 				valOK = true
 			}
@@ -134,3 +138,60 @@ func ruleCovers(r admissionregistrationv1.RuleWithOperations, op admissionregist
 	scopeOK := r.Scope == nil || *r.Scope == admissionregistrationv1.AllScopes || *r.Scope == admissionregistrationv1.NamespacedScope
 	return opOK && resOK && scopeOK && anyOf(r.APIGroups, certrequest.Group) && anyOf(r.APIVersions, certrequest.Version)
 }
+
+// DefaultAdmissionRecheckInterval is how often AdmissionGate re-runs the
+// admission check.
+const DefaultAdmissionRecheckInterval = 3 * time.Minute
+
+// AdmissionGate re-runs CheckCertManagerAdmission periodically; while the
+// last check failed, the request reconciler approves nothing. It is a
+// manager Runnable: Start runs until its context is cancelled.
+type AdmissionGate struct {
+	// Reader is a live API reader.
+	Reader client.Reader
+	// Namespace is the enrolment namespace.
+	Namespace string
+	// Interval between checks (zero: DefaultAdmissionRecheckInterval).
+	Interval time.Duration
+	ok       atomic.Bool
+}
+
+// Check runs the admission check once and records its outcome.
+func (g *AdmissionGate) Check(ctx context.Context) error {
+	err := CheckCertManagerAdmission(ctx, g.Reader, g.Namespace)
+	was := g.ok.Swap(err == nil)
+	if was && err != nil {
+		log.FromContext(ctx).Error(err, "Per-host agent enrolment approvals are suspended")
+	} else if !was && err == nil {
+		log.FromContext(ctx).Info("Per-host agent enrolment approvals are resumed: the admission webhooks cover CertificateRequests again")
+	}
+	return err
+}
+
+// OK reports whether the last check passed.
+func (g *AdmissionGate) OK() bool { return g != nil && g.ok.Load() }
+
+// Start implements manager.Runnable: it re-checks every Interval until ctx
+// is cancelled.
+func (g *AdmissionGate) Start(ctx context.Context) error {
+	interval := g.Interval
+	if interval <= 0 {
+		interval = DefaultAdmissionRecheckInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			_ = g.Check(checkCtx) // the outcome is recorded and logged
+			cancel()
+		}
+	}
+}
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable: every
+// replica keeps its own gate current.
+func (g *AdmissionGate) NeedLeaderElection() bool { return false }
