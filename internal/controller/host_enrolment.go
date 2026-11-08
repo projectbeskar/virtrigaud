@@ -121,7 +121,7 @@ const (
 const hostEnrolmentStateKey = "enrolment.json"
 
 // hostEnrolmentSecretPrefix prefixes a pins Secret name.
-const hostEnrolmentSecretPrefix = "virtrigaud-agent-pins-"
+const hostEnrolmentSecretPrefix = "virtrigaud-agent-pins-" // #nosec G101 -- a Secret name prefix, not a credential
 
 // hostEnrolmentComponent is the app.kubernetes.io/component label of a pins
 // Secret.
