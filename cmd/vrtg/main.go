@@ -253,7 +253,7 @@ func newRootCmd() *cobra.Command {
 		RunE:  notImplemented("init", "the Helm chart"),
 	}
 
-	rootCmd.AddCommand(vmCmd, providerCmd, snapshotCmd, cloneCmd, conformanceCmd, diagCmd, initCmd)
+	rootCmd.AddCommand(vmCmd, providerCmd, snapshotCmd, cloneCmd, conformanceCmd, diagCmd, initCmd, opts.newHostCmd())
 
 	return rootCmd
 }
