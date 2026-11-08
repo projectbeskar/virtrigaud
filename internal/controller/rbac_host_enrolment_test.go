@@ -48,31 +48,41 @@ func assertHostEnrolmentRBAC(t *testing.T, docs [][]byte, wantNS string, wantSig
 			sawClusterRole = true
 			cr := &rbacv1.ClusterRole{}
 			require.NoError(t, yaml.Unmarshal(doc, cr))
-			require.Len(t, cr.Rules, 1, "the ClusterRole grants one rule")
+			require.Len(t, cr.Rules, 3, "the ClusterRole grants three rules")
 			r := cr.Rules[0]
 			assert.Equal(t, []string{"cert-manager.io"}, r.APIGroups)
 			assert.Equal(t, []string{"signers"}, r.Resources)
 			assert.Equal(t, []string{"approve"}, r.Verbs)
 			assert.Equal(t, wantSigners, r.ResourceNames, "approve is limited to the named signers")
+			assert.Equal(t, []string{"authorization.k8s.io"}, cr.Rules[1].APIGroups)
+			assert.Equal(t, []string{"subjectaccessreviews"}, cr.Rules[1].Resources)
+			assert.Equal(t, []string{"create"}, cr.Rules[1].Verbs)
+			assert.Equal(t, []string{"admissionregistration.k8s.io"}, cr.Rules[2].APIGroups)
+			assert.ElementsMatch(t, []string{"mutatingwebhookconfigurations", "validatingwebhookconfigurations"}, cr.Rules[2].Resources)
+			assert.ElementsMatch(t, []string{"get", "list"}, cr.Rules[2].Verbs)
+			for _, rule := range cr.Rules {
+				assert.NotContains(t, rule.Resources, "secrets", "no cluster-wide Secret access")
+			}
 		case "Role":
 			sawRole = true
 			role := &rbacv1.Role{}
 			require.NoError(t, yaml.Unmarshal(doc, role))
 			assert.Equal(t, wantNS, role.Namespace)
-			require.Len(t, role.Rules, 2)
+			require.Len(t, role.Rules, 3)
 			assert.Equal(t, []string{"certificaterequests"}, role.Rules[0].Resources)
-			assert.ElementsMatch(t, []string{"create", "get", "list", "watch"}, role.Rules[0].Verbs)
+			assert.ElementsMatch(t, []string{"get", "list", "watch"}, role.Rules[0].Verbs, "no create: the manager only decides requests")
 			assert.Equal(t, []string{"certificaterequests/status"}, role.Rules[1].Resources)
 			assert.Equal(t, []string{"update"}, role.Rules[1].Verbs)
+			assert.Equal(t, []string{"secrets"}, role.Rules[2].Resources, "pins Secrets, in the enrolment namespace only")
+			assert.ElementsMatch(t, []string{"create", "delete", "get", "list", "update", "watch"}, role.Rules[2].Verbs)
 		case "RoleBinding":
 			assert.Equal(t, wantNS, u.GetNamespace())
 		}
-		// No wildcard and no Secret access in any object.
+		// No wildcard in any object.
 		for _, r := range rulesOf(t, doc) {
 			for _, list := range [][]string{r.APIGroups, r.Resources, r.Verbs, r.ResourceNames} {
 				assert.NotContains(t, list, "*")
 			}
-			assert.NotContains(t, r.Resources, "secrets")
 		}
 	}
 	assert.True(t, sawClusterRole && sawRole)
@@ -135,10 +145,18 @@ func TestRBAC_HostEnrolmentChartTemplate(t *testing.T) {
 
 	out, err := exec.Command(helm, "template", "t", chart, "--show-only", "templates/host-enrolment-rbac.yaml", // #nosec G204 -- test-controlled arguments
 		"--set", "experimental.hostEnrolment.enabled=true",
+		"--set", "experimental.hostEnrolment.developmentBuild=true",
 		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
 		"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/host-agent-pki.host-agent-ca}").CombinedOutput()
 	require.NoError(t, err, string(out))
 	assertHostEnrolmentRBAC(t, splitYAMLDocs(t, out), "host-agent-pki", []string{"issuers.cert-manager.io/host-agent-pki.host-agent-ca"})
+
+	noDev, err := exec.Command(helm, "template", "t", chart, // #nosec G204 -- test-controlled arguments
+		"--set", "experimental.hostEnrolment.enabled=true",
+		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
+		"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/host-agent-pki.host-agent-ca}").CombinedOutput()
+	require.Error(t, err, "rendering needs the explicit development-build statement")
+	assert.Contains(t, string(noDev), "developmentBuild")
 
 	for name, args := range map[string][]string{
 		"wildcard signer": {"--set", "experimental.hostEnrolment.namespace=x", "--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/*}"},
@@ -146,7 +164,8 @@ func TestRBAC_HostEnrolmentChartTemplate(t *testing.T) {
 		"no namespace":    {"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/x.y}"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			all := append([]string{"template", "t", chart, "--set", "experimental.hostEnrolment.enabled=true"}, args...)
+			all := append([]string{"template", "t", chart, "--set", "experimental.hostEnrolment.enabled=true",
+				"--set", "experimental.hostEnrolment.developmentBuild=true"}, args...)
 			out, err := exec.Command(helm, all...).CombinedOutput() // #nosec G204 -- test-controlled arguments
 			assert.Error(t, err, string(out))
 		})

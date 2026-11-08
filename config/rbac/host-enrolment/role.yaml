@@ -15,6 +15,20 @@ rules:
   - approve
   resourceNames:
   - issuers.cert-manager.io/host-agent-pki.host-agent-ca
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - mutatingwebhookconfigurations
+  - validatingwebhookconfigurations
+  verbs:
+  - get
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -46,7 +60,6 @@ rules:
   resources:
   - certificaterequests
   verbs:
-  - create
   - get
   - list
   - watch
@@ -56,6 +69,17 @@ rules:
   - certificaterequests/status
   verbs:
   - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

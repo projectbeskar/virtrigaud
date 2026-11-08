@@ -4,13 +4,21 @@ with the virtrigaud_dev build tag and started with the --dev-host-enrolment-*
 flags (which this chart does not set). Off by default.
 
 Grants exactly: approve on the named cert-manager signers (resourceNames, no
-wildcard), and create/get/list/watch on certificaterequests plus update on
-certificaterequests/status in the enrolment namespace only. No Secret access
-is added (the per-Host pins Secrets are covered by the manager's existing
-grants).
+wildcard), create on subjectaccessreviews (the per-Host enrol check), get/list
+on admission webhook configurations (the fail-closed cert-manager check), and,
+in the enrolment namespace only, get/list/watch on certificaterequests, update
+on certificaterequests/status, and the pins Secrets. Only the manager may write
+Secrets in the enrolment namespace.
+
+It renders only with experimental.hostEnrolment.developmentBuild=true, an
+explicit statement that the manager image is a development build (a release
+manager cannot use these grants).
 */ -}}
 {{- $he := ((.Values.experimental | default dict).hostEnrolment | default dict) }}
 {{- if and .Values.rbac.create $he.enabled }}
+{{- if not $he.developmentBuild }}
+{{- fail "experimental.hostEnrolment.enabled needs experimental.hostEnrolment.developmentBuild=true: per-host agent enrolment works only with a development build of the manager (built with the virtrigaud_dev tag); a release manager refuses its flags and must not hold a signer approve grant" }}
+{{- end }}
 {{- $ns := required "experimental.hostEnrolment.namespace is required when experimental.hostEnrolment.enabled is true" $he.namespace }}
 {{- if not $he.signerNames }}
 {{- fail "experimental.hostEnrolment.signerNames must list the host-agent signer name(s), e.g. issuers.cert-manager.io/<namespace>.<name>" }}
@@ -34,6 +42,12 @@ rules:
   {{- range $he.signerNames }}
   - {{ . | quote }}
   {{- end }}
+- apiGroups: ["authorization.k8s.io"]
+  resources: ["subjectaccessreviews"]
+  verbs: ["create"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+  verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -60,10 +74,13 @@ metadata:
 rules:
 - apiGroups: ["cert-manager.io"]
   resources: ["certificaterequests"]
-  verbs: ["create", "get", "list", "watch"]
+  verbs: ["get", "list", "watch"]
 - apiGroups: ["cert-manager.io"]
   resources: ["certificaterequests/status"]
   verbs: ["update"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "delete", "get", "list", "update", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
