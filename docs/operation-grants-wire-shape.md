@@ -142,7 +142,7 @@ When an agent answers a read that carried a nonce with an error status (for exam
 status detail of type `type.googleapis.com/provider.v1.SignedBlob`, beside the
 `ErrorInfo`, encoded in at most 16 KiB.
 
-### Request fields
+### Request and response fields
 
 Thirteen additive fields on six existing messages:
 
@@ -177,7 +177,9 @@ Thirteen additive fields on six existing messages:
   that sequence number (`AnswerContext.continuity_head`), so a manager can tell a store
   that was rolled back or forked from one that moved forward. 0 asks for nothing.
 - The request fields are set only for a Provider whose type requires operation
-  identity; other Providers ignore them.
+  identity. They carry no meaning for other Providers: a `Describe` or `GetHostInfo`
+  is answered as without them, and a `TaskStatus` is answered from `task` alone, so
+  one without `task` is refused or fails there as it does today.
 
 ### The signature input
 
@@ -216,16 +218,25 @@ plain serialised body).
 
 ### The signing key
 
-The key is the host's enrolled identity key, generated on the host and never leaving
-it (after a renewal is put in use, the renewed key of the same enrolment), and
-`signer_certificate` is the host's current identity certificate. The certificate's
-issuer, a dedicated host-agent CA, is a trust anchor the verifier is configured with
-and is never sent. The same key is the agent's TLS server key, so the agent's TLS
-server accepts TLS 1.3 only, and the key signs nothing but TLS 1.3 handshakes,
-certificate requests and host-signed messages. The host-agent CA hierarchy and the
-grant-signing hierarchy must be separate: no certificate and no ancestor in common, so
-that whoever can issue host certificates can never issue a grant signer, and the
-reverse.
+These are requirements on a per-host agent; no agent implements them yet.
+
+- The signing key must be the host's enrolled identity key, generated on the host and
+  never leaving it (after a renewal is put in use, the renewed key of the same
+  enrolment), and `signer_certificate` must be the host's current identity certificate.
+  The certificate's issuer, a dedicated host-agent CA, is a trust anchor the verifier
+  is configured with and is never sent.
+- The same key is the agent's TLS server key. The agent's TLS server must accept
+  TLS 1.3 only, and the agent must use the key for nothing but TLS 1.3 handshakes,
+  certificate requests and host-signed messages.
+- The host-agent CA hierarchy and the grant-signing hierarchy must be separate: no
+  certificate and no ancestor in common, so that whoever can issue host certificates
+  can never issue a grant signer, and the reverse.
+
+Accepted risk: because one key serves both TLS and signed answers, a compromise of the
+TLS-serving process of an agent can produce answers that verify for that host's VMs;
+keeping the key in a separate signer process limits key exfiltration, not this online
+forgery. A separate answer key, held by a process that never terminates TLS, is
+required before a regulated deployment relies on signed host answers.
 
 ### What a manager will verify
 
@@ -274,7 +285,7 @@ nor call it, and the manager never calls it. Nothing serves or calls it yet.
   their own file from the start, so the breaking-change check never sees them move.
 - A provider built against an older contract ignores the new fields; a manager built
   against an older contract never sends them.
-- The messages live in `provider.proto`. The contract's breaking-change check
+- The grant messages live in `provider.proto`. The contract's breaking-change check
   (`make proto-breaking`, buf category `FILE`) treats moving a message to another file
   as breaking, so they stay there.
 - `contracts.Capabilities` carries the four gates; the SDK's `sdk/provider/capabilities`
