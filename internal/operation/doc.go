@@ -20,14 +20,14 @@ limitations under the License.
 //
 // It holds three things:
 //
-//   - the OperationKind table (kinds.go): each kind names exactly one RPC, its
+//   - the OperationKind table (grantverify/kinds.go): each kind names exactly one RPC, its
 //     request message type and, for the four Power kinds, the fixed
 //     PowerRequest.op;
 //   - grant minting (grant.go): MintOperationGrant builds a version 1
 //     GRANT_KIND_OPERATION body, serialises it once and has a Signer sign
 //     those exact bytes;
-//   - one verifier (verify.go) that a test fake and a later per-host agent
-//     share. It fails closed: an unknown grant_version, an unknown field in
+//   - one verifier (grantverify/verify.go, re-exported by reexport.go) that a
+//     test fake and a later per-host agent share. It fails closed: an unknown grant_version, an unknown field in
 //     the envelope, the grant, the body, any message nested in it or the
 //     decoded request, an UNSPECIFIED or unknown enum value, a zero counter,
 //     a placeholder field set at version 1, a kind that does not fit the RPC
