@@ -1639,6 +1639,10 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 	return nil
 }
 
+// taskReferenceRequiredMessage is the refusal of a TaskStatus request that
+// carries no task reference.
+const taskReferenceRequiredMessage = "task reference is required"
+
 // TaskStatus implements the ProviderServer interface. It polls the vSphere task
 // identified by req.Task.Id (a Task ManagedObjectReference value) and returns its
 // current state.
@@ -1655,12 +1659,12 @@ func (p *Provider) addCloudInitToConfigSpec(configSpec *types.VirtualMachineConf
 // a failed task with a task vCenter no longer knows (which the manager tells apart by
 // its text), so nothing definite can be claimed about it.
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
-	if p.client == nil {
-		return nil, fmt.Errorf("vSphere client not configured")
+	if req.GetTask().GetId() == "" {
+		return nil, errors.NewInvalidSpec(taskReferenceRequiredMessage)
 	}
 
-	if req.Task == nil || req.Task.Id == "" {
-		return nil, fmt.Errorf("task reference is required")
+	if p.client == nil {
+		return nil, fmt.Errorf("vSphere client not configured")
 	}
 
 	p.logger.Debug("Checking task status", "task_id", req.Task.Id)
