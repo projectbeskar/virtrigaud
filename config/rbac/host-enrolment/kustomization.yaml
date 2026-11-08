@@ -1,0 +1,5 @@
+# Per-host agent enrolment RBAC (development builds only). Not referenced by
+# config/default; apply it on purpose after editing the placeholders (see
+# README.md).
+resources:
+- role.yaml

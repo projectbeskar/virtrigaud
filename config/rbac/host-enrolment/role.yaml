@@ -1,0 +1,75 @@
+# Per-host agent enrolment (development builds only); see README.md.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/managed-by: kustomize
+  name: virtrigaud-host-enrolment-approver
+rules:
+- apiGroups:
+  - cert-manager.io
+  resources:
+  - signers
+  verbs:
+  - approve
+  resourceNames:
+  - issuers.cert-manager.io/host-agent-pki.host-agent-ca
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/managed-by: kustomize
+  name: virtrigaud-host-enrolment-approver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: virtrigaud-host-enrolment-approver
+subjects:
+- kind: ServiceAccount
+  name: virtrigaud-controller-manager
+  namespace: virtrigaud-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/managed-by: kustomize
+  name: virtrigaud-host-enrolment
+  namespace: host-agent-pki
+rules:
+- apiGroups:
+  - cert-manager.io
+  resources:
+  - certificaterequests
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cert-manager.io
+  resources:
+  - certificaterequests/status
+  verbs:
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/managed-by: kustomize
+  name: virtrigaud-host-enrolment
+  namespace: host-agent-pki
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: virtrigaud-host-enrolment
+subjects:
+- kind: ServiceAccount
+  name: virtrigaud-controller-manager
+  namespace: virtrigaud-system

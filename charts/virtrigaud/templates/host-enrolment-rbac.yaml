@@ -1,0 +1,83 @@
+{{- /*
+Per-host agent enrolment RBAC. DEVELOPMENT ONLY: used only by a manager built
+with the virtrigaud_dev build tag and started with the --dev-host-enrolment-*
+flags (which this chart does not set). Off by default.
+
+Grants exactly: approve on the named cert-manager signers (resourceNames, no
+wildcard), and create/get/list/watch on certificaterequests plus update on
+certificaterequests/status in the enrolment namespace only. No Secret access
+is added (the per-Host pins Secrets are covered by the manager's existing
+grants).
+*/ -}}
+{{- $he := ((.Values.experimental | default dict).hostEnrolment | default dict) }}
+{{- if and .Values.rbac.create $he.enabled }}
+{{- $ns := required "experimental.hostEnrolment.namespace is required when experimental.hostEnrolment.enabled is true" $he.namespace }}
+{{- if not $he.signerNames }}
+{{- fail "experimental.hostEnrolment.signerNames must list the host-agent signer name(s), e.g. issuers.cert-manager.io/<namespace>.<name>" }}
+{{- end }}
+{{- range $he.signerNames }}
+{{- if or (contains "*" .) (not (contains "/" .)) }}
+{{- fail (printf "experimental.hostEnrolment.signerNames: %q must be one exact signer name (<resource>.<group>/<namespace>.<name>), never a wildcard" .) }}
+{{- end }}
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-host-enrolment-approver
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["cert-manager.io"]
+  resources: ["signers"]
+  verbs: ["approve"]
+  resourceNames:
+  {{- range $he.signerNames }}
+  - {{ . | quote }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-host-enrolment-approver
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "virtrigaud.fullname" . }}-host-enrolment-approver
+subjects:
+- kind: ServiceAccount
+  name: {{ include "virtrigaud.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-host-enrolment
+  namespace: {{ $ns }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["cert-manager.io"]
+  resources: ["certificaterequests"]
+  verbs: ["create", "get", "list", "watch"]
+- apiGroups: ["cert-manager.io"]
+  resources: ["certificaterequests/status"]
+  verbs: ["update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "virtrigaud.fullname" . }}-host-enrolment
+  namespace: {{ $ns }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "virtrigaud.fullname" . }}-host-enrolment
+subjects:
+- kind: ServiceAccount
+  name: {{ include "virtrigaud.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
