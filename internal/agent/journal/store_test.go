@@ -415,6 +415,31 @@ func TestRollback(t *testing.T) {
 	})
 }
 
+// A loss detected at open is recorded durably: it survives a restart even when
+// the file that caused it comes back.
+func TestQuarantine_LossDetectedAtOpenIsSticky(t *testing.T) {
+	e := newEnv(t)
+	var events []journal.Event
+	e.opts.Events = func(ev journal.Event) { events = append(events, ev) }
+	s := e.ready()
+	put(t, s, "a", "1")
+	_ = s.Close()
+	p := filepath.Join(e.dir, journal.AnchorFile)
+	saved, _ := e.mem.ReadFile(p)
+	_ = e.mem.Remove(p)
+	s2 := e.open()
+	wantLost(t, s2, journal.LostAnchorMissing)
+	if len(events) != 1 || events[0].Reason != journal.LostAnchorMissing {
+		t.Fatalf("events = %+v", events)
+	}
+	_ = s2.Close()
+	if ok, _ := e.mem.Exists(filepath.Join(e.dir, journal.QuarantineFile)); !ok {
+		t.Fatal("no quarantine marker after a loss detected at open")
+	}
+	e.mem.Put(p, saved) // the anchor log comes back
+	wantLost(t, e.open(), journal.LostAnchorMissing)
+}
+
 // A crash after the store commit and before the anchor append leaves the
 // store one ahead; that commit was never acknowledged, so it is accepted and
 // anchored at the next open.

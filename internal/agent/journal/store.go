@@ -199,10 +199,11 @@ type Store struct {
 	head       [32]byte
 	anchorSize int64
 
-	state   State
-	lost    LostReason
-	crashed bool
-	closed  bool
+	state    State
+	lost     LostReason
+	recorded bool // the loss was read from a quarantine record
+	crashed  bool
+	closed   bool
 
 	// pendingAnchor is used only when the AnchorBeforeAck guard is off (a
 	// mutation test): the record is appended at the next commit.
@@ -271,7 +272,25 @@ func Open(ctx context.Context, opts Options) (st *Store, err error) {
 		_ = s.closeFiles()
 		return nil, err
 	}
+	s.recordOpenLoss()
 	return s, nil
+}
+
+// recordOpenLoss makes a loss detected at open durable, unless it was read
+// from a quarantine record: a restart must not lift it, even when the
+// condition that caused it (a missing or damaged file) goes away.
+func (s *Store) recordOpenLoss() {
+	if s.state != StateLost || s.recorded {
+		return
+	}
+	if s.anchor == nil {
+		if ok, _ := s.fsys.Exists(s.path(AnchorFile)); ok {
+			if f, err := s.fsys.OpenFile(s.path(AnchorFile), os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+				s.anchor = f
+			}
+		}
+	}
+	s.quarantineLocked(s.lost, "detected when the store was opened")
 }
 
 // open does the work of Open.
@@ -297,6 +316,7 @@ func (s *Store) open() error {
 	}
 	if q, ok := s.readQuarantineFile(); ok {
 		s.setLost(q)
+		s.recorded = true
 	}
 
 	if !dbExists {
@@ -325,6 +345,9 @@ func (s *Store) open() error {
 	copy(s.storeID[:], meta.GetStoreId())
 	s.seq, s.head = pos.Seq, pos.Head
 	if quarantine != nil {
+		if s.state != StateLost {
+			s.recorded = true
+		}
 		s.setLost(parseReason(quarantine.GetReason()))
 	}
 
@@ -392,6 +415,9 @@ func (s *Store) checkAnchor(pos Position) error {
 			return nil
 		}
 		if r.Type == AnchorQuarantine {
+			if s.state != StateLost {
+				s.recorded = true
+			}
 			s.setLost(r.Reason)
 			continue
 		}
