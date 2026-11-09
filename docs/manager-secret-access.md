@@ -101,7 +101,10 @@ The chart then renders:
 
 Each binding names only the manager's ServiceAccount. When the per-host agent
 enrolment is enabled, the chart adds its namespace to
-`--secret-cache-namespaces`, because pins Secrets are read through the cache.
+`--secret-cache-namespaces`, because pins Secrets are watched through the cache.
+The manager also adds the enrolment namespace itself when it is given a
+restricted list and enrolment is enabled, so a Kustomize or hand-written flag
+cannot leave the pins Secret watch blind.
 This chart renders no Secret Role there: the Secret verbs in that namespace come
 from the enrolment feature's own Role. With `rbac.create: false` the chart
 renders no RBAC but still sets `--secret-cache-namespaces`. You must then

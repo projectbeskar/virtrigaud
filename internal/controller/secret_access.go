@@ -74,6 +74,35 @@ func ParseSecretCacheNamespaces(value string) ([]string, error) {
 	return slices.Compact(out), nil
 }
 
+// SecretCacheNamespacesWithEnrolment returns namespaces with the per-host
+// agent enrolment namespace added when the Secret cache is restricted and
+// enrolment is enabled: the enrolment controller watches its pins Secrets
+// there. An unrestricted cache (empty namespaces) or no enrolment returns
+// namespaces unchanged.
+func SecretCacheNamespacesWithEnrolment(namespaces []string, enrolment *HostEnrolmentConfig) []string {
+	if len(namespaces) == 0 || enrolment == nil || slices.Contains(namespaces, enrolment.Namespace) {
+		return namespaces
+	}
+	out := append(slices.Clone(namespaces), enrolment.Namespace)
+	slices.Sort(out)
+	return out
+}
+
+// MergeCacheByObject merges per-object cache options into one map, or nil
+// when every input is empty. A later map wins for an object present twice.
+func MergeCacheByObject(maps ...map[client.Object]cache.ByObject) map[client.Object]cache.ByObject {
+	var out map[client.Object]cache.ByObject
+	for _, m := range maps {
+		for obj, by := range m {
+			if out == nil {
+				out = map[client.Object]cache.ByObject{}
+			}
+			out[obj] = by
+		}
+	}
+	return out
+}
+
 // SecretCacheByObject returns the cache options that restrict the Secret
 // informer to namespaces, or nil (every namespace) when namespaces is empty.
 // A cached read of a Secret outside namespaces fails rather than falling back

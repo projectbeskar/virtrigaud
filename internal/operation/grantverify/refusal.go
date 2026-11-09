@@ -14,13 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package operation
+package grantverify
 
 import (
 	"errors"
 	"fmt"
+)
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+// The ErrorInfo reasons a Refusal carries. They are plain strings, not the
+// internal/providers/contracts constants, so that this package (and a binary
+// that links only it) imports nothing of the API or contract packages;
+// reasons_test.go pins each to its contracts value.
+const (
+	// ReasonGrantUnauthenticated is the reason of a refusal on signature,
+	// chain, validity or generation.
+	ReasonGrantUnauthenticated = "GRANT_UNAUTHENTICATED"
+	// ReasonGrantMismatch is the reason of a refusal because the grant does
+	// not fit the call or the verifier's version.
+	ReasonGrantMismatch = "GRANT_MISMATCH"
+	// ReasonIdentityRequired is the reason of a refusal because the call
+	// carries no operation envelope.
+	ReasonIdentityRequired = "IDENTITY_REQUIRED"
 )
 
 // Rule names the verifier rule a Refusal enforces. Tests and callers match on
@@ -94,8 +108,8 @@ const (
 
 // Refusal is a verifier's refusal of one call: the call is not performed.
 // Reason is the google.rpc.ErrorInfo reason an agent answers with
-// (contracts.GrantUnauthenticatedReason, contracts.GrantMismatchReason or
-// contracts.IdentityRequiredReason). InvalidArgument is set for a request
+// (ReasonGrantUnauthenticated, ReasonGrantMismatch or
+// ReasonIdentityRequired). InvalidArgument is set for a request
 // whose outer fields are set beside the envelope, which an agent refuses with
 // INVALID_ARGUMENT. A Refusal never carries request bytes or key material.
 type Refusal struct {
@@ -126,11 +140,11 @@ func AsRefusal(err error) (*Refusal, bool) {
 // mismatch is a GRANT_MISMATCH refusal: the grant does not fit this call or
 // this verifier's version.
 func mismatch(rule Rule, format string, args ...any) *Refusal {
-	return &Refusal{Reason: contracts.GrantMismatchReason, Rule: rule, detail: fmt.Sprintf(format, args...)}
+	return &Refusal{Reason: ReasonGrantMismatch, Rule: rule, detail: fmt.Sprintf(format, args...)}
 }
 
 // unauthenticated is a GRANT_UNAUTHENTICATED refusal: signature, chain,
 // validity or generation.
 func unauthenticated(rule Rule, format string, args ...any) *Refusal {
-	return &Refusal{Reason: contracts.GrantUnauthenticatedReason, Rule: rule, detail: fmt.Sprintf(format, args...)}
+	return &Refusal{Reason: ReasonGrantUnauthenticated, Rule: rule, detail: fmt.Sprintf(format, args...)}
 }

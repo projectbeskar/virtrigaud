@@ -225,6 +225,23 @@ func main() {
 			"objects. Empty (the default) caches Secrets in every namespace, which needs a cluster-wide Secret "+
 			"list/watch grant. Set it when the manager's Secret access is granted per namespace "+
 			"(Helm rbac.secrets.scope=namespaced); see docs/manager-secret-access.md.")
+	var hostEnrolmentFlags controller.HostEnrolmentFlags
+	devOnly := "DEVELOPMENT ONLY. Honoured only by a manager built with the " + devgate.BuildTag +
+		" build tag; a release build refuses to start when it is set. "
+	flag.StringVar(&hostEnrolmentFlags.Namespace, controller.DevHostEnrolmentNamespaceFlagName, "",
+		devOnly+"Namespace of the per-host agent enrolment CertificateRequests (the host-agent issuer's namespace). "+
+			"Setting it enables per-host agent enrolment; it needs the development operation signer.")
+	flag.StringVar(&hostEnrolmentFlags.Issuer, controller.DevHostEnrolmentIssuerFlagName, "",
+		devOnly+"cert-manager issuer of the host-agent subordinate CA, as kind/name or group/kind/name. "+
+			"cert-manager's default approver must be disabled for it.")
+	flag.StringVar(&hostEnrolmentFlags.ExternalPKIIssuer, controller.DevHostEnrolmentExternalPKIIssuerFlagName, "",
+		devOnly+"Issuer reference (group/kind/name) that marks an enrolment request for an external PKI.")
+	flag.StringVar(&hostEnrolmentFlags.AdminGroup, controller.DevHostEnrolmentAdminGroupFlagName, "",
+		devOnly+"Group whose members may request a per-host agent enrolment.")
+	flag.StringVar(&hostEnrolmentFlags.TrustDomain, controller.DevHostEnrolmentTrustDomainFlagName, "",
+		devOnly+"Trust domain of host URI identities (spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>).")
+	flag.StringVar(&hostEnrolmentFlags.CABundleFile, controller.DevHostEnrolmentCABundleFileFlagName, "",
+		devOnly+"PEM file of the host-agent subordinate CA that issued agent certificates must chain to.")
 	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
@@ -284,6 +301,23 @@ func main() {
 		setupLog.Info("WARNING: a development operation-identity enrolment file is loaded; this manager is not for production use")
 	}
 
+	// Per-host agent enrolment, refused by a release build like the signer.
+	// It needs the development signer (its install id goes into every
+	// enrolment record).
+	var installID []byte
+	if devOperationSigner != nil {
+		installID = devOperationSigner.InstallID()
+	}
+	hostEnrolment, err := controller.ParseHostEnrolmentConfig(hostEnrolmentFlags, installID)
+	if err != nil {
+		setupLog.Error(err, "invalid per-host agent enrolment flags")
+		os.Exit(1)
+	}
+	if hostEnrolment != nil {
+		setupLog.Info("WARNING: per-host agent enrolment is enabled; this manager is not for production use",
+			"namespace", hostEnrolment.Namespace)
+	}
+
 	// The client rate limits, checked before the manager connects to the
 	// cluster: an invalid value stops it rather than running with a limit
 	// client-go would replace (zero) or drop (negative).
@@ -296,6 +330,9 @@ func main() {
 		setupLog.Error(err, "invalid Secret cache namespaces")
 		os.Exit(1)
 	}
+	// The enrolment controller watches the pins Secrets in the enrolment
+	// namespace, so a restricted Secret cache must cover it.
+	secretCacheNamespaces = controller.SecretCacheNamespacesWithEnrolment(secretCacheNamespaces, hostEnrolment)
 	if len(secretCacheNamespaces) > 0 {
 		setupLog.Info("Secret informer cache restricted to namespaces", "namespaces", secretCacheNamespaces)
 	}
@@ -427,8 +464,12 @@ func main() {
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "8da97394.virtrigaud.io",
 		// Secrets are cached in every namespace unless --secret-cache-namespaces
-		// restricts the informer (per-namespace Secret grants).
-		Cache: cache.Options{ByObject: controller.SecretCacheByObject(secretCacheNamespaces)},
+		// restricts the informer (per-namespace Secret grants); CertificateRequests
+		// are cached in the enrolment namespace only (development builds with
+		// enrolment enabled).
+		Cache: cache.Options{ByObject: controller.MergeCacheByObject(
+			controller.SecretCacheByObject(secretCacheNamespaces),
+			controller.HostEnrolmentCacheOptions(hostEnrolment))},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -521,7 +562,9 @@ func main() {
 		TmpSizeLimitMax:         providerTmpSizeLimitMax,
 		Recorder:                mgr.GetEventRecorderFor("provider-controller"),
 		EnabledDevProviderTypes: enabledDevProviderTypes,
-		OperationSignerLoaded:   devOperationSigner != nil,
+		// Development builds only: renders enrolled per-host agent hosts.
+		HostEnrolment:         hostEnrolment,
+		OperationSignerLoaded: devOperationSigner != nil,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
@@ -639,6 +682,46 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Host")
 		os.Exit(1)
+	}
+
+	// Per-host agent enrolment (development builds only, and only with the
+	// enrolment flags): draws enrolment records, decides enrolment
+	// CertificateRequests and pins validated agent keys.
+	if hostEnrolment != nil {
+		// Fail closed: the requester fields of a CertificateRequest are
+		// trustworthy only behind cert-manager's admission webhooks.
+		// The check is re-run periodically; while it fails, no request is
+		// decided.
+		admissionGate := &controller.AdmissionGate{Reader: mgr.GetAPIReader(), Namespace: hostEnrolment.Namespace}
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = admissionGate.Check(checkCtx)
+		checkCancel()
+		if err != nil {
+			setupLog.Error(err, "refusing to run per-host agent enrolment")
+			os.Exit(1)
+		}
+		if err = mgr.Add(admissionGate); err != nil {
+			setupLog.Error(err, "unable to add the enrolment admission check")
+			os.Exit(1)
+		}
+		if err = (&controller.HostEnrolmentReconciler{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config:    hostEnrolment,
+			Recorder:  mgr.GetEventRecorderFor("host-enrolment-controller"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "HostEnrolment")
+			os.Exit(1)
+		}
+		if err = (&controller.HostEnrolmentRequestReconciler{
+			Client:    mgr.GetClient(),
+			Config:    hostEnrolment,
+			Admission: admissionGate,
+			Recorder:  mgr.GetEventRecorderFor("host-enrolment-controller"),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "HostEnrolmentRequest")
+			os.Exit(1)
+		}
 	}
 
 	// Register HostPool controller (ADR-0007 D3): writes HostPool.status

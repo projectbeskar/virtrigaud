@@ -19,7 +19,6 @@ package operation
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"reflect"
@@ -28,6 +27,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -37,8 +37,6 @@ const (
 	// DefaultGrantLifetime is the validity MintOperationGrant gives a grant
 	// when MintRequest.Lifetime is 0.
 	DefaultGrantLifetime = 5 * time.Minute
-	// MaxGrantLifetime is the longest validity this package mints or accepts.
-	MaxGrantLifetime = time.Hour
 )
 
 // Epoch is a manager epoch: a counter that counts from 1 and the 16-byte
@@ -118,15 +116,6 @@ func randomBytes(n int) ([]byte, error) {
 	return b, nil
 }
 
-// IntentDigest is SHA-256(salt || request), the GrantBody.intent_digest over
-// the exact request bytes.
-func IntentDigest(salt, request []byte) []byte {
-	h := sha256.New()
-	_, _ = h.Write(salt) // hash.Hash.Write never returns an error
-	_, _ = h.Write(request)
-	return h.Sum(nil)
-}
-
 // buildOperationBody builds the version 1 OPERATION body r and s describe and
 // checks it, without signing it.
 func buildOperationBody(s Signer, r MintRequest) (*providerv1.GrantBody, error) {
@@ -164,11 +153,11 @@ func buildOperationBody(s Signer, r MintRequest) (*providerv1.GrantBody, error) 
 		IssuedAt:            timestamppb.New(r.IssuedAt),
 		NotAfter:            timestamppb.New(r.IssuedAt.Add(lifetime)),
 	}
-	if refusal := checkOperationBody(body); refusal != nil {
+	if refusal := grantverify.CheckOperationBody(body); refusal != nil {
 		return nil, fmt.Errorf("mint operation grant: %w", refusal)
 	}
-	row, _ := RowFor(id.Kind) // checkOperationBody refused an unknown kind
-	if _, refusal := decodeRequest(row, r.Request); refusal != nil {
+	row, _ := RowFor(id.Kind) // CheckOperationBody refused an unknown kind
+	if _, refusal := grantverify.DecodeRequestFor(row, r.Request); refusal != nil {
 		return nil, fmt.Errorf("mint operation grant: %w", refusal)
 	}
 	return body, nil
@@ -228,22 +217,6 @@ func MintOperationGrant(ctx context.Context, s Signer, r MintRequest) (*provider
 		Signature:       sig.Signature,
 		SignerCertChain: sig.Chain,
 	}, nil
-}
-
-// DecodeRequest decodes requestBytes as the request type kind names and
-// applies the verifier's request rules (no unknown fields or enum values, no
-// envelope of its own, the kind's fixed field). The error never quotes the
-// request.
-func DecodeRequest(kind providerv1.OperationKind, requestBytes []byte) (proto.Message, error) {
-	row, ok := RowFor(kind)
-	if !ok {
-		return nil, mismatch(RuleUnknownEnum, "kind %d is not implemented", kind)
-	}
-	m, refusal := decodeRequest(row, requestBytes)
-	if refusal != nil {
-		return nil, refusal
-	}
-	return m, nil
 }
 
 // isNilSigner reports whether s is nil, or a nil pointer, map, slice, func,
