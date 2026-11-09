@@ -246,24 +246,30 @@ func TestRBAC_ChartSecretGrantNamespaced(t *testing.T) {
 
 func TestRBAC_ChartSecretGrantNamespacedEnrolmentNamespaceIsCacheOnly(t *testing.T) {
 	// The per-host agent enrolment namespace joins the Secret informer (its
-	// pins Secrets are read through the cache), but this chart grants nothing
-	// there: the enrolment feature's own Role does.
-	out, err := secretRBACRender(t, "--set", "rbac.secrets.scope=namespaced",
+	// pins Secrets are watched through the cache), but the Secret grant adds
+	// nothing there: the enrolment feature's own Role is the only one.
+	enrolment := []string{"--set", "experimental.hostEnrolment.enabled=true",
+		"--set", "experimental.hostEnrolment.developmentBuild=true",
+		"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/agent-pki.host-ca}"}
+	out, err := secretRBACRender(t, append([]string{"--set", "rbac.secrets.scope=namespaced",
 		"--set", "rbac.secrets.providerNamespaces={virt-a}",
-		"--set", "experimental.hostEnrolment.enabled=true", "--set", "experimental.hostEnrolment.namespace=agent-pki")
+		"--set", "experimental.hostEnrolment.namespace=agent-pki"}, enrolment...)...)
 	require.NoError(t, err, out)
 	grants, args := renderedSecretGrants(t, out)
 	for name := range grants {
-		assert.NotContains(t, name, "agent-pki/", "no manager Secret Role in the enrolment namespace")
+		if strings.Contains(name, "agent-pki/") {
+			assert.Equal(t, "Role agent-pki/rel-virtrigaud-host-enrolment", name, "only the enrolment feature's own Role grants Secrets in the enrolment namespace")
+		}
 	}
+	assert.Contains(t, grants, "Role agent-pki/rel-virtrigaud-host-enrolment")
 	assert.Contains(t, grants, "Role virt-a/rel-virtrigaud-manager-secrets")
 	v, ok := secretCacheArg(args)
 	require.True(t, ok)
 	assert.Equal(t, "agent-pki,virt-a", v)
 
-	out, err = secretRBACRender(t, "--set", "rbac.secrets.scope=namespaced",
+	out, err = secretRBACRender(t, append([]string{"--set", "rbac.secrets.scope=namespaced",
 		"--set", "rbac.secrets.providerNamespaces={virt-a}",
-		"--set", "experimental.hostEnrolment.enabled=true", "--set", "experimental.hostEnrolment.namespace=Agent_PKI")
+		"--set", "experimental.hostEnrolment.namespace=Agent_PKI"}, enrolment...)...)
 	require.Error(t, err, out)
 	assert.Contains(t, out, "experimental.hostEnrolment.namespace")
 }

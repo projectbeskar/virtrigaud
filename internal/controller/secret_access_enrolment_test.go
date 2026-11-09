@@ -22,7 +22,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // TestSecretCacheNamespacesWithEnrolment: a restricted Secret cache gains
@@ -59,5 +58,5 @@ func TestMergeCacheByObject(t *testing.T) {
 			assert.Equal(t, map[string]cache.Config{"agents": {}}, by.Namespaces)
 		}
 	}
-	assert.Equal(t, map[client.Object]cache.ByObject(secrets), MergeCacheByObject(secrets, nil))
+	assert.Equal(t, secrets, MergeCacheByObject(secrets, nil))
 }
