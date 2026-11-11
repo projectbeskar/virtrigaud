@@ -1,6 +1,6 @@
 module github.com/projectbeskar/virtrigaud/test/proxmox-grpc-test
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/projectbeskar/virtrigaud/proto v0.1.0

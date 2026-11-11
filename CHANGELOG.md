@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-11 14:00] - Go 1.26.11 (GO-2026-6859, net/http)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `proto/go.mod`, `sdk/go.mod`, `test/proxmox-grpc-test/go.mod`: Go 1.26.10 → 1.26.11, which fixes GO-2026-6859 in `net/http` (an HTTP/1 server crash from a header race in `MaxBytesReader`, reported by govulncheck as reachable). CI reads the version from `go.mod`.
+- `Makefile` (`BUILDER_IMAGE`), `build/Dockerfile.manager`, `cmd/provider-{libvirt,mock,proxmox,vsphere}/Dockerfile`, `hack/bench/spike1b/Dockerfile.fakeprovider`: builder images `golang:1.26.11` / `golang:1.26.11-bookworm`, in lockstep with `go.mod`.
+- `docs/go-modules.md`: the current `go` directive.
+
+### Why
+govulncheck (the blocking Supply Chain Vulnerability Scan) started failing every PR and `main` on GO-2026-6859 in the Go standard library; the fix is only in the toolchain.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-08 13:18] - Opt-in namespaced Secret grant for the manager
 **Author:** @wrkode (William Rizzo)
 

@@ -29,7 +29,7 @@ go get github.com/projectbeskar/virtrigaud/sdk@vX.Y.Z github.com/projectbeskar/v
 Use the same version for both. The SDK requires the root module and the proto
 module at its own version, so `go get` of the SDK alone selects all three at
 that version unless your module requires a newer one. The modules need the Go
-version of the release's `go.mod` (`go 1.26.10` today); with the default
+version of the release's `go.mod` (`go 1.26.11` today); with the default
 `GOTOOLCHAIN=auto` the `go` command downloads it.
 
 `vrtg-provider init` from a release writes these requires for you, pinned to

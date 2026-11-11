@@ -10,11 +10,11 @@ PLATFORM ?= linux/amd64
 BUILD_PLATFORMS ?= linux/arm64,linux/amd64
 
 # Base images for building containers.
-# BUILDER_IMAGE must satisfy the Go version in go.mod (currently 1.26.10); the
+# BUILDER_IMAGE must satisfy the Go version in go.mod (currently 1.26.11); the
 # Makefile passes it as a --build-arg to the Dockerfiles, overriding their
 # defaults, so a stale value here makes `make docker-build` fail with
-# "go.mod requires go >= 1.26.10". Keep this in lockstep with go.mod.
-BUILDER_IMAGE ?= golang:1.26.10
+# "go.mod requires go >= 1.26.11". Keep this in lockstep with go.mod.
+BUILDER_IMAGE ?= golang:1.26.11
 BASE_IMAGE ?= gcr.io/distroless/static:nonroot
 
 # Go module proxy configuration
