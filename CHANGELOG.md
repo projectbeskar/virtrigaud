@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Why
 Every caller in the manager polls only a non-empty task reference, so no reconcile path changes, but a malformed request from any client must get a clean refusal, not a nil dereference.
 
+## [2026-11-08 13:20] - Signed host answers and an internal per-host agent service (wire shape only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/host_answer.proto`, `proto/agent/v1/agent.proto`, `proto/provider/v1/provider.proto`: signed host answers and an internal per-host agent service (wire shape only; no provider sets or reads them, and the manager does not use them). The new file defines `SignedBlob`, `AnswerContext`, `OperationAnswer`, `VMAnswer`, `HostAnswer` and the enums `AgentState`, `OperationRecordState`, `VMPresence`, `AgentMode`; `provider.proto` imports it and gains thirteen additive fields: `TaskStatusRequest` `answer_nonce` (2), `op_id` (3), `op_enrolment_id` (4), `target_host_id` (5), `continuity_seq` (6); `TaskStatusResponse.host_answer` (5); `DescribeRequest` `answer_nonce` (4), `binding_id` (5), `continuity_seq` (6); `DescribeResponse.host_answer` (8); `GetHostInfoRequest` `answer_nonce` (2), `continuity_seq` (3); `HostInfo.host_answer` (12). Nothing is renamed, renumbered, retyped or removed, no RPC is added to the `Provider` service, and `GrantBody` is unchanged. `agent.v1` (`AgentService`: `Hello`, `InstallRenewedCertificate`, `AgentStatus`) is internal to VirtRigaud and is not part of the provider contract.
+- `proto/rpc/provider/v1/host_answer.pb.go`, `proto/rpc/agent/v1/`: generated Go bindings (`make proto`); `provider.pb.go` regenerated.
+- `proto/rpc/provider/v1/host_answer_test.go`, `proto/rpc/agent/v1/agent_test.go`: round trips, exact-bytes survival of `SignedBlob` in responses and in a `google.rpc.Status` detail, descriptor pinning of every new message, enum and service and of the thirteen additive fields, the closed `body_type` set, and the signature-input test vector.
+- `internal/providers/{vsphere,libvirt,proxmox,mock}/signed_answer_guard_test.go`, `internal/transport/grpc/client_signed_answer_guard_test.go`: no built-in provider answers differently when the new request fields are set or ever sets `host_answer`; the manager's transport sends none of the fields and ignores a `host_answer` and an extra `SignedBlob` status detail.
+- `internal/controller/release_sites_test.go`: enumerates, by `go/ast`, every call that closes an operation attempt or releases a VirtualMachine finalizer (the helpers, any direct `RemoveFinalizer` call that is not for another kind's finalizer, any assignment to a `Finalizers` field, and references in package-level declarations), so a new call site fails until it is reviewed.
+- `docs/operation-grants-wire-shape.md`: new section "Signed host answers" (messages, transport, request and response fields, signature input and test vector, requirements on the signing key and its accepted risk, what a manager will verify, the per-host agent service). `proto/README.md`: `agent.v1` is internal and evolves additively under the same `buf breaking` check.
+
+### Why
+A manager must be able to act on what a per-host agent reports about an operation, a VM placement or the host without trusting the Provider that relays it. Freezing the wire shape now, additively and before any code uses it, lets the agent and manager sides be built and reviewed against a fixed contract.
+
 ### Impact
 - [ ] Breaking change
 - [ ] Requires cluster rollout

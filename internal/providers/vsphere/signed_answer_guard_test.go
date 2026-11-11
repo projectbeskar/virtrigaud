@@ -1,0 +1,129 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package vsphere
+
+import (
+	"bytes"
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25/types"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+)
+
+// TestSignedAnswerFields_Ignored: the vSphere provider answers TaskStatus,
+// Describe and GetHostInfo with the signed host answer request fields set
+// exactly as without them, and never sets host_answer.
+func TestSignedAnswerFields_Ignored(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	existing := seededVMID(t, p, simUnstamped)
+
+	vm := object.NewVirtualMachine(p.client.Client, types.ManagedObjectReference{Type: "VirtualMachine", Value: existing})
+	task, err := vm.PowerOff(ctx)
+	require.NoError(t, err)
+	require.NoError(t, task.Wait(ctx))
+	for _, ref := range []*providerv1.TaskRef{{Id: task.Reference().Value}, nil} {
+		req := &providerv1.TaskStatusRequest{Task: ref}
+		plain, plainErr := p.TaskStatus(ctx, req)
+		if ref != nil {
+			require.NoError(t, plainErr)
+			require.Equal(t, providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED, plain.GetOutcome())
+		}
+		signed, signedErr := p.TaskStatus(ctx, signedAnswerFieldsTaskStatus(req))
+		assertSameAnswer(t, plain, plainErr, signed, signedErr)
+		assert.Nil(t, signed.GetHostAnswer())
+	}
+
+	for _, id := range []string{existing, "vm-987654"} {
+		req := &providerv1.DescribeRequest{Id: id}
+		plain, plainErr := p.Describe(ctx, req)
+		require.NoError(t, plainErr)
+		signed, signedErr := p.Describe(ctx, signedAnswerFieldsDescribe(req))
+		assertSameAnswer(t, plain, plainErr, signed, signedErr)
+		assert.Nil(t, signed.GetHostAnswer(), id)
+	}
+
+	req := &providerv1.GetHostInfoRequest{HostId: "host-a"}
+	plain, plainErr := p.GetHostInfo(ctx, req)
+	signed, signedErr := p.GetHostInfo(ctx, signedAnswerFieldsGetHostInfo(req))
+	assertSameAnswer(t, plain, plainErr, signed, signedErr)
+	assert.Nil(t, signed.GetHostAnswer())
+}
+
+// The helpers below pin that this provider neither reads the signed host
+// answer request fields nor sets a host_answer: a request carrying them is
+// answered exactly as the same request without them.
+
+// signedAnswerFieldsTaskStatus returns a copy of req with every signed
+// answer request field of TaskStatusRequest set to a valid-looking value.
+func signedAnswerFieldsTaskStatus(req *providerv1.TaskStatusRequest) *providerv1.TaskStatusRequest {
+	out, _ := proto.Clone(req).(*providerv1.TaskStatusRequest)
+	if out == nil {
+		out = &providerv1.TaskStatusRequest{}
+	}
+	out.AnswerNonce = bytes.Repeat([]byte{0x5a}, 16)
+	out.OpId = bytes.Repeat([]byte{0x5b}, 16)
+	out.OpEnrolmentId = bytes.Repeat([]byte{0x5c}, 16)
+	out.TargetHostId = "host-a"
+	out.ContinuitySeq = 7
+	return out
+}
+
+// signedAnswerFieldsDescribe returns a copy of req with every signed answer
+// request field of DescribeRequest set to a valid-looking value.
+func signedAnswerFieldsDescribe(req *providerv1.DescribeRequest) *providerv1.DescribeRequest {
+	out, _ := proto.Clone(req).(*providerv1.DescribeRequest)
+	if out == nil {
+		out = &providerv1.DescribeRequest{}
+	}
+	out.AnswerNonce = bytes.Repeat([]byte{0x5a}, 16)
+	out.BindingId = bytes.Repeat([]byte{0x5d}, 16)
+	out.ContinuitySeq = 7
+	return out
+}
+
+// signedAnswerFieldsGetHostInfo returns a copy of req with every signed
+// answer request field of GetHostInfoRequest set to a valid-looking value.
+func signedAnswerFieldsGetHostInfo(req *providerv1.GetHostInfoRequest) *providerv1.GetHostInfoRequest {
+	out, _ := proto.Clone(req).(*providerv1.GetHostInfoRequest)
+	if out == nil {
+		out = &providerv1.GetHostInfoRequest{}
+	}
+	out.AnswerNonce = bytes.Repeat([]byte{0x5a}, 16)
+	out.ContinuitySeq = 7
+	return out
+}
+
+// assertSameAnswer fails unless the answer to the request with the signed
+// answer fields equals the answer without them: the same message and the
+// same gRPC status, details included.
+func assertSameAnswer[M proto.Message](t *testing.T, plain M, plainErr error, signed M, signedErr error) {
+	t.Helper()
+	assert.True(t, proto.Equal(status.Convert(plainErr).Proto(), status.Convert(signedErr).Proto()),
+		"status changed: plain %v, with signed answer fields %v", plainErr, signedErr)
+	assert.True(t, proto.Equal(plain, signed),
+		"answer changed: plain %v, with signed answer fields %v", plain, signed)
+}
