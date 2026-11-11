@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -218,6 +219,12 @@ func main() {
 			"enrolment id) for Providers whose type requires operation identity. Empty (the default) loads none, and "+
 			"nothing is sent to such a Provider. Honoured only by a manager built with the "+devgate.BuildTag+
 			" build tag; a release build refuses to start when it is set.")
+	var secretCacheNamespacesFlag string
+	flag.StringVar(&secretCacheNamespacesFlag, controller.SecretCacheNamespacesFlagName, "",
+		"Comma-separated namespaces the Secret informer cache is restricted to: the namespaces of the Provider "+
+			"objects. Empty (the default) caches Secrets in every namespace, which needs a cluster-wide Secret "+
+			"list/watch grant. Set it when the manager's Secret access is granted per namespace "+
+			"(Helm rbac.secrets.scope=namespaced); see docs/manager-secret-access.md.")
 	var hostEnrolmentFlags controller.HostEnrolmentFlags
 	devOnly := "DEVELOPMENT ONLY. Honoured only by a manager built with the " + devgate.BuildTag +
 		" build tag; a release build refuses to start when it is set. "
@@ -317,6 +324,17 @@ func main() {
 	if err := clientLimits.validate(); err != nil {
 		setupLog.Error(err, "invalid Kubernetes API client rate limits")
 		os.Exit(1)
+	}
+	secretCacheNamespaces, err := controller.ParseSecretCacheNamespaces(secretCacheNamespacesFlag)
+	if err != nil {
+		setupLog.Error(err, "invalid Secret cache namespaces")
+		os.Exit(1)
+	}
+	// The enrolment controller watches the pins Secrets in the enrolment
+	// namespace, so a restricted Secret cache must cover it.
+	secretCacheNamespaces = controller.SecretCacheNamespacesWithEnrolment(secretCacheNamespaces, hostEnrolment)
+	if len(secretCacheNamespaces) > 0 {
+		setupLog.Info("Secret informer cache restricted to namespaces", "namespaces", secretCacheNamespaces)
 	}
 
 	// Emit a virtrigaud_build_info{version,git_sha,go_version,component} sample
@@ -445,9 +463,13 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "8da97394.virtrigaud.io",
-		// CertificateRequests are cached in the enrolment namespace only
-		// (development builds with enrolment enabled); nil otherwise.
-		Cache: cache.Options{ByObject: controller.HostEnrolmentCacheOptions(hostEnrolment)},
+		// Secrets are cached in every namespace unless --secret-cache-namespaces
+		// restricts the informer (per-namespace Secret grants); CertificateRequests
+		// are cached in the enrolment namespace only (development builds with
+		// enrolment enabled).
+		Cache: cache.Options{ByObject: controller.MergeCacheByObject(
+			controller.SecretCacheByObject(secretCacheNamespaces),
+			controller.HostEnrolmentCacheOptions(hostEnrolment))},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -463,6 +485,24 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
+	}
+
+	// A restricted Secret informer needs list and watch in each of its
+	// namespaces; without them a cached read there would block, so refuse to
+	// start instead.
+	if len(secretCacheNamespaces) > 0 {
+		accessClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+		if err != nil {
+			setupLog.Error(err, "unable to create the client for the Secret access check")
+			os.Exit(1)
+		}
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = controller.CheckSecretCacheAccess(checkCtx, accessClient, secretCacheNamespaces)
+		checkCancel()
+		if err != nil {
+			setupLog.Error(err, "the manager's Secret grant does not cover its Secret cache namespaces")
+			os.Exit(1)
+		}
 	}
 
 	// Create the per-Provider CircuitBreaker registry shared across all

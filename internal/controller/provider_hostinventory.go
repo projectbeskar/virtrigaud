@@ -113,6 +113,8 @@ const (
 //     garbage collection on Provider deletion (no cluster-wide secret-delete
 //     grant on the manager). The manager already holds secrets get;list;watch;
 //     the net-new grant here is create;update (see charts manager-rbac.yaml).
+//     With Helm rbac.secrets.scope=namespaced these verbs are granted only in
+//     the Provider namespaces (docs/manager-secret-access.md).
 //
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hostpools,verbs=get;list;watch

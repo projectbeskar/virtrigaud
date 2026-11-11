@@ -468,6 +468,10 @@ func (r *VirtualMachineReconciler) reconcileBoundProvider(
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hostpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmplacementpolicies,verbs=get;list;watch
+// The Secret markers generate the default, cluster-wide Secret grant. Helm's
+// rbac.secrets.scope=namespaced replaces it with per-namespace Roles and the
+// --secret-cache-namespaces informer restriction; every Secret access and the
+// grant it needs is listed in docs/manager-secret-access.md.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // The operation-intent Secrets of operation identity (operation_intent.go) are
 // created and deleted by the manager. RBAC cannot scope delete to them (no
