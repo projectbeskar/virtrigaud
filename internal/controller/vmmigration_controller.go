@@ -549,6 +549,11 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			// Validate credentials resolve before any side effect (fail fast at
 			// Validating, never mid-export — ADR-0006 D6). Never log the values.
 			if _, err := r.loadS3Credentials(ctx, migration); err != nil {
+				if isTransientReadError(err) {
+					// The API server's passing trouble is not a configuration
+					// error: retry instead of failing the migration.
+					return ctrl.Result{}, err
+				}
 				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Invalid s3 storage configuration: %v", err))
 			}
 		case storagemigration.BackendNFS:
@@ -1039,6 +1044,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to build storage options: %v", err))
 	}
 	creds, err := r.loadS3Credentials(ctx, migration)
+	if isTransientReadError(err) {
+		return ctrl.Result{}, err
+	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to load storage credentials: %v", err))
 	}
@@ -1389,6 +1397,9 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to build storage options: %v", err))
 	}
 	creds, err := r.loadS3Credentials(ctx, migration)
+	if isTransientReadError(err) {
+		return ctrl.Result{}, err
+	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to load storage credentials: %v", err))
 	}
@@ -3588,9 +3599,12 @@ func (r *VMMigrationReconciler) loadS3Credentials(ctx context.Context, migration
 	}
 
 	// The Secret lives in the migration's namespace (namespaced get only; #152).
+	// It is read through the cache, or live when the cache does not cover the
+	// namespace: a workload namespace needs only Secret get
+	// (docs/manager-secret-access.md).
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Namespace: migration.Namespace, Name: s3.CredentialsSecretRef.Name}
-	if err := r.Get(ctx, key, secret); err != nil {
+	if err := getWorkloadSecret(ctx, r.Client, r.APIReader, key, secret); err != nil {
 		return nil, fmt.Errorf("get s3 credentials secret %s/%s: %w", key.Namespace, key.Name, err)
 	}
 

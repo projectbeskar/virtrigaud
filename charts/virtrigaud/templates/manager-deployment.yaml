@@ -67,6 +67,11 @@ spec:
         {{- with include "virtrigaud.clientRateLimitValue" (dict "value" .Values.manager.clientBurst "name" "manager.clientBurst" "whole" true) }}
         - --client-burst={{ . }}
         {{- end }}
+        {{- if eq (include "virtrigaud.secretsScope" .) "namespaced" }}
+        # Secret informer limited to the namespaces the manager holds a Secret
+        # list/watch Role in (rbac.secrets.scope=namespaced).
+        - --secret-cache-namespaces={{ include "virtrigaud.secretCacheNamespaces" . }}
+        {{- end }}
         {{- if .Values.webhooks.enabled }}
         # Webhook serving certs are mounted at this path; the manager's certwatcher
         # loads tls.crt/tls.key from here and serves on controller-runtime's default

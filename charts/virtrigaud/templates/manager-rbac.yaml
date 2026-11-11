@@ -190,6 +190,7 @@ rules:
   - get
   - patch
   - update
+{{- if ne (include "virtrigaud.secretsScope" .) "namespaced" }}
 # Secrets: the manager READS provider credential and TLS Secrets (cloud-init /
 # credential / TLS Secret resolution) and, for clustered providers (ADR-0007
 # D3), CREATES/UPDATES the single host-inventory Secret it owns per Provider
@@ -227,6 +228,7 @@ rules:
   - secrets
   verbs:
   - delete
+{{- end }}
 # Services for remote provider runtimes (provider_controller reconciles them).
 - apiGroups:
   - ""
@@ -558,6 +560,7 @@ rules:
   - get
   - patch
   - update
+{{- if ne (include "virtrigaud.secretsScope" .) "namespaced" }}
 # Secrets: the manager READS provider credential and TLS Secrets (cloud-init /
 # credential / TLS Secret resolution) and, for clustered providers (ADR-0007
 # D3), CREATES/UPDATES the single host-inventory Secret it owns per Provider
@@ -595,6 +598,7 @@ rules:
   - secrets
   verbs:
   - delete
+{{- end }}
 # Services for remote provider runtimes (provider_controller reconciles them).
 - apiGroups:
   - ""

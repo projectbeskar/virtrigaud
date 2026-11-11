@@ -16,6 +16,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Why
 Every caller in the manager polls only a non-empty task reference, so no reconcile path changes, but a malformed request from any client must get a clean refusal, not a nil dereference.
 
+## [2026-11-08 13:18] - Opt-in namespaced Secret grant for the manager
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- Helm `rbac.secrets.scope` (default `cluster`, unchanged). With `namespaced`, the manager's ClusterRole (or release-namespace Role) has no Secret rule. `charts/virtrigaud/templates/manager-secrets-rbac.yaml` renders a Role and RoleBinding per `rbac.secrets.providerNamespaces` entry (`get`, `list`, `watch`, `create`, `update`, `delete`) and per `rbac.secrets.workloadNamespaces` entry (`get` only). Rendering fails on an empty Provider list, an invalid namespace name or an unknown scope.
+- Manager flag `--secret-cache-namespaces` (`internal/controller/secret_access.go`, `cmd/manager/main.go`): restricts the Secret informer cache to the listed namespaces, so the manager needs no cluster-wide Secret `list`/`watch`. The chart sets it to the Provider namespaces in namespaced mode, plus the per-host agent enrolment namespace when that experimental feature is enabled. The manager also adds the enrolment namespace itself to a restricted list when enrolment is enabled (`SecretCacheNamespacesWithEnrolment`), and merges the Secret and enrolment CertificateRequest cache options (`MergeCacheByObject`). The enrolment namespace gets no Role from this chart. At startup the manager checks with SelfSubjectAccessReviews that it may `list` and `watch` Secrets in each listed namespace, and exits otherwise; without the check, cached reads there would hang.
+- `docs/manager-secret-access.md`: every Secret the manager touches (namespace, name pattern, verbs, cache or API reader), the two modes, why nothing narrower is possible (`resourceNames`, label selectors), what fails outside the listed namespaces, the access that remains, and kustomize steps.
+- Tests: `internal/controller/rbac_secrets_test.go` pins the Secret markers, the generated `config/rbac/role.yaml` and the chart output in both modes. `internal/controller/secret_access_envtest_test.go` applies the chart's namespaced RBAC to an API server and runs every Secret access as the manager's ServiceAccount, through a manager with the restricted informer. It also checks the refusals.
+
+### Changed
+- `internal/controller/cloudinit.go`, `internal/controller/vmmigration_controller.go`: cloud-init user-data/metadata Secrets and VMMigration S3 credential Secrets are read through the informer cache, and from the API server (`APIReader`) when the cache does not cover the namespace or does not hold the Secret yet (`getWorkloadSecret`). In the default mode these are cache reads, as before. In namespaced mode a workload namespace needs only Secret `get`. A VMMigration whose S3 credentials Secret read fails with a transient API error (throttled, timed out, unavailable, internal error, ended context) is requeued instead of failed.
+
+### Why
+The manager's cluster-wide Secret grant lets a compromised manager read any Secret in the cluster, including unrelated high-value Secrets such as a CA key. Namespaced mode limits direct Secret access to the namespaces that hold Providers (read/write) and workloads (read by name). It does not close every path: the manager's cluster-wide Deployment grant could still mount a Secret into a pod. The doc lists that residual and the admission policy that closes it. The default stays cluster-wide because the chart cannot know an existing installation's namespaces, and narrowing them would break VMs, migrations and Providers in namespaces that are not listed.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-11-08 13:20] - Signed host answers and an internal per-host agent service (wire shape only)
 **Author:** @wrkode (William Rizzo)
 
