@@ -47,6 +47,9 @@ type FS interface {
 	OpenFile(name string, flag int, perm fs.FileMode) (File, error)
 	// ReadFile returns the whole content of a file.
 	ReadFile(name string) ([]byte, error)
+	// Size returns the size in bytes of a file, without reading it. A file
+	// that is not a regular file is an error.
+	Size(name string) (int64, error)
 	// Exists reports whether a file exists.
 	Exists(name string) (bool, error)
 	// Remove removes a file.
@@ -82,6 +85,19 @@ func (OSFS) OpenFile(name string, flag int, perm fs.FileMode) (File, error) {
 // ReadFile implements FS.
 func (OSFS) ReadFile(name string) ([]byte, error) {
 	return os.ReadFile(name) // #nosec G304 -- the path is built by the journal from its own directory
+}
+
+// Size implements FS. It does not follow a symbolic link: a link is not a
+// regular file.
+func (OSFS) Size(name string) (int64, error) {
+	st, err := os.Lstat(name)
+	if err != nil {
+		return 0, err
+	}
+	if !st.Mode().IsRegular() {
+		return 0, fmt.Errorf("%s is not a regular file", name)
+	}
+	return st.Size(), nil
 }
 
 // Exists implements FS.

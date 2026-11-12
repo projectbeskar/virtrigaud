@@ -211,6 +211,17 @@ func (m *MemFS) ReadFile(name string) ([]byte, error) {
 	return append([]byte(nil), n.data...), nil
 }
 
+// Size implements journal.FS.
+func (m *MemFS) Size(name string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n, ok := m.names[filepath.Clean(name)]
+	if !ok {
+		return 0, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+	}
+	return int64(len(n.data)), nil
+}
+
 // Exists implements journal.FS.
 func (m *MemFS) Exists(name string) (bool, error) {
 	m.mu.Lock()

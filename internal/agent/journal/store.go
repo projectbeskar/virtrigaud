@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -417,13 +418,34 @@ func (s *Store) scanAnchorQuarantine(raw []byte) (LostReason, bool) {
 	return "", false
 }
 
-// readAnchor reads the anchor log, bounded by maxAnchorBytes.
-func (s *Store) readAnchor() ([]byte, bool, error) {
-	raw, err := s.fsys.ReadFile(s.path(AnchorFile))
+// readAnchor reads the anchor log, bounded by maxAnchorBytes. It checks the
+// file's size before reading, and reads at most one byte beyond the bound,
+// so an oversized log is never loaded into memory: bounded is false for it
+// and raw is nil.
+func (s *Store) readAnchor() (raw []byte, bounded bool, err error) {
+	name := s.path(AnchorFile)
+	size, err := s.fsys.Size(name)
+	if err != nil {
+		return nil, false, fmt.Errorf("open journal: size of anchor log: %w", err)
+	}
+	if size > maxAnchorBytes {
+		return nil, false, nil
+	}
+	f, err := s.fsys.OpenFile(name, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, false, fmt.Errorf("open journal: read anchor log: %w", err)
 	}
-	return raw, len(raw) <= maxAnchorBytes, nil
+	defer func() { _ = f.Close() }()
+	// The file may have grown since its size was taken: read one byte past
+	// the bound to tell.
+	raw, err = io.ReadAll(io.LimitReader(f, maxAnchorBytes+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("open journal: read anchor log: %w", err)
+	}
+	if len(raw) > maxAnchorBytes {
+		return nil, false, nil
+	}
+	return raw, true, nil
 }
 
 // open does the work of Open. The caller holds the lock file.
@@ -554,8 +576,8 @@ func (s *Store) anchorHasNoCommit(exists bool) bool {
 	if !exists {
 		return true
 	}
-	raw, err := s.fsys.ReadFile(s.path(AnchorFile))
-	if err != nil {
+	raw, bounded, err := s.readAnchor()
+	if err != nil || !bounded {
 		return false
 	}
 	l, err := ParseAnchorLog(raw)

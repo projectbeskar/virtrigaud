@@ -44,7 +44,9 @@ limitations under the License.
 //     anchor_corrupt. Exactly one unacknowledged commit (the process died
 //     between the bbolt commit and the anchor append) is accepted and
 //     re-anchored. A zero-filled, partial or otherwise invalid last anchor
-//     record is a torn, unacknowledged append and is cut off. This detects a
+//     record is a torn, unacknowledged append and is cut off. An anchor log
+//     larger than 64 MiB is anchor_corrupt: its size is checked before it
+//     is read, and the read stops one byte past the bound. This detects a
 //     bbolt meta-page fallback after an acknowledged commit, a restore of the
 //     store file alone, and a lost or damaged anchor log.
 //   - A store that fails a check, or whose commit, write or fsync fails, is

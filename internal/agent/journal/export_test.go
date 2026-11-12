@@ -23,6 +23,8 @@ var (
 	BucketChainForTest   = bucketChain
 	KeyStoreMetaForTest  = keyStoreMeta
 	KeyQuarantineForTest = keyQuarantine
+	// MaxAnchorBytesForTest is the anchor log size bound.
+	MaxAnchorBytesForTest = maxAnchorBytes
 )
 
 // SetTestBoltOptions installs f to adjust bbolt options in Open; nil removes

@@ -22,6 +22,9 @@ import (
 	"strings"
 
 	bolt "go.etcd.io/bbolt"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb"
 )
 
 // Tx is a journal transaction. A write transaction records every write so
@@ -167,4 +170,43 @@ func (t *Tx) Last(bucket string) []byte {
 		return nil
 	}
 	return append([]byte(nil), k...)
+}
+
+// CommittedPosition returns the store's committed chain position as recorded
+// in this transaction's snapshot: in a read transaction, the position the
+// rest of what the transaction reads belongs to. ok is false when the store
+// records no valid position or store identifier.
+func (t *Tx) CommittedPosition() (pos Position, ok bool) {
+	m := t.btx.Bucket([]byte(bucketMeta))
+	if m == nil {
+		return Position{}, false
+	}
+	pos, ok = decodePosition(m.Get(keyPosition))
+	if !ok {
+		return Position{}, false
+	}
+	meta := &journalpb.StoreMeta{}
+	if err := proto.Unmarshal(m.Get(keyStoreMeta), meta); err != nil || len(meta.GetStoreId()) != len(pos.StoreID) {
+		return Position{}, false
+	}
+	copy(pos.StoreID[:], meta.GetStoreId())
+	return pos, true
+}
+
+// LastCheckpoint returns the newest chain checkpoint at or below seq and its
+// head. ok is false when there is none.
+func (t *Tx) LastCheckpoint(seq uint64) (cpSeq uint64, head [32]byte, ok bool) {
+	if t.btx.Bucket([]byte(bucketCheckpoints)) == nil {
+		return 0, head, false
+	}
+	return lastCheckpoint(t.btx, seq)
+}
+
+// HeadAt returns the chain head the store holds for seq, from a retained
+// chain entry or a checkpoint. ok is false when the store holds none.
+func (t *Tx) HeadAt(seq uint64) (head [32]byte, ok bool) {
+	if seq == 0 || t.btx.Bucket([]byte(bucketChain)) == nil || t.btx.Bucket([]byte(bucketCheckpoints)) == nil {
+		return head, false
+	}
+	return headAt(t.btx, seq)
 }
