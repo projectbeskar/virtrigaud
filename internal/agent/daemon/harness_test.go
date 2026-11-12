@@ -75,6 +75,12 @@ func (n *notifications) Notify(state string) error {
 	return nil
 }
 
+func (n *notifications) snapshot() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]string(nil), n.sent...)
+}
+
 func (n *notifications) has(prefix string) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()

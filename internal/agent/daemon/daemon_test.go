@@ -291,7 +291,7 @@ func TestQuarantinedStoreServesReads(t *testing.T) {
 	}
 	r, state := h.run()
 	if state != providerv1.AgentState_AGENT_STATE_QUARANTINED || !h.notes.has(systemd.NotifyReady+"\nSTATUS=AGENT_STATE_QUARANTINED (anchor_missing)") {
-		t.Fatalf("state = %v, notifications %v", state, h.notes.sent)
+		t.Fatalf("state = %v, notifications %v", state, h.notes.snapshot())
 	}
 	a := r.hello()
 	if a == nil || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_QUARANTINED ||
@@ -353,8 +353,8 @@ func TestReload(t *testing.T) {
 	}
 	r.signals <- syscall.SIGHUP
 	waitLog(t, h, "reload refused")
-	if !h.notes.has(systemd.NotifyReady + "\nSTATUS=reload refused: " + daemon.ReasonEnrolmentChanged) {
-		t.Fatalf("no reload refusal status: %v", h.notes.sent)
+	if !h.notes.has(systemd.NotifyReady + "\nSTATUS=AGENT_STATE_READY; reload refused: " + daemon.ReasonEnrolmentChanged) {
+		t.Fatalf("no reload refusal status: %v", h.notes.snapshot())
 	}
 	if a := r.hello(); a == nil || string(a.GetContext().GetEnrolmentId()) != string(h.pki.Record.EnrolmentID) {
 		t.Fatalf("answer after a refused reload = %v", a)
@@ -411,4 +411,28 @@ func rawKey(t *testing.T, h *host) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// TestReloadKeepsQuarantineInStatus: the status sent after a reload still
+// names the quarantine of the store.
+func TestReloadKeepsQuarantineInStatus(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(h.stateDir, journal.AnchorFile)); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = h.run()
+	r.signals <- syscall.SIGHUP
+	waitLog(t, h, "credentials reloaded")
+	want := systemd.NotifyReady + "\nSTATUS=AGENT_STATE_QUARANTINED (anchor_missing); credentials reloaded"
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.notes.has(want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q in %v", want, h.notes.snapshot())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

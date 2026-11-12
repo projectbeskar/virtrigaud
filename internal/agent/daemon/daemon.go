@@ -395,11 +395,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	d.establish(ctx, st)
 	if ctx.Err() == nil {
 		state, reason := agent.TrustState()
-		status := "STATUS=" + state.String()
-		if reason != "" {
-			status += " (" + reason + ")"
-		}
-		if err := d.notifier.Notify(systemd.NotifyReady + "\n" + status); err != nil {
+		if err := d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent)); err != nil {
 			d.log.Error(err, "notify systemd")
 		}
 		d.log.Info("started", "state", state.String(), "reason", reason)
@@ -423,10 +419,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			if err := d.reload(); err != nil {
 				reason := reloadRefusalReason(err)
 				d.log.Error(err, "reload refused; the running credentials stay in use", "reason", reason)
-				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=reload refused: " + reason)
+				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent) + "; reload refused: " + reason)
 			} else {
 				d.log.Info("credentials reloaded")
-				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=credentials reloaded")
+				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent) + "; credentials reloaded")
 			}
 		case <-ticker.C:
 			if f := agent.floor.Load(); f != nil {
@@ -483,6 +479,17 @@ func (d *daemon) reload() error {
 	}
 	d.creds.Store(&server.Credentials{Identity: id, Trust: tc})
 	return nil
+}
+
+// trustStatus renders the agent's trust state for the service status, for
+// example "AGENT_STATE_QUARANTINED (rolled_back)", so that no status line
+// hides a quarantine.
+func trustStatus(a *agentState) string {
+	state, reason := a.TrustState()
+	if reason == "" {
+		return state.String()
+	}
+	return state.String() + " (" + reason + ")"
 }
 
 // ReasonEnrolmentChanged is the reload refusal reason for a certificate that
