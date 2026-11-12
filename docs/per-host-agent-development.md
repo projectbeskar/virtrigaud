@@ -129,8 +129,8 @@ restore of the state directory restores it too.
 
 A release build also refuses to start when a caller of the agent's Go
 packages sets one of the daemon's test overrides (another trust directory,
-host probe, uid, file owner, file system, clock sources or hooks); the agent
-binary never sets them.
+host probe, uid, listener, file owner, file system, clock sources, clock or
+hooks); the agent binary never sets them.
 
 ## Peer authentication
 
@@ -179,7 +179,7 @@ reproduces the published test vector.
 | Signal | Effect |
 |--------|--------|
 | SIGTERM, SIGINT | `STOPPING=1`; the server stops accepting calls and waits up to `--drain-timeout`; the clock floor is saved; the store is closed; exit 0. During recovery, recovery is cancelled and resumes at the next start. |
-| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/` and trust checks above) and loaded again. A reload that fails, or whose certificate names another host or enrolment, is refused and the running credentials stay; systemd then gets `STATUS=reload refused: <reason>` (`IdentityInvalid`, `EnrolmentChanged`, or a host-check reason such as `PKIInsecure`), never a path or a secret. New handshakes and every later call use the new credentials. `READY=1` follows. |
+| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/` and trust checks above) and loaded again. A reload that fails, or whose certificate names another host or enrolment, is refused and the running credentials stay. New handshakes and every later call use the new credentials. `READY=1` follows, with a status that starts with the trust state, then the result: for example `STATUS=AGENT_STATE_QUARANTINED (rolled_back); credentials reloaded` or `STATUS=AGENT_STATE_READY; reload refused: <reason>` (`IdentityInvalid`, `EnrolmentChanged`, or a host-check reason such as `PKIInsecure`), never a path or a secret. |
 
 ## systemd units
 
@@ -248,6 +248,10 @@ is not the one the certificate names, reads answer unsigned.
   decided when the agent runs real VMs.
 - The release-artefact test checks the release workflow, the CI workflow and
   the `Makefile` only.
+- The per-call check of the Provider's certificate uses the host clock, not
+  the clock floor.
+- The provisioning marker is checked with `lstat` and then read with
+  `O_NOFOLLOW`, not checked on the open descriptor; it holds no secret.
 - `GetHostInfo` reports no inventory (CPU, memory, storage, components).
 - Certificate renewal (`InstallRenewedCertificate`) and `vrtg-agent enroll`
   are not available.
