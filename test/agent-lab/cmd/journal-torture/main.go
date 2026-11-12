@@ -55,6 +55,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"time"
@@ -288,6 +289,12 @@ type report struct {
 	ReopenState  string `json:"reopen_state,omitempty"`
 	ReopenReason string `json:"reopen_reason,omitempty"`
 	Err          string `json:"err,omitempty"`
+	// Tail is what the anchor log looked like before Open, against the
+	// store position after Open: "equal", "store_ahead_1" (an unacknowledged
+	// last commit re-anchored by the tail rule), "torn_tail" (a partial last
+	// anchor record cut off), "none" (no anchor log), or "other".
+	Tail      string `json:"tail,omitempty"`
+	AnchorSeq uint64 `json:"anchor_seq"`
 }
 
 func cmdVerify(args []string) int {
@@ -315,6 +322,18 @@ func cmdVerify(args []string) int {
 	}
 	ctx := context.Background()
 	opts := storeOptions(*dir, 0, 0)
+	torn, haveAnchor := false, false
+	if raw, err := os.ReadFile(filepath.Join(*dir, journal.AnchorFile)); err == nil {
+		haveAnchor = true
+		if l, perr := journal.ParseAnchorLog(raw); perr == nil {
+			torn = l.TornTail
+			for _, rec := range l.Records {
+				if rec.Type == journal.AnchorCommit {
+					r.AnchorSeq = rec.Seq
+				}
+			}
+		}
+	}
 	st, err := journal.Open(ctx, opts)
 	if err != nil {
 		r.Verdict, r.Err = "error", oneLine(err)
@@ -322,6 +341,18 @@ func cmdVerify(args []string) int {
 	}
 	state, reason := st.State()
 	r.State, r.Reason, r.Seq = state.String(), string(reason), st.Position().Seq
+	switch {
+	case !haveAnchor:
+		r.Tail = "none"
+	case torn:
+		r.Tail = "torn_tail"
+	case r.Seq == r.AnchorSeq:
+		r.Tail = "equal"
+	case r.Seq == r.AnchorSeq+1:
+		r.Tail = "store_ahead_1"
+	default:
+		r.Tail = "other"
+	}
 	seen := map[uint64]bool{}
 	verr := st.View(ctx, func(tx *journal.Tx) error {
 		if v := tx.Get(bucketOps, []byte(keyLast)); len(v) == 8 {

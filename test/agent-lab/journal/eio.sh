@@ -49,7 +49,7 @@ error_over() {
   [ "$pos" -lt "$SECTORS" ] && echo "$pos $((SECTORS - pos)) linear $DATA $pos"
 }
 swap() { dmsetup suspend --nolockfs "$DM"; dmsetup load "$DM" --table "$1"; dmsetup resume "$DM"; }
-verify() { local r; r=$("$JT" verify -dir "$W/mnt/state/s" -ack "$1" ${2:-} 2>"$W/verify.err" | tail -1)
+verify() { local r; r=$("$JT" verify -dir "$W/mnt/state/s" -ack "$1" ${2:-} 2>"$W/verify.err" | tail -1 || true)
   case "$r" in \{*) echo "$r" ;; *) echo "{\"verdict\":\"verifier_crash\",\"stderr\":\"$(head -c 300 "$W/verify.err" | tr '\n"' "  ")\"}" ;; esac; }
 
 dmsetup create "$DM" --table "$(linear)"
@@ -81,11 +81,14 @@ for c in $(seq 1 "$CYCLES"); do
   echo 3 > /proc/sys/vm/drop_caches
   if mount "/dev/mapper/$DM" "$W/mnt" 2>"$W/mount.err"; then
     R2=$(verify "$ACKS" -reopen)
+    # A restart is a new process: check once more from a fresh one.
+    R3=$(verify "$ACKS")
     Q=$(cat "$W/mnt/state/s/quarantine" 2>/dev/null || echo none)
+    cp -a "$W/mnt/state/s" "$W/store-$c"
     umount "$W/mnt"
   else
-    R2="{\"verdict\":\"fs_unmountable_after_ack\"}"; Q=unknown
+    R2="{\"verdict\":\"fs_unmountable_after_ack\"}"; R3=null; Q=unknown
   fi
-  echo "{\"cycle\":$c,\"target\":\"$TARGET\",\"run_err\":\"$ERRLINE\",\"quarantine_file\":\"$Q\",\"faulty\":$R1,\"healed\":$R2}" >> "$W/results.jsonl"
+  echo "{\"cycle\":$c,\"target\":\"$TARGET\",\"run_err\":\"$ERRLINE\",\"quarantine_file\":\"$Q\",\"faulty\":$R1,\"healed\":$R2,\"restart\":$R3}" >> "$W/results.jsonl"
 done
 echo "target=$TARGET cycles=$CYCLES fs=$FSTYPE" | tee "$W/summary.txt"

@@ -19,7 +19,7 @@ case "${1:?}" in
   cycle|verify)
     ACKED=${2:?acked}
     mkdir -p "$MNT"; mountpoint -q "$MNT" || mount "$DEV" "$MNT"
-    R=$("$JT" verify -dir "$DIR" -acked "$ACKED" -probe -reopen 2>/tmp/jt-verify.err | tail -1)
+    R=$("$JT" verify -dir "$DIR" -acked "$ACKED" -probe -reopen 2>/tmp/jt-verify.err | tail -1 || true)
     case "$R" in \{*) ;; *) R="{\"verdict\":\"verifier_crash\"}" ;; esac
     echo "$R"
     if [ "$1" = cycle ]; then

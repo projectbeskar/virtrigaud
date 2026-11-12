@@ -66,7 +66,7 @@ for c in $(seq 1 "$CYCLES"); do
   echo 3 > /proc/sys/vm/drop_caches
   cat "$ACKS" >> "$W/acks-all.txt"
   mount "/dev/mapper/$DM" "$W/mnt" 2>"$W/mount.err" || { echo "{\"cycle\":$c,\"verdict\":\"fs_unmountable_after_ack\"}" >> "$W/results.jsonl"; mkfs_dev "$FSTYPE" "/dev/mapper/$DM"; : > "$W/acks-all.txt"; continue; }
-  R=$("$JT" verify -dir "$W/mnt/state/s" -ack "$W/acks-all.txt" -reopen 2>"$W/verify.err" | tail -1)
+  R=$("$JT" verify -dir "$W/mnt/state/s" -ack "$W/acks-all.txt" -reopen 2>"$W/verify.err" | tail -1 || true)
   case "$R" in \{*) ;; *) R="{\"verdict\":\"verifier_crash\"}"; cp "$W/verify.err" "$W/verify-crash-$c.err" ;; esac
   ERRLINE=$(grep -m1 '^ERR' "$ACKS" | tr '"' "'" || true)
   echo "{\"cycle\":$c,\"mode\":\"$MODE\",\"run_err\":\"$ERRLINE\",\"r\":$R}" >> "$W/results.jsonl"

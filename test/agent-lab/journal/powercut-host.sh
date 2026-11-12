@@ -18,7 +18,7 @@ GUEST=${GUEST_SCRIPT:-/opt/jt/scripts/powercut-guest.sh}
 GUEST_ENV=${GUEST_ENV:-}
 MIN=${MIN_RUN:-3}; MAX=${MAX_RUN:-15}
 
-acked() { grep -ao 'ACK [0-9]* [0-9]*' "$ACK_LOG" 2>/dev/null | awk '$2 > m {m = $2} END {print m + 0}'; }
+acked() { { grep -ao 'ACK [0-9]* [0-9]*' "$ACK_LOG" 2>/dev/null || true; } | awk '$2 > m {m = $2} END {print m + 0}'; }
 
 for c in $(seq 0 "$CUTS"); do
   t0=$(date +%s)
