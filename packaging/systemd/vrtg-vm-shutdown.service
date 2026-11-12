@@ -41,7 +41,8 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
-ProtectProc=invisible
+# No ProtectProc=invisible here: it hides /proc/1, and systemctl may then
+# not report a shutdown in progress, so the guard could miss a real one.
 PrivateIPC=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes

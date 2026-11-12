@@ -139,6 +139,10 @@ func TestShutdownUnitProperties(t *testing.T) {
 	if _, ok := u["Service"]["Delegate"]; ok {
 		t.Error("Delegate is set")
 	}
+	// ProtectProc=invisible would hide /proc/1 from the guard's systemctl.
+	if _, ok := u["Service"]["ProtectProc"]; ok {
+		t.Error("ProtectProc is set on the shutdown unit")
+	}
 	for section, keys := range u {
 		for _, k := range dependencyKeys {
 			for _, v := range keys[k] {
