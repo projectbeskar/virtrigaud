@@ -117,7 +117,7 @@ func (h highSSigner) Sign(r io.Reader, d []byte, o crypto.SignerOpts) ([]byte, e
 
 func TestSign(t *testing.T) {
 	p := trusttest.New(t)
-	body := &providerv1.HostAnswer{AgentVersion: "v0.0.1-test", AgentApiVersion: 1, GrantVersions: []uint32{1}}
+	body := &providerv1.HostAnswer{AgentVersion: "test-build", AgentApiVersion: 1, GrantVersions: []uint32{1}}
 	for i := range 8 {
 		blob, err := answer.Sign(highSSigner{p.HostKey}, leafDER(t, p), body)
 		if err != nil {
