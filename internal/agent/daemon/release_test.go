@@ -23,6 +23,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
@@ -40,6 +41,7 @@ func TestReleaseBuildRefusesTestOverrides(t *testing.T) {
 		"Probe":    {Probe: &hostchecktest.Fake{}},
 		"UID":      {UID: &uid},
 		"Hooks":    {Hooks: daemon.Hooks{BeforeRecover: func(context.Context) {}}},
+		"Now":      {Now: time.Now},
 	} {
 		o.Config, o.Executor = cfg, none.Executor{}
 		err := daemon.Run(context.Background(), o, nil)

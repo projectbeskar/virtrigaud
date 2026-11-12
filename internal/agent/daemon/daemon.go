@@ -121,15 +121,14 @@ type Hooks struct {
 }
 
 // Options configures Run.
+//
+// Probe, UID, Listener, TrustDir, TrustFileOwner, JournalFS, Floor, Hooks and
+// Now are test overrides: they replace what the host itself provides, the
+// agent binary never sets them, and a release build refuses to start when
+// any of them is set.
 type Options struct {
 	// Config is the validated configuration. Required.
 	Config *config.Config
-	// Probe reads the host for the start-up checks; nil uses
-	// hostcheck.System.
-	Probe hostcheck.Probe
-	// UID is the agent user's id, the owner of the state directory; nil
-	// uses the process's effective uid.
-	UID *uint32
 	// Executor runs operations. Required.
 	Executor config.Executor
 	// DevEnrolment is the development enrolment stand-in; nil for none.
@@ -142,30 +141,33 @@ type Options struct {
 	Log logr.Logger
 	// Version is the agent's build version.
 	Version string
-	// Listener replaces listening on Config.ListenAddress.
-	Listener net.Listener
-	// TrustDir replaces the configured trust directory. Only tests set it
-	// (the trust directory of a test PKI); the agent binary never does.
-	//
-	// TrustFileOwner replaces root as the owner the trust configuration's
-	// files must have (tests).
-	TrustFileOwner *uint32
-	//
-	// Probe, UID, TrustDir, TrustFileOwner, JournalFS, Floor and Hooks are
-	// test overrides: a release build refuses to start when any of them is
-	// set.
-	TrustDir string
-	// JournalFS replaces the journal's file system (tests).
-	JournalFS journal.FS
-	// Floor replaces the clock floor's sources (tests).
-	Floor FloorSources
 	// ObserveEvery is the clock floor's raise period; zero uses
 	// DefaultObserveEvery.
 	ObserveEvery time.Duration
-	// Hooks are test hooks.
+
+	// Probe reads the host for the start-up checks (test override); nil
+	// uses hostcheck.System.
+	Probe hostcheck.Probe
+	// UID is the agent user's id, the owner the state directory and the key
+	// material must have (test override); nil uses the process's effective
+	// uid.
+	UID *uint32
+	// Listener replaces listening on Config.ListenAddress (test override).
+	Listener net.Listener
+	// TrustDir replaces the configured trust directory, for example the
+	// trust directory of a test PKI (test override).
+	TrustDir string
+	// TrustFileOwner replaces root as the owner the trust configuration's
+	// files must have (test override).
+	TrustFileOwner *uint32
+	// JournalFS replaces the journal's file system (test override).
+	JournalFS journal.FS
+	// Floor replaces the clock floor's sources (test override).
+	Floor FloorSources
+	// Hooks are test hooks (test override).
 	Hooks Hooks
-	// Now is the clock for certificate validity at load; nil uses
-	// time.Now.
+	// Now is the clock for certificate validity at load and reload (test
+	// override); nil uses time.Now.
 	Now func() time.Time
 }
 
@@ -208,8 +210,8 @@ func (o Options) testOverrides() []string {
 	var set []string
 	for name, on := range map[string]bool{
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
-		"TrustFileOwner": o.TrustFileOwner != nil,
-		"Floor":          o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
+		"TrustFileOwner": o.TrustFileOwner != nil, "Listener": o.Listener != nil, "Now": o.Now != nil,
+		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
 	} {
 		if on {
 			set = append(set, name)
