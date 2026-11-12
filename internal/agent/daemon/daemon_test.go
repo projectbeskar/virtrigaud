@@ -373,7 +373,17 @@ func TestLogsCarryNoKeyMaterial(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := strings.Split(string(key), "\n")[1]
-	if strings.Contains(h.logs.text(), body[:32]) || strings.Contains(h.logs.text(), fmt.Sprintf("%x", h.pki.HostKey.D.Bytes())) {
+	if strings.Contains(h.logs.text(), body[:32]) || strings.Contains(h.logs.text(), fmt.Sprintf("%x", rawKey(t, h))) {
 		t.Fatal("the logs contain key material")
 	}
+}
+
+// rawKey returns the host key's raw private scalar.
+func rawKey(t *testing.T, h *host) []byte {
+	t.Helper()
+	b, err := h.pki.HostKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

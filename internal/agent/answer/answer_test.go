@@ -82,7 +82,10 @@ func verify(t *testing.T, blob *providerv1.SignedBlob, msg proto.Message) {
 		t.Fatal(err)
 	}
 	d := sha256.Sum256(m)
-	pub := cert.PublicKey.(*ecdsa.PublicKey)
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatal("signer key is not ECDSA")
+	}
 	if !ecdsa.VerifyASN1(pub, d[:], blob.GetSignature()) {
 		t.Fatal("signature does not verify")
 	}

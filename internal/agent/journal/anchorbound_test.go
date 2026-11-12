@@ -91,7 +91,7 @@ func TestAnchorLogReadIsBounded(t *testing.T) {
 	_ = s.Close()
 	p := filepath.Join(e.dir, journal.AnchorFile)
 	raw, _ := e.mem.ReadFile(p)
-	grown := append(raw, []byte(strings.Repeat("x", int(journal.MaxAnchorBytesForTest)))...)
+	grown := append(raw, []byte(strings.Repeat("x", journal.MaxAnchorBytesForTest))...)
 	e.mem.Put(p, grown)
 	small := &smallSizeFS{MemFS: e.mem}
 	o := e.opts

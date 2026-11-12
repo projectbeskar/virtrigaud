@@ -272,12 +272,12 @@ func answerContext(h Host) (*providerv1.AnswerContext, error) {
 	if h.View.Position.Seq == 0 || h.View.Position.StoreID == ([16]byte{}) {
 		return nil, fmt.Errorf("%w: the store has no chain position", ErrNoAnswer)
 	}
-	switch {
-	case h.State == providerv1.AgentState_AGENT_STATE_QUARANTINED:
+	switch h.State {
+	case providerv1.AgentState_AGENT_STATE_QUARANTINED:
 		if !slices.Contains(lostReasons, journal.LostReason(h.StateReason)) {
 			return nil, fmt.Errorf("%w: quarantine reason %q is not a store loss reason", ErrSign, h.StateReason)
 		}
-	case h.State == providerv1.AgentState_AGENT_STATE_READY, h.State == providerv1.AgentState_AGENT_STATE_UNATTESTED:
+	case providerv1.AgentState_AGENT_STATE_READY, providerv1.AgentState_AGENT_STATE_UNATTESTED:
 		if h.StateReason != "" {
 			return nil, fmt.Errorf("%w: a state reason without a quarantine", ErrSign)
 		}

@@ -212,7 +212,8 @@ func verifyAnswer(t *testing.T, e *env, blob *providerv1.SignedBlob) *providerv1
 		t.Fatal(err)
 	}
 	d := sha256.Sum256(m)
-	if !ecdsa.VerifyASN1(cert.PublicKey.(*ecdsa.PublicKey), d[:], blob.GetSignature()) {
+	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !ecdsa.VerifyASN1(pub, d[:], blob.GetSignature()) {
 		t.Fatal("answer signature does not verify")
 	}
 	if blob.GetBodyType() != answer.BodyTypeHostAnswer {
