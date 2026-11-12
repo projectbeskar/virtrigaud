@@ -95,6 +95,23 @@ func TestLoadConfigRefusals(t *testing.T) {
 		{"grant anchor issued by the host CA", func(t *testing.T, dir string, p *trusttest.PKI) {
 			write(t, dir, trust.FileGrantAnchors, string(subCA(t, p.HostCA)))
 		}},
+		{"provider CA equals the host CA", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileProviderCA, string(p.HostCA.PEM))
+		}},
+		{"provider CA equals the grant anchor", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileProviderCA, string(p.GrantCA.PEM))
+		}},
+		{"provider CA issued by the host CA", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileProviderCA, string(subCA(t, p.HostCA)))
+		}},
+		{"provider CA issued by the grant anchor", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileProviderCA, string(subCA(t, p.GrantCA)))
+		}},
+		{"provider CA and host CA share an issuer", func(t *testing.T, dir string, _ *trusttest.PKI) {
+			root := hostidentitytest.NewCA(t)
+			write(t, dir, trust.FileProviderCA, string(subCA(t, root)))
+			write(t, dir, trust.FileHostCA, string(subCA(t, root)))
+		}},
 		{"grant anchor and host CA share an issuer", func(t *testing.T, dir string, _ *trusttest.PKI) {
 			root := hostidentitytest.NewCA(t)
 			write(t, dir, trust.FileGrantAnchors, string(subCA(t, root)))

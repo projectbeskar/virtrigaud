@@ -25,7 +25,8 @@ limitations under the License.
 // one before it is loaded. The grant anchors and the host identity issuer
 // must be separate hierarchies (CheckSeparation): an issuer of host
 // certificates must never be able to issue a certificate that verifies as a
-// grant signer.
+// grant signer. The Provider identity issuer is kept apart from both, so that
+// no issuer of one role can mint a credential of another.
 //
 // The Provider identity certificate the agent pins is a development-only
 // stand-in for the Provider identity path that a later change defines.
@@ -150,7 +151,8 @@ func ReadFile(path string) ([]byte, error) {
 
 // LoadConfig reads and validates the trust configuration in dir with read
 // (ReadFile when nil). Every file is required and none may be empty; the
-// grant anchors and the host identity issuers must pass CheckSeparation.
+// grant anchors, the host identity issuers and the Provider identity issuers
+// must be three separate hierarchies (CheckSeparated).
 func LoadConfig(dir string, read func(string) ([]byte, error)) (*Config, error) {
 	if read == nil {
 		read = ReadFile
@@ -195,6 +197,12 @@ func LoadConfig(dir string, read func(string) ([]byte, error)) (*Config, error) 
 		return nil, err
 	}
 	if err := CheckSeparation(cfg.GrantAnchors, cfg.HostCAs); err != nil {
+		return nil, err
+	}
+	if err := CheckSeparated("Provider identity issuers", cfg.ProviderCAs, "host identity issuers", cfg.HostCAs); err != nil {
+		return nil, err
+	}
+	if err := CheckSeparated("Provider identity issuers", cfg.ProviderCAs, "grant anchors", cfg.GrantAnchors); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -286,28 +294,34 @@ func (c *Config) AuthorizeProvider(leaf *x509.Certificate) (ProviderIdentity, st
 }
 
 // CheckSeparation refuses a trust configuration in which the grant anchors and
-// the issuers of host identity certificates share a certificate, a key or an
-// issuer, or in which a certificate of one set signed, or chains to, a
-// certificate of the other. A holder of the host identity issuer's key must
-// never be able to issue a certificate that verifies as a grant signer, nor
-// the reverse.
+// the issuers of host identity certificates are not separate hierarchies
+// (CheckSeparated). A holder of the host identity issuer's key must never be
+// able to issue a certificate that verifies as a grant signer, nor the
+// reverse.
 func CheckSeparation(grantAnchors, hostCAs []*x509.Certificate) error {
+	return CheckSeparated("grant anchors", grantAnchors, "host identity issuers", hostCAs)
+}
+
+// CheckSeparated refuses two sets of trust anchors, named aName and bName,
+// that share a certificate, a key or an issuer, or in which a certificate of
+// one set signed, or chains to, a certificate of the other.
+func CheckSeparated(aName string, a []*x509.Certificate, bName string, b []*x509.Certificate) error {
 	all := x509.NewCertPool()
-	grantPool := x509.NewCertPool()
-	hostPool := x509.NewCertPool()
-	for _, g := range grantAnchors {
-		all.AddCert(g)
-		grantPool.AddCert(g)
+	aPool := x509.NewCertPool()
+	bPool := x509.NewCertPool()
+	for _, c := range a {
+		all.AddCert(c)
+		aPool.AddCert(c)
 	}
-	for _, h := range hostCAs {
-		all.AddCert(h)
-		hostPool.AddCert(h)
+	for _, c := range b {
+		all.AddCert(c)
+		bPool.AddCert(c)
 	}
 	violation := func(what string) error {
-		return fmt.Errorf("%w: the grant anchors and the host identity issuers are not separate hierarchies: %s", ErrConfig, what)
+		return fmt.Errorf("%w: the %s and the %s are not separate hierarchies: %s", ErrConfig, aName, bName, what)
 	}
-	for _, g := range grantAnchors {
-		for _, h := range hostCAs {
+	for _, g := range a {
+		for _, h := range b {
 			switch {
 			case g.Equal(h):
 				return violation("a certificate is in both")
@@ -328,14 +342,14 @@ func CheckSeparation(grantAnchors, hostCAs []*x509.Certificate) error {
 			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}, CurrentTime: c.NotBefore.Add(time.Second)})
 		return err == nil
 	}
-	for _, h := range hostCAs {
-		if chains(h, grantPool) {
-			return violation("a host identity issuer chains to a grant anchor")
+	for _, c := range b {
+		if chains(c, aPool) {
+			return violation("one of the " + bName + " chains to one of the " + aName)
 		}
 	}
-	for _, g := range grantAnchors {
-		if chains(g, hostPool) {
-			return violation("a grant anchor chains to a host identity issuer")
+	for _, c := range a {
+		if chains(c, bPool) {
+			return violation("one of the " + aName + " chains to one of the " + bName)
 		}
 	}
 	return nil
