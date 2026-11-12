@@ -59,7 +59,7 @@ the VirtRigaud API packages.
 | `…/pki/` | agent user, `0700` | `host.key` (ECDSA P-256 private key, PEM, PKCS #8 or SEC 1, `0600`) and `host.crt` (the host identity certificate, PEM, the leaf only, `0600`). Never put it in a backup. |
 | `…/clock.floor` | agent user, `0600` | The clock floor (see [Start-up](#start-up-order)). |
 | `…/fake-executor/` | agent user, `0700` | Fake VMs (development builds with `--executor=fake`). |
-| `/usr/share/virtrigaud/trust/` | root, not writable by the agent | Trust configuration, from the host's signed, read-only system image. |
+| `/usr/share/virtrigaud/trust/` | root, not writable by the agent | Trust configuration, meant to come from the host's signed, read-only system image (see [Limits](#limits): today the agent checks only that it cannot write it). |
 
 The trust configuration directory holds four files, all required:
 
@@ -70,10 +70,18 @@ The trust configuration directory holds four files, all required:
 | `grant-anchors.pem` | The operation grant anchors. |
 | `provider-sans` | The Providers the agent serves, one per line: `spiffe://<trust domain>/virtrigaud/provider/<namespace>/<name>`. Blank lines and `#` comments are ignored. |
 
-The agent refuses a trust configuration in which the grant anchors and the
-host identity CA share a certificate, a key or an issuer, or in which one
-signed, or chains to, the other: whoever holds the host identity CA's key
-must not be able to issue a grant signer.
+The grant anchors, the host identity CA and the Provider identity CA must be
+three separate hierarchies: the agent refuses a trust configuration in which
+any two of them share a certificate, a key or an issuer, or in which one
+signed, or chains to, the other. Whoever holds the key of one of them must
+not be able to issue a credential of another role (for example, the host
+identity CA's key holder must not be able to issue a grant signer).
+
+Every file of the trust configuration and of `pki/` is opened without
+following a symbolic link and checked on the open descriptor before it is
+read: a regular file of at most 1 MiB, owned by root (trust configuration,
+not writable by group or others) or by the agent's user (`pki/`, no
+permission for group or others).
 
 The host certificate must chain to `host-ca.pem`, certify the host key, carry
 the server-authentication usage, not be a CA, be valid now, and carry exactly
@@ -109,14 +117,20 @@ restore of the state directory restores it too.
 
 | Check | Refusal reason |
 |-------|----------------|
+| The agent does not run as root (effective uid 0). | `RunsAsRoot` |
 | The agent runs in the host's initial PID, cgroup, user and time namespaces (a kernel without time namespaces passes that one). | `UnsupportedHost` |
 | `/sys/fs/cgroup` is a unified cgroup v2 hierarchy. | `UnsupportedHost` |
 | The state directory is a directory (not a symbolic link), owned by the agent's user, with no permission for group or others. | `StateDirInsecure` |
-| The state directory is on ext4, ext3, XFS, Btrfs, F2FS (mounted from a `/dev/` device) or ZFS; never tmpfs, ramfs, overlay or a network file system. | `StateNotPersistent` |
+| The state directory is on ext4, ext3, XFS, Btrfs, F2FS (mounted from a `/dev/` device that is not a loop device) or ZFS; never tmpfs, ramfs, overlay, a loop device or a network file system. | `StateNotPersistent` |
 | `host-id` exists, is a regular file owned by the agent's user that group and others cannot write, and names the host of the certificate. | `StateNotPersistent` |
 | `pki/` and every file in it are owned by the agent's user, grant nothing to group or others, and are not symbolic links. | `PKIInsecure` |
 | Every directory from `/` to the trust directory, and every file in it, is owned by root, not writable by group or others, not a symbolic link; and the agent's process cannot write the directory or its files. | `TrustConfigInsecure` |
-| The trust configuration and the host identity load (see above). | `IdentityInvalid` |
+| The trust configuration and the host identity load, including the checks on the open files (see above). | `IdentityInvalid` |
+
+A release build also refuses to start when a caller of the agent's Go
+packages sets one of the daemon's test overrides (another trust directory,
+host probe, uid, file owner, file system, clock sources or hooks); the agent
+binary never sets them.
 
 ## Peer authentication
 
@@ -125,10 +139,18 @@ connection is accepted only from a client certificate that chains to
 `provider-ca.pem`, carries exactly one URI subject alternative name, and
 whose name is `spiffe://<trust domain>/virtrigaud/provider/<namespace>/<name>/<Provider UID>`
 with the trust domain, namespace and name in `provider-sans`. Anything else
-fails the handshake. Every call then compares the Provider UID with the
-Provider the host certificate is enrolled with, and refuses another one with
-`FailedPrecondition` and the ErrorInfo reason `PROVIDER_MISMATCH` before any
-other check.
+fails the handshake. Every call then verifies the client certificate again,
+against the current `provider-ca.pem` and the current time, so that a reload
+that replaces the Provider identity CA, or a certificate that expires while
+its connection is open, cuts the connection off (`PermissionDenied`). It then
+compares the Provider UID with the Provider the host certificate is enrolled
+with, and refuses another one with `FailedPrecondition` and the ErrorInfo
+reason `PROVIDER_MISMATCH` before any other check.
+
+Connections are closed after 30 minutes (and a minute of grace for running
+calls), so each is authenticated again with a new handshake. A handshake must
+finish within 10 seconds, a connection carries at most 64 concurrent calls,
+and a client may not send keepalive pings more often than every 30 seconds.
 
 ## What the agent serves
 
@@ -157,7 +179,7 @@ reproduces the published test vector.
 | Signal | Effect |
 |--------|--------|
 | SIGTERM, SIGINT | `STOPPING=1`; the server stops accepting calls and waits up to `--drain-timeout`; the clock floor is saved; the store is closed; exit 0. During recovery, recovery is cancelled and resumes at the next start. |
-| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/` and trust checks above) and loaded again. A reload that fails, or whose certificate names another host or enrolment, is refused and the running credentials stay. New handshakes and every later call use the new credentials. `READY=1` follows. |
+| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/` and trust checks above) and loaded again. A reload that fails, or whose certificate names another host or enrolment, is refused and the running credentials stay; systemd then gets `STATUS=reload refused: <reason>` (`IdentityInvalid`, `EnrolmentChanged`, or a host-check reason such as `PKIInsecure`), never a path or a secret. New handshakes and every later call use the new credentials. `READY=1` follows. |
 
 ## systemd units
 
@@ -167,18 +189,27 @@ fragments; they are not installed by anything.
 `vrtg-agent.service`: `Type=notify`, `Restart=always`, `RestartSec=2`,
 `StartLimitIntervalSec=300`, `StartLimitBurst=10`, `KillMode=process`,
 `User=virtrigaud-agent`, `StateDirectory=virtrigaud-agent` (`0700`),
-`NoNewPrivileges=yes`, an empty capability bounding set, `ProtectSystem=strict`
-and further sandboxing. It sets no `Delegate=` and creates no scope. No other
-unit upholds it, so it can be stopped for maintenance.
+`RestartPreventExitStatus=2` (a configuration error is not retried),
+`NoNewPrivileges=yes`, an empty capability bounding set, `ProtectSystem=strict`,
+`ProtectProc=invisible`, `PrivateIPC=yes`, `LimitNOFILE=4096`, `TasksMax=128`,
+`MemoryMax=256M` and further sandboxing. It sets no `Delegate=` and creates no
+scope. No other unit upholds it, so it can be stopped for maintenance.
 
 `vrtg-vm-shutdown.service`: a `oneshot` unit with `RemainAfterExit=yes` whose
 stop action is `vrtg-agent shutdown-vms`. That command stops the VMs only
-when `systemctl is-system-running` reports `stopping` or a start job of
-`shutdown.target`, `reboot.target`, `halt.target`, `poweroff.target` or
-`kexec.target` is queued; a maintenance stop of the unit stops nothing, and
-so does a state it cannot read. The unit neither wants, requires nor orders
-itself after `vrtg-agent.service`, so starting it never starts an agent
-stopped for maintenance.
+when `/usr/bin/systemctl is-system-running` reports `stopping` or a start job
+of `shutdown.target`, `reboot.target`, `soft-reboot.target`, `halt.target`,
+`poweroff.target` or `kexec.target` is queued; a maintenance stop of the unit
+stops nothing. When it cannot read the host's state it stops nothing either,
+and exits 1. The unit never wants, requires or binds to `vrtg-agent.service`,
+so starting it never starts an agent stopped for maintenance; it is not
+ordered against the agent's unit either (`After=` would only order the two,
+never pull the agent in). That ordering is decided when the agent runs real
+VMs.
+
+`hack/verify-systemd-units.sh` runs `systemd-analyze verify` on both units
+(with the binary path replaced, since it does not exist on a build machine);
+the CI lint job runs it.
 
 ## Development enrolment
 
@@ -204,7 +235,19 @@ is not the one the certificate names, reads answer unsigned.
 
 - The agent executes no operation; every mutating call is refused.
 - The host key is used in the agent's own process, behind Go's
-  `crypto.Signer`; it is not yet held by a separate signer process.
+  `crypto.Signer`. A later slice moves the key behind a separate signer
+  process before answers are relied on.
+- The trust configuration's provenance is not proved: the agent checks only
+  that the trust path is owned by root and that it cannot write it. Positive
+  provenance (a verity-protected system extension or a signed bundle) is
+  required before the agent leaves development builds.
+- The clock floor file is outside the chain-anchored store: a rollback of
+  that file alone is not detected. This must be fixed before grant expiry is
+  enforced on the host.
+- The shutdown unit is not ordered against the agent's unit; the order is
+  decided when the agent runs real VMs.
+- The release-artefact test checks the release workflow, the CI workflow and
+  the `Makefile` only.
 - `GetHostInfo` reports no inventory (CPU, memory, storage, components).
 - Certificate renewal (`InstallRenewedCertificate`) and `vrtg-agent enroll`
   are not available.
