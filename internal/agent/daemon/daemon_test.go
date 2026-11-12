@@ -232,6 +232,25 @@ func TestStartRefusals(t *testing.T) {
 				h.t.Fatal(err)
 			}
 		}, daemon.ReasonIdentityInvalid},
+		"host key readable by group, seen on the open file": {func(h *host) {
+			if err := os.Chmod(filepath.Join(h.cfg.PKIDir(), trust.FileHostKey), 0o640); err != nil {
+				h.t.Fatal(err)
+			}
+		}, daemon.ReasonIdentityInvalid},
+		"trust file replaced by a symbolic link": {func(h *host) {
+			p := filepath.Join(h.trustDir, trust.FileHostCA)
+			if err := os.Rename(p, p+".real"); err != nil {
+				h.t.Fatal(err)
+			}
+			if err := os.Symlink(p+".real", p); err != nil {
+				h.t.Fatal(err)
+			}
+		}, daemon.ReasonIdentityInvalid},
+		"trust file writable by group, seen on the open file": {func(h *host) {
+			if err := os.Chmod(filepath.Join(h.trustDir, trust.FileProviderSANs), 0o664); err != nil {
+				h.t.Fatal(err)
+			}
+		}, daemon.ReasonIdentityInvalid},
 		"host certificate from another issuer": {func(h *host) {
 			csr := hostidentitytest.NewCSR(h.t, h.pki.HostKey, hostidentitytest.CSROptions{URIs: hostidentity.RequestURIs(h.pki.HostURI, h.pki.Record)})
 			if err := os.WriteFile(filepath.Join(h.cfg.PKIDir(), trust.FileHostCert), hostidentitytest.NewCA(h.t).Issue(h.t, csr, hostidentitytest.IssueOptions{}), 0o600); err != nil {

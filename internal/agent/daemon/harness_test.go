@@ -49,7 +49,18 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-const testUID uint32 = 4242
+// testUID is the agent's uid in these tests: the user running them, so that
+// the files they write pass the owner checks made on open descriptors.
+var testUID = uint32(os.Getuid()) // #nosec G115 -- a uid is 32 bits
+
+// probeEUID is the effective uid the fake probe reports: never root, so that
+// the tests also run as root.
+func probeEUID() uint32 {
+	if testUID == 0 {
+		return 4242
+	}
+	return testUID
+}
 
 // notifications records systemd notifications.
 type notifications struct {
@@ -146,6 +157,7 @@ func newHost(t *testing.T) *host {
 	}
 	h.cfg = &config.Config{StateDir: h.stateDir, ListenAddress: "127.0.0.1:0", DrainTimeout: 5 * time.Second, Executor: config.ExecutorNone}
 	h.probe = hostchecktest.Healthy(hostcheck.Config{StateDir: h.stateDir, PKIDir: h.cfg.PKIDir(), TrustDir: h.trustDir, UID: testUID}, h.pki.HostURI)
+	h.probe.Edit(func(f *hostchecktest.Fake) { f.UID = probeEUID() })
 	return h
 }
 
@@ -173,7 +185,7 @@ func (h *host) start() *running {
 	uid := testUID
 	opts := daemon.Options{
 		Config: h.cfg, Probe: h.probe, UID: &uid, Executor: h.exec, DevEnrolment: h.dev, Notifier: h.notes,
-		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, Hooks: hooks,
+		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, TrustFileOwner: &uid, Hooks: hooks,
 		Floor: daemon.FloorSources{Wall: wall{}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
 	}
 	go func() {

@@ -20,11 +20,11 @@ package config
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/fake"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/safefile"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 )
 
@@ -53,9 +53,14 @@ func newExecutor(name, dir string) (Executor, error) {
 	return nil, fmt.Errorf("--%s=%q is not an executor", FlagExecutor, name)
 }
 
-// loadDevEnrolment reads and parses the development enrolment file.
+// maxDevEnrolmentBytes bounds the development enrolment file.
+const maxDevEnrolmentBytes = 64 << 10
+
+// loadDevEnrolment reads and parses the development enrolment file: a
+// regular file (not through a symbolic link) that group and others cannot
+// write, of at most 64 KiB.
 func loadDevEnrolment(path string) (*DevEnrolment, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- an administrator-chosen development file
+	data, err := safefile.Read(path, safefile.Policy{DenyMode: 0o022, Max: maxDevEnrolmentBytes})
 	if err != nil {
 		return nil, fmt.Errorf("read development enrolment file: %w", err)
 	}

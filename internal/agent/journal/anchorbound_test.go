@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,7 @@ package journal_test
 
 import (
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -27,63 +28,97 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal/journaltest"
 )
 
-// oversizeAnchorFS reports the anchor log as larger than the bound and counts
-// every attempt to read it.
-type oversizeAnchorFS struct {
-	*journaltest.MemFS
-	reads atomic.Int32
-}
-
 func isAnchor(name string) bool { return filepath.Base(name) == journal.AnchorFile }
 
-func (o *oversizeAnchorFS) Size(name string) (int64, error) {
-	if isAnchor(name) {
-		return int64(journal.MaxAnchorBytesForTest) + 1, nil
-	}
-	return o.MemFS.Size(name)
+// sizedFS reports, for the anchor log opened for reading, the size its
+// fstat returns (size), and counts the bytes read from it.
+type sizedFS struct {
+	*journaltest.MemFS
+	size  int64
+	read  atomic.Int64
+	most  atomic.Int64
+	plain atomic.Int32
 }
 
-func (o *oversizeAnchorFS) ReadFile(name string) ([]byte, error) {
-	if isAnchor(name) {
-		o.reads.Add(1)
-	}
-	return o.MemFS.ReadFile(name)
+type sizedFile struct {
+	journal.File
+	fs   *sizedFS
+	this *atomic.Int64
 }
 
-func (o *oversizeAnchorFS) OpenFile(name string, flag int, perm fs.FileMode) (journal.File, error) {
-	if isAnchor(name) {
-		o.reads.Add(1)
+func (f sizedFile) Stat() (fs.FileInfo, error) {
+	fi, err := f.File.Stat()
+	if err != nil {
+		return nil, err
 	}
-	return o.MemFS.OpenFile(name, flag, perm)
+	return sizedInfo{FileInfo: fi, size: f.fs.size}, nil
 }
 
-// TestAnchorLogSizeCheckedBeforeRead: an anchor log above the bound is
-// anchor_corrupt, and Open never opens or reads it.
-func TestAnchorLogSizeCheckedBeforeRead(t *testing.T) {
-	e := newEnv(t)
-	s := e.ready()
-	put(t, s, "a", "1")
-	_ = s.Close()
+func (f sizedFile) Read(p []byte) (int, error) {
+	n, err := f.File.Read(p)
+	f.fs.read.Add(int64(n))
+	if total := f.this.Add(int64(n)); total > f.fs.most.Load() {
+		f.fs.most.Store(total)
+	}
+	return n, err
+}
 
-	big := &oversizeAnchorFS{MemFS: e.mem}
+type sizedInfo struct {
+	fs.FileInfo
+	size int64
+}
+
+func (i sizedInfo) Size() int64 { return i.size }
+
+func (s *sizedFS) OpenFile(name string, flag int, perm fs.FileMode) (journal.File, error) {
+	f, err := s.MemFS.OpenFile(name, flag, perm)
+	if err != nil || !isAnchor(name) || flag != os.O_RDONLY {
+		return f, err
+	}
+	return sizedFile{File: f, fs: s, this: new(atomic.Int64)}, nil
+}
+
+func (s *sizedFS) ReadFile(name string) ([]byte, error) {
+	if isAnchor(name) {
+		s.plain.Add(1)
+	}
+	return s.MemFS.ReadFile(name)
+}
+
+func reopen(t *testing.T, e *env, fsys journal.FS) *journal.Store {
+	t.Helper()
 	o := e.opts
-	o.Dir, o.FS = e.dir, big
+	o.Dir, o.FS = e.dir, fsys
 	st, err := journal.Open(t.Context(), o)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
+// TestAnchorLogSizeCheckedBeforeRead: an anchor log whose open file is above
+// the bound is anchor_corrupt, and not a byte of it is read.
+func TestAnchorLogSizeCheckedBeforeRead(t *testing.T) {
+	e := newEnv(t)
+	s := e.ready()
+	put(t, s, "a", "1")
+	_ = s.Close()
+	big := &sizedFS{MemFS: e.mem, size: int64(journal.MaxAnchorBytesForTest) + 1}
+	st := reopen(t, e, big)
 	if state, r := st.State(); state != journal.StateLost || r != journal.LostAnchorCorrupt {
 		t.Fatalf("state = %v{%s}, want lost{%s}", state, r, journal.LostAnchorCorrupt)
 	}
-	// The quarantine append opens the log for writing; no open may read it.
-	if n := big.reads.Load(); n > 1 {
-		t.Fatalf("anchor log opened %d times; an oversized log must not be read", n)
+	if n := big.read.Load(); n != 0 {
+		t.Fatalf("%d bytes of an oversized anchor log were read", n)
+	}
+	if n := big.plain.Load(); n != 0 {
+		t.Fatalf("the anchor log was read whole %d times", n)
 	}
 }
 
-// TestAnchorLogReadIsBounded: a log that grows past the bound between its
-// size check and its read is still read only up to the bound.
+// TestAnchorLogReadIsBounded: a log that grows past the bound after its size
+// was taken is read only up to the bound.
 func TestAnchorLogReadIsBounded(t *testing.T) {
 	e := newEnv(t)
 	s := e.ready()
@@ -91,28 +126,13 @@ func TestAnchorLogReadIsBounded(t *testing.T) {
 	_ = s.Close()
 	p := filepath.Join(e.dir, journal.AnchorFile)
 	raw, _ := e.mem.ReadFile(p)
-	grown := append(raw, []byte(strings.Repeat("x", journal.MaxAnchorBytesForTest))...)
-	e.mem.Put(p, grown)
-	small := &smallSizeFS{MemFS: e.mem}
-	o := e.opts
-	o.Dir, o.FS = e.dir, small
-	st, err := journal.Open(t.Context(), o)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	e.mem.Put(p, append(raw, []byte(strings.Repeat("x", journal.MaxAnchorBytesForTest))...))
+	small := &sizedFS{MemFS: e.mem, size: 1}
+	st := reopen(t, e, small)
 	if state, r := st.State(); state != journal.StateLost || r != journal.LostAnchorCorrupt {
 		t.Fatalf("state = %v{%s}, want lost{%s}", state, r, journal.LostAnchorCorrupt)
 	}
-}
-
-// smallSizeFS under-reports the anchor log's size, as a log that grew after
-// its size was taken.
-type smallSizeFS struct{ *journaltest.MemFS }
-
-func (s *smallSizeFS) Size(name string) (int64, error) {
-	if isAnchor(name) {
-		return 1, nil
+	if n := small.most.Load(); n > int64(journal.MaxAnchorBytesForTest)+1 {
+		t.Fatalf("%d bytes read from one open, more than the bound", n)
 	}
-	return s.MemFS.Size(name)
 }

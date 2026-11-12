@@ -39,14 +39,13 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/safefile"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 )
 
@@ -124,29 +123,30 @@ type Config struct {
 	Providers []ProviderIdentity
 }
 
-// ReadFile reads a file of the trust configuration or the key material: a
-// regular file (never through a symbolic link) of at most 1 MiB.
+// ReadFile reads a file of the trust configuration or the key material: it
+// opens it without following a symbolic link and reads it only if the open
+// file is a regular file of at most 1 MiB. It checks no owner or mode; see
+// TrustFileReader and KeyFileReader.
 func ReadFile(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
+	return safefile.Read(path, safefile.Policy{Max: maxTrustFileBytes})
+}
+
+// TrustFileReader returns a reader for the trust configuration: each file,
+// checked on its open descriptor, must be a regular file owned by owner (root
+// on a host) that group and others cannot write, of at most 1 MiB.
+func TrustFileReader(owner uint32) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		return safefile.Read(path, safefile.Policy{Owner: &owner, DenyMode: 0o022, Max: maxTrustFileBytes})
 	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
+}
+
+// KeyFileReader returns a reader for the key material: each file, checked on
+// its open descriptor, must be a regular file owned by the agent's user uid
+// with no permission for group or others, of at most 1 MiB.
+func KeyFileReader(uid uint32) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		return safefile.Read(path, safefile.Policy{Owner: &uid, DenyMode: 0o077, Max: maxTrustFileBytes})
 	}
-	f, err := os.Open(path) // #nosec G304 -- a path of the agent's own configuration
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	b, err := io.ReadAll(io.LimitReader(f, maxTrustFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(b) > maxTrustFileBytes {
-		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxTrustFileBytes)
-	}
-	return b, nil
 }
 
 // LoadConfig reads and validates the trust configuration in dir with read

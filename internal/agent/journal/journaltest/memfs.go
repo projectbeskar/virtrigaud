@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 )
@@ -211,17 +212,6 @@ func (m *MemFS) ReadFile(name string) ([]byte, error) {
 	return append([]byte(nil), n.data...), nil
 }
 
-// Size implements journal.FS.
-func (m *MemFS) Size(name string) (int64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	n, ok := m.names[filepath.Clean(name)]
-	if !ok {
-		return 0, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
-	}
-	return int64(len(n.data)), nil
-}
-
 // Exists implements journal.FS.
 func (m *MemFS) Exists(name string) (bool, error) {
 	m.mu.Lock()
@@ -388,3 +378,23 @@ func (f *memFile) Close() error {
 	f.closed = true
 	return nil
 }
+
+// Stat implements journal.File: a regular file of the current size.
+func (f *memFile) Stat() (fs.FileInfo, error) {
+	f.fs.mu.Lock()
+	defer f.fs.mu.Unlock()
+	return memInfo{name: filepath.Base(f.name), size: int64(len(f.n.data))}, nil
+}
+
+// memInfo is the fs.FileInfo of a memFile.
+type memInfo struct {
+	name string
+	size int64
+}
+
+func (i memInfo) Name() string       { return i.name }
+func (i memInfo) Size() int64        { return i.size }
+func (i memInfo) Mode() fs.FileMode  { return 0o600 }
+func (i memInfo) ModTime() time.Time { return time.Time{} }
+func (i memInfo) IsDir() bool        { return false }
+func (i memInfo) Sys() any           { return nil }

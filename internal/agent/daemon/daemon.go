@@ -147,8 +147,13 @@ type Options struct {
 	// TrustDir replaces the configured trust directory. Only tests set it
 	// (the trust directory of a test PKI); the agent binary never does.
 	//
-	// Probe, UID, TrustDir, JournalFS, Floor and Hooks are test overrides:
-	// a release build refuses to start when any of them is set.
+	// TrustFileOwner replaces root as the owner the trust configuration's
+	// files must have (tests).
+	TrustFileOwner *uint32
+	//
+	// Probe, UID, TrustDir, TrustFileOwner, JournalFS, Floor and Hooks are
+	// test overrides: a release build refuses to start when any of them is
+	// set.
 	TrustDir string
 	// JournalFS replaces the journal's file system (tests).
 	JournalFS journal.FS
@@ -203,7 +208,8 @@ func (o Options) testOverrides() []string {
 	var set []string
 	for name, on := range map[string]bool{
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
-		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
+		"TrustFileOwner": o.TrustFileOwner != nil,
+		"Floor":          o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
 	} {
 		if on {
 			set = append(set, name)
@@ -215,12 +221,15 @@ func (o Options) testOverrides() []string {
 
 // daemon is one run of the agent.
 type daemon struct {
-	o        Options
-	log      logr.Logger
-	uid      uint32
-	trustDir string
-	creds    *server.CredentialStore
-	notifier systemd.Notifier
+	o   Options
+	log logr.Logger
+	uid uint32
+	// trustOwner is the owner the trust configuration's files must have:
+	// root.
+	trustOwner uint32
+	trustDir   string
+	creds      *server.CredentialStore
+	notifier   systemd.Notifier
 }
 
 // Run runs the agent until ctx ends or a stop signal arrives on signals, and
@@ -253,6 +262,9 @@ func Run(ctx context.Context, o Options, signals <-chan os.Signal) error {
 	d.uid = d.o.Probe.EUID()
 	if o.UID != nil {
 		d.uid = *o.UID
+	}
+	if o.TrustFileOwner != nil {
+		d.trustOwner = *o.TrustFileOwner
 	}
 	var err error
 	if d.trustDir, err = o.Config.TrustDir(); err != nil {
@@ -434,11 +446,11 @@ func (d *daemon) loadCredentials() (*server.Credentials, error) {
 		TrustDir: d.trustDir, UID: d.uid}); err != nil {
 		return nil, err
 	}
-	tc, err := trust.LoadConfig(d.trustDir, nil)
+	tc, err := trust.LoadConfig(d.trustDir, trust.TrustFileReader(d.trustOwner))
 	if err != nil {
 		return nil, err
 	}
-	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), nil)
+	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid))
 	if err != nil {
 		return nil, err
 	}
@@ -458,11 +470,11 @@ func (d *daemon) reload() error {
 	if err := hostcheck.CheckTrustDir(d.o.Probe, d.trustDir); err != nil {
 		return err
 	}
-	tc, err := trust.LoadConfig(d.trustDir, nil)
+	tc, err := trust.LoadConfig(d.trustDir, trust.TrustFileReader(d.trustOwner))
 	if err != nil {
 		return err
 	}
-	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), nil)
+	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid))
 	if err != nil {
 		return err
 	}

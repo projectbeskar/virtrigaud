@@ -61,19 +61,15 @@ func (f floorFile) path() string { return filepath.Join(f.dir, FloorFile) }
 
 // Load implements clockfloor.Store.
 func (f floorFile) Load(context.Context) (clockfloor.State, error) {
-	size, err := f.fsys.Size(f.path())
+	b, bounded, err := journal.ReadFileBounded(f.fsys, f.path(), maxFloorBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return clockfloor.State{}, clockfloor.ErrNotFound
 	}
 	if err != nil {
 		return clockfloor.State{}, fmt.Errorf("%w: %v", errFloorUnreadable, err)
 	}
-	if size > maxFloorBytes {
-		return clockfloor.State{}, fmt.Errorf("%w: %w: %d bytes", errFloorUnreadable, clockfloor.ErrCorrupt, size)
-	}
-	b, err := f.fsys.ReadFile(f.path())
-	if err != nil {
-		return clockfloor.State{}, fmt.Errorf("%w: %v", errFloorUnreadable, err)
+	if !bounded {
+		return clockfloor.State{}, fmt.Errorf("%w: %w: larger than %d bytes", errFloorUnreadable, clockfloor.ErrCorrupt, maxFloorBytes)
 	}
 	var s clockfloor.State
 	if err := s.UnmarshalBinary(b); err != nil {
