@@ -20,6 +20,8 @@ ExecStart=/usr/libexec/virtrigaud/vrtg-agent run
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=2
+# Exit status 2 is a configuration error: restarting cannot fix it.
+RestartPreventExitStatus=2
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=60
@@ -28,6 +30,9 @@ Group=virtrigaud-agent
 StateDirectory=virtrigaud-agent
 StateDirectoryMode=0700
 UMask=0077
+LimitNOFILE=4096
+TasksMax=128
+MemoryMax=256M
 
 # Hardening. The agent needs no privilege: it reads its own state and its
 # read-only trust configuration and listens on one TCP port.
@@ -44,6 +49,8 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
+ProtectProc=invisible
+PrivateIPC=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

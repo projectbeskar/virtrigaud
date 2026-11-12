@@ -84,7 +84,7 @@ func TestAgentUnitProperties(t *testing.T) {
 	for key, want := range map[string]string{
 		"Type": "notify", "NoNewPrivileges": "yes", "Restart": "always", "RestartSec": "2", "KillMode": "process",
 		"CapabilityBoundingSet": "", "AmbientCapabilities": "", "User": "virtrigaud-agent", "StateDirectoryMode": "0700",
-		"ProtectSystem": "strict",
+		"ProtectSystem": "strict", "RestartPreventExitStatus": "2", "ProtectProc": "invisible", "PrivateIPC": "yes",
 	} {
 		if got := u.one(t, "Service", key); got != want {
 			t.Errorf("[Service] %s = %q, want %q", key, got, want)
@@ -93,6 +93,11 @@ func TestAgentUnitProperties(t *testing.T) {
 	for key, want := range map[string]string{"StartLimitIntervalSec": "300", "StartLimitBurst": "10"} {
 		if got := u.one(t, "Unit", key); got != want {
 			t.Errorf("[Unit] %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"LimitNOFILE", "TasksMax", "MemoryMax"} {
+		if u.one(t, "Service", key) == "" {
+			t.Errorf("[Service] %s is empty", key)
 		}
 	}
 	if !strings.HasSuffix(u.one(t, "Service", "ExecStart"), "/vrtg-agent run") {

@@ -3,10 +3,13 @@
 # artefact ships the agent or this unit.
 #
 # Its stop action runs "vrtg-agent shutdown-vms", which acts only while
-# systemd is stopping the system or has a shutdown, reboot, halt, power-off
-# or kexec job queued; stopping this unit for maintenance stops no VM. It
-# neither wants nor orders itself after the agent's unit, so starting it never
-# starts an agent an operator stopped for maintenance.
+# systemd is stopping the system or has a shutdown, reboot, soft-reboot, halt,
+# power-off or kexec job queued; stopping this unit for maintenance stops no
+# VM. It never wants, requires or binds to the agent's unit, so starting it
+# never starts an agent an operator stopped for maintenance (After= alone
+# would only order the two units, never pull the agent in). Whether it must be
+# ordered against the agent's unit is decided when the agent runs real VMs; it
+# is not ordered against it today.
 [Unit]
 Description=VirtRigaud: stop the per-host agent's VMs at host shutdown (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
@@ -20,6 +23,9 @@ TimeoutStopSec=330
 User=virtrigaud-agent
 Group=virtrigaud-agent
 UMask=0077
+LimitNOFILE=1024
+TasksMax=32
+MemoryMax=128M
 
 NoNewPrivileges=yes
 CapabilityBoundingSet=
@@ -35,6 +41,8 @@ ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
+ProtectProc=invisible
+PrivateIPC=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
