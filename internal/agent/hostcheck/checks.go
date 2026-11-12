@@ -74,12 +74,13 @@ type Config struct {
 }
 
 // Run runs every start-up check that needs no certificate, in order: the
-// namespaces, cgroup v2, the state directory (owner, mode, persistence), the
+// process is not root, the namespaces, cgroup v2, the state directory (owner, mode, persistence), the
 // key material and the trust configuration. It returns the first Failure.
 // The provisioning marker is checked separately (CheckHostMarker), once the
 // host's identity is known.
 func Run(p Probe, cfg Config) error {
 	for _, check := range []func() error{
+		func() error { return CheckNotRoot(p) },
 		func() error { return CheckNamespaces(p) },
 		func() error { return CheckCgroupV2(p) },
 		func() error { return CheckStateDir(p, cfg.StateDir, cfg.UID) },
@@ -90,6 +91,16 @@ func Run(p Probe, cfg Config) error {
 		if err := check(); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// CheckNotRoot refuses a process whose effective uid is 0: the agent holds
+// no privilege and runs as its own user, which also keeps its trust
+// configuration out of its reach.
+func CheckNotRoot(p Probe) error {
+	if p.EUID() == 0 {
+		return refuse(ReasonRunsAsRoot, "user", "the agent runs as root; run it as its own unprivileged user")
 	}
 	return nil
 }

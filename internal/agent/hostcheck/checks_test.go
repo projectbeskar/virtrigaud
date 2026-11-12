@@ -63,6 +63,7 @@ func TestStartRefusals(t *testing.T) {
 		edit   func(f *hostchecktest.Fake)
 		reason string
 	}{
+		{"runs as root", func(f *hostchecktest.Fake) { f.UID = 0 }, hostcheck.ReasonRunsAsRoot},
 		// Initial namespaces.
 		{"pid namespace", func(f *hostchecktest.Fake) { f.Namespaces["pid"] = 4026532000 }, hostcheck.ReasonUnsupportedHost},
 		{"cgroup namespace", func(f *hostchecktest.Fake) { f.Namespaces["cgroup"] = 4026532001 }, hostcheck.ReasonUnsupportedHost},

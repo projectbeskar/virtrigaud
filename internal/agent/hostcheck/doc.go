@@ -41,6 +41,9 @@ import (
 // the system journal and, later, for the host's status; it never carries a
 // path or a secret.
 const (
+	// ReasonRunsAsRoot: the agent runs as root. It needs no privilege and
+	// must run as its own unprivileged user.
+	ReasonRunsAsRoot = "RunsAsRoot"
 	// ReasonUnsupportedHost: the agent does not run in the host's initial
 	// namespaces, or the host has no unified cgroup v2 hierarchy.
 	ReasonUnsupportedHost = "UnsupportedHost"

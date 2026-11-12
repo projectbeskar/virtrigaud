@@ -197,6 +197,9 @@ func TestStartRefusals(t *testing.T) {
 		edit   func(h *host)
 		reason string
 	}{
+		"runs as root": {func(h *host) {
+			h.probe.Edit(func(f *hostchecktest.Fake) { f.UID = 0 })
+		}, hostcheck.ReasonRunsAsRoot},
 		"not in the initial PID namespace": {func(h *host) {
 			h.probe.Edit(func(f *hostchecktest.Fake) { f.Namespaces["pid"] = 1 })
 		}, hostcheck.ReasonUnsupportedHost},

@@ -131,6 +131,7 @@ type host struct {
 
 func newHost(t *testing.T) *host {
 	t.Helper()
+	daemon.AllowTestOverrides(t)
 	root := t.TempDir()
 	h := &host{t: t, pki: trusttest.New(t), stateDir: filepath.Join(root, "state"), trustDir: filepath.Join(root, "trust"),
 		dev: &config.DevEnrolment{StartEpoch: 2}, exec: none.Executor{}, notes: &notifications{}, logs: &logBuffer{},
