@@ -56,6 +56,11 @@ var persistentFSTypes = map[string]bool{
 	"ext4": true, "ext3": true, "xfs": true, "btrfs": true, "f2fs": true, "zfs": true,
 }
 
+// loopDevicePrefix names loop devices: a file posing as a block device. Its
+// backing file can live on tmpfs, so a loop-backed mount proves nothing about
+// persistence and is refused.
+const loopDevicePrefix = "/dev/loop"
+
 // datasetFSTypes are persistent file systems whose mount source is a dataset
 // name rather than a device path.
 var datasetFSTypes = map[string]bool{"zfs": true}
@@ -180,8 +185,9 @@ func CheckStateDir(p Probe, dir string, uid uint32) error {
 
 // CheckPersistent refuses a state directory that is not positively on a
 // persistent file system: its mount must be one of the local, disk-backed
-// file-system types, mounted from a block device (or a dataset, for ZFS). A
-// tmpfs, ramfs or overlay mount, and a network file system, are refused,
+// file-system types, mounted from a block device that is not a loop device
+// (or a dataset, for ZFS). A tmpfs, ramfs or overlay mount, a loop-backed
+// mount and a network file system are refused,
 // which also catches a persistent partition that failed to mount and left
 // an in-memory directory in its place.
 func CheckPersistent(p Probe, dir string) error {
@@ -195,6 +201,9 @@ func CheckPersistent(p Probe, dir string) error {
 	}
 	if !datasetFSTypes[m.FSType] && !strings.HasPrefix(m.Source, "/dev/") {
 		return refuse(ReasonStateNotPersistent, check, "%s is on a %q mount at %s that is not backed by a block device", dir, m.FSType, m.MountPoint)
+	}
+	if strings.HasPrefix(m.Source, loopDevicePrefix) {
+		return refuse(ReasonStateNotPersistent, check, "%s is on a loop device (%s), whose backing file may itself be in memory", dir, m.Source)
 	}
 	return nil
 }

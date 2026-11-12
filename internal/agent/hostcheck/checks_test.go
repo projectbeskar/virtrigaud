@@ -100,6 +100,9 @@ func TestStartRefusals(t *testing.T) {
 		{"state not on a block device", func(f *hostchecktest.Fake) {
 			f.Mounts[0] = hostcheck.Mount{MountPoint: "/", FSType: "ext4", Source: "rootfs"}
 		}, hostcheck.ReasonStateNotPersistent},
+		{"state on a loop device", func(f *hostchecktest.Fake) {
+			f.Mounts = append(f.Mounts, hostcheck.Mount{MountPoint: "/var/lib", FSType: "ext4", Source: "/dev/loop3"})
+		}, hostcheck.ReasonStateNotPersistent},
 		{"provisioning marker missing", func(f *hostchecktest.Fake) {
 			delete(f.Files, marker)
 			delete(f.Content, marker)
