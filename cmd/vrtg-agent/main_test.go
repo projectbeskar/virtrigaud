@@ -50,15 +50,17 @@ func TestShutdownVMsGuard(t *testing.T) {
 		name  string
 		m     manager
 		calls int
+		code  int
 	}{
-		{"maintenance stop", manager{state: "running"}, 0},
-		{"system stopping", manager{state: "stopping"}, 1},
-		{"reboot queued", manager{state: "running", jobs: []systemd.Job{{Unit: "reboot.target", Type: "start"}}}, 1},
-		{"state unreadable", manager{err: errors.New("no bus")}, 0},
+		{"maintenance stop", manager{state: "running"}, 0, 0},
+		{"system stopping", manager{state: "stopping"}, 1, 0},
+		{"reboot queued", manager{state: "running", jobs: []systemd.Job{{Unit: "reboot.target", Type: "start"}}}, 1, 0},
+		{"soft reboot queued", manager{state: "running", jobs: []systemd.Job{{Unit: "soft-reboot.target", Type: "start"}}}, 1, 0},
+		{"state unreadable", manager{err: errors.New("no bus")}, 0, 1},
 	} {
 		s := &stopper{}
-		if code := shutdownVMs(context.Background(), tc.m, s, logr.Discard()); code != 0 || s.calls != tc.calls {
-			t.Errorf("%s: exit %d, StopAll called %d times, want %d", tc.name, code, s.calls, tc.calls)
+		if code := shutdownVMs(context.Background(), tc.m, s, logr.Discard()); code != tc.code || s.calls != tc.calls {
+			t.Errorf("%s: exit %d, StopAll called %d times; want exit %d, %d calls", tc.name, code, s.calls, tc.code, tc.calls)
 		}
 	}
 }

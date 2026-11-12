@@ -35,7 +35,8 @@ const defaultShutdownTimeout = 5 * time.Minute
 // shutdownCommand stops every VM, and only while the host is shutting down:
 // the shutdown unit's stop action runs it, and so does a maintenance stop of
 // that unit, which must never stop VMs. Exit status 0 when it acted or
-// correctly did nothing, 1 when stopping failed, 2 for bad flags.
+// correctly did nothing, 1 when stopping failed or the host's state could not
+// be read (no VM is stopped then), 2 for bad flags.
 func shutdownCommand(args []string, log logr.Logger, stderr io.Writer) int {
 	fs := flag.NewFlagSet("shutdown-vms", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -63,7 +64,7 @@ func shutdownVMs(ctx context.Context, m systemd.Manager, s executor.Stopper, log
 	down, err := systemd.ShutdownInProgress(ctx, m)
 	if err != nil {
 		log.Error(err, "cannot tell whether the host is shutting down; no VM is stopped")
-		return 0
+		return 1
 	}
 	if !down {
 		log.Info("the host is not shutting down; no VM is stopped")

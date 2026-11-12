@@ -105,8 +105,12 @@ type Manager interface {
 const SystemStateStopping = "stopping"
 
 // ShutdownTargets are the targets whose queued start job means the host is
-// going down: shutdown, reboot, halt, power-off and kexec.
-var ShutdownTargets = []string{"shutdown.target", "reboot.target", "halt.target", "poweroff.target", "kexec.target"}
+// going down: shutdown, reboot, soft reboot, halt, power-off and kexec.
+var ShutdownTargets = []string{"shutdown.target", "reboot.target", "soft-reboot.target", "halt.target", "poweroff.target", "kexec.target"}
+
+// SystemctlPath is the systemctl binary the guard runs, by absolute path so
+// that $PATH cannot replace it.
+const SystemctlPath = "/usr/bin/systemctl"
 
 // ShutdownInProgress reports whether the host is shutting down: systemd's
 // system state is stopping, or a start job of a shutdown target is queued.
@@ -135,7 +139,7 @@ func ShutdownInProgress(ctx context.Context, m Manager) (bool, error) {
 
 // Systemctl is the Manager of the running host, read with systemctl.
 type Systemctl struct {
-	// Path is the systemctl binary; empty means "systemctl" on $PATH.
+	// Path is the systemctl binary; empty means SystemctlPath.
 	Path string
 }
 
@@ -143,7 +147,7 @@ var _ Manager = Systemctl{}
 
 func (s Systemctl) bin() string {
 	if s.Path == "" {
-		return "systemctl"
+		return SystemctlPath
 	}
 	return s.Path
 }

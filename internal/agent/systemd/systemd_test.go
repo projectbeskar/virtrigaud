@@ -58,6 +58,7 @@ func TestShutdownGuardTruthTable(t *testing.T) {
 		{"halt queued", fakeManager{state: "running", jobs: start("halt.target")}, true, false},
 		{"shutdown queued", fakeManager{state: "running", jobs: start("shutdown.target")}, true, false},
 		{"kexec queued", fakeManager{state: "running", jobs: start("kexec.target")}, true, false},
+		{"soft reboot queued", fakeManager{state: "running", jobs: start("soft-reboot.target")}, true, false},
 		{"other target queued", fakeManager{state: "running", jobs: start("rescue.target")}, false, false},
 		{"agent restart queued", fakeManager{state: "running", jobs: []systemd.Job{{Unit: "vrtg-agent.service", Type: "restart"}}}, false, false},
 		{"stop job of a shutdown target", fakeManager{state: "running", jobs: []systemd.Job{{Unit: "reboot.target", Type: "stop"}}}, false, false},
@@ -99,5 +100,17 @@ func TestSocketNotifier(t *testing.T) {
 	n, err := conn.Read(buf)
 	if err != nil || string(buf[:n]) != systemd.NotifyReady {
 		t.Fatalf("received %q, %v", buf[:n], err)
+	}
+}
+
+// TestSystemctlByAbsolutePath: the guard never resolves systemctl on $PATH.
+func TestSystemctlByAbsolutePath(t *testing.T) {
+	if systemd.SystemctlPath != "/usr/bin/systemctl" {
+		t.Fatalf("SystemctlPath = %q", systemd.SystemctlPath)
+	}
+	t.Setenv("PATH", t.TempDir())
+	// Whatever the host answers, the binary is found by its path, not $PATH.
+	if _, err := (systemd.Systemctl{Path: "/nonexistent/systemctl"}).SystemState(context.Background()); err == nil {
+		t.Fatal("a missing binary answered")
 	}
 }
