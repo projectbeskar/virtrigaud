@@ -49,6 +49,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -147,11 +148,17 @@ func (a *ackSink) emit(line string) error {
 		return nil
 	}
 	if a.tty {
-		// tcdrain: wait until the bytes left the UART.
-		if err := unix.IoctlSetInt(int(a.f.Fd()), unix.TCSBRK, 1); err != nil {
-			return fmt.Errorf("drain ack: %w", err)
+		// tcdrain: wait until the bytes left the UART. The Go runtime's
+		// preemption signals interrupt it; retry.
+		for {
+			err := unix.IoctlSetInt(int(a.f.Fd()), unix.TCSBRK, 1)
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, unix.EINTR) {
+				return fmt.Errorf("drain ack: %w", err)
+			}
 		}
-		return nil
 	}
 	if err := a.f.Sync(); err != nil {
 		return fmt.Errorf("sync ack: %w", err)
