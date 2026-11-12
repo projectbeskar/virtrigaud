@@ -409,11 +409,13 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		case <-reload:
 			_ = d.notifier.Notify(systemd.NotifyReloading)
 			if err := d.reload(); err != nil {
-				d.log.Error(err, "reload refused; the running credentials stay in use")
+				reason := reloadRefusalReason(err)
+				d.log.Error(err, "reload refused; the running credentials stay in use", "reason", reason)
+				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=reload refused: " + reason)
 			} else {
 				d.log.Info("credentials reloaded")
+				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=credentials reloaded")
 			}
-			_ = d.notifier.Notify(systemd.NotifyReady)
 		case <-ticker.C:
 			if f := agent.floor.Load(); f != nil {
 				if err := f.Observe(ctx); err != nil {
@@ -465,10 +467,29 @@ func (d *daemon) reload() error {
 		return err
 	}
 	if !id.SameEnrolment(d.creds.Load().Identity) {
-		return errors.New("the reloaded certificate names another host or enrolment; enrolling again is not a reload")
+		return errEnrolmentChanged
 	}
 	d.creds.Store(&server.Credentials{Identity: id, Trust: tc})
 	return nil
+}
+
+// ReasonEnrolmentChanged is the reload refusal reason for a certificate that
+// names another host or enrolment.
+const ReasonEnrolmentChanged = "EnrolmentChanged"
+
+// errEnrolmentChanged refuses a reload that would change the enrolment.
+var errEnrolmentChanged = errors.New("the reloaded certificate names another host or enrolment; enrolling again is not a reload")
+
+// reloadRefusalReason is the one-word reason of a refused reload, for the
+// service status: never a path or a secret.
+func reloadRefusalReason(err error) string {
+	if f, ok := hostcheck.AsFailure(err); ok {
+		return f.Reason
+	}
+	if errors.Is(err, errEnrolmentChanged) {
+		return ReasonEnrolmentChanged
+	}
+	return ReasonIdentityInvalid
 }
 
 // openFloor opens the clock floor (step 4). A floor that cannot be read or

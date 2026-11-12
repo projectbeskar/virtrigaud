@@ -334,6 +334,9 @@ func TestReload(t *testing.T) {
 	}
 	r.signals <- syscall.SIGHUP
 	waitLog(t, h, "reload refused")
+	if !h.notes.has(systemd.NotifyReady + "\nSTATUS=reload refused: " + daemon.ReasonEnrolmentChanged) {
+		t.Fatalf("no reload refusal status: %v", h.notes.sent)
+	}
 	if a := r.hello(); a == nil || string(a.GetContext().GetEnrolmentId()) != string(h.pki.Record.EnrolmentID) {
 		t.Fatalf("answer after a refused reload = %v", a)
 	}
