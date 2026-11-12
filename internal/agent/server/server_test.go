@@ -27,6 +27,7 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +82,7 @@ func (f *fakeAgent) set(state providerv1.AgentState, reason string) {
 
 type env struct {
 	t     *testing.T
+	skew  atomic.Int64
 	pki   *trusttest.PKI
 	creds *server.CredentialStore
 	agent *fakeAgent
@@ -109,7 +111,8 @@ func newEnv(t *testing.T) *env {
 	view.Position.StoreID[0], view.Position.Head[0] = 7, 8
 	e := &env{t: t, pki: p, creds: server.NewCredentialStore(&server.Credentials{Identity: id, Trust: cfg}),
 		agent: &fakeAgent{view: view, state: providerv1.AgentState_AGENT_STATE_READY}}
-	srv, err := server.New(server.Options{Agent: e.agent, Credentials: e.creds, Version: "test", JournalSchemaVersion: 1, Log: logr.Discard()})
+	srv, err := server.New(server.Options{Agent: e.agent, Credentials: e.creds, Version: "test", JournalSchemaVersion: 1, Log: logr.Discard(),
+		Now: func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,5 +427,40 @@ func TestCredentialReload(t *testing.T) {
 	e.creds.Store(&server.Credentials{Identity: old.Identity, Trust: &cfg})
 	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("after reload: %v", err)
+	}
+}
+
+// TestIssuerRotationCutsOffOpenConnection: after a reload replaces the
+// Provider identity issuer, the next call on a connection established under
+// the old one is refused.
+func TestIssuerRotationCutsOffOpenConnection(t *testing.T) {
+	e := newEnv(t)
+	c := agentv1.NewAgentServiceClient(e.dial(e.provider(), 0))
+	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	old := e.creds.Load()
+	cfg := *old.Trust
+	rotated := hostidentitytest.NewCA(t)
+	cfg.ProviderCAs = []*x509.Certificate{rotated.Cert}
+	cfg.ProviderCAPool = x509.NewCertPool()
+	cfg.ProviderCAPool.AddCert(rotated.Cert)
+	e.creds.Store(&server.Credentials{Identity: old.Identity, Trust: &cfg})
+	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("after the issuer rotation: %v", err)
+	}
+}
+
+// TestExpiredClientCertOnOpenConnection: a client certificate that expires
+// while its connection is open is refused on the next call.
+func TestExpiredClientCertOnOpenConnection(t *testing.T) {
+	e := newEnv(t)
+	c := agentv1.NewAgentServiceClient(e.dial(e.provider(), 0))
+	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	e.skew.Store(int64(60 * 24 * time.Hour))
+	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("after expiry: %v", err)
 	}
 }

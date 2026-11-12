@@ -24,9 +24,12 @@ limitations under the License.
 // pinned Provider identity issuer, carries exactly one URI identity, and
 // names a Provider in the trust configuration's allow-list
 // (spiffe://<trust domain>/virtrigaud/provider/<namespace>/<name>/<uid>);
-// anything else fails the handshake. Every call then compares the Provider
-// UID of that identity with the Provider the host is enrolled with, and
-// refuses a different one with PROVIDER_MISMATCH before any other check. The
+// anything else fails the handshake. Every call then verifies the client
+// certificate again against the current issuer and clock (a reload or an
+// expiry cuts off an established connection, PermissionDenied), and compares
+// the Provider UID of that identity with the Provider the host is enrolled
+// with, refusing a different one with PROVIDER_MISMATCH before any other
+// check. Connections are closed after MaxConnectionAge. The
 // server speaks TLS 1.3 only, so the host key never signs a TLS 1.2 key
 // exchange chosen by an unauthenticated client.
 //
@@ -47,6 +50,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -58,6 +62,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -72,6 +77,24 @@ import (
 // ErrorInfoDomain is the google.rpc.ErrorInfo domain of every reason the
 // agent answers with; it equals the provider contract's domain.
 const ErrorInfoDomain = "provider.virtrigaud.io"
+
+// Connection limits of the server.
+const (
+	// ConnectionTimeout bounds a connection's TLS handshake.
+	ConnectionTimeout = 10 * time.Second
+	// MaxConcurrentStreams bounds the calls in flight on one connection.
+	MaxConcurrentStreams = 64
+	// MaxConnectionAge closes every connection after this age, so that
+	// each one is authenticated again with a new handshake against the
+	// current credentials.
+	MaxConnectionAge = 30 * time.Minute
+	// MaxConnectionAgeGrace is how long running calls may finish after
+	// MaxConnectionAge.
+	MaxConnectionAgeGrace = time.Minute
+	// KeepaliveMinTime is the shortest keepalive ping interval a client may
+	// use; a client that pings more often is disconnected.
+	KeepaliveMinTime = 30 * time.Second
+)
 
 // Credentials is what the TLS server and the peer check use: the host's
 // identity and the trust configuration. It is replaced as a whole on reload.
@@ -182,6 +205,10 @@ func New(opts Options) (*Server, error) {
 	s := &Server{opts: opts, mutating: MutatingMethods()}
 	so := []grpc.ServerOption{
 		grpc.Creds(credentials.NewTLS(TLSConfig(opts.Credentials))),
+		grpc.ConnectionTimeout(ConnectionTimeout),
+		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
+		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: MaxConnectionAge, MaxConnectionAgeGrace: MaxConnectionAgeGrace}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: KeepaliveMinTime}),
 		grpc.ChainUnaryInterceptor(s.unaryGate),
 		grpc.ChainStreamInterceptor(s.streamGate),
 		grpc.MaxRecvMsgSize(4 << 20),
@@ -250,7 +277,19 @@ func (s *Server) checkPeer(ctx context.Context) error {
 		return status.Error(codes.Unauthenticated, "the caller presented no client certificate")
 	}
 	c := s.opts.Credentials.Load()
-	_, uid, err := c.Trust.AuthorizeProvider(info.State.PeerCertificates[0])
+	leaf := info.State.PeerCertificates[0]
+	// The handshake verified the chain against the credentials of that
+	// moment; a reload may since have replaced the Provider identity issuer,
+	// and the certificate may since have expired. Verify again, now.
+	inter := x509.NewCertPool()
+	for _, ic := range info.State.PeerCertificates[1:] {
+		inter.AddCert(ic)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: c.Trust.ProviderCAPool, Intermediates: inter,
+		CurrentTime: s.opts.Now(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return status.Error(codes.PermissionDenied, "the caller's certificate is no longer valid for this agent")
+	}
+	_, uid, err := c.Trust.AuthorizeProvider(leaf)
 	if err != nil {
 		return status.Error(codes.PermissionDenied, "the caller is not an allowed Provider")
 	}
