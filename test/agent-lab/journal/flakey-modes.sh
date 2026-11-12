@@ -9,12 +9,16 @@
 #   flakey-modes.sh MODE CYCLES WORKDIR
 #
 # MODE: drop_writes | error_writes | corrupt_byte | random_corrupt
+# SCOPE=device (default) applies the mode to the whole volume; SCOPE=files
+# applies it only to the blocks the store file and the anchor log occupy when
+# the faulty phase starts (file-system metadata stays intact, so the result
+# shows the journal's own detection).
 # Output: WORKDIR/results.jsonl, one verify report per cycle.
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/common.sh"
 MODE=${1:?mode}; CYCLES=${2:-20}; W=${3:-/dev/shm/jt-fl-$1}
 FSTYPE=${FSTYPE:-ext4}; SIZE=${SIZE:-256M}
-UP=${UP:-1}; DOWN=${DOWN:-1}
+UP=${UP:-1}; DOWN=${DOWN:-1}; SCOPE=${SCOPE:-device}
 DM=jt-fl
 
 case "$MODE" in
@@ -37,11 +41,21 @@ SECTORS=$(blockdev --getsz "$DATA")
 table() { # table linear|faulty|dropall
   case "$1" in
     linear) echo "0 $SECTORS linear $DATA 0" ;;
-    faulty) echo "0 $SECTORS flakey $DATA 0 $UP $DOWN $FEAT" ;;
+    faulty)
+      if [ "$SCOPE" = files ]; then
+        sync -f "$W/mnt/state/s/state.db"
+        table_over "$SECTORS" "$DATA" \
+          "$(file_sectors "$W/mnt" "$W/mnt/state/s/state.db" "$W/mnt/state/s/anchor.log")" \
+          flakey "$DATA" OFFSET "$UP" "$DOWN" $FEAT
+      else
+        echo "0 $SECTORS flakey $DATA 0 $UP $DOWN $FEAT"
+      fi ;;
     dropall) echo "0 $SECTORS flakey $DATA 0 0 1 1 drop_writes" ;;
   esac
 }
-swap() { dmsetup suspend --nolockfs "$DM"; dmsetup load "$DM" --table "$(table "$1")"; dmsetup resume "$DM"; }
+swap() { # the table is computed before the suspend (it may sync the volume)
+  local t; t=$(table "$1")
+  dmsetup suspend --nolockfs "$DM"; dmsetup load "$DM" --table "$t"; dmsetup resume "$DM"; }
 
 dmsetup create "$DM" --table "$(table linear)"
 mkfs_dev "$FSTYPE" "/dev/mapper/$DM"
@@ -72,5 +86,5 @@ for c in $(seq 1 "$CYCLES"); do
   echo "{\"cycle\":$c,\"mode\":\"$MODE\",\"run_err\":\"$ERRLINE\",\"r\":$R}" >> "$W/results.jsonl"
   umount "$W/mnt"
 done
-echo "mode=$MODE cycles=$CYCLES fs=$FSTYPE up=$UP down=$DOWN" | tee "$W/summary.txt"
+echo "mode=$MODE scope=$SCOPE cycles=$CYCLES fs=$FSTYPE up=$UP down=$DOWN" | tee "$W/summary.txt"
 verdict_counts "$W/results.jsonl" | tee -a "$W/summary.txt"

@@ -33,21 +33,8 @@ rm -rf "$W"; mkdir -p "$W/mnt"
 DATA=$(loopdev "$W/data.img" "$SIZE")
 SECTORS=$(blockdev --getsz "$DATA")
 linear() { echo "0 $SECTORS linear $DATA 0"; }
-# error_over FILE: a linear table with dm-error over FILE's extents.
-error_over() {
-  local bs ranges
-  bs=$(stat -f -c %S "$W/mnt")
-  ranges=$(filefrag -e "$1" | awk -F'[:. ]+' -v bs="$bs" '/^ *[0-9]+:/ {
-      for (i = 1; i <= NF; i++) if ($i != "") f[++n] = $i
-      s = f[4] * bs / 512; e = (f[5] + 1) * bs / 512; print s, e; n = 0 }' | sort -n)
-  local pos=0
-  while read -r s e; do
-    [ "$s" -gt "$pos" ] && echo "$pos $((s - pos)) linear $DATA $pos"
-    echo "$s $((e - s)) error"
-    pos=$e
-  done <<< "$ranges"
-  [ "$pos" -lt "$SECTORS" ] && echo "$pos $((SECTORS - pos)) linear $DATA $pos"
-}
+# error_over FILE: a linear table with dm-error over FILE's blocks.
+error_over() { table_over "$SECTORS" "$DATA" "$(file_sectors "$W/mnt" "$1")" error; }
 swap() { dmsetup suspend --nolockfs "$DM"; dmsetup load "$DM" --table "$1"; dmsetup resume "$DM"; }
 verify() { local r; r=$("$JT" verify -dir "$W/mnt/state/s" -ack "$1" ${2:-} 2>"$W/verify.err" | tail -1 || true)
   case "$r" in \{*) echo "$r" ;; *) echo "{\"verdict\":\"verifier_crash\",\"stderr\":\"$(head -c 300 "$W/verify.err" | tr '\n"' "  ")\"}" ;; esac; }
