@@ -482,8 +482,10 @@ func cmdLWMarks(args []string) int {
 	off := ss
 	ent := make([]byte, 32)
 	w := bufio.NewWriter(os.Stdout)
-	defer func() { _ = w.Flush() }()
-	fmt.Fprintf(w, "# entries %d sectorsize %d\n", nr, ss)
+	if _, err := fmt.Fprintf(w, "# entries %d sectorsize %d\n", nr, ss); err != nil {
+		fmt.Fprintf(os.Stderr, "write marks: %v\n", err)
+		return 4
+	}
 	for idx := uint64(0); idx < nr; idx++ {
 		if _, err := f.ReadAt(ent, off); err != nil {
 			fmt.Fprintf(os.Stderr, "entry %d: %v\n", idx, err)
@@ -500,7 +502,10 @@ func cmdLWMarks(args []string) int {
 				fmt.Fprintf(os.Stderr, "mark %d: %v\n", idx, err)
 				return 4
 			}
-			fmt.Fprintf(w, "%d %s\n", idx, string(bytes.TrimRight(name, "\x00")))
+			if _, err := fmt.Fprintf(w, "%d %s\n", idx, string(bytes.TrimRight(name, "\x00"))); err != nil {
+				fmt.Fprintf(os.Stderr, "write marks: %v\n", err)
+				return 4
+			}
 		case flags&lwFlagDisc != 0:
 			// A discard carries no data.
 		default:
@@ -508,6 +513,10 @@ func cmdLWMarks(args []string) int {
 			// (as replay-log reads it).
 			off += int64(nrSectors) * ss
 		}
+	}
+	if err := w.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "write marks: %v\n", err)
+		return 4
 	}
 	return 0
 }
