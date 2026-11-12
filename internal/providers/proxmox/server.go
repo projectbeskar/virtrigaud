@@ -895,14 +895,23 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	}, nil
 }
 
+// taskReferenceRequiredMessage is the refusal of a TaskStatus request that
+// carries no task reference.
+const taskReferenceRequiredMessage = "task reference is required"
+
 // TaskStatus checks the status of an async task
 func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
+	// A request without a task reference is refused, never answered.
+	taskID := req.GetTask().GetId()
+	if taskID == "" {
+		return nil, errors.NewInvalidSpec(taskReferenceRequiredMessage)
+	}
+
 	if p.client == nil {
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
 	// Parse task ID to extract node
-	taskID := req.Task.Id
 	parts := strings.Split(taskID, ":")
 	if len(parts) < 3 {
 		return &providerv1.TaskStatusResponse{

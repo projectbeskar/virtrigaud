@@ -342,6 +342,10 @@ func (s *Server) routedTaskRef(hostID, taskRef string) string {
 	return clustered.EncodeHostTaskRef(hostconn.HostID(strings.TrimSpace(hostID)), taskRef)
 }
 
+// taskReferenceRequiredMessage is the refusal of a TaskStatus request that
+// carries no task reference.
+const taskReferenceRequiredMessage = "task reference is required"
+
 // TaskStatus checks the status of an async task.
 //
 // On a clustered provider the task reference must be one this provider issued
@@ -369,8 +373,13 @@ func (s *Server) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReque
 	}
 	// The single-host provider issues no task either (every virsh operation
 	// is synchronous), so it knows nothing about the reference it is asked
-	// about: the answer keeps no typed outcome, and its historical done.
-	done, err := s.provider.IsTaskComplete(ctx, req.Task.Id)
+	// about: the answer keeps no typed outcome, and its historical done. A
+	// request without a task reference is refused, never answered done.
+	taskID := req.GetTask().GetId()
+	if taskID == "" {
+		return nil, status.Error(codes.InvalidArgument, taskReferenceRequiredMessage)
+	}
+	done, err := s.provider.IsTaskComplete(ctx, taskID)
 	if err != nil {
 		return &providerv1.TaskStatusResponse{
 			Done:  false,
