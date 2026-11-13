@@ -549,14 +549,14 @@ func TestConnectWithRetry(t *testing.T) {
 	sock := shortSock(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err := ConnectWithRetry(ctx, ClientOptions{Socket: sock, ServerUID: EUID()}, 20*time.Millisecond)
+	_, err := ConnectWithRetry(ctx, ClientOptions{Socket: sock, ServerUID: EUID()}, 20*time.Millisecond, nil)
 	require.ErrorIs(t, err, ErrSigner)
 
 	errc := make(chan error, 1)
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel2()
 	go func() {
-		_, err := ConnectWithRetry(ctx2, ClientOptions{Socket: sock, ServerUID: EUID()}, 20*time.Millisecond)
+		_, err := ConnectWithRetry(ctx2, ClientOptions{Socket: sock, ServerUID: EUID()}, 20*time.Millisecond, nil)
 		errc <- err
 	}()
 	// The signer starts while the client is retrying (or just before its first
@@ -612,4 +612,23 @@ func TestPurposesHaveSeparateBudgets(t *testing.T) {
 	assert.EqualValues(t, 2, r.srv.signedBy[PurposeAnswer].Load())
 	assert.EqualValues(t, 1, r.srv.limitedBy[PurposeHandshake].Load())
 	assert.EqualValues(t, 1, r.srv.limitedBy[PurposeAnswer].Load())
+}
+
+// TestConnectWithRetryStopsOnPermanentErrors: a signer of another user is
+// not waited for, and the retry callback sees the failures that are retried.
+func TestConnectWithRetryStopsOnPermanentErrors(t *testing.T) {
+	r := serve(t, "", ServerOptions{}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := ConnectWithRetry(ctx, ClientOptions{Socket: r.socket, ServerUID: EUID() + 1}, time.Hour, nil)
+	require.ErrorIs(t, err, ErrPeer)
+	assert.Less(t, time.Since(start), 4*time.Second)
+
+	var seen int
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	_, err = ConnectWithRetry(ctx2, ClientOptions{Socket: shortSock(t), ServerUID: EUID()}, 20*time.Millisecond, func(error) { seen++ })
+	require.ErrorIs(t, err, ErrSigner)
+	assert.Positive(t, seen)
 }

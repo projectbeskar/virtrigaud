@@ -29,10 +29,11 @@ func AllowTestOverrides(t testing.TB) {
 	t.Cleanup(func() { allowTestOverrides = false })
 }
 
-// SetSignerStartWait shortens the start-up wait for the signer until t ends.
-func SetSignerStartWait(t testing.TB, d time.Duration) {
+// SetSignerPoll shortens the pause between attempts to reach the signer at
+// start-up until t ends.
+func SetSignerPoll(t testing.TB, d time.Duration) {
 	t.Helper()
-	old := signerStartWait
-	signerStartWait = d
-	t.Cleanup(func() { signerStartWait = old })
+	old := signerPollEvery
+	signerPollEvery = d
+	t.Cleanup(func() { signerPollEvery = old })
 }

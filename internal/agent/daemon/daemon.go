@@ -116,14 +116,27 @@ const ReasonIdentityInvalid = "IdentityInvalid"
 // nothing.
 const ReasonSignerUnavailable = "SignerUnavailable"
 
-// signerStartWait bounds how long the start-up waits for the signer to
-// answer: it may still be starting. A variable so that this package's tests
-// can shorten it.
-var signerStartWait = 15 * time.Second
+// signerPollEvery is the pause between start-up attempts to reach the
+// signer. The start waits for the signer without a limit, in a not-ready
+// state that the service status names, because the signer is a separate unit
+// that may be down for as long as it takes to restart or repair it, and an
+// agent that exited instead would exhaust its start rate limit and stay
+// failed. A variable so that this package's tests can shorten it.
+var signerPollEvery = 2 * time.Second
 
-// signerRetryEvery is the pause between start-up attempts to reach the
-// signer.
-const signerRetryEvery = 250 * time.Millisecond
+// signerWaitLogEvery is the shortest interval between two log lines about a
+// signer that is not there yet.
+const signerWaitLogEvery = 30 * time.Second
+
+// signerWaitStatus is the service status while the start waits for the
+// signer, and the extension of the start timeout that goes with each
+// attempt (EXTEND_TIMEOUT_USEC, 30 seconds), so that systemd does not fail
+// the start while the agent waits.
+const (
+	signerWaitStatus  = "STATUS=waiting for the host key signer"
+	signerWaitExtend  = "EXTEND_TIMEOUT_USEC=30000000"
+	signerWaitMessage = "waiting for the host key signer"
+)
 
 // ErrStartRefused is wrapped by every refused start.
 var ErrStartRefused = errors.New("the agent refused to start")
@@ -184,6 +197,10 @@ type Options struct {
 	// SignerUID is the signer user's id (test override); nil resolves
 	// Config.SignerUser.
 	SignerUID *uint32
+	// AllowSignerSameUser lets the signer's user be the agent's own (test
+	// override): a signer that is the agent's user protects nothing, so the
+	// agent refuses it otherwise. Root is always refused.
+	AllowSignerSameUser bool
 	// Listener replaces listening on Config.ListenAddress (test override).
 	Listener net.Listener
 	// TrustDir replaces the configured trust directory, for example the
@@ -241,7 +258,7 @@ var allowTestOverrides = false
 func (o Options) testOverrides() []string {
 	var set []string
 	for name, on := range map[string]bool{
-		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
+		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
 		"TrustFileOwner": o.TrustFileOwner != nil, "Listener": o.Listener != nil, "Now": o.Now != nil,
 		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
 	} {
@@ -351,6 +368,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	// Step 0: host checks, trust configuration, identity.
 	creds, err := d.loadCredentials(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil // stopped while waiting for the signer
+		}
 		reason := ReasonIdentityInvalid
 		if f, ok := hostcheck.AsFailure(err); ok {
 			reason = f.Reason
@@ -550,10 +570,18 @@ func (d *daemon) loadCredentials(ctx context.Context) (*server.Credentials, erro
 		return nil, err
 	}
 	// The host key is in the signer process; the agent only reaches it. The
-	// start waits a bounded time for a signer that is still starting.
-	waitCtx, cancel := context.WithTimeout(ctx, signerStartWait)
-	defer cancel()
-	sg, err := signer.ConnectWithRetry(waitCtx, d.signerOptions(ctx), signerRetryEvery)
+	// start waits for a signer that is not there yet, without a limit.
+	if d.signerUID == 0 || (d.signerUID == d.uid && !d.o.AllowSignerSameUser) {
+		return nil, fmt.Errorf("%w: the signer's user (uid %d) must be neither root nor the agent's own user: %w", signer.ErrSigner, d.signerUID, signer.ErrPeer)
+	}
+	var lastLog time.Time
+	sg, err := signer.ConnectWithRetry(ctx, d.signerOptions(ctx), signerPollEvery, func(err error) {
+		_ = d.notifier.Notify(signerWaitStatus + "\n" + signerWaitExtend)
+		if now := d.o.Now(); lastLog.IsZero() || now.Sub(lastLog) >= signerWaitLogEvery {
+			lastLog = now
+			d.log.Info(signerWaitMessage, "error", err.Error())
+		}
+	})
 	if err != nil {
 		return nil, fmt.Errorf("reach the signer: %w", err)
 	}

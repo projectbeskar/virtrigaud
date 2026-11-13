@@ -236,7 +236,13 @@ func TestStartRefusals(t *testing.T) {
 				f.Files[filepath.Dir(h.cfg.SignerSocket)] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o755, UID: testUID}
 			})
 		}, hostcheck.ReasonSignerSocketInsecure},
-		"signer down": {func(h *host) { h.signer.stop() }, daemon.ReasonSignerUnavailable},
+		"signer is the agent's own user": {func(h *host) { h.refuseSameUser = true }, daemon.ReasonSignerUnavailable},
+		"signer is root": {func(h *host) {
+			h.signerUID = 0
+			h.probe.Edit(func(f *hostchecktest.Fake) {
+				f.Files[filepath.Dir(h.cfg.SignerSocket)] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o750, UID: 0}
+			})
+		}, daemon.ReasonSignerUnavailable},
 		"signer of another user": {func(h *host) {
 			h.signerUID = testUID + 1
 			h.probe.Edit(func(f *hostchecktest.Fake) {
@@ -568,5 +574,57 @@ func TestScrubFindsDamageAndReflectsItInStatus(t *testing.T) {
 	waitLog(t, h, "journal scrub failed")
 	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostJournalCorrupt) {
 		t.Fatalf("answer = %v", a)
+	}
+}
+
+// TestStartWaitsForTheSigner: with the signer down at start-up the agent
+// does not exit (it would exhaust its start rate limit and stay failed); it
+// stays not ready with a status naming the wait and asking systemd for more
+// start time, and starts when the signer comes up.
+func TestStartWaitsForTheSigner(t *testing.T) {
+	h := newHost(t)
+	socket := h.signer.socket
+	h.signer.stop()
+	r := h.start()
+	waitLog(t, h, "waiting for the host key signer")
+	select {
+	case s := <-r.started:
+		t.Fatalf("the agent started (%v) without the signer", s)
+	case err := <-r.done:
+		t.Fatalf("the agent exited while waiting for the signer: %v", err)
+	default:
+	}
+	if !h.notes.has("STATUS=waiting for the host key signer\nEXTEND_TIMEOUT_USEC=") {
+		t.Fatalf("no wait status: %v", h.notes.snapshot())
+	}
+	if h.notes.has(systemd.NotifyReady) {
+		t.Fatal("READY=1 sent while waiting")
+	}
+	h.signer = startSigner(t, socket, h.pki.HostKey)
+	select {
+	case s := <-r.started:
+		if s != providerv1.AgentState_AGENT_STATE_READY {
+			t.Fatalf("state = %v", s)
+		}
+	case err := <-r.done:
+		t.Fatalf("the agent exited: %v\n%s", err, h.logs.text())
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the agent did not start once the signer was up\n%s", h.logs.text())
+	}
+	if r.hello() == nil {
+		t.Fatal("no signed answer")
+	}
+	_ = r.stop()
+}
+
+// TestStopWhileWaitingForTheSigner: a stop during the wait ends the agent
+// cleanly (exit status 0).
+func TestStopWhileWaitingForTheSigner(t *testing.T) {
+	h := newHost(t)
+	h.signer.stop()
+	r := h.start()
+	waitLog(t, h, "waiting for the host key signer")
+	if err := r.stop(); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
 	}
 }

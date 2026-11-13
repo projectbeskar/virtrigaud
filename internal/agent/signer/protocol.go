@@ -140,6 +140,10 @@ var (
 	// with a signature that does not verify. A caller treats it as "no
 	// signature"; nothing is signed locally instead.
 	ErrSigner = errors.New("host key signer")
+	// ErrKey is wrapped by a failure that the signer's public key is not
+	// usable (it does not decode, or is not ECDSA P-256); waiting cannot
+	// cure it.
+	ErrKey = errors.New("host key signer serves an unusable key")
 	// ErrPeer is wrapped by a refused peer credential.
 	ErrPeer = errors.New("peer credential refused")
 	// ErrFrameTooLarge is returned for a frame longer than MaxFrameBytes.

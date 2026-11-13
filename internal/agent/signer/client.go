@@ -22,6 +22,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -86,11 +87,11 @@ func Connect(ctx context.Context, o ClientOptions) (*Client, error) {
 	}
 	pk, err := x509.ParsePKIXPublicKey(body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: the public key does not decode", ErrSigner)
+		return nil, fmt.Errorf("%w: %w: the public key does not decode", ErrSigner, ErrKey)
 	}
 	pub, ok := pk.(*ecdsa.PublicKey)
 	if !ok || pub.Curve != elliptic.P256() {
-		return nil, fmt.Errorf("%w: the public key is not ECDSA P-256", ErrSigner)
+		return nil, fmt.Errorf("%w: %w: the public key is not ECDSA P-256", ErrSigner, ErrKey)
 	}
 	c.pub = pub
 	return c, nil
@@ -98,12 +99,23 @@ func Connect(ctx context.Context, o ClientOptions) (*Client, error) {
 
 // ConnectWithRetry is Connect, tried again every retryEvery until it
 // succeeds or ctx ends; it is for the start-up, when the signer may still be
-// starting. The error of the last attempt is returned when ctx ends.
-func ConnectWithRetry(ctx context.Context, o ClientOptions, retryEvery time.Duration) (*Client, error) {
+// starting or restarting. The error of the last attempt is returned when ctx
+// ends.
+//
+// A failure that waiting cannot cure (the peer is not the signer's user, or
+// the signer serves a key of the wrong type) ends it at once. onRetry, when
+// not nil, is called with each failure that will be retried.
+func ConnectWithRetry(ctx context.Context, o ClientOptions, retryEvery time.Duration, onRetry func(error)) (*Client, error) {
 	for {
 		c, err := Connect(ctx, o)
 		if err == nil {
 			return c, nil
+		}
+		if errors.Is(err, ErrPeer) || errors.Is(err, ErrKey) {
+			return nil, err
+		}
+		if onRetry != nil && ctx.Err() == nil {
+			onRetry(err)
 		}
 		t := time.NewTimer(retryEvery)
 		select {
