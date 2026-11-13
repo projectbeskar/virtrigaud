@@ -81,3 +81,9 @@ func (s *Store) LockForTest() (unlock func()) {
 	s.mu.Lock()
 	return s.mu.Unlock
 }
+
+// TaintForTest marks the database as left unusable by a panic, as dbView does.
+func (s *Store) TaintForTest() { s.tainted.Store(true) }
+
+// OnViewFaultForTest runs the handler of a faulted read.
+func (s *Store) OnViewFaultForTest() { s.onViewFault() }
