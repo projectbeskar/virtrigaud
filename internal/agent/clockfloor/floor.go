@@ -23,14 +23,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 )
 
 // Defaults of Config.
 const (
 	// DefaultPersistInterval is how far the floor may advance beyond the
-	// persisted one before Observe saves it again. A save is one small
-	// fsync, so the interval is short.
+	// persisted one before Observe saves it again. It bounds the write rate
+	// (one save per interval at most, apart from the first and the last) and
+	// how much of a raise a crash can lose.
 	DefaultPersistInterval = 10 * time.Second
 	// DefaultMaxAhead is how far the floor may be ahead of the wall clock
 	// before the Floor reports StateClockFloorAhead.
@@ -118,19 +120,27 @@ type Floor struct {
 	// anchor is the (floor, boot time) pair boot-time credit is computed
 	// from: the last one saved, or the one Open established.
 	anchor State
-	// saved is the floor of the last successful Save.
-	saved  time.Time
-	failed error
+	// saved is the floor of the last successful Save, or the floor Open read
+	// from the store before any Save (zero when the store held none).
+	saved time.Time
+	// persisting is set by StartPersisting and cleared by StopPersisting:
+	// only while it is set does the Floor call Store.Save.
+	persisting bool
+	failed     error
 }
 
-// Open reads the persisted floor, raises it from the agent's own clocks and
-// saves it again, anchored in the current boot.
+// Open reads the persisted floor and raises it from the agent's own clocks,
+// anchored in the current boot. It only reads: the Floor then lives in memory
+// and writes nothing until StartPersisting, because the agent's store must
+// not commit before its continuity is established. Until then, and
+// whatever the store holds, the in-memory floor is never lower than the
+// stored one (it starts from it).
 //
 // It returns an error, and the caller must not run, when the floor is
 // unreadable (any Load error other than ErrNotFound), is missing and
-// cfg.FirstUse is false (ErrFloorMissing), a clock source fails, the boot
-// clock regressed within the persisted boot (ErrBootTimeRegressed), or the
-// save fails. Errors wrap the cause; use errors.Is.
+// cfg.FirstUse is false (ErrFloorMissing), a clock source fails, or the boot
+// clock regressed within the persisted boot (ErrBootTimeRegressed). Errors
+// wrap the cause; use errors.Is.
 func Open(ctx context.Context, cfg Config) (*Floor, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("open clock floor: no store")
@@ -175,7 +185,7 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 	}
 
 	persisted, err := cfg.Store.Load(ctx)
-	var floor time.Time
+	var floor, saved time.Time
 	switch {
 	case errors.Is(err, ErrNotFound):
 		if !cfg.FirstUse {
@@ -187,7 +197,7 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 		if verr := persisted.validate(); verr != nil {
 			return nil, fmt.Errorf("open clock floor: %w: %w", ErrCorrupt, verr)
 		}
-		floor = persisted.Floor
+		floor, saved = persisted.Floor, persisted.Floor
 		if persisted.BootID == bootID {
 			// Same boot (the agent restarted): credit the boot time that
 			// passed since the floor was anchored. Another boot_id earns no
@@ -207,10 +217,33 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 		floor = wall
 	}
 	anchor := State{Floor: floor, BootID: bootID, BootTime: boot}
-	if err := cfg.Store.Save(ctx, anchor); err != nil {
-		return nil, fmt.Errorf("open clock floor: save: %w", err)
-	}
-	return &Floor{cfg: cfg, bootID: bootID, floor: floor, anchor: anchor, saved: floor}, nil
+	return &Floor{cfg: cfg, bootID: bootID, floor: floor, anchor: anchor, saved: saved}, nil
+}
+
+// StartPersisting saves the floor, raised from the clocks as of now, and from
+// then on lets Observe and Flush save it. The agent calls it as the first
+// write after its store's continuity is established. It is the first Save of
+// a Floor: the value saved is at least the floor Open read, so no earlier
+// stored value is replaced by a lower one, and a Store that checks that
+// (UpdateClockFloor's transaction) holds the same line. A Save error fails
+// the Floor for good (StateFailed), like any later one. Calling it again
+// saves again.
+func (f *Floor) StartPersisting(ctx context.Context) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+	f.mu.Lock()
+	f.persisting = true
+	f.mu.Unlock()
+	return f.observe(ctx, true)
+}
+
+// StopPersisting makes Observe and Flush raise the floor in memory only. The
+// agent calls it when its store can no longer commit (it is quarantined), so
+// that the floor keeps protecting grant verification without failing.
+func (f *Floor) StopPersisting() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.persisting = false
 }
 
 // observeLocked raises the in-memory floor from the wall clock and from the
@@ -267,19 +300,23 @@ func (f *Floor) Now() time.Time {
 // periodic task. A Save error fails the Floor for good (StateFailed): the
 // floor is never retried and continued from.
 func (f *Floor) Observe(ctx context.Context) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
 	return f.observe(ctx, false)
 }
 
-// Flush is Observe that always saves, for use at shutdown so a restart loses
-// no credit.
+// Flush is Observe that always saves (while the Floor is persisting), for use
+// at shutdown so a restart loses no credit. Before StartPersisting it saves
+// nothing.
 func (f *Floor) Flush(ctx context.Context) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
 	return f.observe(ctx, true)
 }
 
+// observe raises the floor and, while persisting, saves it when force is set
+// or it advanced PersistInterval beyond the saved one. f.saveMu is held.
 func (f *Floor) observe(ctx context.Context, force bool) error {
-	f.saveMu.Lock()
-	defer f.saveMu.Unlock()
-
 	f.mu.Lock()
 	if f.failed != nil {
 		err := f.failed
@@ -291,6 +328,10 @@ func (f *Floor) observe(ctx context.Context, force bool) error {
 		err := f.failed
 		f.mu.Unlock()
 		return err
+	}
+	if !f.persisting && !guard.Off(guard.ClockFloorReadOnlyOpen) {
+		f.mu.Unlock()
+		return nil
 	}
 	if !force && f.floor.Sub(f.saved) < f.cfg.PersistInterval {
 		f.mu.Unlock()

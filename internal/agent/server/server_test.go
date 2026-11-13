@@ -58,6 +58,8 @@ type fakeAgent struct {
 	view   opstore.HostView
 	state  providerv1.AgentState
 	reason string
+	// floor is the clock floor in unix seconds; 0 reports a floor long ago.
+	floor atomic.Int64
 }
 
 func (f *fakeAgent) HostView(context.Context, uint64) (opstore.HostView, error) {
@@ -72,7 +74,12 @@ func (f *fakeAgent) TrustState() (providerv1.AgentState, string) {
 	return f.state, f.reason
 }
 
-func (f *fakeAgent) ClockFloor() time.Time { return time.Unix(1700000000, 0) }
+func (f *fakeAgent) ClockFloor() time.Time {
+	if v := f.floor.Load(); v != 0 {
+		return time.Unix(v, 0)
+	}
+	return time.Unix(1700000000, 0)
+}
 
 func (f *fakeAgent) set(state providerv1.AgentState, reason string) {
 	f.mu.Lock()
@@ -462,5 +469,26 @@ func TestExpiredClientCertOnOpenConnection(t *testing.T) {
 	e.skew.Store(int64(60 * 24 * time.Hour))
 	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("after expiry: %v", err)
+	}
+}
+
+// TestClientCertCheckUsesTheClockFloor: with the host clock rolled back behind
+// a client certificate's expiry, the clock floor still holds the time the
+// agent has seen, so the expired certificate stays refused.
+func TestClientCertCheckUsesTheClockFloor(t *testing.T) {
+	e := newEnv(t)
+	c := agentv1.NewAgentServiceClient(e.dial(e.provider(), 0))
+	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// The host clock reads now; the floor says the certificate expired.
+	e.agent.floor.Store(time.Now().Add(60 * 24 * time.Hour).Unix())
+	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("with the floor past the expiry: %v", err)
+	}
+	// A floor behind the clock changes nothing.
+	e.agent.floor.Store(time.Now().Add(-24 * time.Hour).Unix())
+	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); err != nil {
+		t.Fatalf("with the floor behind the clock: %v", err)
 	}
 }

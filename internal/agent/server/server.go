@@ -267,6 +267,21 @@ func refusal(code codes.Code, reason, msg string) error {
 // checkPeer authenticates the caller of one call: an allowed Provider
 // identity (checked again against the current trust configuration) whose UID
 // is the Provider the host is enrolled with.
+// verifyNow is the time a client certificate's validity is judged at: the
+// later of the host clock and the agent's clock floor, so that rolling the
+// host clock back does not make an expired certificate valid again, as it
+// does not for an expired grant key. A floor ahead of the clock (a clock
+// rolled back) therefore refuses certificates that the clock alone would
+// accept, which is the safe direction; a failed floor reads as zero and
+// leaves the host clock.
+func (s *Server) verifyNow() time.Time {
+	now := s.opts.Now()
+	if floor := s.opts.Agent.ClockFloor(); floor.After(now) {
+		return floor
+	}
+	return now
+}
+
 func (s *Server) checkPeer(ctx context.Context) error {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
@@ -286,7 +301,7 @@ func (s *Server) checkPeer(ctx context.Context) error {
 		inter.AddCert(ic)
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: c.Trust.ProviderCAPool, Intermediates: inter,
-		CurrentTime: s.opts.Now(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		CurrentTime: s.verifyNow(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		return status.Error(codes.PermissionDenied, "the caller's certificate is no longer valid for this agent")
 	}
 	_, uid, err := c.Trust.AuthorizeProvider(leaf)

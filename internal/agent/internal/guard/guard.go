@@ -88,6 +88,12 @@ const (
 	// FreezeResumeReenrol: Reenrol finishes an incomplete freeze before it
 	// activates the new enrolment.
 	FreezeResumeReenrol Name = "freeze-resume-reenrol"
+	// ClockFloorNeverLower: the clock floor's commit refuses a value below
+	// the one stored.
+	ClockFloorNeverLower Name = "clock-floor-never-lower"
+	// ClockFloorReadOnlyOpen: the clock floor writes nothing until the agent
+	// starts persisting it after continuity is established.
+	ClockFloorReadOnlyOpen Name = "clock-floor-read-only-open"
 )
 
 // All lists every guard, in a fixed order.
@@ -97,5 +103,6 @@ func All() []Name {
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
+		ClockFloorNeverLower, ClockFloorReadOnlyOpen,
 	}
 }

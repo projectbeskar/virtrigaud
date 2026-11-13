@@ -415,6 +415,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 		srv.Shutdown(dctx)
 		if f := agent.floor.Load(); f != nil {
+			if js, _ := st.Journal().State(); js == journal.StateLost {
+				f.StopPersisting()
+			}
 			if err := f.Flush(dctx); err != nil {
 				d.log.Error(err, "save the clock floor")
 			}
@@ -424,7 +427,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 
 	// Steps 6 to 8.
-	d.establish(ctx, st)
+	d.establish(ctx, st, agent.floor.Load())
 	if ctx.Err() == nil {
 		state, reason := agent.TrustState()
 		if err := d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent)); err != nil {
@@ -459,6 +462,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			}
 		case <-ticker.C:
 			if f := agent.floor.Load(); f != nil {
+				if js, _ := st.Journal().State(); js == journal.StateLost {
+					// The store can no longer commit; the floor goes on in memory.
+					f.StopPersisting()
+				}
 				if err := f.Observe(ctx); err != nil {
 					d.log.Error(err, "raise the clock floor")
 				}
@@ -589,16 +596,19 @@ func reloadRefusalReason(err error) string {
 	return ReasonIdentityInvalid
 }
 
-// openFloor opens the clock floor (step 4). A floor that cannot be read or
-// written quarantines the store; a clock source the floor cannot use refuses
-// the start.
+// openFloor opens the clock floor (step 4): it reads the floor record of the
+// store and raises it in memory, and writes nothing, because the store does
+// not commit before continuity is established (startFloor commits it). A floor
+// record that is missing for an enrolled store, or cannot be read,
+// quarantines the store; a clock source the floor cannot use refuses the
+// start.
 func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
 	firstUse := false
 	if v, err := agent.store.HostView(ctx, 0); err == nil {
 		firstUse = v.LastStartEpoch == 0
 	}
 	f, err := clockfloor.Open(ctx, clockfloor.Config{
-		Store: floorFile{fsys: d.o.JournalFS, dir: d.o.Config.StateDir}, FirstUse: firstUse,
+		Store: floorStore{st: agent.store}, FirstUse: firstUse, PersistInterval: FloorPersistInterval,
 		Wall: d.o.Floor.Wall, Boot: d.o.Floor.Boot, BootID: d.o.Floor.BootID, TimeNS: d.o.Floor.TimeNS,
 	})
 	switch {
@@ -611,23 +621,23 @@ func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
 		// gone or damaged, the same shape as a missing store marker.
 		agent.store.Journal().Quarantine(journal.LostInconsistentStore, "clock floor unreadable")
 		return nil
-	case errors.Is(err, errFloorWrite):
-		d.log.Error(err, "the clock floor cannot be written; the store is quarantined")
-		agent.store.Journal().Quarantine(journal.LostIOError, "clock floor not written")
-		return nil
 	}
 	d.log.Error(err, "start refused: the host's clocks cannot keep a floor", "reason", hostcheck.ReasonUnsupportedHost)
 	return fmt.Errorf("%w: %s: %v", ErrStartRefused, hostcheck.ReasonUnsupportedHost, err)
 }
 
-// establish runs steps 6 and 7: continuity, the development enrolment
-// stand-in, and recovery.
-func (d *daemon) establish(ctx context.Context, st *opstore.Store) {
+// establish runs steps 6 and 7: continuity, the first commit of the clock
+// floor, the development enrolment stand-in, and recovery. floor is nil when
+// the floor could not be opened (the store is quarantined).
+func (d *daemon) establish(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) {
 	if js, _ := st.Journal().State(); js != journal.StateUnattested {
 		return
 	}
 	if err := st.EstablishContinuity(ctx); err != nil {
 		d.log.Error(err, "continuity not established")
+		return
+	}
+	if !d.startFloor(ctx, st, floor) {
 		return
 	}
 	d.enrol(ctx, st)
@@ -650,6 +660,26 @@ func (d *daemon) establish(ctx context.Context, st *opstore.Store) {
 	if len(refs) > 0 {
 		d.log.Info("operations remain runnable; this agent starts no runner", "count", len(refs))
 	}
+}
+
+// startFloor commits the clock floor, raised in memory since step 4, as the
+// first write after continuity is established, before an enrolment or any
+// recovery commit. It reports whether start-up may go on. A floor that cannot
+// be committed quarantines the store (io_error): nothing is run on a floor
+// the store does not hold.
+func (d *daemon) startFloor(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) bool {
+	if floor == nil {
+		return true
+	}
+	if err := floor.StartPersisting(ctx); err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		d.log.Error(err, "the clock floor cannot be written; the store is quarantined")
+		st.Journal().Quarantine(journal.LostIOError, "clock floor not written")
+		return false
+	}
+	return true
 }
 
 // enrol is the development enrolment stand-in: a fresh store is enrolled with

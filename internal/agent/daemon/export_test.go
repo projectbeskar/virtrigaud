@@ -16,7 +16,15 @@ limitations under the License.
 
 package daemon
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
+	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+)
+
+// NewFloorStore returns the clock floor's Store over st.
+func NewFloorStore(st *opstore.Store) clockfloor.Store { return floorStore{st: st} }
 
 // AllowTestOverrides lets t use the test overrides of Options in a release
 // build, until t ends.

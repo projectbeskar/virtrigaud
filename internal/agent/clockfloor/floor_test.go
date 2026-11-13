@@ -56,10 +56,13 @@ func cfgFor(c *fakeClocks, s clockfloor.Store) clockfloor.Config {
 	return clockfloor.Config{Store: s, Wall: c, Boot: c, BootID: c, FirstUse: true}
 }
 
+// open opens a Floor and starts persisting, as the agent does once its
+// store's continuity is established.
 func open(t testing.TB, c *fakeClocks, s clockfloor.Store) *clockfloor.Floor {
 	t.Helper()
 	f, err := clockfloor.Open(context.Background(), cfgFor(c, s))
 	require.NoError(t, err)
+	require.NoError(t, f.StartPersisting(context.Background()))
 	return f
 }
 
@@ -245,8 +248,10 @@ func TestFloor_SaveFailureIsSticky(t *testing.T) {
 	assert.Equal(t, clockfloor.StateFailed, f.Status().State)
 
 	s2 := &clockfloor.MemStore{SaveErr: errors.New("EIO")}
-	_, err := clockfloor.Open(context.Background(), cfgFor(newClocks(), s2))
-	require.Error(t, err)
+	f2, err := clockfloor.Open(context.Background(), cfgFor(newClocks(), s2))
+	require.NoError(t, err, "Open only reads")
+	require.Error(t, f2.StartPersisting(context.Background()))
+	assert.Equal(t, clockfloor.StateFailed, f2.Status().State)
 }
 
 // TestFloor_PersistInterval: Observe saves only after the floor advanced a

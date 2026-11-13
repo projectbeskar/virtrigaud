@@ -87,7 +87,7 @@ type State struct {
 // is. The record's CRC-32 detects accidental corruption and nothing else;
 // anyone who can write the record can forge a floor, and replacing the whole
 // store with an older consistent copy is not detected here. That is defended
-// by the Store the agent will use (a hash-chained, anchored operation store)
+// by the Store the agent uses (a hash-chained, anchored operation store)
 // together with the manager checking that a host's reported position never
 // goes backwards, not by this package.
 type Store interface {
