@@ -17,6 +17,7 @@ limitations under the License.
 package opstore_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -286,4 +287,81 @@ func TestFreezeMarkerNeverLeftBehind(t *testing.T) {
 	h.restart()
 	assert.Equal(t, before, h.s.Position().Seq, "recovery wrote nothing")
 	require.NoError(t, h.s.ConfirmFreeze(context.Background(), h.enrol), "the freeze can be confirmed once it is complete")
+}
+
+// A freeze reads at most FreezeScanCap records per transaction, whatever
+// their state: many finished operations do not make one transaction scan them
+// all, and the freeze still ends in the right state, also across crashes.
+func TestReenrol_FreezeScanIsCapped(t *testing.T) {
+	for _, crashAt := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("crash-%d", crashAt), func(t *testing.T) {
+			h := newHarness(t)
+			h.opts = func(o *opstore.Options) { o.FreezeChunk, o.FreezeScanCap = 3, 5 }
+			h.fresh()
+			ctx := context.Background()
+			const finished = 12
+			for i := 0; i < finished; i++ {
+				h.do(h.req(fmt.Sprintf("vm-done-%d", i), rid(), kCreate, 1))
+			}
+			var open []opstore.Request
+			for i := 0; i < 2; i++ {
+				r := h.req(fmt.Sprintf("vm-open-%d", i), rid(), kCreate, 1)
+				h.mustAccept(r)
+				open = append(open, r)
+			}
+			next := opstore.Enrolment{HostID: "host-1", ID: rid(), ProviderUID: h.provider, StartEpoch: h.start + 1}
+			before := h.s.Position().Seq
+			if crashAt > 0 {
+				h.crash = &journaltest.Crasher{Point: opstore.PointMidFreeze, N: crashAt}
+				require.ErrorIs(t, h.s.Reenrol(ctx, next), journal.ErrCrashed)
+				h.restart()
+			}
+			require.NoError(t, h.s.Reenrol(ctx, next))
+			// 14 records at 5 per transaction: at least three freeze transactions
+			// (a single unbounded one would be one), plus the activation.
+			assert.GreaterOrEqual(t, h.s.Position().Seq-before, uint64(4))
+			for _, r := range open {
+				v, ok := h.lookup(r)
+				require.True(t, ok)
+				assert.Equal(t, opstore.StateRetired, v.State)
+				assert.Equal(t, opstore.ReasonProviderChanged, v.Reason)
+			}
+			require.False(t, h.s.Freezing())
+			h.verifyChain()
+		})
+	}
+}
+
+// A freeze marker that cannot be read fails closed: the store opens (and
+// serves reads) but is quarantined, and the host refuses every operation.
+func TestOpen_UnreadableFreezeMarkerFailsClosed(t *testing.T) {
+	cases := map[string][]byte{
+		"short":            []byte("garbage"),
+		"foreign cursor":   append(make([]byte, 16), bytes.Repeat([]byte{0xff}, 32)...),
+		"cursor wrong len": append(make([]byte, 16), 1, 2, 3),
+	}
+	for name, marker := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.fresh()
+			ctx := context.Background()
+			r := h.req("vm", rid(), kCreate, 1)
+			h.do(r)
+			_, err := h.s.Journal().Update(ctx, func(tx *journal.Tx) error {
+				return tx.Put("meta", []byte("freeze"), marker)
+			})
+			require.NoError(t, err)
+			_ = h.s.Close()
+			h.mem.Crash()
+			s := h.open()
+			st, reason := s.Journal().State()
+			assert.Equal(t, journal.StateLost, st)
+			assert.Equal(t, journal.LostInconsistentStore, reason)
+			assert.True(t, s.Freezing())
+			v, ok, err := s.Lookup(ctx, ref(r))
+			require.NoError(t, err)
+			assert.True(t, ok, "reads are served")
+			assert.Equal(t, opstore.StateCompleted, v.State)
+		})
+	}
 }

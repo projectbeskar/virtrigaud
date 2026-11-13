@@ -216,7 +216,7 @@ func runModel(seed uint64) (err error) {
 		vms: map[string]*mVM{}, vmTomb: map[string]bool{}, attempts: map[string]uint64{}, bindings: map[string][]byte{}}
 	h.enrol, h.holder, h.start = m.newID(), m.newID(), 2
 	m.chunk = 1 + m.rnd.IntN(3)
-	h.opts = func(o *opstore.Options) { o.FreezeChunk = m.chunk }
+	h.opts = func(o *opstore.Options) { o.FreezeChunk, o.FreezeScanCap = m.chunk, 1<<30 } // the scan cap has its own tests
 	defer func() {
 		if h.s != nil {
 			_ = h.s.Close()

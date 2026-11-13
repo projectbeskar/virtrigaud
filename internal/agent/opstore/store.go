@@ -86,6 +86,9 @@ type Options struct {
 	// freeze transaction freezes. Zero uses DefaultFreezeChunk; tests set a
 	// small value to exercise a freeze that takes several transactions.
 	FreezeChunk int
+	// FreezeScanCap is the most records (of any state) one re-enrolment
+	// freeze transaction reads. Zero uses eight times the chunk size.
+	FreezeScanCap int
 	// Audit receives every admission decision and state change, including
 	// refusals that write nothing, for example to write a structured
 	// system-journal line. It never receives request bytes. Nil discards. It
@@ -141,9 +144,10 @@ type Store struct {
 	mu    sync.Mutex
 	ready bool
 	// freezing is set while a re-enrolment's freeze is incomplete (its
-	// marker is in the store). The host refuses every operation while it is
-	// set; Recover and Reenrol finish the freeze. Guarded by mu.
-	freezing bool
+	// marker is in the store, or the marker cannot be read). The host refuses
+	// every operation while it is set; Recover and Reenrol finish the freeze.
+	// It is written under mu and read without it (Freezing).
+	freezing atomic.Bool
 	// recovered mirrors ready for readers that must not wait for s.mu
 	// (Ready), which Recover holds while it runs.
 	recovered atomic.Bool
@@ -176,14 +180,24 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	}
 	if err := j.View(ctx, func(tx *journal.Tx) error {
 		fm, err := readFreeze(tx)
-		s.freezing = fm != nil
+		s.freezing.Store(fm != nil)
 		return err
 	}); err != nil {
-		_ = j.Close()
-		return nil, fmt.Errorf("open operation store: read freeze marker: %w", err)
+		// Fail closed: a marker that cannot be read may name an incomplete
+		// freeze. The host refuses every operation, the store is quarantined
+		// (unless the failed read already did it) and keeps serving reads.
+		s.freezing.Store(true)
+		if st, _ := j.State(); st != journal.StateLost {
+			j.Quarantine(journal.LostInconsistentStore, "freeze marker unreadable")
+		}
 	}
 	return s, nil
 }
+
+// Freezing reports whether a re-enrolment's freeze is incomplete: the host
+// refuses every operation until Recover or Reenrol finishes it. It does not
+// wait for a freeze in progress.
+func (s *Store) Freezing() bool { return s.freezing.Load() }
 
 // Journal returns the underlying journal.
 func (s *Store) Journal() *journal.Store { return s.j }

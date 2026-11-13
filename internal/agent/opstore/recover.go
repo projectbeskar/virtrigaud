@@ -242,7 +242,7 @@ func (s *Store) Recover(ctx context.Context) ([]OpRef, error) {
 	case s.ready:
 		return nil, fmt.Errorf("recover: %w", ErrAlreadyRecovered)
 	}
-	if s.freezing && !guard.Off(guard.FreezeResumeRecover) {
+	if s.freezing.Load() && !guard.Off(guard.FreezeResumeRecover) {
 		// A crash left a re-enrolment's freeze incomplete: finish it before any
 		// operation of the frozen enrolment is classified, so that each one is
 		// frozen once, as provider_changed.

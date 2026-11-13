@@ -17,6 +17,7 @@ limitations under the License.
 package opstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +37,10 @@ import (
 // its VM record and an audit event), so one chunk is bounded at a few
 // hundred records.
 const DefaultFreezeChunk = 128
+
+// freezeScanFactor is how many times DefaultFreezeChunk's records one freeze
+// transaction may read, open or not.
+const freezeScanFactor = 8
 
 // errChunkFull stops the scan of a freeze chunk that found one more open
 // operation than the chunk holds.
@@ -67,7 +72,21 @@ func readFreeze(tx *journal.Tx) (*freezeMarker, error) {
 	if len(b) != idLen && len(b) != idLen+2*idLen {
 		return nil, fmt.Errorf("%w: freeze marker has %d bytes", errCorruptRecord, len(b))
 	}
-	return &freezeMarker{prev: append([]byte(nil), b[:idLen]...), cursor: append([]byte(nil), b[idLen:]...)}, nil
+	m := &freezeMarker{prev: append([]byte(nil), b[:idLen]...), cursor: append([]byte(nil), b[idLen:]...)}
+	if len(m.cursor) > 0 && !bytes.HasPrefix(m.cursor, m.prev) {
+		return nil, fmt.Errorf("%w: freeze cursor is not an operation of the frozen enrolment", errCorruptRecord)
+	}
+	return m, nil
+}
+
+// freezeScanCap is the most records one freeze transaction reads, of any
+// state, so that a predecessor with very many finished operations cannot make
+// one transaction scan them all.
+func (s *Store) freezeScanCap() int {
+	if s.opts.FreezeScanCap > 0 {
+		return s.opts.FreezeScanCap
+	}
+	return freezeScanFactor * s.freezeChunk()
 }
 
 func (s *Store) freezeChunk() int {
@@ -167,20 +186,20 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 // marker with the last chunk. s.mu is held. s.freezing stays set until the
 // last chunk commits, so a failure leaves the host refusing every operation.
 func (s *Store) freezeLocked(ctx context.Context, prev []byte) error {
-	s.freezing = true
+	s.freezing.Store(true)
 	for {
 		buf := &auditBuf{}
 		var more bool
 		if _, err := s.j.Update(ctx, func(tx *journal.Tx) error {
 			var err error
-			more, err = freezeChunk(tx, prev, s.freezeChunk(), buf)
+			more, err = freezeChunk(tx, prev, s.freezeChunk(), s.freezeScanCap(), buf)
 			return err
 		}); err != nil {
 			return err
 		}
 		s.flush(buf)
 		if !more {
-			s.freezing = false
+			s.freezing.Store(false)
 			return nil
 		}
 		if err := s.j.CrashPoint(PointMidFreeze); err != nil {
@@ -193,8 +212,11 @@ func (s *Store) freezeLocked(ctx context.Context, prev []byte) error {
 // after those the marker's cursor already passed. The first chunk (no marker)
 // also marks the enrolment frozen and clears the active enrolment. It writes
 // the marker with the new cursor and reports more when open operations
-// remain; the last chunk deletes the marker instead.
-func freezeChunk(tx *journal.Tx, prev []byte, limit int, buf *auditBuf) (more bool, err error) {
+// may remain; the last chunk deletes the marker instead. The scan stops
+// after scanCap records of any state; the cursor then advances to the last
+// record read, so a later chunk never reads it again, and a chunk may freeze
+// no operation at all (progress is the cursor).
+func freezeChunk(tx *journal.Tx, prev []byte, limit, scanCap int, buf *auditBuf) (more bool, err error) {
 	fm, err := readFreeze(tx)
 	if err != nil {
 		return false, err
@@ -227,13 +249,20 @@ func freezeChunk(tx *journal.Tx, prev []byte, limit int, buf *auditBuf) (more bo
 		return false, fmt.Errorf("%w: a freeze of another enrolment is in progress", ErrEnrolment)
 	}
 	var open []*pb.OpRecord
-	var lastKey []byte
+	lastKey := fm.cursor
+	scanned := 0
 	err = tx.ForEachAfter(bucketOps, prev, fm.cursor, func(k, v []byte) error {
+		if scanned == scanCap {
+			more = true
+			return errChunkFull
+		}
+		scanned++
 		rec := &pb.OpRecord{}
 		if err := unmarshalRecord(v, rec); err != nil {
 			return err
 		}
 		if rec.GetState() != StateAccepted && rec.GetState() != StateExecuting {
+			lastKey = k
 			return nil
 		}
 		if len(open) == limit {
@@ -303,7 +332,7 @@ func anyIntent(rec *pb.OpRecord) bool {
 func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.freezing {
+	if s.freezing.Load() {
 		return fmt.Errorf("confirm freeze: %w: a freeze is still in progress", ErrEnrolment)
 	}
 	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
