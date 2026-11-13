@@ -184,12 +184,16 @@ func TestProtocolRefusals(t *testing.T) {
 		req  []byte
 		want Status
 	}{
-		{"wrong hash id", frame(append([]byte{Version, OpSign, 2}, d...)...), StatusBadRequest},
-		{"hash id zero", frame(append([]byte{Version, OpSign, 0}, d...)...), StatusBadRequest},
-		{"digest of 31 bytes", frame(append([]byte{Version, OpSign, HashSHA256}, d[:31]...)...), StatusBadRequest},
-		{"digest of 33 bytes", frame(append([]byte{Version, OpSign, HashSHA256}, append(d, 0)...)...), StatusBadRequest},
-		{"digest of 48 bytes", frame(append([]byte{Version, OpSign, HashSHA256}, make([]byte, 48)...)...), StatusBadRequest},
-		{"no digest", frame(Version, OpSign, HashSHA256), StatusBadRequest},
+		{"wrong hash id", frame(append([]byte{Version, OpSign, 2, PurposeAnswer}, d...)...), StatusBadRequest},
+		{"hash id zero", frame(append([]byte{Version, OpSign, 0, PurposeAnswer}, d...)...), StatusBadRequest},
+		{"digest of 31 bytes", frame(append([]byte{Version, OpSign, HashSHA256, PurposeAnswer}, d[:31]...)...), StatusBadRequest},
+		{"digest of 33 bytes", frame(append([]byte{Version, OpSign, HashSHA256, PurposeAnswer}, append(d, 0)...)...), StatusBadRequest},
+		{"digest of 48 bytes", frame(append([]byte{Version, OpSign, HashSHA256, PurposeAnswer}, make([]byte, 48)...)...), StatusBadRequest},
+		{"no digest", frame(Version, OpSign, HashSHA256, PurposeAnswer), StatusBadRequest},
+		{"no purpose", frame(Version, OpSign, HashSHA256), StatusBadRequest},
+		{"unknown purpose", frame(append([]byte{Version, OpSign, HashSHA256, 9}, d...)...), StatusBadRequest},
+		{"purpose zero", frame(append([]byte{Version, OpSign, HashSHA256, 0}, d...)...), StatusBadRequest},
+		{"old request shape, digest directly after the hash", frame(append([]byte{Version, OpSign, HashSHA256}, d...)...), StatusBadRequest},
 		{"no hash id", frame(Version, OpSign), StatusBadRequest},
 		{"unknown operation", frame(Version, 9), StatusBadRequest},
 		{"unknown version", frame(2, OpPublicKey), StatusBadRequest},
@@ -390,7 +394,7 @@ func TestRateLimit(t *testing.T) {
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	r := serve(t, "", ServerOptions{SignsPerSecond: 1, SignBurst: 2}, func(s *Server) {
 		s.now = clock
-		s.limiter = newBucket(1, 2, clock())
+		s.limiters = map[byte]*bucket{PurposeAnswer: newBucket(1, 2, clock()), PurposeHandshake: newBucket(1, 2, clock())}
 	})
 	c := r.client(t)
 	d := digestOf("m")
@@ -514,8 +518,8 @@ func TestNewServerRefusals(t *testing.T) {
 // FuzzDispatch: no request makes the signer panic or sign anything but a
 // well-formed request.
 func FuzzDispatch(f *testing.F) {
-	f.Add([]byte{Version, OpSign, HashSHA256})
-	f.Add(append([]byte{Version, OpSign, HashSHA256}, make([]byte, 32)...))
+	f.Add([]byte{Version, OpSign, HashSHA256, PurposeAnswer})
+	f.Add(append([]byte{Version, OpSign, HashSHA256, PurposeHandshake}, make([]byte, 32)...))
 	f.Add([]byte{Version, OpPublicKey})
 	f.Add([]byte{})
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -529,8 +533,8 @@ func FuzzDispatch(f *testing.F) {
 		}
 		switch {
 		case len(req) == 2 && req[0] == Version && req[1] == OpPublicKey:
-		case len(req) == 3+DigestSize && req[0] == Version && req[1] == OpSign && req[2] == HashSHA256:
-			if !ecdsa.VerifyASN1(&key.PublicKey, req[3:], body) {
+		case len(req) == 4+DigestSize && req[0] == Version && req[1] == OpSign && req[2] == HashSHA256 && (req[3] == PurposeAnswer || req[3] == PurposeHandshake):
+			if !ecdsa.VerifyASN1(&key.PublicKey, req[4:], body) {
 				t.Fatal("a signature that does not verify")
 			}
 		default:
@@ -576,4 +580,36 @@ func TestClientContextEnds(t *testing.T) {
 	_, err = c.Sign(rand.Reader, digestOf("x"), crypto.SHA256)
 	require.ErrorIs(t, err, ErrSigner)
 	assert.True(t, errors.Is(err, ErrSigner))
+}
+
+// TestPurposesHaveSeparateBudgets: a flood of handshake signatures that
+// exhausts the handshake budget leaves the answer budget untouched.
+func TestPurposesHaveSeparateBudgets(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	r := serve(t, "", ServerOptions{SignsPerSecond: 1, SignBurst: 2, HandshakeSignsPerSecond: 1, HandshakeSignBurst: 2}, func(s *Server) {
+		s.now = clock
+		s.limiters = map[byte]*bucket{PurposeAnswer: newBucket(1, 2, clock()), PurposeHandshake: newBucket(1, 2, clock())}
+	})
+	c := r.client(t)
+	answers := c.AnswerSigner()
+	d := digestOf("m")
+	for i := 0; i < 2; i++ {
+		_, err := c.Sign(rand.Reader, d, crypto.SHA256)
+		require.NoError(t, err)
+	}
+	_, err := c.Sign(rand.Reader, d, crypto.SHA256)
+	require.ErrorIs(t, err, ErrSigner, "the handshake budget is used")
+	for i := 0; i < 2; i++ {
+		sig, err := answers.Sign(rand.Reader, d, crypto.SHA256)
+		require.NoError(t, err, "the answer budget is separate")
+		assert.True(t, ecdsa.VerifyASN1(answers.Public().(*ecdsa.PublicKey), d, sig))
+	}
+	_, err = answers.Sign(rand.Reader, d, crypto.SHA256)
+	require.ErrorIs(t, err, ErrSigner)
+	assert.EqualValues(t, 2, r.srv.signedBy[PurposeHandshake].Load())
+	assert.EqualValues(t, 2, r.srv.signedBy[PurposeAnswer].Load())
+	assert.EqualValues(t, 1, r.srv.limitedBy[PurposeHandshake].Load())
+	assert.EqualValues(t, 1, r.srv.limitedBy[PurposeAnswer].Load())
 }

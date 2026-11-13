@@ -51,8 +51,10 @@ func signerCommand(args []string, log logr.Logger, stderr io.Writer) int {
 	socket := fs.String("socket", config.DefaultSignerSocket, "the Unix socket to serve (its directory: owned by the signer's user, no access for others)")
 	keyFile := fs.String("key-file", config.DefaultSignerKeyFile, "the host private key file (owned by the signer's user, mode 0600)")
 	agentUser := fs.String("agent-user", defaultSignerAgentUser, "the only user served (name or uid)")
-	perSecond := fs.Float64("max-signs-per-second", signer.DefaultSignsPerSecond, "the sustained signature rate limit")
-	burst := fs.Int("sign-burst", signer.DefaultSignBurst, "the signature rate limit's burst size")
+	perSecond := fs.Float64("max-signs-per-second", signer.DefaultSignsPerSecond, "the sustained rate limit of the answer budget (signed host answers)")
+	burst := fs.Int("sign-burst", signer.DefaultSignBurst, "the answer budget's burst size")
+	hsPerSecond := fs.Float64("max-handshake-signs-per-second", signer.DefaultHandshakeSignsPerSecond, "the sustained rate limit of the handshake budget (TLS handshakes, which unauthenticated peers can trigger)")
+	hsBurst := fs.Int("handshake-sign-burst", signer.DefaultHandshakeSignBurst, "the handshake budget's burst size")
 	every := fs.Duration("log-interval", signer.DefaultLogInterval, "how often the signature counters are logged")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -63,7 +65,7 @@ func signerCommand(args []string, log logr.Logger, stderr io.Writer) int {
 			return 2
 		}
 	}
-	if *perSecond <= 0 || *burst < 1 || *every <= 0 {
+	if *perSecond <= 0 || *burst < 1 || *hsPerSecond <= 0 || *hsBurst < 1 || *every <= 0 {
 		log.Error(errors.New("the rate limit and the log interval must be positive"), "invalid configuration")
 		return 2
 	}
@@ -89,6 +91,7 @@ func signerCommand(args []string, log logr.Logger, stderr io.Writer) int {
 	if err := signer.Run(context.Background(), signer.RunOptions{
 		SocketPath: *socket, KeyFile: *keyFile, OwnerUID: own, AgentUID: agentUID,
 		SignsPerSecond: *perSecond, SignBurst: *burst, LogInterval: *every,
+		HandshakeSignsPerSecond: *hsPerSecond, HandshakeSignBurst: *hsBurst,
 		Notifier: systemd.NewNotifier(), Log: log,
 	}, signals); err != nil {
 		log.Error(err, "the signer stopped")

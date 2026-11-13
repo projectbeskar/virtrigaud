@@ -124,7 +124,31 @@ func (c *Client) Public() crypto.PublicKey { return c.pub }
 // without reaching the signer. rand is ignored: the signer draws its own
 // randomness. The returned signature is ASN.1 DER and has been verified
 // against the public key.
-func (c *Client) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+//
+// A Client signs as PurposeHandshake (the TLS handshake budget); AnswerSigner
+// returns the view that signs as PurposeAnswer.
+func (c *Client) Sign(r io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return c.sign(r, digest, opts, PurposeHandshake)
+}
+
+// AnswerSigner returns a crypto.Signer for the same key that charges its
+// signatures to the answer budget of the signer, so that host answers are not
+// starved by a flood of handshakes.
+func (c *Client) AnswerSigner() crypto.Signer { return answerSigner{c} }
+
+// answerSigner is a Client's view that signs as PurposeAnswer.
+type answerSigner struct{ c *Client }
+
+// Public implements crypto.Signer.
+func (a answerSigner) Public() crypto.PublicKey { return a.c.Public() }
+
+// Sign implements crypto.Signer; see Client.Sign.
+func (a answerSigner) Sign(r io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	return a.c.sign(r, digest, opts, PurposeAnswer)
+}
+
+// sign sends a sign request charged to purpose.
+func (c *Client) sign(_ io.Reader, digest []byte, opts crypto.SignerOpts, purpose byte) ([]byte, error) {
 	if h, ok := opts.(crypto.Hash); !ok || h != crypto.SHA256 {
 		return nil, fmt.Errorf("%w: only crypto.SHA256 digests are signed", ErrSigner)
 	}
@@ -134,8 +158,8 @@ func (c *Client) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byt
 	if err := c.ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSigner, err)
 	}
-	req := make([]byte, 0, 3+len(digest))
-	req = append(req, Version, OpSign, HashSHA256)
+	req := make([]byte, 0, 4+len(digest))
+	req = append(req, Version, OpSign, HashSHA256, purpose)
 	req = append(req, digest...)
 	sig, err := c.call(c.ctx, req)
 	if err != nil {

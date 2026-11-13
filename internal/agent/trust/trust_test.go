@@ -259,3 +259,33 @@ func write(t *testing.T, dir, name, data string) {
 		t.Fatal(err)
 	}
 }
+
+// answerSigner is a signer with a separate view for answers.
+type answerSigner struct {
+	crypto.Signer
+	answers crypto.Signer
+}
+
+func (a answerSigner) AnswerSigner() crypto.Signer { return a.answers }
+
+// TestIdentityUsesTheAnswerView: a signer that has a view for answers is used
+// for the handshake as itself and for answers through that view.
+func TestIdentityUsesTheAnswerView(t *testing.T) {
+	p := trusttest.New(t)
+	trustDir, pkiDir := writeAll(t, p)
+	cfg, err := trust.LoadConfig(trustDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers, hand := &ecdsaView{p.HostKey}, &ecdsaView{p.HostKey}
+	id, err := trust.LoadIdentity(pkiDir, cfg, time.Now(), nil, answerSigner{Signer: hand, answers: answers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Signer != crypto.Signer(answers) || id.TLS.PrivateKey != crypto.Signer(answerSigner{Signer: hand, answers: answers}) {
+		t.Fatalf("signers: answers %v, TLS %v", id.Signer, id.TLS.PrivateKey)
+	}
+}
+
+// ecdsaView is a distinct signer value over a key.
+type ecdsaView struct{ *ecdsa.PrivateKey }

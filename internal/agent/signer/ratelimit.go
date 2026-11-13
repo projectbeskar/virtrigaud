@@ -30,11 +30,22 @@ import (
 // signature per TLS handshake and one per signed answer; a host serving a
 // few Providers needs a handful per second, so 50 per second with a burst of
 // 100 leaves a wide margin for reconnect storms and still refuses a flood.
+//
+// The budgets are separate for TLS handshakes, which any peer that reaches
+// the agent's port can trigger (the agent throttles them before the handshake
+// and the port must be firewalled, but the budget is still shared with
+// unauthenticated peers), and for signed answers, which only an authenticated
+// Provider can ask for. A flood on the first cannot starve the second.
 const (
-	// DefaultSignsPerSecond is the sustained rate.
+	// DefaultSignsPerSecond is the sustained rate of the answer budget.
 	DefaultSignsPerSecond = 50.0
-	// DefaultSignBurst is the bucket size.
+	// DefaultSignBurst is the bucket size of the answer budget.
 	DefaultSignBurst = 100
+	// DefaultHandshakeSignsPerSecond is the sustained rate of the handshake
+	// budget.
+	DefaultHandshakeSignsPerSecond = 20.0
+	// DefaultHandshakeSignBurst is the bucket size of the handshake budget.
+	DefaultHandshakeSignBurst = 40
 )
 
 // bucket is a token bucket: capacity burst, refilled at rate tokens per

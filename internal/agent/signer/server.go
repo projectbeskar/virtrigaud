@@ -46,11 +46,17 @@ type ServerOptions struct {
 	// Log receives structured events. Digests, signatures and key material
 	// are never logged; only counts are.
 	Log logr.Logger
-	// SignsPerSecond and SignBurst set the rate limit (DefaultSignsPerSecond
-	// and DefaultSignBurst when zero).
+	// SignsPerSecond and SignBurst set the answer budget's rate limit
+	// (DefaultSignsPerSecond and DefaultSignBurst when zero).
 	SignsPerSecond float64
-	// SignBurst is the rate limit's burst size.
+	// SignBurst is the answer budget's burst size.
 	SignBurst int
+	// HandshakeSignsPerSecond and HandshakeSignBurst set the handshake
+	// budget's rate limit (DefaultHandshakeSignsPerSecond and
+	// DefaultHandshakeSignBurst when zero).
+	HandshakeSignsPerSecond float64
+	// HandshakeSignBurst is the handshake budget's burst size.
+	HandshakeSignBurst int
 	// MaxConns bounds the connections served at once (DefaultMaxConns when
 	// zero); a connection above it is closed at once.
 	MaxConns int
@@ -71,15 +77,17 @@ type keyPair struct {
 // Server is the signer: it serves the host key over a Unix socket to one
 // uid, as a digest oracle (see the package documentation).
 type Server struct {
-	o       ServerOptions
-	log     logr.Logger
-	key     atomic.Pointer[keyPair]
-	limiter *bucket
-	now     func() time.Time
+	o        ServerOptions
+	log      logr.Logger
+	key      atomic.Pointer[keyPair]
+	limiters map[byte]*bucket
+	now      func() time.Time
 	// peerUID reads a connection's peer uid (PeerUID; tests replace it).
 	peerUID func(net.Conn) (uint32, error)
 
 	signed, limited, rejected, denied, overloaded atomic.Uint64
+	// signedBy and limitedBy count per purpose.
+	signedBy, limitedBy map[byte]*atomic.Uint64
 }
 
 // NewServer returns a Server for o.
@@ -90,7 +98,13 @@ func NewServer(o ServerOptions) (*Server, error) {
 	if o.SignBurst == 0 {
 		o.SignBurst = DefaultSignBurst
 	}
-	if o.SignsPerSecond < 0 || o.SignBurst < 1 {
+	if o.HandshakeSignsPerSecond == 0 {
+		o.HandshakeSignsPerSecond = DefaultHandshakeSignsPerSecond
+	}
+	if o.HandshakeSignBurst == 0 {
+		o.HandshakeSignBurst = DefaultHandshakeSignBurst
+	}
+	if o.SignsPerSecond < 0 || o.SignBurst < 1 || o.HandshakeSignsPerSecond < 0 || o.HandshakeSignBurst < 1 {
 		return nil, errors.New("the signing rate limit must be positive")
 	}
 	if o.MaxConns == 0 {
@@ -102,11 +116,16 @@ func NewServer(o ServerOptions) (*Server, error) {
 	if o.LogInterval == 0 {
 		o.LogInterval = DefaultLogInterval
 	}
-	s := &Server{o: o, log: o.Log, now: time.Now, peerUID: PeerUID}
+	s := &Server{o: o, log: o.Log, now: time.Now, peerUID: PeerUID,
+		signedBy:  map[byte]*atomic.Uint64{PurposeAnswer: {}, PurposeHandshake: {}},
+		limitedBy: map[byte]*atomic.Uint64{PurposeAnswer: {}, PurposeHandshake: {}}}
 	if err := s.SetKey(o.Key); err != nil {
 		return nil, err
 	}
-	s.limiter = newBucket(o.SignsPerSecond, o.SignBurst, s.now())
+	s.limiters = map[byte]*bucket{
+		PurposeAnswer:    newBucket(o.SignsPerSecond, o.SignBurst, s.now()),
+		PurposeHandshake: newBucket(o.HandshakeSignsPerSecond, o.HandshakeSignBurst, s.now()),
+	}
 	return s, nil
 }
 
@@ -213,18 +232,21 @@ func (s *Server) dispatch(req []byte) (Status, []byte) {
 		}
 		return StatusOK, kp.der
 	case OpSign:
-		if len(req) < 3 {
+		if len(req) < 4 {
 			s.rejected.Add(1)
 			return StatusBadRequest, nil
 		}
 		h, ok := signHashes[req[2]]
-		digest := req[3:]
-		if !guard.Off(guard.SignerDigestCheck) && (!ok || len(digest) != h.size) {
+		purpose := req[3]
+		digest := req[4:]
+		limiter := s.limiters[purpose]
+		if limiter == nil || (!guard.Off(guard.SignerDigestCheck) && (!ok || len(digest) != h.size)) {
 			s.rejected.Add(1)
 			return StatusBadRequest, nil
 		}
-		if !guard.Off(guard.SignerRateLimit) && !s.limiter.allow(s.now()) {
+		if !guard.Off(guard.SignerRateLimit) && !limiter.allow(s.now()) {
 			s.limited.Add(1)
+			s.limitedBy[purpose].Add(1)
 			return StatusRateLimited, nil
 		}
 		sig, err := ecdsa.SignASN1(rand.Reader, kp.priv, digest)
@@ -233,6 +255,7 @@ func (s *Server) dispatch(req []byte) (Status, []byte) {
 			return StatusInternal, nil
 		}
 		s.signed.Add(1)
+		s.signedBy[purpose].Add(1)
 		return StatusOK, sig
 	}
 	s.rejected.Add(1)
@@ -245,6 +268,7 @@ func (s *Server) summaries(ctx context.Context) {
 	t := time.NewTicker(s.o.LogInterval)
 	defer t.Stop()
 	var last [5]uint64
+	var lastBy [4]uint64
 	for {
 		select {
 		case <-ctx.Done():
@@ -254,10 +278,14 @@ func (s *Server) summaries(ctx context.Context) {
 			if cur == last {
 				continue
 			}
+			by := [4]uint64{s.signedBy[PurposeHandshake].Load(), s.limitedBy[PurposeHandshake].Load(),
+				s.signedBy[PurposeAnswer].Load(), s.limitedBy[PurposeAnswer].Load()}
 			s.log.Info("signer activity", "windowSeconds", int(s.o.LogInterval.Seconds()),
 				"signed", cur[0]-last[0], "rateLimited", cur[1]-last[1], "rejected", cur[2]-last[2],
-				"peerRefused", cur[3]-last[3], "overloaded", cur[4]-last[4], "signedTotal", cur[0])
-			last = cur
+				"peerRefused", cur[3]-last[3], "overloaded", cur[4]-last[4], "signedTotal", cur[0],
+				"handshakeSigned", by[0]-lastBy[0], "handshakeRateLimited", by[1]-lastBy[1],
+				"answerSigned", by[2]-lastBy[2], "answerRateLimited", by[3]-lastBy[3])
+			last, lastBy = cur, by
 		}
 	}
 }

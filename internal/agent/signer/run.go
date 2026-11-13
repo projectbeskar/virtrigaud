@@ -47,6 +47,11 @@ type RunOptions struct {
 	SignsPerSecond float64
 	// SignBurst is the rate limit's burst size.
 	SignBurst int
+	// HandshakeSignsPerSecond and HandshakeSignBurst are the handshake
+	// budget's rate limit (ServerOptions fields of the same names).
+	HandshakeSignsPerSecond float64
+	// HandshakeSignBurst is the handshake budget's burst size.
+	HandshakeSignBurst int
 	// LogInterval is the period of the activity summary.
 	LogInterval time.Duration
 	// Notifier receives READY when the signer serves (nil sends nothing).
@@ -69,7 +74,8 @@ func Run(ctx context.Context, o RunOptions, signals <-chan os.Signal) error {
 		return fmt.Errorf("run signer: %w", err)
 	}
 	srv, err := NewServer(ServerOptions{Key: key, AllowedUID: o.AgentUID, Log: o.Log,
-		SignsPerSecond: o.SignsPerSecond, SignBurst: o.SignBurst, LogInterval: o.LogInterval})
+		SignsPerSecond: o.SignsPerSecond, SignBurst: o.SignBurst, LogInterval: o.LogInterval,
+		HandshakeSignsPerSecond: o.HandshakeSignsPerSecond, HandshakeSignBurst: o.HandshakeSignBurst})
 	if err != nil {
 		return fmt.Errorf("run signer: %w", err)
 	}

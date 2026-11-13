@@ -56,8 +56,9 @@ type Identity struct {
 	TLS tls.Certificate
 	// Leaf is the host identity certificate.
 	Leaf *x509.Certificate
-	// Signer is the host key's signer. It signs TLS handshakes and host
-	// answers, nothing else; its private half is in another process.
+	// Signer is the host key's signer for host answers (TLS handshakes are
+	// signed through TLS). It signs those two, nothing else; its private half
+	// is in another process.
 	Signer crypto.Signer
 	// HostURI is the host's URI identity.
 	HostURI string
@@ -65,6 +66,14 @@ type Identity struct {
 	HostNamespace, HostName string
 	// Record is the enrolment record the certificate carries.
 	Record hostidentity.Record
+}
+
+// AnswerSigner is implemented by a signer that keeps separate budgets for TLS
+// handshakes and for signed answers (signer.Client). LoadIdentity uses the
+// signer itself for the handshake and its AnswerSigner for the answers.
+type AnswerSigner interface {
+	// AnswerSigner returns a signer for the same key for signed answers.
+	AnswerSigner() crypto.Signer
 }
 
 // HostID is the host identity an answer names: the Host's name.
@@ -121,10 +130,14 @@ func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) (
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrIdentity, err)
 	}
+	answers := signer
+	if as, ok := signer.(AnswerSigner); ok {
+		answers = as.AnswerSigner()
+	}
 	return &Identity{
 		TLS:           tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: signer, Leaf: leaf},
 		Leaf:          leaf,
-		Signer:        signer,
+		Signer:        answers,
 		HostURI:       hostURI,
 		HostNamespace: ns,
 		HostName:      name,

@@ -43,12 +43,18 @@ limitations under the License.
 // is the protocol version byte, an operation byte and the operation's body;
 // a response is the protocol version byte, a status byte and the body.
 //
-//	OpPublicKey   no body                  -> the PKIX DER public key
-//	OpSign        hash byte, digest bytes  -> the ASN.1 DER ECDSA signature
+//	OpPublicKey   no body                            -> the PKIX DER public key
+//	OpSign        hash byte, purpose byte, digest    -> the ASN.1 DER ECDSA signature
 //
 // The only hash is SHA-256 (what crypto/tls signs with an ECDSA P-256 key in
 // TLS 1.3 and what host answers use) and the digest must be exactly 32 bytes.
-// Anything else is refused. Both ends check the peer's uid with SO_PEERCRED
+// The purpose says which budget the signature is charged to: PurposeHandshake
+// for the TLS handshakes, which unauthenticated peers can trigger, and
+// PurposeAnswer for signed host answers, which only an authenticated Provider
+// can. The two have separate rate limits, so a flood of handshakes cannot
+// starve the answers. The signer takes the purpose on trust, since it cannot
+// see what is signed: a compromised agent can lie about it, so this protects
+// against outside floods only. Anything else is refused. Both ends check the peer's uid with SO_PEERCRED
 // on every connection.
 //
 // It imports no Kubernetes package.
@@ -71,6 +77,10 @@ const (
 	OpPublicKey byte = 1
 	// OpSign asks for a signature over a digest.
 	OpSign byte = 2
+	// PurposeHandshake charges a signature to the handshake budget.
+	PurposeHandshake byte = 1
+	// PurposeAnswer charges a signature to the answer budget.
+	PurposeAnswer byte = 2
 	// HashSHA256 is the only hash identifier.
 	HashSHA256 byte = 1
 	// DigestSize is the size of the only digest accepted: SHA-256.
