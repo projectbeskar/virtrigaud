@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
+	pb "github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb"
 )
 
 // ActiveEnrolment is the active enrolment as the store records it.
@@ -116,3 +117,30 @@ func hostViewTx(tx *journal.Tx, continuitySeq uint64) (HostView, error) {
 // operations while its journal is ready. It does not wait for a recovery in
 // progress.
 func (s *Store) Recovered() bool { return s.recovered.Load() }
+
+// LatestEnrolmentHostID returns the host identity of the enrolment record with
+// the highest start epoch among those the store still holds (the active one,
+// or a frozen predecessor), or "" when it holds none (never enrolled, or every
+// record was discarded after a confirmed freeze). It scans the enrolment
+// records, so it is for enrolment decisions at start and reload, not for
+// answering calls.
+func (s *Store) LatestEnrolmentHostID(ctx context.Context) (string, error) {
+	var host string
+	var latest uint64
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		return tx.ForEach(bucketEnrolments, nil, func(_, raw []byte) error {
+			rec := &pb.Enrolment{}
+			if err := unmarshalRecord(raw, rec); err != nil {
+				return err
+			}
+			if rec.GetStartEpoch() >= latest {
+				latest, host = rec.GetStartEpoch(), rec.GetHostId()
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return "", fmt.Errorf("read the enrolment records: %w", err)
+	}
+	return host, nil
+}

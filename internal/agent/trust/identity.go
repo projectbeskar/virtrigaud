@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -83,7 +82,10 @@ func (id *Identity) HostID() string { return id.HostName }
 // when nil) and validates it against cfg at now, with signer as the host key:
 // the signer's public key is ECDSA P-256 and the certificate is a single leaf
 // for that key, not a CA, with the server authentication usage, that chains
-// to a host identity issuer of cfg and is valid at now; its URI subject alternative names are exactly the
+// to a host identity issuer of cfg and is valid at now; it meets the certificate
+// profile (hostidentity.CheckLeafProfile: no CA bit, no certificate signing
+// usage, digital signature, server authentication only, at most 30 days, the
+// Host's name or no subject, no non-URI names); its URI subject alternative names are exactly the
 // host's URI identity and an enrolment record (hostidentity.RecordFromURIs).
 func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) ([]byte, error), signer crypto.Signer) (*Identity, error) {
 	if read == nil {
@@ -112,12 +114,6 @@ func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) (
 	if !ok || !pub.Equal(key) {
 		return nil, fmt.Errorf("%w: the host certificate does not certify the host key", ErrIdentity)
 	}
-	if leaf.IsCA {
-		return nil, fmt.Errorf("%w: the host certificate is a CA certificate", ErrIdentity)
-	}
-	if !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
-		return nil, fmt.Errorf("%w: the host certificate lacks the server authentication usage", ErrIdentity)
-	}
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: cfg.HostCAPool, CurrentTime: now,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
 		return nil, fmt.Errorf("%w: the host certificate does not verify against the host identity issuer: %v", ErrIdentity, err)
@@ -125,6 +121,10 @@ func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) (
 	hostURI, ns, name, err := hostURIOf(leaf)
 	if err != nil {
 		return nil, err
+	}
+	// The same certificate profile the manager enforces before it pins the key.
+	if err := hostidentity.CheckLeafProfile(leaf, name); err != nil {
+		return nil, fmt.Errorf("%w: the host certificate: %v", ErrIdentity, err)
 	}
 	rec, err := hostidentity.RecordFromURIs(leaf.URIs, hostURI)
 	if err != nil {

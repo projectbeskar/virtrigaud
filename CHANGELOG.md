@@ -46,6 +46,58 @@ The per-host agent could only refuse mutations. It now executes a signed operati
 - [ ] Documentation only
 - Development builds only: release builds keep the no-op executor and refuse every mutating call; no Provider routes to the agent yet. The wire contract is unchanged.
 
+## [2026-11-13 18:00] - Agent half of host enrolment: key, request, certificate install, enrolment from the certificate (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/enrol/`: `BuildCSR` (the certificate signing request: subject common name the Host's name, exactly the manager-published host URI and enrolment record URIs as subject alternative names, no other extension, signed with the host key as proof of possession; ECDSA P-256 only) and `Install` (checks the issued certificate against the request file, the pinned host identity issuer, the signer's public key and the profile, then writes `pki/host.crt` through a temporary file, sync and rename, and confirms it with the daemon's own loader, putting the previous file back or removing the new one when the loader refuses it). The checks reuse the manager's `hostidentity` rules, so the agent's request is what the manager approves and the agent refuses what the manager would refuse: chain, exact URI set including the record, other key, CA bit, usages other than server authentication, lifetime above 30 days, other subject, expired or not yet valid.
+- `internal/agent/signer/keygen.go`: `CreateKey` (ECDSA P-256, PKCS #8 PEM, mode `0600`, written to a private temporary file and linked into place without replacing, in a directory private to the signer's user; an existing key is never replaced) and `CheckKeyDir`.
+- `cmd/vrtg-agent/enroll.go`: `vrtg-agent enroll csr` (run as the signer's user: creates the host key if there is none and writes the request; the key never leaves that user) and `vrtg-agent enroll install` (run as the agent's user: runs the host checks, asks the running signer for its public key over the socket, never opens the key file, and installs the certificate; `--replace` for a re-enrolment). It replaces the `enroll` placeholder (`enroll_stub.go`).
+- `internal/agent/internal/guard/guard.go`: seven mutation guards for the enrolment checks (`enrol-key-never-replaced`, `enrol-csr-key-type`, `enrol-csr-uris`, `enrol-request-key`, `enrol-no-replace`, `enrol-same-enrolment`, `enrol-loader-check`).
+- Tests: `internal/agent/enrol/` (the request round-tripped through the manager's `hostidentity.Authorise`; install refusals for another CA, other enrolment id, other provider, other host, missing and extra URIs, other key, CA bit, excessive lifetime, client authentication usage, other subject, expired, garbage; replacement rules; the loader confirmation; a source check that the package never names a key loader or the key file), `internal/agent/signer/keygen_test.go`, `cmd/vrtg-agent/enroll_test.go` (the offline flow end to end with a test issuer and an in-process signer, user and flag refusals, the host check that refuses a host where the agent can read the key), `internal/agent/daemon/enrolment_test.go` and `enrolment_dev_test.go` (enrolment without the development file, re-enrolment on reload and on restart, a used enrolment id refused, the freeze of open operations).
+
+### Changed
+- `internal/agent/daemon/daemon.go`: the agent derives its active enrolment from the host certificate at start (step 6) and on reload. A store never enrolled is enrolled at epoch 1 (or at the development enrolment file's epoch); a store with another or no active enrolment is re-enrolled with the next epoch, which freezes the previous enrolment's open operations in bounded chunks first; an enrolment id the store has used is refused (answers stay unsigned at start; the reload is refused with the new reason `ReenrolmentRefused` and the running credentials stay). A reload of a same-host certificate with a new enrolment re-enrols before it replaces the credentials. A store whose active enrolment is for another host is never touched. A certificate for another host is still refused (`EnrolmentChanged`).
+- `internal/agent/config/config.go`, `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`: the development enrolment file now only supplies the first enrolment's start epoch and predecessors; the enrolment section of the agent doc describes the two-user flow, the checks and the re-enrolment semantics.
+
+### Fixed (review round)
+- `.gitignore` ignores the binary `go build` leaves in each `cmd/<name>/` directory by its exact name, and `hack/verify-no-binaries.sh` (wired into the CI lint job) fails on any tracked ELF, Mach-O, PE, static archive or WebAssembly file, with an explicit allow-list in `hack/no-binaries-allowlist`.
+- `internal/agent/daemon/daemon.go`: a certificate of another host is never enrolled into a store that has no active enrolment (the store marker's host and the newest enrolment record's host are checked); the "already matching" check compares the install id too. `internal/agent/opstore/hostview.go`: `HostView.LatestHostID`.
+- `internal/hostidentity/profile.go`: `CheckLeafProfile`, the certificate profile (no CA bit, no certificate or CRL signing usage, digital signature, server authentication only, at most 30 days, subject rule, no non-URI names), used by `ValidateIssued` on the manager side and by `trust.LoadIdentity` on the agent side.
+- `cmd/vrtg-agent/enroll.go`, `internal/agent/enrol/install.go`: `enroll install` requires the Host's current request URIs (`--uri` or `--uris-file`) and refuses a request file that does not carry exactly them.
+- `internal/agent/signer/keygen.go`: the replace-guard mutation now exercises the replace path and the tests assert the key on disk is unchanged; stray temporary key files from a killed run are removed.
+- The `enroll` steps and the enrolment and re-enrolment derived from the certificate (start and reload) are for development builds only (`virtrigaud_dev`); a release build exits 1 on `enroll`, enrols a store only from a development enrolment, never re-enrols and refuses a reload with another enrolment (`EnrolmentChanged`). Tests for both builds. `docs/per-host-agent-development.md`: the hand-off paths of the example use `--out -` and a shared directory.
+
+### Changed (second review round)
+- Manager side, stricter: `internal/hostidentity/policy.go` approval now requires the `digital signature` usage and refuses `cert sign` and `crl sign` explicitly (a request with `server auth` alone is denied `UsagesRefused`); `ValidateIssued` already refuses an issued certificate with certificate or CRL signing or without digital signature (`CheckLeafProfile`). The external-PKI bundle (`internal/hostidentity/certrequest`, `vrtg host enroll --bundle-out`) gains `keyUsages` (`digital signature`) and `forbiddenKeyUsages` (`cert sign`, `crl sign`). `docs/host-agent-enrolment.md` describes both.
+- `internal/agent/internal/safefile`, `internal/agent/trust/config.go`, `cmd/vrtg-agent/enroll.go`: the enrolment steps read the request, the certificate and the URI list only when each is owned by root or the caller and not writable by group or others (`trust.HandoffFileReader`); the docs use a root-created hand-off directory, not `/var/tmp`.
+- `internal/agent/opstore/hostview.go`: `Store.LatestEnrolmentHostID` (a scan used only by the enrolment decision, not on the per-call path); `internal/agent/daemon/daemon.go`: the owner check is `storeOwnerMismatch`, tested one check at a time; a store that names no host is adoptable by any host (documented).
+
+### Why
+The manager half of enrolment was merged; the agent could not produce a request or install a certificate, and relied on a development enrolment file. The key must stay with the signer's user, so the request is signed where the key is created rather than through the signer's digest-only socket.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-11-13 15:30] - Adopters list
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `ADOPTERS.md`: a list of organizations using VirtRigaud, in the format common to CNCF projects (organization, contact, since, stage, description of use), with how to add, update or remove an entry.
+- `README.md`: an Adopters section linking to it.
+
+### Why
+Lets new users see where the project is in use and lets adopters list themselves through a pull request.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-11-13 12:00] - Operation store: clock floor inside the store, bounded re-enrolment freeze (development builds only)
 **Author:** @wrkode (William Rizzo)
 

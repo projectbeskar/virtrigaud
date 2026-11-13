@@ -464,31 +464,46 @@ func TestClockFloorStoreNeverGoesDown(t *testing.T) {
 	}
 }
 
-// TestNotEnrolledAnswersUnsigned: without the development enrolment a fresh
-// store stays unenrolled; reads answer without a signed answer.
-func TestNotEnrolledAnswersUnsigned(t *testing.T) {
+// TestEnrolsFromTheCertificateWithoutTheDevelopmentFile: with no development
+// enrolment file a development build enrols a fresh store from the host
+// certificate alone (epoch 1), and reads carry a signed answer naming that
+// enrolment. A release build leaves the store unenrolled and answers
+// unsigned.
+func TestEnrolsFromTheCertificateWithoutTheDevelopmentFile(t *testing.T) {
 	h := newHost(t)
 	h.dev = nil
 	r, state := h.run()
 	if state != providerv1.AgentState_AGENT_STATE_READY {
 		t.Fatalf("state = %v", state)
 	}
-	if a := r.hello(); a != nil {
-		t.Fatalf("signed answer without an enrolment: %v", a)
+	a := r.hello()
+	if !config.DevBuild {
+		if a != nil {
+			t.Fatalf("a release build signed an answer without an enrolment: %v", a)
+		}
+		return
+	}
+	if a == nil || string(a.GetContext().GetEnrolmentId()) != string(h.pki.Record.EnrolmentID) {
+		t.Fatalf("answer = %v", a)
+	}
+	if !strings.Contains(h.logs.text(), "enrolled from the host certificate") {
+		t.Fatalf("no enrolment log:\n%s", h.logs.text())
 	}
 }
 
 // TestReload: SIGHUP reloads the trust configuration and key material; a
-// certificate for another enrolment is refused and the running one stays.
+// certificate for another host is refused and the running one stays.
 func TestReload(t *testing.T) {
 	h := newHost(t)
 	r, _ := h.run()
 	r.hello()
-	// A certificate for another enrolment: refused, answers still name the
+	// A certificate for another host: refused, answers still name the
 	// running enrolment.
-	other := h.pki.Record
-	other.EnrolmentID = make([]byte, 16)
-	cert := h.pki.IssueHost(t, h.pki.HostKey, hostidentity.RequestURIs(h.pki.HostURI, other), hostidentitytest.IssueOptions{})
+	otherHost, err := hostidentity.HostURI(trusttest.TrustDomain, trusttest.HostNS, "another-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := h.pki.IssueHost(t, h.pki.HostKey, hostidentity.RequestURIs(otherHost, h.pki.Record), hostidentitytest.IssueOptions{})
 	if err := os.WriteFile(filepath.Join(h.cfg.PKIDir(), trust.FileHostCert), cert, 0o600); err != nil {
 		t.Fatal(err)
 	}

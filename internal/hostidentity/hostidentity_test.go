@@ -161,6 +161,16 @@ func TestAuthoriseDeniesEachBrokenRule(t *testing.T) {
 		{"client auth with server auth", func(r *hostidentity.Request) {
 			r.Usages = []string{hostidentity.UsageClientAuth, hostidentity.UsageServerAuth}
 		}, hostidentity.ReasonUsages},
+		{"server auth without digital signature", func(r *hostidentity.Request) { r.Usages = []string{hostidentity.UsageServerAuth} }, hostidentity.ReasonUsages},
+		{"server auth and key encipherment only", func(r *hostidentity.Request) {
+			r.Usages = []string{hostidentity.UsageServerAuth, hostidentity.UsageKeyEncipherment}
+		}, hostidentity.ReasonUsages},
+		{"cert sign", func(r *hostidentity.Request) {
+			r.Usages = []string{hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature, hostidentity.UsageCertSign}
+		}, hostidentity.ReasonUsages},
+		{"crl sign", func(r *hostidentity.Request) {
+			r.Usages = []string{hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature, hostidentity.UsageCRLSign}
+		}, hostidentity.ReasonUsages},
 		{"an extra usage", func(r *hostidentity.Request) { r.Usages = append(r.Usages, "cert sign") }, hostidentity.ReasonUsages},
 		{"default usages", func(r *hostidentity.Request) { r.Usages = nil }, hostidentity.ReasonUsages},
 		{"a subject other than the host name", func(r *hostidentity.Request) {
@@ -213,6 +223,8 @@ func TestValidateIssued(t *testing.T) {
 		"a CA":                   ca.Issue(t, csr, hostidentitytest.IssueOptions{IsCA: true}),
 		"another subject":        ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: "host-b"}}),
 		"extra subject RDNs":     ca.Issue(t, csr, hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: testHostName, Organization: []string{"x"}}}),
+		"certSign key usage":     ca.Issue(t, csr, hostidentitytest.IssueOptions{KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign}),
+		"no digital signature":   ca.Issue(t, csr, hostidentitytest.IssueOptions{KeyUsage: x509.KeyUsageKeyEncipherment}),
 		"not PEM":                []byte("nope"),
 	}
 	for name, chain := range cases {
@@ -225,4 +237,31 @@ func TestValidateIssued(t *testing.T) {
 	assert.ErrorIs(t, err, hostidentity.ErrIssued, "an expired certificate is refused")
 	_, err = hostidentity.RootPool(ca.Issue(t, csr, hostidentitytest.IssueOptions{}))
 	assert.Error(t, err, "a CA bundle holding a leaf is refused")
+}
+
+// TestCheckLeafProfile: the profile alone, as the agent applies it to the
+// certificate it loads.
+func TestCheckLeafProfile(t *testing.T) {
+	ca := hostidentitytest.NewCA(t)
+	key := hostidentitytest.NewKey(t)
+	csr := hostidentitytest.NewCSR(t, key, hostidentitytest.CSROptions{URIs: hostidentity.RequestURIs(testHostURI(t), testRecord())})
+	leaf := func(o hostidentitytest.IssueOptions) *x509.Certificate {
+		certs, err := hostidentity.ParseCertificates(ca.Issue(t, csr, o))
+		require.NoError(t, err)
+		return certs[0]
+	}
+	require.NoError(t, hostidentity.CheckLeafProfile(leaf(hostidentitytest.IssueOptions{}), testHostName))
+	require.NoError(t, hostidentity.CheckLeafProfile(leaf(hostidentitytest.IssueOptions{KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment}), testHostName))
+	for name, o := range map[string]hostidentitytest.IssueOptions{
+		"CA":                     {IsCA: true},
+		"certSign":               {KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign},
+		"CRL sign":               {KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCRLSign},
+		"no digital signature":   {KeyUsage: x509.KeyUsageKeyEncipherment},
+		"client and server auth": {ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}},
+		"client auth only":       {ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}},
+		"lifetime":               {Lifetime: 31 * 24 * time.Hour},
+		"subject":                {Subject: &pkix.Name{CommonName: "other"}},
+	} {
+		assert.Error(t, hostidentity.CheckLeafProfile(leaf(o), testHostName), name)
+	}
 }

@@ -125,6 +125,26 @@ const (
 	// RecoveredOpsRun: the agent starts a runner for every operation that
 	// recovery left runnable, so that no operation stays running without one.
 	RecoveredOpsRun Name = "recovered-ops-run"
+	// EnrolKeyNeverReplaced: enrolment never replaces an existing host key.
+	EnrolKeyNeverReplaced Name = "enrol-key-never-replaced"
+	// EnrolCSRKeyType: the enrolment request is built only for an ECDSA
+	// P-256 key.
+	EnrolCSRKeyType Name = "enrol-csr-key-type"
+	// EnrolCSRURIs: the enrolment request carries exactly the host URI and
+	// the manager's enrolment record URIs.
+	EnrolCSRURIs Name = "enrol-csr-uris"
+	// EnrolRequestKey: a certificate is installed only for a request made
+	// with the signer's key, refused before anything is written.
+	EnrolRequestKey Name = "enrol-request-key"
+	// EnrolNoReplace: an installed host certificate is replaced only on
+	// request.
+	EnrolNoReplace Name = "enrol-no-replace"
+	// EnrolSameEnrolment: a certificate for the enrolment that is already
+	// installed is not installed again.
+	EnrolSameEnrolment Name = "enrol-same-enrolment"
+	// EnrolLoaderCheck: the installed file is confirmed with the daemon's own
+	// loader, and removed or restored when the loader refuses it.
+	EnrolLoaderCheck Name = "enrol-loader-check"
 )
 
 // All lists every guard, in a fixed order.
@@ -137,5 +157,7 @@ func All() []Name {
 		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
 		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun,
+		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
+		EnrolLoaderCheck,
 	}
 }

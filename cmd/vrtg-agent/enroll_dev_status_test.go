@@ -1,3 +1,5 @@
+//go:build virtrigaud_dev
+
 /*
 Copyright 2026.
 
@@ -16,18 +18,5 @@ limitations under the License.
 
 package main
 
-import (
-	"fmt"
-	"io"
-
-	"github.com/projectbeskar/virtrigaud/internal/agent/config"
-)
-
-// enrollCommand is the placeholder of host enrolment, which arrives with a
-// later change; until then a development build enrols a fresh store at
-// start-up from its certificate and a development enrolment file.
-func enrollCommand(_ []string, stderr io.Writer) int {
-	_, _ = fmt.Fprintf(stderr, "vrtg-agent enroll is not available yet; a development build enrols at start-up with --%s\n",
-		config.FlagDevEnrolmentFile)
-	return 1
-}
+// enrollNoStepStatus is the exit status of "enroll" with no step: usage.
+const enrollNoStepStatus = 2

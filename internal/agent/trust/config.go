@@ -150,6 +150,18 @@ func KeyFileReader(uid uint32) func(string) ([]byte, error) {
 	}
 }
 
+// HandoffFileReader returns a reader for the files an administrator hands to
+// an enrolment step (the request, the issued certificate, the list of request
+// URIs): each file, checked on its open descriptor, must be a regular file
+// owned by root or by caller (the user running the step) that group and
+// others cannot write, of at most 1 MiB. A file another user could have
+// replaced, or planted in a shared directory, is refused.
+func HandoffFileReader(caller uint32) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		return safefile.Read(path, safefile.Policy{Owners: []uint32{0, caller}, DenyMode: 0o022, Max: maxTrustFileBytes})
+	}
+}
+
 // LoadConfig reads and validates the trust configuration in dir with read
 // (ReadFile when nil). Every file is required and none may be empty; the
 // grant anchors, the host identity issuers and the Provider identity issuers
