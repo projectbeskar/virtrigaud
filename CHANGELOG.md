@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-13 18:00] - Agent half of host enrolment: key, request, certificate install, enrolment from the certificate (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/enrol/`: `BuildCSR` (the certificate signing request: subject common name the Host's name, exactly the manager-published host URI and enrolment record URIs as subject alternative names, no other extension, signed with the host key as proof of possession; ECDSA P-256 only) and `Install` (checks the issued certificate against the request file, the pinned host identity issuer, the signer's public key and the profile, then writes `pki/host.crt` through a temporary file, sync and rename, and confirms it with the daemon's own loader, putting the previous file back or removing the new one when the loader refuses it). The checks reuse the manager's `hostidentity` rules, so the agent's request is what the manager approves and the agent refuses what the manager would refuse: chain, exact URI set including the record, other key, CA bit, usages other than server authentication, lifetime above 30 days, other subject, expired or not yet valid.
+- `internal/agent/signer/keygen.go`: `CreateKey` (ECDSA P-256, PKCS #8 PEM, mode `0600`, written to a private temporary file and linked into place without replacing, in a directory private to the signer's user; an existing key is never replaced) and `CheckKeyDir`.
+- `cmd/vrtg-agent/enroll.go`: `vrtg-agent enroll csr` (run as the signer's user: creates the host key if there is none and writes the request; the key never leaves that user) and `vrtg-agent enroll install` (run as the agent's user: runs the host checks, asks the running signer for its public key over the socket, never opens the key file, and installs the certificate; `--replace` for a re-enrolment). It replaces the `enroll` placeholder (`enroll_stub.go`).
+- `internal/agent/internal/guard/guard.go`: seven mutation guards for the enrolment checks (`enrol-key-never-replaced`, `enrol-csr-key-type`, `enrol-csr-uris`, `enrol-request-key`, `enrol-no-replace`, `enrol-same-enrolment`, `enrol-loader-check`).
+- Tests: `internal/agent/enrol/` (the request round-tripped through the manager's `hostidentity.Authorise`; install refusals for another CA, other enrolment id, other provider, other host, missing and extra URIs, other key, CA bit, excessive lifetime, client authentication usage, other subject, expired, garbage; replacement rules; the loader confirmation; a source check that the package never names a key loader or the key file), `internal/agent/signer/keygen_test.go`, `cmd/vrtg-agent/enroll_test.go` (the offline flow end to end with a test issuer and an in-process signer, user and flag refusals, the host check that refuses a host where the agent can read the key), `internal/agent/daemon/enrolment_test.go` and `enrolment_dev_test.go` (enrolment without the development file, re-enrolment on reload and on restart, a used enrolment id refused, the freeze of open operations).
+
+### Changed
+- `internal/agent/daemon/daemon.go`: the agent derives its active enrolment from the host certificate at start (step 6) and on reload. A store never enrolled is enrolled at epoch 1 (or at the development enrolment file's epoch); a store with another or no active enrolment is re-enrolled with the next epoch, which freezes the previous enrolment's open operations in bounded chunks first; an enrolment id the store has used is refused (answers stay unsigned at start; the reload is refused with the new reason `ReenrolmentRefused` and the running credentials stay). A reload of a same-host certificate with a new enrolment re-enrols before it replaces the credentials. A store whose active enrolment is for another host is never touched. A certificate for another host is still refused (`EnrolmentChanged`).
+- `internal/agent/config/config.go`, `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`: the development enrolment file now only supplies the first enrolment's start epoch and predecessors; the enrolment section of the agent doc describes the two-user flow, the checks and the re-enrolment semantics.
+
+### Why
+The manager half of enrolment was merged; the agent could not produce a request or install a certificate, and relied on a development enrolment file. The key must stay with the signer's user, so the request is signed where the key is created rather than through the signer's digest-only socket.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-13 12:00] - Operation store: clock floor inside the store, bounded re-enrolment freeze (development builds only)
 **Author:** @wrkode (William Rizzo)
 

@@ -11,9 +11,8 @@ Everything here is used only by development builds: a manager built with the
 `virtrigaud_dev` build tag and started with the `--dev-host-enrolment-*` flags.
 A release manager refuses those flags at startup, renders no agent credentials
 into any inventory, and leaves the new Host fields unused. The agent side
-(generating the key and the CSR on the host) is not part of this page; the
-agent process itself is described in
-[`per-host-agent-development.md`](per-host-agent-development.md).
+(generating the key and the CSR on the host, installing the certificate) is
+in [`per-host-agent-development.md`](per-host-agent-development.md#enrolment).
 
 ## Host fields
 
@@ -251,5 +250,9 @@ verb satisfies `enrol`, so whoever holds one can enrol any Host in its scope.
 
 ## Not done yet
 
-Rotation, re-enrolment, removing pins on revocation, revoking at the CA, and
-the agent side (key generation, CSR, certificate installation) are later work.
+Rotation, removing pins on revocation, and revoking at the CA are later work.
+The agent side (key generation, CSR, certificate installation, deriving the
+enrolment record) is described in
+[`per-host-agent-development.md`](per-host-agent-development.md#enrolment); the
+manager does not yet support enrolling a Host that is already enrolled (a
+re-enrolment is refused with `AlreadyEnrolled`).
