@@ -134,11 +134,40 @@ has two phases:
 After that the floor is committed again only when it has advanced by one
 minute since the last commit, at most once per observe period (5 seconds)
 even if the clock jumps, and once at drain. A crash loses at most an unsaved
-advance of about one minute plus an observe period, never a committed value;
-within the same boot, the boot-time credit restores that advance after a
-restart, so only a power loss or a crash followed by a reboot with the wall
-clock behind loses it. A quarantined store cannot commit; the floor then keeps
-running in memory.
+advance of about one minute plus an observe period, never a committed value.
+Within the same boot, the boot-time credit restores that advance after a
+restart. After a power loss, or a crash followed by a reboot (another
+`boot_id`), no credit is possible, so when the agent opens the store in a new
+boot it raises the stored floor by that bound (one minute plus the observe
+period, 65 seconds), but never beyond the wall clock plus the floor's ahead
+bound (5 minutes): the floor is then not lower than it was before the crash,
+and a correct clock is never pushed into the ahead state by the raise. The
+bound against grant expiry: with this raise, an expired grant-signing key
+stays expired across a power loss unless the wall clock was rolled back by
+more than 5 minutes and the host then ran on that clock; with the wall clock
+behind by more than the ahead bound the floor is simply ahead (below).
+
+A quarantined store cannot commit; the floor then keeps running in memory (a
+commit that fails because the store was quarantined stops persisting, it does
+not fail the floor).
+
+The caveat of every store-held value applies: a joint restore of the store and
+its anchor log is not detected on the host (the manager-side check that a
+host's reported chain position does not go backwards covers it), and that
+restore brings back an older floor with it.
+
+**Floor ahead of the clock.** If the floor is ahead of the wall clock by more
+than 5 minutes (the clock was rolled back, or jumped forward and was
+corrected), the floor is `ClockFloorAhead`: grants are refused and the host
+reports state `AGENT_STATE_UNATTESTED` with reason `clock_floor_ahead`.
+Reads (`Hello`, `GetHostInfo`) keep answering, so the manager can see why: the
+per-call check of the Provider's certificate uses the later of the host clock
+and the floor only while the floor is healthy; while it is ahead, failed or
+missing it uses the host clock, and every mutating call is refused with the
+reason `clock_floor_ahead` (`clock_floor_unavailable` for a failed or missing
+floor). Recovery is to correct the wall clock; once it reaches the floor the
+host is ready again with no restart. If the clock cannot be corrected, the
+only other way is to enrol the host again, which starts a new floor.
 
 ### Re-enrolment freeze
 
@@ -146,12 +175,18 @@ Re-enrolling freezes every operation of the previous enrolment that is still
 open (retired when it has no step intent, otherwise outcome unknown) before the
 new enrolment becomes active. The freeze commits in chunks of at most 128
 operations, so one transaction's size and latency do not depend on how many
-operations were open. The first chunk marks the old enrolment frozen (no
+operations were open, and one transaction reads at most 8 times that many
+records (open or finished: a freeze scan over a predecessor with very many
+finished operations advances its cursor over them in several transactions, and
+may freeze none in some of them). The first chunk marks the old enrolment frozen (no
 enrolment is active from then on, so the host refuses every operation) and
 writes a freeze-in-progress marker that each chunk advances. A crash between
 chunks leaves the marker: recovery finishes the freeze at the next start, or
 the next re-enrolment does, before the new enrolment is activated. Every
-operation is frozen once.
+operation is frozen once. A freeze that stops partway without a crash keeps
+the host refusing every operation, and the host reports `AGENT_STATE_UNATTESTED`
+with reason `freeze_incomplete`. A marker that cannot be read quarantines the
+store (`inconsistent_store`) and keeps the host refusing; reads still answer.
 
 ### Host checks
 
@@ -289,9 +324,12 @@ is not the one the certificate names, reads answer unsigned.
   decided when the agent runs real VMs.
 - The release-artefact test checks the release workflow, the CI workflow and
   the `Makefile` only.
-- A failed clock floor reads as no floor, so the per-call check of the
-  Provider's certificate (which uses the later of the host clock and the
-  floor) falls back to the host clock; grants are refused in that state.
+- A failed or missing clock floor (the latter when the store could not give
+  the agent one, which also quarantines it) reads as no floor: the per-call
+  check of the Provider's certificate, which uses the later of the host clock
+  and a healthy floor, falls back to the host clock for reads, and every
+  mutating call is refused (`clock_floor_unavailable`); grants are refused
+  too.
 - The provisioning marker is checked with `lstat` and then read with
   `O_NOFOLLOW`, not checked on the open descriptor; it holds no secret.
 - `GetHostInfo` reports no inventory (CPU, memory, storage, components).
