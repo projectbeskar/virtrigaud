@@ -19,8 +19,8 @@ package fake
 import (
 	"context"
 	"crypto/x509"
-	"time"
 	"fmt"
+	"time"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/test/conformance/clustered"

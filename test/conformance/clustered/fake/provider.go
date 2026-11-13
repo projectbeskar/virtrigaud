@@ -121,7 +121,9 @@ type provider struct {
 	// cur is the signed call being executed, while w.mu is held.
 	cur *admission
 	// placements are the hosts' placement bindings (identity mode).
-	placements interface{ Binding(host, vmUID string) []byte }
+	placements interface {
+		Binding(host, vmUID string) []byte
+	}
 }
 
 func (p *provider) v(x Violation) bool { return p.violations[x] }

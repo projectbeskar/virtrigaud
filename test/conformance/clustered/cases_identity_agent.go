@@ -49,7 +49,9 @@ func requireSigned(e *Env, s SignedOpStatus, what string) *providerv1.OperationA
 }
 
 // operationState is the state a verified answer names.
-func operationState(a *providerv1.OperationAnswer) providerv1.OperationRecordState { return a.GetState() }
+func operationState(a *providerv1.OperationAnswer) providerv1.OperationRecordState {
+	return a.GetState()
+}
 
 func agentIdentityCases() []Case {
 	return []Case{
