@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-13 15:30] - Adopters list
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `ADOPTERS.md`: a list of organizations using VirtRigaud, in the format common to CNCF projects (organization, contact, since, stage, description of use), with how to add, update or remove an entry.
+- `README.md`: an Adopters section linking to it.
+
+### Why
+Lets new users see where the project is in use and lets adopters list themselves through a pull request.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-11-13 00:19] - Operation store journal: verify every record, scrub, and harder open (development builds only)
 **Author:** @wrkode (William Rizzo)
 
