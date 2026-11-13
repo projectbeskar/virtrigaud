@@ -43,6 +43,7 @@ the VirtRigaud API packages.
 | `--state-dir` | `/var/lib/virtrigaud-agent` | State directory: clean absolute path. |
 | `--listen-address` | `:9460` | Address served to the Provider. |
 | `--drain-timeout` | `30s` | How long a stop waits for running calls. |
+| `--scrub-interval` | `1h` | How often the operation store reads every record and verifies it against its live-state digest. Must be positive; the scrub cannot be switched off. A scrub that finds damage quarantines the store (`journal_corrupt`), and the service status shows it. |
 | `--executor` | `none` | `none`, or `fake` in a development build. |
 | `--dev-trust-dir` | (empty: `/usr/share/virtrigaud/trust`) | Development builds only: another trust configuration directory. The start-up checks still apply to it. |
 | `--dev-enrolment-file` | (empty) | Development builds only: the development enrolment file. |

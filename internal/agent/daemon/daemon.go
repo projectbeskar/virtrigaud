@@ -51,6 +51,17 @@ limitations under the License.
 // so that systemd keeps the agent running to answer reads instead of
 // restarting it.
 //
+// # Scrub
+//
+// While the agent runs, the operation store is scrubbed every
+// --scrub-interval (default one hour; it cannot be switched off, because the
+// scrub is what finds a damaged record that nothing reads). A scrub reads
+// every record, compares their digest sum with the store's recorded live-state
+// digest and verifies the chain's commitment to it. One goroutine runs it, so
+// scrubs never overlap, and it stops with the agent's context. A scrub that
+// finds damage quarantines the store (journal_corrupt): the loss is logged and
+// the service status shows it, like any other quarantine.
+//
 // # Signals
 //
 // SIGTERM or SIGINT drains: the server stops accepting calls and waits for
@@ -379,7 +390,18 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	go func() { serveErr <- srv.Serve(lis) }()
 	d.log.Info("serving", "address", lis.Addr().String())
 
+	// The scrub runs until the agent drains; the drain waits for it, so it
+	// never reads a closed store.
+	scrubCtx, stopScrub := context.WithCancel(ctx)
+	scrubDone := make(chan struct{})
+	go func() {
+		defer close(scrubDone)
+		d.scrubLoop(scrubCtx, agent)
+	}()
+
 	drain := func() {
+		stopScrub()
+		<-scrubDone
 		_ = d.notifier.Notify(systemd.NotifyStopping)
 		dctx, cancel := context.WithTimeout(context.Background(), d.o.Config.DrainTimeout)
 		defer cancel()
@@ -431,6 +453,51 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 				if err := f.Observe(ctx); err != nil {
 					d.log.Error(err, "raise the clock floor")
 				}
+			}
+		}
+	}
+}
+
+// scrubInterval is the period of the store scrub.
+func (d *daemon) scrubInterval() time.Duration {
+	if d.o.Config.ScrubInterval > 0 {
+		return d.o.Config.ScrubInterval
+	}
+	return config.DefaultScrubInterval
+}
+
+// scrubLoop scrubs the operation store every scrub interval until ctx ends.
+// It is one goroutine, so a scrub never overlaps the next one: a tick that
+// arrives during a scrub waits for it. A scrub that finds damage has
+// quarantined the store; the loss is logged by the store's event and the
+// service status reflects it like any other loss. A store that is already
+// lost is not scrubbed again.
+func (d *daemon) scrubLoop(ctx context.Context, agent *agentState) {
+	log := d.log.WithName("scrub")
+	ticker := time.NewTicker(d.scrubInterval())
+	defer ticker.Stop()
+	j := agent.store.Journal()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		before, _ := j.State()
+		if before == journal.StateLost {
+			continue
+		}
+		err := j.Scrub(ctx)
+		switch {
+		case err == nil:
+			log.V(1).Info("journal scrub passed")
+		case ctx.Err() != nil:
+			return
+		default:
+			after, reason := j.State()
+			log.Error(err, "journal scrub failed", "state", after.String(), "reason", string(reason))
+			if after == journal.StateLost {
+				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent))
 			}
 		}
 	}

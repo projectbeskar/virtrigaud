@@ -19,6 +19,7 @@ package config_test
 import (
 	"flag"
 	"testing"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 )
@@ -41,6 +42,9 @@ func TestDefaults(t *testing.T) {
 	if c.StateDir != config.DefaultStateDir || c.Executor != config.ExecutorNone || c.PKIDir() != config.DefaultStateDir+"/pki" {
 		t.Fatalf("defaults = %+v", c)
 	}
+	if c.ScrubInterval != config.DefaultScrubInterval || config.DefaultScrubInterval != time.Hour {
+		t.Fatalf("scrub interval = %v", c.ScrubInterval)
+	}
 	if d, err := c.TrustDir(); err != nil || d != "/usr/share/virtrigaud/trust" {
 		t.Fatalf("trust dir = %q, %v", d, err)
 	}
@@ -55,7 +59,7 @@ func TestDefaults(t *testing.T) {
 
 func TestValidateRefusals(t *testing.T) {
 	for _, args := range [][]string{
-		{"--state-dir=relative"}, {"--state-dir=/var/lib/x/"}, {"--listen-address="}, {"--drain-timeout=0s"},
+		{"--state-dir=relative"}, {"--state-dir=/var/lib/x/"}, {"--listen-address="}, {"--drain-timeout=0s"}, {"--scrub-interval=0s"}, {"--scrub-interval=-1m"},
 		{"--executor=libvirt"}, {"--dev-trust-dir=relative"},
 	} {
 		if err := parse(t, args...).Validate(); err == nil {
@@ -76,5 +80,12 @@ func TestParseDevEnrolment(t *testing.T) {
 		if _, err := config.ParseDevEnrolment([]byte(bad)); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
+	}
+}
+
+func TestScrubIntervalFlag(t *testing.T) {
+	c := parse(t, "--scrub-interval=90s")
+	if err := c.Validate(); err != nil || c.ScrubInterval != 90*time.Second {
+		t.Fatalf("%v, %v", c.ScrubInterval, err)
 	}
 }
