@@ -172,7 +172,7 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	digest := sha256.Sum256(m)
 	sig, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrSign, err)
+		return nil, fmt.Errorf("%w: %w", ErrSign, err)
 	}
 	if sig, err = grantverify.NormalizeLowS(sig, elliptic.P256()); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSign, err)

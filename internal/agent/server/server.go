@@ -70,6 +70,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
@@ -575,6 +576,12 @@ func errorClass(err error) string {
 		return "inventory_too_large"
 	case errors.Is(err, answer.ErrInvalidInventory):
 		return "invalid_inventory"
+	case errors.Is(err, signer.ErrRateLimited):
+		return "signer_rate_limited"
+	case errors.Is(err, signer.ErrUnavailable):
+		return "signer_unavailable"
+	case errors.Is(err, signer.ErrRefused):
+		return "signer_refused"
 	case errors.Is(err, answer.ErrSign):
 		return "sign"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
