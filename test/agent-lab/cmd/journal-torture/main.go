@@ -53,6 +53,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -479,6 +480,10 @@ func cmdLWMarks(args []string) int {
 	}
 	nr := binary.LittleEndian.Uint64(hdr[16:])
 	ss := int64(binary.LittleEndian.Uint32(hdr[24:]))
+	if ss < 512 || ss&(ss-1) != 0 {
+		fmt.Fprintf(os.Stderr, "implausible sector size %d\n", ss)
+		return 4
+	}
 	off := ss
 	ent := make([]byte, 32)
 	w := bufio.NewWriter(os.Stdout)
@@ -497,6 +502,11 @@ func cmdLWMarks(args []string) int {
 		off += ss
 		switch {
 		case flags&lwFlagMark != 0:
+			// The mark name sits in the entry's own sector, after its header.
+			if dataLen > uint64(ss-32) {
+				fmt.Fprintf(os.Stderr, "mark %d: implausible name length %d\n", idx, dataLen)
+				return 4
+			}
 			name := make([]byte, dataLen)
 			if _, err := f.ReadAt(name, off-ss+32); err != nil {
 				fmt.Fprintf(os.Stderr, "mark %d: %v\n", idx, err)
@@ -510,8 +520,13 @@ func cmdLWMarks(args []string) int {
 			// A discard carries no data.
 		default:
 			// Data follows the entry header; nr_sectors counts log sectors
-			// (as replay-log reads it).
-			off += int64(nrSectors) * ss
+			// (as replay-log reads it). A count that would overflow the
+			// offset is a damaged log.
+			if nrSectors > uint64((math.MaxInt64-off)/ss) {
+				fmt.Fprintf(os.Stderr, "entry %d: implausible sector count %d\n", idx, nrSectors)
+				return 4
+			}
+			off += int64(nrSectors) * ss // #nosec G115 -- bounded by the check above
 		}
 	}
 	if err := w.Flush(); err != nil {
