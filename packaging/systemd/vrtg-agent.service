@@ -5,11 +5,23 @@
 # serves the Provider that routes to this host and keeps its operation store
 # in its state directory. It is not upheld by any other unit, so an operator
 # can stop it for maintenance.
+#
+# It holds no host private key: the host key is in the separate signer
+# process (vrtg-agent-signer.service), which the agent reaches over a Unix
+# socket. The agent cannot sign a TLS handshake or an answer without it, so
+# starting the agent starts the signer first (Wants= with After=; the signer
+# is Type=notify, so After= waits until it serves). The dependency is Wants=,
+# not Requires=: with Requires= every restart of the signer (a crash, or a
+# key reload by restart) would also restart the agent and take down its
+# operation store and its Provider connections, while the agent already
+# fails closed on its own when the signer is away, answering without a
+# signature and refusing TLS handshakes, and signs again when the signer
+# returns.
 [Unit]
 Description=VirtRigaud per-host agent (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
-Wants=network-online.target
-After=network-online.target local-fs.target
+Wants=network-online.target vrtg-agent-signer.service
+After=network-online.target local-fs.target vrtg-agent-signer.service
 StartLimitIntervalSec=300
 StartLimitBurst=10
 
@@ -35,7 +47,8 @@ TasksMax=128
 MemoryMax=256M
 
 # Hardening. The agent needs no privilege: it reads its own state and its
-# read-only trust configuration and listens on one TCP port.
+# read-only trust configuration, listens on one TCP port and connects to the
+# signer's Unix socket.
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

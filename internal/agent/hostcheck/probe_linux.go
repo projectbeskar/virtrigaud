@@ -206,6 +206,20 @@ func (System) Writable(path string) (bool, error) {
 	return false, fmt.Errorf("access %s: %w", path, err)
 }
 
+// Readable implements Probe with access(2) and R_OK. A path that does not
+// exist, is not a directory on the way or cannot be reached is "not
+// readable"; any other error is reported.
+func (System) Readable(path string) (bool, error) {
+	err := unix.Access(path, unix.R_OK)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM), errors.Is(err, unix.ENOENT), errors.Is(err, unix.ENOTDIR):
+		return false, nil
+	}
+	return false, fmt.Errorf("access %s: %w", path, err)
+}
+
 // EUID implements Probe.
 func (System) EUID() uint32 {
 	return uint32(os.Geteuid()) // #nosec G115 -- a uid is a 32-bit value on Linux

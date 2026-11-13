@@ -19,6 +19,7 @@ package daemon_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -44,6 +45,8 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck/hostchecktest"
+	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -144,25 +147,71 @@ type host struct {
 	logs     *logBuffer
 	hooks    daemon.Hooks
 	boot     bootClock
+	signer   *testSigner
+	// signerUID is the uid the agent expects the signer to have.
+	signerUID uint32
+}
+
+// testSigner is a real signer process stand-in: the signer's server on a
+// real Unix socket, which the agent reaches like the real one.
+type testSigner struct {
+	socket string
+	srv    *signer.Server
+	cancel context.CancelFunc
+	done   chan error
+}
+
+// startSigner serves key on socket until stop.
+func startSigner(t *testing.T, socket string, key *ecdsa.PrivateKey) *testSigner {
+	t.Helper()
+	srv, err := signer.NewServer(signer.ServerOptions{Key: key, AllowedUID: testUID, Log: logr.Discard()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lis, err := signer.Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &testSigner{socket: socket, srv: srv, cancel: cancel, done: make(chan error, 1)}
+	go func() { s.done <- srv.Serve(ctx, lis) }()
+	t.Cleanup(s.stop)
+	return s
+}
+
+// stop stops the signer and waits for it.
+func (s *testSigner) stop() {
+	s.cancel()
+	<-s.done
+	s.done <- nil
 }
 
 func newHost(t *testing.T) *host {
 	t.Helper()
 	daemon.AllowTestOverrides(t)
+	daemon.SetSignerStartWait(t, 300*time.Millisecond)
 	root := t.TempDir()
 	h := &host{t: t, pki: trusttest.New(t), stateDir: filepath.Join(root, "state"), trustDir: filepath.Join(root, "trust"),
 		dev: &config.DevEnrolment{StartEpoch: 2}, exec: none.Executor{}, notes: &notifications{}, logs: &logBuffer{},
-		boot: bootClock{start: time.Now()}}
+		boot: bootClock{start: time.Now()}, signerUID: testUID}
 	if err := os.MkdirAll(h.stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	h.pki.WriteTrust(t, h.trustDir)
 	h.pki.WritePKI(t, filepath.Join(h.stateDir, config.PKIDirName))
+	sockDir, err := os.MkdirTemp("", "vsg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	h.signer = startSigner(t, filepath.Join(sockDir, "signer.sock"), h.pki.HostKey)
 	if err := os.WriteFile(filepath.Join(h.stateDir, hostcheck.HostMarkerFile), []byte(h.pki.HostURI+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h.cfg = &config.Config{StateDir: h.stateDir, ListenAddress: "127.0.0.1:0", DrainTimeout: 5 * time.Second, Executor: config.ExecutorNone}
-	h.probe = hostchecktest.Healthy(hostcheck.Config{StateDir: h.stateDir, PKIDir: h.cfg.PKIDir(), TrustDir: h.trustDir, UID: testUID}, h.pki.HostURI)
+	h.cfg = &config.Config{StateDir: h.stateDir, ListenAddress: "127.0.0.1:0", DrainTimeout: 5 * time.Second, Executor: config.ExecutorNone,
+		SignerSocket: h.signer.socket, SignerUser: "signer", SignerKeyFile: filepath.Join(root, "signer-state", trust.FileHostKey)}
+	h.probe = hostchecktest.Healthy(hostcheck.Config{StateDir: h.stateDir, PKIDir: h.cfg.PKIDir(), TrustDir: h.trustDir, UID: testUID,
+		SignerKeyFile: h.cfg.SignerKeyFile, SignerSocketDir: filepath.Dir(h.cfg.SignerSocket), SignerUID: testUID}, h.pki.HostURI)
 	h.probe.Edit(func(f *hostchecktest.Fake) { f.UID = probeEUID() })
 	return h
 }
@@ -189,10 +238,11 @@ func (h *host) start() *running {
 	hooks := h.hooks
 	hooks.Started = func(s providerv1.AgentState) { r.started <- s }
 	uid := testUID
+	signerUID := h.signerUID
 	opts := daemon.Options{
 		Config: h.cfg, Probe: h.probe, UID: &uid, Executor: h.exec, DevEnrolment: h.dev, Notifier: h.notes,
 		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, TrustFileOwner: &uid, Hooks: hooks,
-		Floor: daemon.FloorSources{Wall: wall{}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
+		SignerUID: &signerUID, Floor: daemon.FloorSources{Wall: wall{}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
 	}
 	go func() {
 		r.done <- daemon.Run(context.Background(), opts, r.signals)

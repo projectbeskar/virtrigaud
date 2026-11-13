@@ -104,3 +104,31 @@ func TestSystemProbe(t *testing.T) {
 		t.Errorf("readdir = %v, %v", names, err)
 	}
 }
+
+// TestSystemProbeReadable: the real probe tells a readable file from one the
+// process cannot read, and from a path that does not exist.
+func TestSystemProbeReadable(t *testing.T) {
+	var p System
+	dir := t.TempDir()
+	f := filepath.Join(dir, "k")
+	if err := os.WriteFile(f, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := p.Readable(f); err != nil || !r {
+		t.Errorf("own file readable = %v, %v", r, err)
+	}
+	if err := os.Chmod(f, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() != 0 {
+		if r, err := p.Readable(f); err != nil || r {
+			t.Errorf("mode 000 file readable = %v, %v", r, err)
+		}
+	}
+	if r, err := p.Readable(filepath.Join(dir, "absent")); err != nil || r {
+		t.Errorf("absent file readable = %v, %v", r, err)
+	}
+	if r, err := p.Readable(filepath.Join(f, "below")); err != nil || r {
+		t.Errorf("path below a file readable = %v, %v", r, err)
+	}
+}

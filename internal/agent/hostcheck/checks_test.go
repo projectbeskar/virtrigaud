@@ -26,8 +26,9 @@ import (
 )
 
 const (
-	testUID     = 1500
-	testHostURI = "spiffe://example.test/virtrigaud/host/ns/host-a"
+	testUID       = 1500
+	testSignerUID = 1501
+	testHostURI   = "spiffe://example.test/virtrigaud/host/ns/host-a"
 )
 
 var testCfg = hostcheck.Config{
@@ -35,6 +36,10 @@ var testCfg = hostcheck.Config{
 	PKIDir:   "/var/lib/virtrigaud-agent/pki",
 	TrustDir: "/usr/share/virtrigaud/trust",
 	UID:      testUID,
+
+	SignerKeyFile:   "/var/lib/virtrigaud-signer/host.key",
+	SignerSocketDir: "/run/virtrigaud-signer",
+	SignerUID:       testSignerUID,
 }
 
 func healthy() *hostchecktest.Fake { return hostchecktest.Healthy(testCfg, testHostURI) }
@@ -130,6 +135,31 @@ func TestStartRefusals(t *testing.T) {
 			f.Files[pkiKey] = hostcheck.FileInfo{Mode: fs.ModeSymlink | 0o777, UID: testUID}
 		}, hostcheck.ReasonPKIInsecure},
 		{"pki dir missing", func(f *hostchecktest.Fake) { delete(f.Files, testCfg.PKIDir) }, hostcheck.ReasonPKIInsecure},
+		// The host key belongs to the signer.
+		{"agent can read the signer's key file", func(f *hostchecktest.Fake) {
+			f.ReadablePaths[testCfg.SignerKeyFile] = true
+		}, hostcheck.ReasonHostKeyReadable},
+		{"agent can read a key file in its own pki dir", func(f *hostchecktest.Fake) {
+			f.ReadablePaths[filepath.Join(testCfg.PKIDir, "host.key")] = true
+		}, hostcheck.ReasonHostKeyReadable},
+		{"a key file in the agent's pki dir, even unreadable", func(f *hostchecktest.Fake) {
+			f.Files[filepath.Join(testCfg.PKIDir, "host.key")] = hostcheck.FileInfo{Mode: 0o600, UID: testUID}
+		}, hostcheck.ReasonHostKeyReadable},
+		{"no key file path configured", func(*hostchecktest.Fake) {}, hostcheck.ReasonHostKeyReadable},
+		// The signer's socket directory.
+		{"socket dir owned by the agent", func(f *hostchecktest.Fake) {
+			f.Files[testCfg.SignerSocketDir] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o750, UID: testUID}
+		}, hostcheck.ReasonSignerSocketInsecure},
+		{"socket dir open to others", func(f *hostchecktest.Fake) {
+			f.Files[testCfg.SignerSocketDir] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o755, UID: testSignerUID}
+		}, hostcheck.ReasonSignerSocketInsecure},
+		{"socket dir writable by its group", func(f *hostchecktest.Fake) {
+			f.Files[testCfg.SignerSocketDir] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o770, UID: testSignerUID}
+		}, hostcheck.ReasonSignerSocketInsecure},
+		{"socket dir is a symlink", func(f *hostchecktest.Fake) {
+			f.Files[testCfg.SignerSocketDir] = hostcheck.FileInfo{Mode: fs.ModeSymlink | 0o777, UID: testSignerUID}
+		}, hostcheck.ReasonSignerSocketInsecure},
+		{"socket dir missing", func(f *hostchecktest.Fake) { delete(f.Files, testCfg.SignerSocketDir) }, hostcheck.ReasonSignerSocketInsecure},
 		// Trust configuration.
 		{"trust file writable by the agent", func(f *hostchecktest.Fake) { f.WritablePaths[trustFile] = true }, hostcheck.ReasonTrustConfigInsecure},
 		{"trust dir writable by the agent", func(f *hostchecktest.Fake) { f.WritablePaths[testCfg.TrustDir] = true }, hostcheck.ReasonTrustConfigInsecure},
@@ -155,7 +185,14 @@ func TestStartRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := healthy()
 			p.Edit(tc.edit)
-			err := run(p)
+			cfg := testCfg
+			if tc.name == "no key file path configured" {
+				cfg.SignerKeyFile = ""
+			}
+			err := hostcheck.Run(p, cfg)
+			if err == nil {
+				err = hostcheck.CheckHostMarker(p, cfg.StateDir, testHostURI, testUID)
+			}
 			f, ok := hostcheck.AsFailure(err)
 			if !ok {
 				t.Fatalf("err = %v, want a refusal with %s", err, tc.reason)

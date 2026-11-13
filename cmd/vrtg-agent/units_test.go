@@ -119,6 +119,125 @@ func TestAgentUnitProperties(t *testing.T) {
 	}
 }
 
+// TestAgentUnitOrdersAfterTheSigner: the agent wants the signer and starts
+// after it, but does not require it: a signer restart must not restart the
+// agent, which fails closed on its own while the signer is away.
+func TestAgentUnitOrdersAfterTheSigner(t *testing.T) {
+	const signerUnit = "vrtg-agent-signer.service"
+	u := parseUnit(t, "vrtg-agent.service")
+	if !slices.ContainsFunc(u["Unit"]["Wants"], func(v string) bool { return slices.Contains(strings.Fields(v), signerUnit) }) {
+		t.Errorf("[Unit] Wants = %v, want %s", u["Unit"]["Wants"], signerUnit)
+	}
+	if !slices.ContainsFunc(u["Unit"]["After"], func(v string) bool { return slices.Contains(strings.Fields(v), signerUnit) }) {
+		t.Errorf("[Unit] After = %v, want %s", u["Unit"]["After"], signerUnit)
+	}
+	for section, keys := range u {
+		for _, k := range []string{"Requires", "Requisite", "BindsTo", "PartOf", "PropagatesStopTo", "StopPropagatedFrom"} {
+			if slices.ContainsFunc(keys[k], func(v string) bool { return strings.Contains(v, "signer") }) {
+				t.Errorf("[%s] %s refers to the signer: its restart would restart the agent", section, k)
+			}
+		}
+	}
+}
+
+// TestSignerUnitProperties: the signer's unit runs as its own user, not the
+// agent's; is a notify service restarted always with a bounded start rate;
+// has no new privileges, no capability, no network (private network
+// namespace and AF_UNIX only) and a syscall filter; reaches only its own
+// state and the socket directory; and neither delegates a cgroup nor creates
+// a scope.
+func TestSignerUnitProperties(t *testing.T) {
+	u := parseUnit(t, "vrtg-agent-signer.service")
+	for key, want := range map[string]string{
+		"Type": "notify", "NotifyAccess": "main", "NoNewPrivileges": "yes", "Restart": "always", "RestartSec": "2",
+		"KillMode": "process", "CapabilityBoundingSet": "", "AmbientCapabilities": "", "User": "virtrigaud-signer",
+		"Group": "virtrigaud-signer", "StateDirectory": "virtrigaud-signer", "StateDirectoryMode": "0700",
+		"ReadWritePaths": "/run/virtrigaud-signer", "UMask": "0077", "ProtectSystem": "strict", "ProtectHome": "yes",
+		"RestartPreventExitStatus": "2", "ProtectProc": "invisible", "PrivateIPC": "yes", "PrivateNetwork": "yes",
+		"PrivateTmp": "yes", "PrivateDevices": "yes", "RestrictAddressFamilies": "AF_UNIX", "MemoryDenyWriteExecute": "yes",
+		"SystemCallArchitectures": "native", "RestrictNamespaces": "yes", "LockPersonality": "yes", "RestrictSUIDSGID": "yes",
+		"ProtectKernelTunables": "yes", "ProtectKernelModules": "yes", "ProtectKernelLogs": "yes", "ProtectControlGroups": "yes",
+		"ProtectClock": "yes", "ProtectHostname": "yes", "RestrictRealtime": "yes",
+	} {
+		if got := u.one(t, "Service", key); got != want {
+			t.Errorf("[Service] %s = %q, want %q", key, got, want)
+		}
+	}
+	if got := u["Service"]["SystemCallFilter"]; !slices.Equal(got, []string{"@system-service", "~@privileged"}) {
+		t.Errorf("SystemCallFilter = %v", got)
+	}
+	for key, want := range map[string]string{"StartLimitIntervalSec": "300", "StartLimitBurst": "10"} {
+		if got := u.one(t, "Unit", key); got != want {
+			t.Errorf("[Unit] %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"LimitNOFILE", "TasksMax", "MemoryMax"} {
+		if u.one(t, "Service", key) == "" {
+			t.Errorf("[Service] %s is empty", key)
+		}
+	}
+	if !strings.HasSuffix(u.one(t, "Service", "ExecStart"), "/vrtg-agent signer") {
+		t.Errorf("ExecStart = %q", u.one(t, "Service", "ExecStart"))
+	}
+	// The signer is not the agent's user and shares nothing of its.
+	a := parseUnit(t, "vrtg-agent.service")
+	for _, key := range []string{"User", "Group", "StateDirectory"} {
+		if u.one(t, "Service", key) == a.one(t, "Service", key) {
+			t.Errorf("[Service] %s is the agent's: the two must be separate users", key)
+		}
+	}
+	// PrivateUsers would hide the agent's uid from SO_PEERCRED.
+	for _, key := range []string{"Delegate", "Slice", "DelegateSubgroup", "PrivateUsers"} {
+		if _, ok := u["Service"][key]; ok {
+			t.Errorf("[Service] %s is set", key)
+		}
+	}
+	for _, s := range u {
+		for k, vs := range s {
+			for _, v := range vs {
+				if strings.Contains(v, ".scope") || strings.Contains(k, "Scope") {
+					t.Errorf("%s=%s names a scope", k, v)
+				}
+			}
+		}
+	}
+	// It reaches no unit of the agent's.
+	for section, keys := range u {
+		for _, k := range dependencyKeys {
+			for _, v := range keys[k] {
+				if strings.Contains(v, "vrtg-agent.service") || strings.Contains(v, "vrtg-vm-shutdown") {
+					t.Errorf("[%s] %s=%s: the signer depends on nothing of the agent", section, k, v)
+				}
+			}
+		}
+	}
+}
+
+// TestSysusersAndTmpfilesCoverTheSigner: the signer's user, its state
+// directory and the socket directory (group the agent's, setgid, nothing for
+// others) are declared.
+func TestSysusersAndTmpfilesCoverTheSigner(t *testing.T) {
+	sysusers, err := os.ReadFile(filepath.Join(unitDir, "virtrigaud-agent.sysusers.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sysusers), "u virtrigaud-signer ") || !strings.Contains(string(sysusers), "u virtrigaud-agent ") {
+		t.Errorf("sysusers does not declare both users:\n%s", sysusers)
+	}
+	tmpfiles, err := os.ReadFile(filepath.Join(unitDir, "virtrigaud-agent.tmpfiles.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"d /var/lib/virtrigaud-signer     0700 virtrigaud-signer virtrigaud-signer -",
+		"d /run/virtrigaud-signer         2750 virtrigaud-signer virtrigaud-agent -",
+	} {
+		if !strings.Contains(string(tmpfiles), want) {
+			t.Errorf("tmpfiles lacks %q", want)
+		}
+	}
+}
+
 // TestShutdownUnitProperties: the shutdown unit runs shutdown-vms as its
 // stop action, has no new privileges and no capability, and neither wants,
 // requires, binds to nor orders itself against the agent's unit, so it never

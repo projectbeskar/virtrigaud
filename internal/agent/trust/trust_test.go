@@ -17,6 +17,10 @@ limitations under the License.
 package trust_test
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -51,7 +55,7 @@ func TestLoadConfigAndIdentity(t *testing.T) {
 	if len(cfg.Providers) != 1 || cfg.Providers[0] != trusttest.ProviderIdentity() {
 		t.Fatalf("providers = %+v", cfg.Providers)
 	}
-	id, err := trust.LoadIdentity(pkiDir, cfg, time.Now(), nil)
+	id, err := trust.LoadIdentity(pkiDir, cfg, time.Now(), nil, p.HostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +139,7 @@ func TestLoadIdentityRefusals(t *testing.T) {
 		edit func(t *testing.T, dir string, p *trusttest.PKI)
 		now  time.Time
 	}{
-		{"missing key", func(t *testing.T, dir string, _ *trusttest.PKI) { rm(t, dir, trust.FileHostKey) }, time.Time{}},
+		{"no signer", func(*testing.T, string, *trusttest.PKI) {}, time.Time{}},
 		{"missing certificate", func(t *testing.T, dir string, _ *trusttest.PKI) { rm(t, dir, trust.FileHostCert) }, time.Time{}},
 		{"certificate for another key", func(t *testing.T, dir string, p *trusttest.PKI) {
 			other := hostidentitytest.NewKey(t)
@@ -159,9 +163,7 @@ func TestLoadIdentityRefusals(t *testing.T) {
 			write(t, dir, trust.FileHostCert, string(p.HostCertPEM)+string(p.HostCA.PEM))
 		}, time.Time{}},
 		{"expired", func(*testing.T, string, *trusttest.PKI) {}, time.Now().Add(60 * 24 * time.Hour)},
-		{"not a P-256 key", func(t *testing.T, dir string, _ *trusttest.PKI) {
-			write(t, dir, trust.FileHostKey, "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
-		}, time.Time{}},
+		{"signer is not P-256", func(*testing.T, string, *trusttest.PKI) {}, time.Time{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := trusttest.New(t)
@@ -175,7 +177,18 @@ func TestLoadIdentityRefusals(t *testing.T) {
 			if now.IsZero() {
 				now = time.Now()
 			}
-			if _, err := trust.LoadIdentity(pkiDir, cfg, now, nil); !errors.Is(err, trust.ErrIdentity) {
+			var signer crypto.Signer = p.HostKey
+			switch tc.name {
+			case "no signer":
+				signer = nil
+			case "signer is not P-256":
+				k, kerr := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+				if kerr != nil {
+					t.Fatal(kerr)
+				}
+				signer = k
+			}
+			if _, err := trust.LoadIdentity(pkiDir, cfg, now, nil, signer); !errors.Is(err, trust.ErrIdentity) {
 				t.Fatalf("err = %v, want ErrIdentity", err)
 			}
 		})

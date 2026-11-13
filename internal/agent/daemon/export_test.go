@@ -16,7 +16,10 @@ limitations under the License.
 
 package daemon
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // AllowTestOverrides lets t use the test overrides of Options in a release
 // build, until t ends.
@@ -24,4 +27,12 @@ func AllowTestOverrides(t testing.TB) {
 	t.Helper()
 	allowTestOverrides = true
 	t.Cleanup(func() { allowTestOverrides = false })
+}
+
+// SetSignerStartWait shortens the start-up wait for the signer until t ends.
+func SetSignerStartWait(t testing.TB, d time.Duration) {
+	t.Helper()
+	old := signerStartWait
+	signerStartWait = d
+	t.Cleanup(func() { signerStartWait = old })
 }

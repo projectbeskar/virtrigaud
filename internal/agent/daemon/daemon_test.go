@@ -19,6 +19,8 @@ package daemon_test
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -40,6 +42,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
+	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -220,11 +223,30 @@ func TestStartRefusals(t *testing.T) {
 		"provisioning marker missing": {func(h *host) {
 			h.probe.Edit(func(f *hostchecktest.Fake) { delete(f.Content, filepath.Join(h.stateDir, hostcheck.HostMarkerFile)) })
 		}, hostcheck.ReasonStateNotPersistent},
-		"host key readable by group": {func(h *host) {
+		"host key copy in the agent's key directory": {func(h *host) {
 			h.probe.Edit(func(f *hostchecktest.Fake) {
-				f.Files[filepath.Join(h.cfg.PKIDir(), "host.key")] = hostcheck.FileInfo{Mode: 0o640, UID: testUID}
+				f.Files[filepath.Join(h.cfg.PKIDir(), "host.key")] = hostcheck.FileInfo{Mode: 0o600, UID: testUID}
 			})
-		}, hostcheck.ReasonPKIInsecure},
+		}, hostcheck.ReasonHostKeyReadable},
+		"host key readable by the agent": {func(h *host) {
+			h.probe.Edit(func(f *hostchecktest.Fake) { f.ReadablePaths[h.cfg.SignerKeyFile] = true })
+		}, hostcheck.ReasonHostKeyReadable},
+		"signer socket directory open to others": {func(h *host) {
+			h.probe.Edit(func(f *hostchecktest.Fake) {
+				f.Files[filepath.Dir(h.cfg.SignerSocket)] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o755, UID: testUID}
+			})
+		}, hostcheck.ReasonSignerSocketInsecure},
+		"signer down": {func(h *host) { h.signer.stop() }, daemon.ReasonSignerUnavailable},
+		"signer of another user": {func(h *host) {
+			h.signerUID = testUID + 1
+			h.probe.Edit(func(f *hostchecktest.Fake) {
+				f.Files[filepath.Dir(h.cfg.SignerSocket)] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o750, UID: h.signerUID}
+			})
+		}, daemon.ReasonSignerUnavailable},
+		"signer serves another key": {func(h *host) {
+			h.signer.stop()
+			h.signer = startSigner(h.t, h.signer.socket, hostidentitytest.NewKey(h.t))
+		}, daemon.ReasonIdentityInvalid},
 		"trust configuration writable": {func(h *host) {
 			h.probe.Edit(func(f *hostchecktest.Fake) { f.WritablePaths[h.trustDir] = true })
 		}, hostcheck.ReasonTrustConfigInsecure},
@@ -233,8 +255,8 @@ func TestStartRefusals(t *testing.T) {
 				h.t.Fatal(err)
 			}
 		}, daemon.ReasonIdentityInvalid},
-		"host key readable by group, seen on the open file": {func(h *host) {
-			if err := os.Chmod(filepath.Join(h.cfg.PKIDir(), trust.FileHostKey), 0o640); err != nil {
+		"host certificate readable by group, seen on the open file": {func(h *host) {
+			if err := os.Chmod(filepath.Join(h.cfg.PKIDir(), trust.FileHostCert), 0o640); err != nil {
 				h.t.Fatal(err)
 			}
 		}, daemon.ReasonIdentityInvalid},
@@ -394,13 +416,66 @@ func TestLogsCarryNoKeyMaterial(t *testing.T) {
 	r, _ := h.run()
 	r.hello()
 	_ = r.stop()
-	key, err := os.ReadFile(filepath.Join(h.cfg.PKIDir(), trust.FileHostKey))
+	der, err := x509.MarshalPKCS8PrivateKey(h.pki.HostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := strings.Split(string(key), "\n")[1]
+	body := base64.StdEncoding.EncodeToString(der)
 	if strings.Contains(h.logs.text(), body[:32]) || strings.Contains(h.logs.text(), fmt.Sprintf("%x", rawKey(t, h))) {
 		t.Fatal("the logs contain key material")
+	}
+}
+
+// TestAgentHoldsNoKeyFile: the agent's key material directory holds the
+// certificate only; the key is in the signer's hands.
+func TestAgentHoldsNoKeyFile(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	r.hello()
+	_ = r.stop()
+	names, err := os.ReadDir(h.cfg.PKIDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if n.Name() != trust.FileHostCert {
+			t.Errorf("the agent's key material directory holds %s", n.Name())
+		}
+	}
+}
+
+// TestSignerRestartWhileRunning: the signer restarting under a running agent
+// breaks signing only while it is down: answers are unsigned then (never
+// signed by the agent), and signed again afterwards, with no agent restart.
+func TestSignerRestartWhileRunning(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if r.hello() == nil {
+		t.Fatal("no signed answer with the signer up")
+	}
+	socket := h.signer.socket
+	h.signer.stop()
+	if resp, err := agentv1.NewAgentServiceClient(r.conn()).Hello(callCtx(t),
+		&agentv1.HelloRequest{AnswerNonce: bytes.Repeat([]byte{2}, 16), CallerApiVersion: 1}); err == nil && resp.GetHostAnswer() != nil {
+		t.Fatal("a signed answer with the signer down")
+	}
+	h.signer = startSigner(t, socket, h.pki.HostKey)
+	if r.hello() == nil {
+		t.Fatal("no signed answer after the signer restarted")
+	}
+}
+
+// TestReloadReachesTheSigner: a reload fetches the signer's key again, and a
+// reload with the signer down is refused with the running credentials kept.
+func TestReloadReachesTheSigner(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	r.hello()
+	h.signer.stop()
+	r.signals <- syscall.SIGHUP
+	waitLog(t, h, "reload refused")
+	if !strings.Contains(h.logs.text(), "reach the signer") {
+		t.Fatalf("the refusal does not name the signer:\n%s", h.logs.text())
 	}
 }
 

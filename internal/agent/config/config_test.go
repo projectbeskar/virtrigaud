@@ -42,6 +42,9 @@ func TestDefaults(t *testing.T) {
 	if c.StateDir != config.DefaultStateDir || c.Executor != config.ExecutorNone || c.PKIDir() != config.DefaultStateDir+"/pki" {
 		t.Fatalf("defaults = %+v", c)
 	}
+	if c.SignerSocket != config.DefaultSignerSocket || c.SignerUser != config.DefaultSignerUser || c.SignerKeyFile != config.DefaultSignerKeyFile {
+		t.Fatalf("signer defaults = %q %q %q", c.SignerSocket, c.SignerUser, c.SignerKeyFile)
+	}
 	if c.ScrubInterval != config.DefaultScrubInterval || config.DefaultScrubInterval != time.Hour {
 		t.Fatalf("scrub interval = %v", c.ScrubInterval)
 	}
@@ -61,6 +64,8 @@ func TestValidateRefusals(t *testing.T) {
 	for _, args := range [][]string{
 		{"--state-dir=relative"}, {"--state-dir=/var/lib/x/"}, {"--listen-address="}, {"--drain-timeout=0s"}, {"--scrub-interval=0s"}, {"--scrub-interval=-1m"},
 		{"--executor=libvirt"}, {"--dev-trust-dir=relative"},
+		{"--signer-socket=relative.sock"}, {"--signer-socket="}, {"--signer-socket=/run/x/../y.sock"}, {"--signer-user="},
+		{"--signer-key-file=host.key"}, {"--signer-key-file="},
 	} {
 		if err := parse(t, args...).Validate(); err == nil {
 			t.Errorf("%v accepted", args)

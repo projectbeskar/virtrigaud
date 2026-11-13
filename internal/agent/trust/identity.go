@@ -36,7 +36,9 @@ import (
 // The files of the key material directory.
 const (
 	// FileHostKey holds the host's PEM private key (PKCS #8 or SEC 1),
-	// ECDSA P-256. It never leaves the host.
+	// ECDSA P-256. It never leaves the host and is read by the signer
+	// process only: the agent process neither reads nor holds it, and refuses
+	// to start when it can read a file of this name.
 	FileHostKey = "host.key"
 	// FileHostCert holds the host's PEM identity certificate (the leaf
 	// only; its issuer is FileHostCA of the trust configuration).
@@ -46,15 +48,16 @@ const (
 // ErrIdentity is wrapped by every host identity error.
 var ErrIdentity = errors.New("host identity refused")
 
-// Identity is the host's identity: its key, its certificate and the
-// enrolment record the certificate carries.
+// Identity is the host's identity: its signer, its certificate and the
+// enrolment record the certificate carries. The agent process holds no
+// private key: Signer forwards to the signer process.
 type Identity struct {
 	// TLS is the certificate and key the agent serves TLS with.
 	TLS tls.Certificate
 	// Leaf is the host identity certificate.
 	Leaf *x509.Certificate
-	// Signer is the host key. It signs TLS handshakes and host answers,
-	// nothing else.
+	// Signer is the host key's signer. It signs TLS handshakes and host
+	// answers, nothing else; its private half is in another process.
 	Signer crypto.Signer
 	// HostURI is the host's URI identity.
 	HostURI string
@@ -67,23 +70,22 @@ type Identity struct {
 // HostID is the host identity an answer names: the Host's name.
 func (id *Identity) HostID() string { return id.HostName }
 
-// LoadIdentity reads the host key and certificate from pkiDir with read
-// (ReadFile when nil) and validates them against cfg at now: the key is
-// ECDSA P-256; the certificate is a single leaf for that key, not a CA, with
-// the server authentication usage, that chains to a host identity issuer of
-// cfg and is valid at now; its URI subject alternative names are exactly the
+// LoadIdentity reads the host certificate from pkiDir with read (ReadFile
+// when nil) and validates it against cfg at now, with signer as the host key:
+// the signer's public key is ECDSA P-256 and the certificate is a single leaf
+// for that key, not a CA, with the server authentication usage, that chains
+// to a host identity issuer of cfg and is valid at now; its URI subject alternative names are exactly the
 // host's URI identity and an enrolment record (hostidentity.RecordFromURIs).
-func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) ([]byte, error)) (*Identity, error) {
+func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) ([]byte, error), signer crypto.Signer) (*Identity, error) {
 	if read == nil {
 		read = ReadFile
 	}
-	keyPEM, err := read(filepath.Join(pkiDir, FileHostKey))
-	if err != nil {
-		return nil, fmt.Errorf("%w: read the host key: %v", ErrIdentity, err)
+	if signer == nil {
+		return nil, fmt.Errorf("%w: no host key signer", ErrIdentity)
 	}
-	key, err := parseKey(keyPEM)
-	if err != nil {
-		return nil, err
+	key, ok := signer.Public().(*ecdsa.PublicKey)
+	if !ok || key.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("%w: the host key is not ECDSA P-256", ErrIdentity)
 	}
 	certPEM, err := read(filepath.Join(pkiDir, FileHostCert))
 	if err != nil {
@@ -98,7 +100,7 @@ func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) (
 	}
 	leaf := certs[0]
 	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
-	if !ok || !pub.Equal(key.Public()) {
+	if !ok || !pub.Equal(key) {
 		return nil, fmt.Errorf("%w: the host certificate does not certify the host key", ErrIdentity)
 	}
 	if leaf.IsCA {
@@ -120,9 +122,9 @@ func LoadIdentity(pkiDir string, cfg *Config, now time.Time, read func(string) (
 		return nil, fmt.Errorf("%w: %v", ErrIdentity, err)
 	}
 	return &Identity{
-		TLS:           tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: key, Leaf: leaf},
+		TLS:           tls.Certificate{Certificate: [][]byte{leaf.Raw}, PrivateKey: signer, Leaf: leaf},
 		Leaf:          leaf,
-		Signer:        key,
+		Signer:        signer,
 		HostURI:       hostURI,
 		HostNamespace: ns,
 		HostName:      name,
@@ -156,6 +158,10 @@ func hostURIOf(leaf *x509.Certificate) (uri, namespace, name string, err error) 
 	}
 	return uri, namespace, name, nil
 }
+
+// ParseHostKey decodes one PEM ECDSA P-256 private key, PKCS #8 or SEC 1. It
+// is for the signer process, the only process that holds the host key.
+func ParseHostKey(b []byte) (*ecdsa.PrivateKey, error) { return parseKey(b) }
 
 // parseKey decodes one PEM ECDSA P-256 private key, PKCS #8 or SEC 1.
 func parseKey(b []byte) (*ecdsa.PrivateKey, error) {

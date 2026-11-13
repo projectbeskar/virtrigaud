@@ -82,6 +82,20 @@ const (
 	// KnownBeforeMismatch: admission answers a known op_id from its record
 	// or tombstone before refusing on the enrolment.
 	KnownBeforeMismatch Name = "known-before-mismatch"
+	// SignerPeerCheck: the signer serves only the agent's uid.
+	SignerPeerCheck Name = "signer-peer-check"
+	// SignerClientPeerCheck: the agent talks only to the signer's uid.
+	SignerClientPeerCheck Name = "signer-client-peer-check"
+	// SignerDigestCheck: the signer signs only a SHA-256 digest of exactly
+	// 32 bytes.
+	SignerDigestCheck Name = "signer-digest-check"
+	// SignerRateLimit: the signer refuses signatures above its rate limit.
+	SignerRateLimit Name = "signer-rate-limit"
+	// SignerVerify: the agent verifies the signature the signer returns.
+	SignerVerify Name = "signer-verify"
+	// HostKeyUnreadable: the agent refuses to start when it can read the
+	// host key file.
+	HostKeyUnreadable Name = "host-key-unreadable"
 )
 
 // All lists every guard, in a fixed order.
@@ -90,6 +104,7 @@ func All() []Name {
 		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
-		CloseAfterIOError, UnknownEnrolmentNotDefinite,
+		CloseAfterIOError, UnknownEnrolmentNotDefinite, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
+		SignerRateLimit, SignerVerify, HostKeyUnreadable,
 	}
 }
