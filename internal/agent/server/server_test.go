@@ -19,11 +19,13 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -93,6 +95,8 @@ type env struct {
 	// signer.Client, so every handshake and signed answer in these tests goes
 	// through a real Unix socket.
 	signer *signerProc
+	// signs counts the signatures requested from the signer.
+	signs *countingSigner
 }
 
 // signerProc is the signer's server on a real socket.
@@ -139,7 +143,20 @@ func (p *signerProc) stop() {
 	<-p.done
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T) *env { return newEnvWith(t, server.Throttle{}) }
+
+// countingSigner counts the signatures the agent asks the signer for.
+type countingSigner struct {
+	crypto.Signer
+	n atomic.Int64
+}
+
+func (c *countingSigner) Sign(r io.Reader, d []byte, o crypto.SignerOpts) ([]byte, error) {
+	c.n.Add(1)
+	return c.Signer.Sign(r, d, o)
+}
+
+func newEnvWith(t *testing.T, th server.Throttle) *env {
 	t.Helper()
 	p := trusttest.New(t)
 	dir := t.TempDir()
@@ -156,7 +173,8 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := trust.LoadIdentity(filepath.Join(dir, "pki"), cfg, time.Now(), nil, sg)
+	counter := &countingSigner{Signer: sg}
+	id, err := trust.LoadIdentity(filepath.Join(dir, "pki"), cfg, time.Now(), nil, counter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,10 +184,10 @@ func newEnv(t *testing.T) *env {
 		Position: journal.Position{Seq: 3},
 	}
 	view.Position.StoreID[0], view.Position.Head[0] = 7, 8
-	e := &env{t: t, pki: p, signer: sp, creds: server.NewCredentialStore(&server.Credentials{Identity: id, Trust: cfg}),
+	e := &env{t: t, pki: p, signer: sp, signs: counter, creds: server.NewCredentialStore(&server.Credentials{Identity: id, Trust: cfg}),
 		agent: &fakeAgent{view: view, state: providerv1.AgentState_AGENT_STATE_READY}}
 	srv, err := server.New(server.Options{Agent: e.agent, Credentials: e.creds, Version: "test", JournalSchemaVersion: 1, Log: logr.Discard(),
-		Now: func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) }})
+		Now: func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) }, Throttle: th})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,5 +585,26 @@ func TestSignedAnswerNeedsTheSignerOnAnEstablishedConnection(t *testing.T) {
 	}
 	if resp.GetHostAnswer() != nil {
 		t.Fatal("a signed answer was made with the signer down")
+	}
+}
+
+// TestUnauthenticatedFloodDoesNotReachTheSigner: TLS 1.3 signs the server's
+// CertificateVerify before it looks at the client certificate, so every
+// ClientHello would cost one signature. The pre-handshake throttle closes the
+// connections above a source's rate before the handshake: the signer is asked
+// for no more signatures than the burst, however many connections come.
+func TestUnauthenticatedFloodDoesNotReachTheSigner(t *testing.T) {
+	e := newEnvWith(t, server.Throttle{PerSourceRate: 0.0001, PerSourceBurst: 3})
+	before := e.signs.n.Load()
+	cfg := &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true} // #nosec G402 -- a test client that sends a ClientHello and nothing else
+	for i := 0; i < 30; i++ {
+		d := &net.Dialer{Timeout: 2 * time.Second}
+		c, err := tls.DialWithDialer(d, "tcp", e.addr, cfg)
+		if err == nil {
+			_ = c.Close()
+		}
+	}
+	if got := e.signs.n.Load() - before; got > 3 {
+		t.Fatalf("%d signatures for 30 unauthenticated connections with a burst of 3", got)
 	}
 }

@@ -93,6 +93,11 @@ const (
 	SignerRateLimit Name = "signer-rate-limit"
 	// SignerVerify: the agent verifies the signature the signer returns.
 	SignerVerify Name = "signer-verify"
+	// SourceThrottle: connections above a source address's rate are closed
+	// before the TLS handshake.
+	SourceThrottle Name = "source-throttle"
+	// HandshakeCap: at most a fixed number of TLS handshakes run at once.
+	HandshakeCap Name = "handshake-cap"
 	// HostKeyUnreadable: the agent refuses to start when it can read the
 	// host key file.
 	HostKeyUnreadable Name = "host-key-unreadable"
@@ -105,6 +110,6 @@ func All() []Name {
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
-		SignerRateLimit, SignerVerify, HostKeyUnreadable,
+		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
 	}
 }
