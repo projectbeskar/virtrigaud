@@ -55,12 +55,20 @@ func fuzzRequest(method string) (proto.Message, proto.Message) {
 // FuzzOperationPathDecoders sends arbitrary request bytes, decoded as the
 // request message of a mutating method, TaskStatus or Describe, to a ready
 // agent with an operation path. The agent never fails other than with a
-// gRPC status, and arbitrary bytes never have an effect.
+// gRPC status, and arbitrary bytes, a re-delivery of a finished operation
+// included, never have an effect.
 func FuzzOperationPathDecoders(f *testing.F) {
 	e := newOpsEnv(f)
 	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", []byte("data")))
 	env := &providerv1.OperationEnvelope{Request: o.request, Grant: e.grant(o, time.Now(), 0)}
 	signed, _ := proto.Marshal(&providerv1.CreateRequest{OperationEnvelope: env})
+	// The signed Create runs to its end first: a re-delivery of it is then
+	// answered from its record, and no input may have an effect.
+	task, err := e.sendEnvelope(o.method, env, nil)
+	if err != nil {
+		f.Fatal(err)
+	}
+	e.waitDone(task)
 	f.Add(uint8(0), signed)
 	f.Add(uint8(2), []byte{0x2a, 0x00})
 	ts, _ := proto.Marshal(&providerv1.TaskStatusRequest{AnswerNonce: nonce(1), OpId: randID(), OpEnrolmentId: randID(), TargetHostId: "host-a"})
@@ -83,10 +91,8 @@ func FuzzOperationPathDecoders(f *testing.F) {
 				t.Fatalf("%s: not a gRPC status: %v", method, err)
 			}
 		}
-		if method != providerv1.Provider_Create_FullMethodName || !proto.Equal(req, &providerv1.CreateRequest{OperationEnvelope: env}) {
-			if e.exec.total() != before {
-				t.Fatalf("%s: arbitrary bytes had an effect", method)
-			}
+		if e.exec.total() != before {
+			t.Fatalf("%s: arbitrary bytes had an effect", method)
 		}
 	})
 }
