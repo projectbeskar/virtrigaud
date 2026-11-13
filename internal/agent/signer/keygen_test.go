@@ -50,10 +50,18 @@ func TestCreateKeyWritesAPrivateKeyOnce(t *testing.T) {
 	assert.True(t, loaded.Equal(k))
 
 	// A second run never replaces the key.
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
 	k2, created, err := CreateKey(path, uid)
 	require.NoError(t, err)
 	assert.False(t, created)
 	assert.True(t, k2.Equal(k), "the existing key is returned unchanged")
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "the key file is unchanged")
+	onDisk, err := LoadKey(path, uid)
+	require.NoError(t, err)
+	assert.True(t, onDisk.PublicKey.Equal(&k.PublicKey), "the key on disk is still the first one")
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -100,4 +108,19 @@ func TestCreateKeyRefusals(t *testing.T) {
 		require.NoError(t, rerr)
 		assert.Equal(t, "x", string(got))
 	})
+}
+
+func TestCreateKeyRemovesStrayTemporaryFiles(t *testing.T) {
+	dir := keyDir(t)
+	stray := filepath.Join(dir, ".host.key.deadbeef")
+	require.NoError(t, os.WriteFile(stray, []byte("left by a killed run"), 0o600))
+	other := filepath.Join(dir, "unrelated")
+	require.NoError(t, os.WriteFile(other, []byte("x"), 0o600))
+	_, created, err := CreateKey(filepath.Join(dir, "host.key"), EUID())
+	require.NoError(t, err)
+	require.True(t, created)
+	_, err = os.Lstat(stray)
+	assert.True(t, os.IsNotExist(err), "the stray key material is gone")
+	_, err = os.Lstat(other)
+	assert.NoError(t, err, "other files are left alone")
 }

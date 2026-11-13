@@ -73,11 +73,16 @@ func CreateKey(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, er
 	if err := CheckKeyDir(dir, uid); err != nil {
 		return nil, false, err
 	}
-	if _, err := os.Lstat(path); err == nil && !guard.Off(guard.EnrolKeyNeverReplaced) {
+	removeStrayTemps(dir)
+	_, statErr := os.Lstat(path)
+	switch {
+	case statErr == nil && !guard.Off(guard.EnrolKeyNeverReplaced):
 		k, err := LoadKey(path, uid)
 		return k, false, err
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, false, fmt.Errorf("stat the host key: %w", err)
+	case statErr == nil:
+		// Only the mutation test build gets here: it goes on to replace the key.
+	case !errors.Is(statErr, fs.ErrNotExist):
+		return nil, false, fmt.Errorf("stat the host key: %w", statErr)
 	}
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -127,6 +132,26 @@ func CreateKey(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, er
 		return nil, false, fmt.Errorf("sync the key directory: %w", err)
 	}
 	return k, true, nil
+}
+
+// strayTempGlob matches the temporary files CreateKey leaves behind when it
+// is killed between creating one and linking it into place.
+const strayTempGlob = ".host.key.*"
+
+// removeStrayTemps removes the regular files a killed CreateKey left in dir.
+// They hold key material that was never installed. Errors are ignored: a file
+// that cannot be removed is not in the way, because every run draws a new
+// name.
+func removeStrayTemps(dir string) {
+	names, err := filepath.Glob(filepath.Join(dir, strayTempGlob))
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		if fi, err := os.Lstat(n); err == nil && fi.Mode().IsRegular() {
+			_ = os.Remove(n)
+		}
+	}
 }
 
 // syncDir syncs a directory so a created or linked entry survives a crash.
