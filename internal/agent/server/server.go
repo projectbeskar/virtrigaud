@@ -38,11 +38,15 @@ limitations under the License.
 // GetHostInfo, agent.v1 Hello and AgentStatus answer with a host-signed
 // HostAnswer when the request carries a nonce and the store's active
 // enrolment is the one the host certificate names. Every mutating Provider
-// method (the methods of the operation kind table) is refused: UNATTESTED
-// until the store's continuity is established and its recovery has run,
-// QUARANTINED while the store has lost its persistence guarantee, and
-// Unimplemented once ready, because this agent does not execute operations
-// yet. Every other method is Unimplemented.
+// method (the methods of the operation kind table) is refused UNATTESTED
+// until the store's continuity is established and its recovery has run, and
+// QUARANTINED while the store has lost its persistence guarantee. Once ready,
+// a server with an operation path (Options.Operations, development builds
+// only) verifies the call's operation grant and has the operation store admit
+// it (see operate); a server without one refuses every mutating method
+// Unimplemented. TaskStatus and Describe answer from the operation store,
+// with a host-signed OperationAnswer or VMAnswer when the request carries a
+// nonce. Every other method is Unimplemented.
 //
 // It imports no Kubernetes package.
 package server
@@ -65,6 +69,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
@@ -229,6 +234,10 @@ type Options struct {
 	AnswersPerSecond float64
 	// AnswerBurst is the burst of the per-identity answer limit.
 	AnswerBurst int
+	// Operations is the agent's operation path. Nil refuses every mutating
+	// method once the agent is ready (Unimplemented): a release build never
+	// sets it.
+	Operations Operations
 }
 
 // Defaults of the per-identity answer limit, below the signer's answer budget
@@ -252,6 +261,7 @@ type Server struct {
 	limited   logGate
 	providerS *providerService
 	agentS    *agentService
+	vc        verifierCache
 }
 
 // New returns a server for opts.
@@ -413,6 +423,8 @@ func (s *Server) gate(ctx context.Context, method string) error {
 	case cause != "":
 		err = refusalWith(codes.Unavailable, opstore.ReasonUnattested, "the host refuses operations: "+cause,
 			map[string]string{MetadataCause: cause})
+	case state == providerv1.AgentState_AGENT_STATE_READY && s.opts.Operations != nil:
+		return nil
 	case state == providerv1.AgentState_AGENT_STATE_READY:
 		err = status.Error(codes.Unimplemented, "this agent executes no operations")
 	default:
@@ -426,6 +438,10 @@ func (s *Server) unaryGate(ctx context.Context, req any, info *grpc.UnaryServerI
 	if err := s.gate(ctx, info.FullMethod); err != nil {
 		return nil, err
 	}
+	if s.mutating[info.FullMethod] {
+		// gate passes a mutating method only to the operation path.
+		return s.operate(ctx, info.FullMethod, req)
+	}
 	return handler(ctx, req)
 }
 
@@ -433,12 +449,31 @@ func (s *Server) streamGate(srv any, ss grpc.ServerStream, info *grpc.StreamServ
 	if err := s.gate(ss.Context(), info.FullMethod); err != nil {
 		return err
 	}
+	if s.mutating[info.FullMethod] {
+		return status.Error(codes.Unimplemented, "no operation is carried on a stream")
+	}
 	return handler(srv, ss)
 }
 
 // hostAnswer signs a HostAnswer for nonce, or returns nil when none can be
 // made (no nonce, no matching enrolment, a store that cannot be read).
 func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uint64) *providerv1.SignedBlob {
+	return s.signAnswer(ctx, nonce, func(h answer.Host) (proto.Message, error) {
+		view, err := s.opts.Agent.HostView(ctx, continuitySeq)
+		if err != nil {
+			return nil, fmt.Errorf("the store cannot be read: %w", err)
+		}
+		h.View = view
+		return answer.HostAnswer(h)
+	})
+}
+
+// signAnswer makes a signed answer for nonce with build, or returns nil when
+// none can be made: no nonce, the caller is above its answer rate, build
+// refuses (no matching enrolment, a store that cannot be read, a field that
+// breaks the answer rules), or the signer fails. build receives the host's
+// identity, trust state and clock; it reads the store itself, in one read.
+func (s *Server) signAnswer(ctx context.Context, nonce []byte, build func(answer.Host) (proto.Message, error)) *providerv1.SignedBlob {
 	if len(nonce) == 0 {
 		return nil
 	}
@@ -450,14 +485,9 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 		return nil
 	}
 	c := s.opts.Credentials.Load()
-	view, err := s.opts.Agent.HostView(ctx, continuitySeq)
-	if err != nil {
-		s.logNoAnswer(err, "no signed answer: the store cannot be read")
-		return nil
-	}
 	state, reason := s.opts.Agent.TrustState()
-	body, err := answer.HostAnswer(answer.Host{
-		Nonce: nonce, View: view, HostID: c.Identity.HostID(), Record: c.Identity.Record,
+	body, err := build(answer.Host{
+		Nonce: nonce, HostID: c.Identity.HostID(), Record: c.Identity.Record,
 		State: state, StateReason: reason, AgentVersion: s.opts.Version,
 		JournalSchemaVersion: s.opts.JournalSchemaVersion, ClockFloor: s.opts.Agent.ClockFloor(), Now: s.opts.Now(),
 	})

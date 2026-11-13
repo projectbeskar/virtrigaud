@@ -41,8 +41,8 @@ func randID() []byte {
 
 // TestRecoverPopulatedStore: an agent started on a store that holds a
 // completed operation and an accepted one that never ran recovers it, comes
-// up READY, keeps both records as they were (it runs no operation), and
-// leaves the fake VM untouched.
+// up READY, keeps the completed record as it was and runs the accepted one
+// to its end exactly once.
 func TestRecoverPopulatedStore(t *testing.T) {
 	h := newHost(t)
 	exec, err := fake.New(filepath.Join(h.stateDir, config.FakeExecutorDirName))
@@ -92,13 +92,27 @@ func TestRecoverPopulatedStore(t *testing.T) {
 	if state != providerv1.AgentState_AGENT_STATE_READY {
 		t.Fatalf("state = %v\n%s", state, h.logs.text())
 	}
-	waitLog(t, h, "operations remain runnable; this agent starts no runner")
+	waitLog(t, h, "operations remain runnable after recovery")
+	waitLog(t, h, `"event"="terminal"`)
 	if err := r.stop(); err != nil {
 		t.Fatal(err)
 	}
 	vms, err := exec.VMs()
-	if err != nil || vms["vm-1"].Power != fake.PowerOn {
-		t.Fatalf("fake VM changed: %+v %v", vms, err)
+	if err != nil || vms["vm-1"].Power != fake.PowerOff {
+		t.Fatalf("the recovered power off did not run: %+v %v", vms, err)
+	}
+	effects, err := fake.Effects(filepath.Join(h.stateDir, config.FakeExecutorDirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	powers := 0
+	for _, e := range effects {
+		if e.Step == "power" {
+			powers++
+		}
+	}
+	if powers != 1 {
+		t.Fatalf("power effects = %d, want 1", powers)
 	}
 	st, err = opstore.Open(ctx, opstore.Options{Journal: journal.Options{Dir: h.stateDir}, Executor: exec})
 	if err != nil {
@@ -108,7 +122,7 @@ func TestRecoverPopulatedStore(t *testing.T) {
 	if v, ok, err := st.Lookup(ctx, ref); err != nil || !ok || v.State != opstore.StateCompleted {
 		t.Fatalf("create after restart: %+v %v %v", v, ok, err)
 	}
-	if v, ok, err := st.Lookup(ctx, opstore.OpRef{EnrolmentID: off.EnrolmentID, OpID: off.OpID}); err != nil || !ok || v.State != opstore.StateAccepted {
+	if v, ok, err := st.Lookup(ctx, opstore.OpRef{EnrolmentID: off.EnrolmentID, OpID: off.OpID}); err != nil || !ok || v.State != opstore.StateCompleted {
 		t.Fatalf("power off after restart: %+v %v %v", v, ok, err)
 	}
 }
