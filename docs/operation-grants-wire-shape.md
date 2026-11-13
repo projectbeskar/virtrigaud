@@ -120,7 +120,7 @@ description of every field.
 | `AnswerContext` | message | What binds an answer to one request and to the host's state: `nonce` (1), `provider_uid`, `host_id`, `install_id`, `enrolment_id` (2–5), `chain_position` (6, store identifier, sequence number and chain head, 56 bytes), `agent_state` and `state_reason` (7, 8), `agent_time` (9, informational), and the continuity fields `continuity_head`, `checkpoint_seq`, `checkpoint_head` (10–12). Every answer body carries one. |
 | `OperationAnswer` | message | The answer about one operation: `context` (1), the `op_id` and `op_enrolment_id` asked about (2, 3), `state` (4), `tombstoned` (5), the recorded identity `kind`, `attempt`, `vm_uid`, `binding_id`, `intent_digest` (6–10) and `outcome_reason` (11). `kind` is the number of the recorded `OperationKind`, carried as an `int32` because `provider.proto` imports this file. |
 | `VMAnswer` | message | The answer about one VM placement: `context` (1), the `vm_uid` and `binding_id` asked about (2, 3), `presence` (4), and for a completed Delete `delete_op_id`, `delete_enrolment_id`, `delete_seq` (5–7). |
-| `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8). |
+| `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8), `inventory` (9, see [Host inventory](#host-inventory)). |
 | `AgentState` | enum | `UNATTESTED`, `READY`, `QUARANTINED` (values 0–3, 0 is `UNSPECIFIED`). `READY` means the store's continuity is established and the recovery of interrupted operations has run. |
 | `OperationRecordState` | enum | `ACCEPTED`, `EXECUTING`, `COMPLETED`, `FAILED_CLEAN`, `FAILED_DIRTY`, `OUTCOME_UNKNOWN`, `RETIRED` (1–7: what the store records for an operation it holds a record or tombstone of), `NO_RECORD` and `UNKNOWN_TO_AGENT` (8, 9: it holds neither; neither proves anything about the operation). |
 | `VMPresence` | enum | `CREATING`, `PRESENT`, `DELETED`, `OTHER_BINDING`, `NO_RECORD` (values 0–5, 0 is `UNSPECIFIED`). `NO_RECORD` never means that the VM was deleted. |
@@ -144,7 +144,7 @@ status detail of type `type.googleapis.com/provider.v1.SignedBlob`, beside the
 
 ### Request and response fields
 
-Thirteen additive fields on six existing messages:
+Fourteen additive fields on six existing messages:
 
 | Message | Field | No. | Type |
 |---|---|---|---|
@@ -160,6 +160,7 @@ Thirteen additive fields on six existing messages:
 | `DescribeResponse` | `host_answer` | 8 | `SignedBlob` |
 | `GetHostInfoRequest` | `answer_nonce` | 2 | bytes |
 | | `continuity_seq` | 3 | uint64 |
+| | `inventory_version` | 4 | uint32 |
 | `HostInfo` | `host_answer` | 12 | `SignedBlob` |
 
 - `answer_nonce` is exactly 16 random bytes, fresh for each request. An agent signs an
@@ -176,6 +177,8 @@ Thirteen additive fields on six existing messages:
   manager has already seen a signed chain head; the agent answers with its own head at
   that sequence number (`AnswerContext.continuity_head`), so a manager can tell a store
   that was rolled back or forked from one that moved forward. 0 asks for nothing.
+- `inventory_version` asks the agent to put its host inventory in the signed answer;
+  see [Host inventory](#host-inventory). It is set only together with `answer_nonce`.
 - The request fields are set only for a Provider whose type requires operation
   identity. They carry no meaning for other Providers: a `Describe` or `GetHostInfo`
   is answered as without them, and a `TaskStatus` is answered from `task` alone, so
@@ -264,6 +267,77 @@ Only answers from an agent in `READY` state can be definite. `NO_RECORD`,
 `UNKNOWN_TO_AGENT`, `OTHER_BINDING`, `CREATING` and `PRESENT` never release a Delete
 finalizer.
 
+### Host inventory
+
+`HostAnswer.inventory` (9) is a host's report of the components it runs virtual
+machines with, in the same signed body as the nonce, the enrolment and the chain
+position, so one signature covers them all. Nothing in an agent or a manager uses it
+yet: this is the wire shape only.
+
+| Message or enum | Fields and values |
+|---|---|
+| `HostInventory` | `inventory_version` (1), `state` (2), `snapshot_age_seconds` (3), `components` (4), `features` (5), `process_identity_tier` (6), `unexpected_extensions` (7), `state_reason` (8), `requested_version` (9), `supported_version` (10) |
+| `HostComponent` | `name` (1), `state` (2), `state_reason` (3), `observed_version` (4), `declared_version` (5), `required_range` (6), `source` (7), `manifest_origin` (8), `artifact_sha256` (9), `files` (10) |
+| `ComponentFile` | `name` (1), `sha256` (2) |
+| `HostFeature` | `name` (1), `result` (2), `reason` (3) |
+| `HostExtension` | `name` (1), `kind` (2), `image_sha256` (3) |
+| `InventoryState` | `COMPLETE`, `PENDING`, `OVER_LIMIT`, `UNREADABLE` (values 1-4) |
+| `ComponentState` | `READY`, `MISSING`, `INCOMPATIBLE`, `UNHEALTHY`, `UNMANIFESTED`, `MANIFEST_INVALID` (1-6) |
+| `ManifestOrigin` | `NONE`, `READ_ONLY`, `WRITABLE` (1-3) |
+| `FeatureResult` | `PRESENT`, `ABSENT`, `ERROR` (1-3) |
+| `ProcessIdentityTier` | `PIDFD_STORE`, `PIDFS_HANDLE`, `PIDFS_INODE`, `START_TIME` (1-4) |
+| `ExtensionKind` | `DIRECTORY`, `UNDECLARED_IMAGE`, `OVERLAYS_COMPONENT` (1-3) |
+
+Every enum has `UNSPECIFIED` as value 0, which is never valid in an answer except
+`process_identity_tier`, where it means "not reported".
+
+**Asking and echo.** A caller asks for an inventory with
+`GetHostInfoRequest.inventory_version`: the highest version of `HostInventory` it
+implements, or 0 for none. It is set only together with `answer_nonce`. The answer
+carries `inventory` if and only if the request's `inventory_version` is at least 1. The
+agent echoes the request's value byte for byte in `requested_version`, reports the
+highest version it implements in `supported_version`, and uses the lower of the two as
+`inventory_version`. A verifier requires `requested_version` to equal what it sent, so a
+Provider that lowers the requested version in transit is caught, and requires
+`inventory_version` to be the lower of the two. A field, enum value or reason added to
+the inventory later is used only when `inventory_version` is at least the version that
+introduced it. An answer without `inventory` to a request that asked for one is still a
+valid answer for every other purpose; it only means that no inventory is known.
+
+**Bounds.** At most 32 components, 8 files per component and 64 files in all, 32
+features and 16 unexpected extensions; the encoded `HostInventory` is at most 32 KiB,
+and the largest allowed content encodes to 25 532 bytes. An
+agent never truncates: when what it observed does not fit it reports `OVER_LIMIT` and
+lists nothing. Lists are sorted by `name` in byte order, each name once. Digests are raw
+SHA-256, exactly 32 bytes where set. Names, versions, ranges and reasons are short and
+restricted to a small character set; a reason is a value from a closed set and never an
+error message or a path. A `COMPLETE` inventory has no `state_reason` and a reported
+`process_identity_tier`; `PENDING`, `OVER_LIMIT` and `UNREADABLE` list nothing.
+
+**What it is.** The inventory is signed so that the Provider cannot alter, replay or
+downgrade it. A host whose agent is compromised can still report anything, so it is a
+detective control and not a proof.
+
+Test vectors (reproduced by the tests in the `proto` module):
+
+- `GetHostInfoRequest{answer_nonce = 00 01 ... 0f, inventory_version = 1}` encodes to
+  `1210000102030405060708090a0b0c0d0e0f` `2001`.
+- A `HostAnswer` body (not a complete answer: it has no `context`) with
+  `agent_version` `"v0.0.1"` and an `inventory` of version 1, state `COMPLETE`, a
+  snapshot age of 30, one component (`cloud-hypervisor`, `READY`, observed and
+  declared version `1.0.0`, origin `READ_ONLY`, the SHA-256 of the empty string as
+  artifact digest), identity tier `PIDFS_HANDLE` and requested and supported version
+  1 encodes to these 94 bytes:
+  `120676302e302e31` `4a54` `08011001181e` `2246`
+  `0a10636c6f75642d68797065727669736f72` `1001` `2205312e302e30` `2a05312e302e30`
+  `4002` `4a20e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+  `3002` `4801` `5001`.
+  Its signature input is the 148 bytes `766972747269676175642e686f73742d7369676e65642e763100`
+  `0016` `70726f76696465722e76312e486f7374416e73776572` `0000005e` followed by that
+  body, and the SHA-256 of the input is
+  `43b3a3f66dc30637eea72a7b65bde3ee4f93c9844186838322a88971569be858`. The framing
+  vector above is unchanged.
+
 ### The per-host agent service
 
 [`proto/agent/v1/agent.proto`](../proto/agent/v1/agent.proto) (package `agent.v1`, Go
@@ -280,9 +354,12 @@ nor call it, and the manager never calls it. Nothing serves or calls it yet.
 
 - Additive on the wire: new messages, enums, one new field per mutating request and
   four new capability fields. Nothing existing is renamed, renumbered or retyped.
-- The signed host answer messages, their thirteen request and response fields and the
+- The signed host answer messages, their fourteen request and response fields and the
   per-host agent service are additive in the same way; the answer messages are in
   their own file from the start, so the breaking-change check never sees them move.
+- The host inventory (`HostAnswer.inventory` and the messages and enums it uses) is
+  additive in the same way and lives in the same file as `HostAnswer`. It adds no
+  `body_type`, changes no framing and no existing field.
 - A provider built against an older contract ignores the new fields; a manager built
   against an older contract never sends them.
 - The grant messages live in `provider.proto`. The contract's breaking-change check
