@@ -43,7 +43,10 @@ limitations under the License.
 //     3). The store's active enrolment is brought to the one the host
 //     certificate carries (syncEnrolment): a fresh store is enrolled, and a
 //     store with another or no active enrolment is re-enrolled, which
-//     freezes the previous enrolment's open operations first.
+//     freezes the previous enrolment's open operations first. A release
+//     build does neither of the certificate-derived steps: it enrols a fresh
+//     store only from a development enrolment (never set outside tests), and
+//     otherwise leaves answers unsigned.
 //  7. Recovery resolves every interrupted operation by the store's recovery
 //     table. This agent starts no runner for an operation left runnable.
 //  8. Ready: systemd is notified (READY=1), and the trust state turns
@@ -721,7 +724,7 @@ func (d *daemon) reload(ctx context.Context, st *opstore.Store) error {
 		return err
 	}
 	if cur := d.creds.Load().Identity; !id.SameEnrolment(cur) {
-		if id.HostURI != cur.HostURI {
+		if id.HostURI != cur.HostURI || !config.DevBuild {
 			return errEnrolmentChanged
 		}
 		// A new enrolment of this host (vrtg-agent enroll install --replace):
@@ -750,7 +753,7 @@ func trustStatus(a *agentState) string {
 }
 
 // ReasonEnrolmentChanged is the reload refusal reason for a certificate that
-// names another host.
+// names another host, or, in a release build, another enrolment.
 const ReasonEnrolmentChanged = "EnrolmentChanged"
 
 // ReasonReenrolmentRefused is the reload refusal reason for a certificate that
@@ -761,7 +764,7 @@ const ReasonEnrolmentChanged = "EnrolmentChanged"
 const ReasonReenrolmentRefused = "ReenrolmentRefused"
 
 // errEnrolmentChanged refuses a reload that would change the host.
-var errEnrolmentChanged = errors.New("the reloaded certificate names another host")
+var errEnrolmentChanged = errors.New("the reloaded certificate names another host or enrolment")
 
 // errReenrolmentRefused marks a reload whose re-enrolment the store refused.
 var errReenrolmentRefused = errors.New("the store refused the new enrolment")
@@ -882,6 +885,10 @@ func (d *daemon) enrol(ctx context.Context, st *opstore.Store) {
 	id := d.creds.Load().Identity
 	switch err := d.syncEnrolment(ctx, st, id); {
 	case err == nil:
+	case errors.Is(err, errNotEnrolled):
+		d.log.Info("the store is not enrolled; answers stay unsigned")
+	case errors.Is(err, errReenrolDevOnly):
+		d.log.Error(err, "answers stay unsigned until the host is enrolled again")
 	case errors.Is(err, errStoreOfOtherHost):
 		d.log.Error(err, "enrolment refused; answers stay unsigned until the host is enrolled again", "reason", "StoreOfOtherHost")
 	default:
@@ -889,6 +896,16 @@ func (d *daemon) enrol(ctx context.Context, st *opstore.Store) {
 			"enrolment", hex.EncodeToString(id.Record.EnrolmentID))
 	}
 }
+
+// errNotEnrolled is returned by a release build for a store that was never
+// enrolled: it has no development enrolment, and a release build derives no
+// enrolment from the certificate until the manager's re-enrolment flow lands.
+var errNotEnrolled = errors.New("the store is not enrolled; a release build does not enrol from the certificate")
+
+// errReenrolDevOnly is returned by a release build for a certificate that
+// names an enrolment the store does not have active: re-enrolling is for
+// development builds until the manager's re-enrolment flow lands.
+var errReenrolDevOnly = errors.New("the store's active enrolment is not the one the host certificate names; a release build does not re-enrol")
 
 // errStoreOfOtherHost refuses to enrol a store whose active enrolment is for
 // another host.
@@ -911,6 +928,10 @@ var errStoreOfOtherHost = errors.New("the store belongs to another host")
 //     open operation of the previous enrolment in bounded chunks, then
 //     activates the new one; an enrolment id the store has used before is
 //     refused and the store keeps its state.
+//
+// Development builds only (config.DevBuild): a release build enrols a fresh
+// store only from a development enrolment, never re-enrols, and leaves the
+// answers unsigned otherwise, until the manager's re-enrolment flow lands.
 //
 // A store that belongs to another host is never touched: the active
 // enrolment's host, or with none active the store marker's and the newest
@@ -943,12 +964,17 @@ func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust
 		e.StartEpoch = 1
 		if dev := d.o.DevEnrolment; dev != nil {
 			e.StartEpoch, e.Predecessors = dev.StartEpoch, dev.Predecessors
+		} else if !config.DevBuild {
+			return errNotEnrolled
 		}
 		if err := st.Enrol(ctx, e); err != nil {
 			return fmt.Errorf("enrol: %w", err)
 		}
 		d.log.Info("enrolled from the host certificate", "enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
 		return nil
+	}
+	if !config.DevBuild {
+		return errReenrolDevOnly
 	}
 	e.StartEpoch = v.LastStartEpoch + 1
 	if err := st.Reenrol(ctx, e); err != nil {

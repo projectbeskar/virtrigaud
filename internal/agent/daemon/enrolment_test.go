@@ -1,3 +1,5 @@
+//go:build virtrigaud_dev
+
 /*
 Copyright 2026.
 
@@ -33,39 +35,10 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal/journaltest"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/systemd"
-	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
 )
-
-// certWithEnrolment returns the host's certificate for a new enrolment id (b
-// repeated), the same host, key and Provider.
-func certWithEnrolment(h *host, b byte) []byte {
-	h.t.Helper()
-	rec := h.pki.Record
-	rec.EnrolmentID = make([]byte, hostidentity.IDLen)
-	for i := range rec.EnrolmentID {
-		rec.EnrolmentID[i] = b
-	}
-	return h.pki.IssueHost(h.t, h.pki.HostKey, hostidentity.RequestURIs(h.pki.HostURI, rec), hostidentitytest.IssueOptions{})
-}
-
-func (h *host) installCert(cert []byte) {
-	h.t.Helper()
-	if err := os.WriteFile(filepath.Join(h.cfg.PKIDir(), trust.FileHostCert), cert, 0o600); err != nil {
-		h.t.Fatal(err)
-	}
-}
-
-// answerEnrolment returns the enrolment id the host's signed answer names,
-// or nil when the answer is unsigned.
-func answerEnrolment(r *running) []byte {
-	if a := r.hello(); a != nil {
-		return a.GetContext().GetEnrolmentId()
-	}
-	return nil
-}
 
 // TestReloadReenrolsOnANewEnrolment: a certificate for a new enrolment of
 // this host, loaded on SIGHUP, re-enrols the store and then replaces the

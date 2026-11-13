@@ -1,3 +1,5 @@
+//go:build virtrigaud_dev
+
 /*
 Copyright 2026.
 

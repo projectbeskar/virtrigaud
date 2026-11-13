@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
+	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
@@ -458,8 +459,10 @@ func TestClockFloorStoreNeverGoesDown(t *testing.T) {
 }
 
 // TestEnrolsFromTheCertificateWithoutTheDevelopmentFile: with no development
-// enrolment file a fresh store is enrolled from the host certificate alone
-// (epoch 1), and reads carry a signed answer naming that enrolment.
+// enrolment file a development build enrols a fresh store from the host
+// certificate alone (epoch 1), and reads carry a signed answer naming that
+// enrolment. A release build leaves the store unenrolled and answers
+// unsigned.
 func TestEnrolsFromTheCertificateWithoutTheDevelopmentFile(t *testing.T) {
 	h := newHost(t)
 	h.dev = nil
@@ -468,6 +471,12 @@ func TestEnrolsFromTheCertificateWithoutTheDevelopmentFile(t *testing.T) {
 		t.Fatalf("state = %v", state)
 	}
 	a := r.hello()
+	if !config.DevBuild {
+		if a != nil {
+			t.Fatalf("a release build signed an answer without an enrolment: %v", a)
+		}
+		return
+	}
 	if a == nil || string(a.GetContext().GetEnrolmentId()) != string(h.pki.Record.EnrolmentID) {
 		t.Fatalf("answer = %v", a)
 	}
