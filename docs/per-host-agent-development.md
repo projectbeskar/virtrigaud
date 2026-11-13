@@ -63,8 +63,10 @@ the VirtRigaud API packages.
 | `--socket` | `/run/virtrigaud-signer/signer.sock` | The Unix socket to serve: clean absolute path. Its directory must be owned by the signer's user and grant nothing to others and no write to its group. |
 | `--key-file` | `/var/lib/virtrigaud-signer/host.key` | The host private key: a regular file (not a symbolic link) owned by the signer's user with no permission for group or others, ECDSA P-256, PEM. |
 | `--agent-user` | `virtrigaud-agent` | The only user served, a name or a uid. It must not be the signer's own user. |
-| `--max-signs-per-second` | `50` | The sustained signature rate limit. |
-| `--sign-burst` | `100` | The rate limit's burst size. |
+| `--max-signs-per-second` | `50` | The sustained rate limit of the answer budget (signed host answers). |
+| `--sign-burst` | `100` | The answer budget's burst size. |
+| `--max-handshake-signs-per-second` | `20` | The sustained rate limit of the handshake budget (TLS handshakes). |
+| `--handshake-sign-burst` | `40` | The handshake budget's burst size. |
 | `--log-interval` | `1m` | How often the signature counters are logged (only while they change). |
 
 The signer refuses to run as root.
@@ -118,7 +120,7 @@ the host's URI identity, `urn:virtrigaud:enrolment:<32 hex>`,
 
 | Step | What happens | On failure |
 |------|--------------|------------|
-| 0 | Host checks (below); the signer is reached (retried for up to 15 seconds, since it may still be starting) and its public key fetched; then the trust configuration and the host identity are loaded, the host certificate must certify the signer's key, and the provisioning marker must name the host. | The start is refused (exit 1) with a reason; nothing on the host changes. |
+| 0 | Host checks (below); the signer is reached and its public key fetched (if the signer is not there yet, the agent waits for it without a time limit, not ready, with `STATUS=waiting for the host key signer` and a start timeout extension for systemd, so that a signer that is down for minutes at boot does not use up the agent's start rate limit; a stop during the wait exits 0); then the trust configuration and the host identity are loaded, the host certificate must certify the signer's key, and the provisioning marker must name the host. | The start is refused (exit 1) with a reason; nothing on the host changes. |
 | 1 | The store's single-writer lock. | A second agent on the same state directory exits. |
 | 2 | The store opens with full fsync and checks its schema. | A store written for a newer agent refuses the start, naming the schema version it needs. |
 | 3 | Local continuity checks: chain, anchor log, store marker, quarantine record. | The store is quarantined: reads still answer, every mutation is refused. |
@@ -147,11 +149,11 @@ restore of the state directory restores it too.
 | The state directory is on ext4, ext3, XFS, Btrfs, F2FS (mounted from a `/dev/` device that is not a loop device) or ZFS; never tmpfs, ramfs, overlay, a loop device or a network file system. | `StateNotPersistent` |
 | `host-id` exists, is a regular file owned by the agent's user that group and others cannot write, and names the host of the certificate. | `StateNotPersistent` |
 | `pki/` and every file in it are owned by the agent's user, grant nothing to group or others, and are not symbolic links. | `PKIInsecure` |
-| The agent cannot read the host private key: `--signer-key-file` is not readable by the agent's user (`access(2)`; a file that does not exist or that the agent cannot reach passes), and `pki/` holds no file named `host.key` at all, readable or not. | `HostKeyReadable` |
+| The agent is shown not to be able to read the host private key: an attempt to open `--signer-key-file` for reading (never read from) is refused by permission (`EACCES`). A file that opens, and also a missing path, a symbolic link or any other error, refuses the start, so a misspelled key path cannot pass for a protected one. `pki/` holds no file named `host.key` at all, readable or not. | `HostKeyReadable` |
 | The signer's socket directory is a directory (not a symbolic link), owned by the signer's user, with nothing for others and no write permission for its group. | `SignerSocketInsecure` |
 | Every directory from `/` to the trust directory, and every file in it, is owned by root, not writable by group or others, not a symbolic link; and the agent's process cannot write the directory or its files. | `TrustConfigInsecure` |
 | The trust configuration and the host identity load, including the checks on the open files (see above), and the host certificate certifies the signer's key. | `IdentityInvalid` |
-| The signer answers on its socket, run by the signer's user (checked with `SO_PEERCRED`), with an ECDSA P-256 key. | `SignerUnavailable` |
+| The signer's user (`--signer-user`) is neither root nor the agent's own user, and the signer answers on its socket, run by that user (checked with `SO_PEERCRED`), with an ECDSA P-256 key. A signer that is not there yet is waited for (see [Start-up order](#start-up-order)); a signer of the wrong user or with an unusable key is refused at once. | `SignerUnavailable` |
 
 A release build also refuses to start when a caller of the agent's Go
 packages sets one of the daemon's test overrides (another trust directory,
@@ -174,6 +176,20 @@ its connection is open, cuts the connection off (`PermissionDenied`). It then
 compares the Provider UID with the Provider the host certificate is enrolled
 with, and refuses another one with `FailedPrecondition` and the ErrorInfo
 reason `PROVIDER_MISMATCH` before any other check.
+
+Before the TLS handshake, a throttle closes connections that exceed a limit:
+at most 16 handshakes run at once, and a source address may open 2 new
+connections per second with a burst of 10 (a table of 4096 addresses; when it
+is full of active ones a new address is refused). This matters because in
+TLS 1.3 the server signs its CertificateVerify before it looks at the client
+certificate: every ClientHello from any peer that can reach the port would
+otherwise cost the host key one signature. A refused connection never
+reaches the signer; the refusals are logged once per 30 seconds with the count
+held back, as is the "no signed answer" error. **The agent's port must be
+firewalled to the Provider's address ranges.** The throttle bounds what a
+peer that can connect costs; it authenticates nobody, and the handshake
+signature budget of the signer (below) is shared with every peer that gets
+through it.
 
 Connections are closed after 30 minutes (and a minute of grace for running
 calls), so each is authenticated again with a new handshake. A handshake must
@@ -234,7 +250,7 @@ bytes. A request is the version byte (1), an operation byte and its body:
 | Operation | Body | Response body |
 |-----------|------|---------------|
 | `1` public key | none | the public key, PKIX DER |
-| `2` sign | hash byte `1` (SHA-256), then exactly 32 digest bytes | the signature, ASN.1 DER |
+| `2` sign | hash byte `1` (SHA-256), purpose byte (`1` handshake, `2` answer), then exactly 32 digest bytes | the signature, ASN.1 DER |
 
 A response is the version byte, a status byte (`0` ok, `1` bad request,
 `2` rate limited, `3` internal error) and the body. The only hash is SHA-256
@@ -265,21 +281,57 @@ restarts is reached again by the next call with no action by the agent. While
 the signer is down or refuses, every `Sign` fails: new TLS handshakes fail,
 and a read with a nonce is answered without `host_answer` (no answer, which a
 manager treats as no evidence). The agent never signs for itself. At start-up
-the agent retries the signer for up to 15 seconds, then refuses the start
-(`SignerUnavailable`). SIGHUP on the agent fetches the signer's key again
-(a failed fetch keeps the running credentials); SIGHUP on the signer loads a
-replaced key file (a key that does not load keeps the old one), which is how a
-renewed certificate with a new key is brought in: replace the key file, signal
-the signer, replace the certificate, signal the agent.
+the agent waits for the signer without a time limit (see
+[Start-up order](#start-up-order)); a signer of the wrong user or with an
+unusable key is refused at once (`SignerUnavailable`). SIGHUP on the agent
+fetches the signer's key again (a failed fetch keeps the running
+credentials); SIGHUP on the signer loads a replaced key file (a key that does
+not load keeps the old one), which is how a renewed certificate with a new
+key is brought in: replace the key file, signal the signer, replace the
+certificate, signal the agent. Between the signer's SIGHUP and the agent's
+there is a brief window in which the signer holds the new key and the agent
+still has the old certificate and public key: every signature the agent asks
+for fails verification, so TLS handshakes and signed answers fail closed
+until the agent's SIGHUP loads the new certificate. Do the two signals one
+after the other.
 
-**Rate limit and logging.** The signer limits signatures with a token bucket,
-50 per second sustained with a burst of 100 (flags above). A limit cannot
-stop a compromised agent process from asking, since the signer cannot tell
-what it signs; it bounds how fast, keeps a stolen oracle from working as a bulk
-signing service, caps the signer's CPU and shows an abuse as a rate in the
-log. The agent needs about one signature per TLS handshake and per signed
-answer, a few per second at most on a host with a few Providers, so the
-default leaves a wide margin. The signer logs, at most once per
+**Memory.** The signer overwrites the buffer the key file was read into and
+the decoded key bytes right after parsing, and its unit forbids core dumps and
+swap. Go gives no zeroization guarantee for the parsed key it keeps, nor for
+the old key after a reload (it stays in memory until the garbage collector
+frees it, and copies the runtime made are not tracked), so none is claimed.
+
+**Installing.** On a development host, create the users and directories before
+starting any unit: `systemd-sysusers` and `systemd-tmpfiles --create` with the
+fragments in `packaging/systemd/` (the socket directory is
+`/run/virtrigaud-signer`, owned by the signer's user, group the agent's,
+`2750`, and is not made by the signer unit). Put `host.key` in
+`/var/lib/virtrigaud-signer/` (`0600`, owned by the signer's user) and only
+`host.crt` in the agent's `pki/`. The `vrtg-agent` binary, which both units
+run, must be owned by root and writable by no one else (`root:root`, `0755`),
+and so must the directories above it: the agent's user must not be able to
+replace the program that holds the key.
+
+**What the separation assumes.** The claim that a compromise of the agent
+process cannot copy the key out assumes that the compromise does not also
+reach root, or the signer's own uid: a process with either can read the
+signer's memory or its key file.
+
+**Rate limits and logging.** The signer limits signatures with two token
+buckets, one per purpose: 20 per second (burst 40) for TLS handshakes and
+50 per second (burst 100) for signed answers (flags above). The agent's TLS
+handshakes use the first and its host answers the second, so a flood of
+handshakes, which any peer that reaches the agent's port can start, cannot
+starve the answers a Provider asks for. The purpose is declared by the agent
+and taken on trust, since the signer cannot see what is signed: a compromised
+agent can lie about it, so the split protects against outside floods, not
+against that. A limit cannot stop a compromised agent process from asking;
+it bounds how fast, keeps a stolen oracle from working as a bulk signing
+service, caps the signer's CPU and shows an abuse as a rate in the log. The
+agent needs about one signature per TLS handshake and per signed answer, a few
+per second at most on a host with a few Providers, so the defaults leave a
+wide margin (and the agent's pre-handshake throttle keeps unauthenticated
+connections from using the handshake budget up in the first place). The signer logs, at most once per
 `--log-interval` and only while something changed, the counts of signatures,
 rate-limited requests, malformed requests, refused peers and refused
 connections, and its totals when it stops; it never logs a digest, a
@@ -308,10 +360,13 @@ scope. No other unit upholds it, so it can be stopped for maintenance.
 
 `vrtg-agent-signer.service`: the host key signer. `Type=notify` (`READY=1`
 once it serves), `Restart=always`, the same start-rate limit and sandboxing as
-the agent, and its own user and group (`virtrigaud-signer`), state directory
-(`/var/lib/virtrigaud-signer`, `0700`) and, beyond the agent's, a private
-network namespace with `RestrictAddressFamilies=AF_UNIX`, a `MemoryMax` of
-`64M` and read-write access to `/run/virtrigaud-signer` only. It sets no
+the agent, and its own user and group (`virtrigaud-signer`) and, beyond the
+agent's, a private network namespace with `RestrictAddressFamilies=AF_UNIX`,
+a `MemoryMax` of `64M`, `MemorySwapMax=0` and `LimitCORE=0` (the key is never
+swapped out or dumped), its state directory (`/var/lib/virtrigaud-signer`,
+`0700`, made by `tmpfiles.d`) read-only (`ReadOnlyPaths=`; the signer never
+writes there, so the unit has no `StateDirectory=`) and read-write access to
+`/run/virtrigaud-signer` only. It sets no
 `PrivateUsers=`, which would hide the agent's uid from `SO_PEERCRED`.
 `ExecReload` sends SIGHUP (reload the key file). The `sysusers.d` fragment
 declares both users, and the `tmpfiles.d` fragment the signer's state
@@ -319,7 +374,10 @@ directory and the socket directory.
 
 The agent's unit has `Wants=` and `After=vrtg-agent-signer.service`: starting
 the agent starts the signer first, and as the signer is `Type=notify`,
-`After=` waits until it serves. It is `Wants=`, not `Requires=`, on purpose.
+`After=` waits until it serves. If the signer is still not up, the agent waits
+(not ready, with a status line and `EXTEND_TIMEOUT_USEC` so that systemd does
+not time the start out) instead of exiting, so it recovers when the signer
+does, with no `systemctl reset-failed`. It is `Wants=`, not `Requires=`, on purpose.
 With `Requires=`, every restart of the signer (a crash, or a key reload done
 as a restart) would restart the agent too and take down its store and its
 Provider connections, while the agent already fails closed on its own while the
@@ -373,7 +431,15 @@ is not the one the certificate names, reads answer unsigned.
   and so can make host answers that verify. A separate answer key, held by a
   process that never terminates TLS, is a later requirement for the regulated
   profile; until then a signed host answer is no stronger than the agent
-  process that relays it. The signer's rate limit bounds how fast, not whether.
+  process that relays it. The signer's rate limits bound how fast, not
+  whether, and the handshake/answer split is declared by the agent, so it
+  protects against outside floods only. The key's protection also assumes the
+  attacker has not reached root or the signer's uid.
+- The agent's port must be firewalled to the Provider's address ranges: the
+  pre-handshake throttle bounds the cost of a peer that can connect (one host
+  key signature per allowed connection) but authenticates nobody, and the
+  signer's handshake budget is shared with every peer the throttle lets
+  through.
 - The agent's checks that it cannot read the key file (`access(2)`) are made
   at start-up and on reload, not continuously; a later change of the file's
   permissions is not noticed until then.
