@@ -36,9 +36,15 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 User=virtrigaud-signer
 Group=virtrigaud-signer
-StateDirectory=virtrigaud-signer
-StateDirectoryMode=0700
+# The key is read from /var/lib/virtrigaud-signer, made by tmpfiles.d (0700,
+# owned by the signer's user); the signer never writes there, so it is
+# read-only to it (ProtectSystem=strict also makes it so).
+ReadOnlyPaths=/var/lib/virtrigaud-signer
 ReadWritePaths=/run/virtrigaud-signer
+# No core dump (it would hold the key) and no swap (the key is never written
+# to disk).
+LimitCORE=0
+MemorySwapMax=0
 UMask=0077
 LimitNOFILE=256
 TasksMax=64

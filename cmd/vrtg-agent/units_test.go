@@ -151,7 +151,7 @@ func TestSignerUnitProperties(t *testing.T) {
 	for key, want := range map[string]string{
 		"Type": "notify", "NotifyAccess": "main", "NoNewPrivileges": "yes", "Restart": "always", "RestartSec": "2",
 		"KillMode": "process", "CapabilityBoundingSet": "", "AmbientCapabilities": "", "User": "virtrigaud-signer",
-		"Group": "virtrigaud-signer", "StateDirectory": "virtrigaud-signer", "StateDirectoryMode": "0700",
+		"Group": "virtrigaud-signer", "ReadOnlyPaths": "/var/lib/virtrigaud-signer", "LimitCORE": "0", "MemorySwapMax": "0",
 		"ReadWritePaths": "/run/virtrigaud-signer", "UMask": "0077", "ProtectSystem": "strict", "ProtectHome": "yes",
 		"RestartPreventExitStatus": "2", "ProtectProc": "invisible", "PrivateIPC": "yes", "PrivateNetwork": "yes",
 		"PrivateTmp": "yes", "PrivateDevices": "yes", "RestrictAddressFamilies": "AF_UNIX", "MemoryDenyWriteExecute": "yes",
@@ -181,10 +181,15 @@ func TestSignerUnitProperties(t *testing.T) {
 	}
 	// The signer is not the agent's user and shares nothing of its.
 	a := parseUnit(t, "vrtg-agent.service")
-	for _, key := range []string{"User", "Group", "StateDirectory"} {
+	for _, key := range []string{"User", "Group"} {
 		if u.one(t, "Service", key) == a.one(t, "Service", key) {
 			t.Errorf("[Service] %s is the agent's: the two must be separate users", key)
 		}
+	}
+	// The signer never writes its state directory: systemd must not make it
+	// one of the service's own (read-write) state directories.
+	if _, ok := u["Service"]["StateDirectory"]; ok {
+		t.Error("[Service] StateDirectory is set: the key directory is read-only to the signer")
 	}
 	// PrivateUsers would hide the agent's uid from SO_PEERCRED.
 	for _, key := range []string{"Delegate", "Slice", "DelegateSubgroup", "PrivateUsers"} {

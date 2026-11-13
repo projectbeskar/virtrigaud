@@ -172,9 +172,16 @@ func hostURIOf(leaf *x509.Certificate) (uri, namespace, name string, err error) 
 	return uri, namespace, name, nil
 }
 
-// ParseHostKey decodes one PEM ECDSA P-256 private key, PKCS #8 or SEC 1. It
-// is for the signer process, the only process that holds the host key.
-func ParseHostKey(b []byte) (*ecdsa.PrivateKey, error) { return parseKey(b) }
+// ParseHostKey decodes one PEM ECDSA P-256 private key, PKCS #8 or SEC 1, and
+// then overwrites b and its own decoded copy of the key bytes with zeros,
+// whether it succeeded or not, so that the caller does not keep a PEM copy of
+// the key in memory. It is for the signer process, the only process that
+// holds the host key. Go gives no zeroization guarantee for the decoded
+// *ecdsa.PrivateKey itself, nor for copies the runtime may have made.
+func ParseHostKey(b []byte) (*ecdsa.PrivateKey, error) {
+	defer clear(b)
+	return parseKey(b)
+}
 
 // parseKey decodes one PEM ECDSA P-256 private key, PKCS #8 or SEC 1.
 func parseKey(b []byte) (*ecdsa.PrivateKey, error) {
@@ -182,6 +189,7 @@ func parseKey(b []byte) (*ecdsa.PrivateKey, error) {
 	if block == nil || len(strings.TrimSpace(string(rest))) != 0 {
 		return nil, fmt.Errorf("%w: the host key file must hold exactly one PEM block", ErrIdentity)
 	}
+	defer clear(block.Bytes)
 	var k any
 	var err error
 	switch block.Type {

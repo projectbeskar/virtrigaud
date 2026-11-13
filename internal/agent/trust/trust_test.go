@@ -289,3 +289,38 @@ func TestIdentityUsesTheAnswerView(t *testing.T) {
 
 // ecdsaView is a distinct signer value over a key.
 type ecdsaView struct{ *ecdsa.PrivateKey }
+
+// TestParseHostKeyZeroesItsInput: the buffer the PEM was in holds no key
+// material afterwards, on success and on failure.
+func TestParseHostKeyZeroesItsInput(t *testing.T) {
+	p := trusttest.New(t)
+	dir := t.TempDir()
+	path := p.WriteKey(t, dir)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := trust.ParseHostKey(b)
+	if err != nil || !k.Equal(p.HostKey) {
+		t.Fatalf("ParseHostKey = %v, %v", k, err)
+	}
+	if !allZero(b) {
+		t.Fatal("the PEM buffer was not zeroed")
+	}
+	bad := []byte("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
+	if _, err := trust.ParseHostKey(bad); err == nil {
+		t.Fatal("a bad key was accepted")
+	}
+	if !allZero(bad) {
+		t.Fatal("the buffer of a refused key was not zeroed")
+	}
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
