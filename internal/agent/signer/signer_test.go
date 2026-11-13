@@ -471,7 +471,9 @@ func TestLogsCarryCountsOnly(t *testing.T) {
 	text := r.logs.text()
 	assert.Contains(t, text, `"signed"=1`)
 	assert.Contains(t, text, "signedTotal")
-	for _, secret := range [][]byte{d, sig, key.D.Bytes()} {
+	raw, err := key.Bytes()
+	require.NoError(t, err)
+	for _, secret := range [][]byte{d, sig, raw} {
 		assert.NotContains(t, text, string(secret))
 		assert.NotContains(t, text, hexOf(secret))
 	}
