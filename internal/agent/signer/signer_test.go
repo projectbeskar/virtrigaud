@@ -24,6 +24,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -631,4 +632,62 @@ func TestConnectWithRetryStopsOnPermanentErrors(t *testing.T) {
 	_, err = ConnectWithRetry(ctx2, ClientOptions{Socket: shortSock(t), ServerUID: EUID()}, 20*time.Millisecond, func(error) { seen++ })
 	require.ErrorIs(t, err, ErrSigner)
 	assert.Positive(t, seen)
+}
+
+// FuzzReadFrame: whatever bytes arrive, readFrame never panics, never returns
+// more than MaxFrameBytes, and a frame it returns is what writeFrame wrote.
+func FuzzReadFrame(f *testing.F) {
+	f.Add(frame(1, 2, 3))
+	f.Add([]byte{0xff, 0xff, 1})
+	f.Add([]byte{0, 5, 1})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, in []byte) {
+		p, err := readFrame(bytes.NewReader(in))
+		if err != nil {
+			return
+		}
+		if len(p) > MaxFrameBytes {
+			t.Fatalf("a frame of %d bytes", len(p))
+		}
+		var out bytes.Buffer
+		if err := writeFrame(&out, p); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.HasPrefix(in, out.Bytes()) {
+			t.Fatalf("frame %x does not round-trip from %x", p, in)
+		}
+	})
+}
+
+// FuzzClientResponse: the client's reading of a response and of a public key
+// never panics, accepts a response only with the right version and an OK
+// status, and a key only if it is ECDSA P-256.
+func FuzzClientResponse(f *testing.F) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(f, err)
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	require.NoError(f, err)
+	f.Add(append([]byte{Version, byte(StatusOK)}, der...))
+	f.Add([]byte{Version, byte(StatusRateLimited)})
+	f.Add([]byte{2, 0})
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, resp []byte) {
+		body, err := parseResponse(resp)
+		if err == nil && (len(resp) < 2 || resp[0] != Version || Status(resp[1]) != StatusOK) {
+			t.Fatalf("response %x accepted", resp)
+		}
+		if err != nil && !errors.Is(err, ErrSigner) {
+			t.Fatalf("error %v does not wrap ErrSigner", err)
+		}
+		if err != nil {
+			return
+		}
+		pub, kerr := parsePublicKey(body)
+		if kerr == nil && pub.Curve != elliptic.P256() {
+			t.Fatal("a key that is not P-256 was accepted")
+		}
+		if kerr != nil && !errors.Is(kerr, ErrKey) {
+			t.Fatalf("key error %v does not wrap ErrKey", kerr)
+		}
+	})
 }

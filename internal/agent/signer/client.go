@@ -85,13 +85,9 @@ func Connect(ctx context.Context, o ClientOptions) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	pk, err := x509.ParsePKIXPublicKey(body)
+	pub, err := parsePublicKey(body)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w: the public key does not decode", ErrSigner, ErrKey)
-	}
-	pub, ok := pk.(*ecdsa.PublicKey)
-	if !ok || pub.Curve != elliptic.P256() {
-		return nil, fmt.Errorf("%w: %w: the public key is not ECDSA P-256", ErrSigner, ErrKey)
+		return nil, err
 	}
 	c.pub = pub
 	return c, nil
@@ -214,6 +210,12 @@ func (c *Client) call(ctx context.Context, req []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: receive: %v", ErrSigner, err)
 	}
+	return parseResponse(resp)
+}
+
+// parseResponse returns the body of an OK response payload, and an error
+// wrapping ErrSigner for anything else.
+func parseResponse(resp []byte) ([]byte, error) {
 	if len(resp) < 2 || resp[0] != Version {
 		return nil, fmt.Errorf("%w: malformed response", ErrSigner)
 	}
@@ -221,4 +223,18 @@ func (c *Client) call(ctx context.Context, req []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: the signer answered: %s", ErrSigner, st)
 	}
 	return resp[2:], nil
+}
+
+// parsePublicKey decodes the body of a public key response: an ECDSA P-256
+// key, or an error wrapping ErrSigner and ErrKey.
+func parsePublicKey(body []byte) (*ecdsa.PublicKey, error) {
+	pk, err := x509.ParsePKIXPublicKey(body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w: the public key does not decode", ErrSigner, ErrKey)
+	}
+	pub, ok := pk.(*ecdsa.PublicKey)
+	if !ok || pub.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("%w: %w: the public key is not ECDSA P-256", ErrSigner, ErrKey)
+	}
+	return pub, nil
 }
