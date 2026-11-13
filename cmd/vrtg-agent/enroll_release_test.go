@@ -26,6 +26,10 @@ import (
 	"testing"
 )
 
+// enrollNoStepStatus is the exit status of "enroll" with no step: a release
+// build has none.
+const enrollNoStepStatus = 1
+
 // TestReleaseBuildHasNoEnrolment: a release build's enroll steps do nothing:
 // exit 1, a message naming the development build, no key and no file.
 func TestReleaseBuildHasNoEnrolment(t *testing.T) {

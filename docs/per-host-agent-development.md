@@ -567,16 +567,22 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
 3. **The request goes to an administrator, with files only.** `vrtg host
    enroll --host <name> --csr host.csr` (see the manager page) has it
    approved and signed by the host-agent sub-CA; the issued certificate is
-   copied back to the host. Put `host.csr` and the certificate where the
-   agent's user can read them (for example a directory under `/var/tmp` that is
-   readable by it); the agent's step reads both, and neither is secret.
+   copied back to the host. Put `host.csr`, the certificate and the list of
+   request URIs in a hand-off directory that only root or you can write to,
+   created for the purpose and readable by the agent's user: as root, `install
+   -d -m 0755 -o root -g root /run/vrtg-enrol`, or as an operator, `mktemp -d`
+   and `chmod 0755` on it. Not a shared, world-writable directory such as
+   `/var/tmp`. The steps read these files only when each is a regular file
+   owned by root or by the user running the step and not writable by group or
+   others (not reached through a symbolic link), so a file planted or replaced
+   by another user is refused; neither file is secret.
 4. **The signer is (re)started**, so it loads the key (`systemctl restart
    vrtg-agent-signer`); the signer serves only a key that exists.
 5. **`vrtg-agent enroll install`, as the agent's user:**
 
    ```
-   sudo -u virtrigaud-agent vrtg-agent enroll install --csr /var/tmp/enrol/host.csr \
-       --certificate /var/tmp/enrol/host-cert.pem --uris-file /var/tmp/enrol/request-uris
+   sudo -u virtrigaud-agent vrtg-agent enroll install --csr /run/vrtg-enrol/host.csr \
+       --certificate /run/vrtg-enrol/host-cert.pem --uris-file /run/vrtg-enrol/request-uris
    ```
 
    The Host's **current** request URIs are required (`--uri`, repeatable, or
@@ -640,7 +646,11 @@ store's active enrolment is then brought to it:
   that belongs to another host is never touched: the active enrolment's host,
   or with none active the store marker's and the newest enrolment record's
   host, must be the certificate's (otherwise the log says `StoreOfOtherHost`
-  and answers stay unsigned).
+  and answers stay unsigned). A store that names no host at all, whose
+  marker names none and whose enrolment records were all discarded, belongs
+  to nobody and can be adopted by whichever host presents a certificate: the
+  store itself holds nothing that says otherwise, and the provisioning marker
+  in the state directory (`host-id`) is what ties a disk to a host.
 
 On reload, a certificate of the same host with a new enrolment re-enrols the
 store first and only then replaces the running credentials, so no answer names

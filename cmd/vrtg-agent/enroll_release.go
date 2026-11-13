@@ -25,10 +25,6 @@ import (
 	"github.com/go-logr/logr"
 )
 
-// enrollNoStepStatus is the exit status of "enroll" with no step: a release
-// build has none.
-const enrollNoStepStatus = 1
-
 // enrollCommand is the release build's placeholder: host enrolment from the
 // agent's side exists in development builds only, until the manager's
 // re-enrolment flow lands. A release build enrols nothing and its host
