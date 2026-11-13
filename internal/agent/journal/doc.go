@@ -67,13 +67,17 @@ limitations under the License.
 //     honours fsync.
 //   - At open, before any commit, the store first checks min_reader_version
 //     (a store that needs a newer reader refuses to open, with the required
-//     version in the error, and nothing is written to it, so an older binary
-//     never quarantines a newer store), then reads its identity, position and
+//     version in the error, read through a read-only handle before the store
+//     is opened for writing or any file of the state directory is changed, so
+//     an older binary never quarantines or alters a newer store), then reads its identity, position and
 //     quarantine record, so that any loss names the store and the position.
 //     A store whose schema predates record verification, or whose meta has no
 //     live-state digest, is lost{journal_corrupt}: it is not migrated. The
-//     chain is recomputed from its last checkpoint, including the state
-//     digest it committed to, and the position is compared with the anchor log:
+//     chain is recomputed from its newest checkpoint, or from the one before
+//     it when the entries between them are retained (which authenticates the
+//     newest checkpoint), including the state digest it committed to, and the
+//     position is compared with the anchor log (the head compared in the
+//     one-commit-ahead case is the one the recomputation produced):
 //     store behind the anchor ⇒ rolled_back; store more than one ahead, or
 //     at the same position with another head, or of another store ⇒
 //     inconsistent_store; store missing ⇒ journal_missing; anchor missing ⇒
@@ -98,9 +102,13 @@ limitations under the License.
 //     anchor log is re-created holding only the quarantine record). The same
 //     rule applies when a loss is found while the store runs: a store found
 //     corrupt gets no record written into it, and the marker file and the
-//     anchor log record the loss. The corruption is found again by the next
-//     open's scan, so no record is needed in the store itself. A failed fsync
-//     is never retried.
+//     anchor log record the loss. Only a corruption is found again by a later
+//     open (its scan and chain check): a journal_corrupt loss does not depend on
+//     the records alone. A reason a client reports (rolled_back,
+//     inconsistent_store, anchor_missing, io_error) is kept only by those
+//     records, so when neither the marker file nor the anchor log took the
+//     record, it is written into the store as the last resort (the evidence
+//     cost is accepted). A failed fsync is never retried.
 //   - A store marker binds the store_id to the host and its enrolment
 //     (written by the operation store). A store that has committed and whose
 //     marker is missing, or names another store, is inconsistent_store.
@@ -123,9 +131,12 @@ limitations under the License.
 //   - A first open that died after bbolt created the store file and before the
 //     journal committed anything (no anchor log, marker, quarantine record,
 //     anchor-rotation file or bucket exists) is started again, like one that
-//     died before its anchor log was complete. The old store file is renamed
-//     to state.db.unfinished-<unix nanoseconds> and the directory fsynced, not
-//     removed. Any such record, or any committed data, keeps the store lost.
+//     died before its anchor log was complete. The old store file is set aside
+//     as state.db.unfinished-<unix nanoseconds> (linked, then unlinked, and the
+//     directory fsynced; a name is never overwritten), not removed. A second
+//     unfinished first open, with such a file already there, is an Open error
+//     for the operator to look at: nothing piles up and nothing is written.
+//     Any such record, or any committed data, keeps the store lost.
 //   - One writer at a time: Open takes an exclusive flock on the state
 //     directory itself and then on state.db.lock (re-checked against the
 //     file at the path) before it reads or changes any other file, and holds

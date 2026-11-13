@@ -34,7 +34,8 @@ limitations under the License.
 //     refuses every mutation.
 //  4. The clock floor is read and raised from the host's own clocks. A
 //     floor that is missing for an enrolled store, or unreadable, quarantines
-//     the store (journal_corrupt).
+//     the store (inconsistent_store: a state file beside a store that
+//     verifies is gone or damaged, like a missing store marker).
 //  5. The server starts serving in the unattested state: reads, Hello and
 //     GetHostInfo answer; every mutation is refused UNATTESTED. Nothing is
 //     committed before step 6.
@@ -243,6 +244,9 @@ type daemon struct {
 	trustDir   string
 	creds      *server.CredentialStore
 	notifier   systemd.Notifier
+	// started is set once the start-up sequence ended and READY was sent: a
+	// scrub before it leaves the status to the start-up notification.
+	started atomic.Bool
 }
 
 // Run runs the agent until ctx ends or a stop signal arrives on signals, and
@@ -401,10 +405,14 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 
 	drain := func() {
 		stopScrub()
-		<-scrubDone
 		_ = d.notifier.Notify(systemd.NotifyStopping)
 		dctx, cancel := context.WithTimeout(context.Background(), d.o.Config.DrainTimeout)
 		defer cancel()
+		select {
+		case <-scrubDone:
+		case <-dctx.Done():
+			d.log.Error(dctx.Err(), "the store scrub did not stop within the drain timeout; abandoned")
+		}
 		srv.Shutdown(dctx)
 		if f := agent.floor.Load(); f != nil {
 			if err := f.Flush(dctx); err != nil {
@@ -423,6 +431,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			d.log.Error(err, "notify systemd")
 		}
 		d.log.Info("started", "state", state.String(), "reason", reason)
+		d.started.Store(true)
 		if d.o.Hooks.Started != nil {
 			d.o.Hooks.Started(state)
 		}
@@ -496,7 +505,7 @@ func (d *daemon) scrubLoop(ctx context.Context, agent *agentState) {
 		default:
 			after, reason := j.State()
 			log.Error(err, "journal scrub failed", "state", after.String(), "reason", string(reason))
-			if after == journal.StateLost {
+			if after == journal.StateLost && d.started.Load() {
 				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent))
 			}
 		}
@@ -598,7 +607,9 @@ func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
 		return nil
 	case errors.Is(err, clockfloor.ErrFloorMissing), errors.Is(err, clockfloor.ErrCorrupt), errors.Is(err, errFloorUnreadable):
 		d.log.Error(err, "the clock floor cannot be read; the store is quarantined")
-		agent.store.Journal().Quarantine(journal.LostJournalCorrupt, "clock floor unreadable")
+		// Not journal_corrupt: the journal verified. A state file beside it is
+		// gone or damaged, the same shape as a missing store marker.
+		agent.store.Journal().Quarantine(journal.LostInconsistentStore, "clock floor unreadable")
 		return nil
 	case errors.Is(err, errFloorWrite):
 		d.log.Error(err, "the clock floor cannot be written; the store is quarantined")

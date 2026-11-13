@@ -305,7 +305,7 @@ func TestQuarantinedStoreServesReads(t *testing.T) {
 }
 
 // TestMissingClockFloorQuarantines: an enrolled store whose clock floor is
-// gone is quarantined (journal_corrupt), never given a new floor.
+// gone is quarantined (inconsistent_store), never given a new floor.
 func TestMissingClockFloorQuarantines(t *testing.T) {
 	h := newHost(t)
 	r, _ := h.run()
@@ -319,7 +319,7 @@ func TestMissingClockFloorQuarantines(t *testing.T) {
 	if state != providerv1.AgentState_AGENT_STATE_QUARANTINED {
 		t.Fatalf("state = %v", state)
 	}
-	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostJournalCorrupt) {
+	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostInconsistentStore) {
 		t.Fatalf("answer = %v", a)
 	}
 }

@@ -100,7 +100,7 @@ the host's URI identity, `urn:virtrigaud:enrolment:<32 hex>`,
 | 1 | The store's single-writer lock. | A second agent on the same state directory exits. |
 | 2 | The store opens with full fsync and checks its schema. | A store written for a newer agent refuses the start, naming the schema version it needs. |
 | 3 | Local continuity checks: chain, anchor log, store marker, quarantine record. | The store is quarantined: reads still answer, every mutation is refused. |
-| 4 | The clock floor is read and raised from the host's own clocks. | A missing floor for an enrolled store, or an unreadable one, quarantines the store (`journal_corrupt`); one that cannot be written quarantines it (`io_error`); clocks the floor cannot use refuse the start. |
+| 4 | The clock floor is read and raised from the host's own clocks. | A missing floor for an enrolled store, or an unreadable one, quarantines the store (`inconsistent_store`); one that cannot be written quarantines it (`io_error`); clocks the floor cannot use refuse the start. |
 | 5 | The server starts serving, unattested. Nothing is committed before step 6. | |
 | 6 | Continuity is established. A development build with `--dev-enrolment-file` enrols a store that was never enrolled. | |
 | 7 | Recovery of interrupted operations. An operation left runnable stays as it is: this agent starts no runner. | |
