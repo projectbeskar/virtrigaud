@@ -410,3 +410,131 @@ func parseCert(der []byte, tg *agenttarget.Target) (*x509.Certificate, error) {
 	}
 	return c, nil
 }
+
+// copyTree copies the regular files under from into to, skipping the
+// top-level entries in skip.
+func copyTree(t *testing.T, from, to string, skip ...string) {
+	t.Helper()
+	err := filepath.Walk(from, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(from, path)
+		if err != nil {
+			return err
+		}
+		for _, s := range skip {
+			if rel == s {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		dst := filepath.Join(to, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dst, 0o700)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		b, err := os.ReadFile(path) // #nosec G304 -- the test's own state directory
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, b, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// resetTree removes everything under dir but the top-level entries in keep.
+func resetTree(t *testing.T, dir string, keep ...string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		kept := false
+		for _, k := range keep {
+			kept = kept || e.Name() == k
+		}
+		if !kept {
+			if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// TestJointRestoreRerunFindsItsOwnEffect: a joint restore of the whole state
+// set (store, anchor log, witnesses) to the point where a Create was accepted
+// is not detectable on the host, and recovery runs the Create again. The
+// executor finds its own effect (the VM with the operation's placement) and
+// the operation completes, never as a definite failure; a foreign VM in its
+// place makes the outcome unknown or a dirty failure, never a clean one.
+func TestJointRestoreRerunFindsItsOwnEffect(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreign=%v", foreign), func(t *testing.T) {
+			ctx := context.Background()
+			tg, h := oneHost(t)
+			if err := h.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Start(daemon.DevCrashEnv + "=before-accept,after-anchor"); err != nil {
+				t.Fatal(err)
+			}
+			env, id, err := tg.Mint(ctx, hostA, vmUID, kindCr, &providerv1.CreateRequest{Name: "web", TargetHostId: hostA, Owner: owner()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = tg.SendDirect(ctx, hostA, kindCr, env)
+			if killed, err := h.Wait(30 * time.Second); err != nil || !killed {
+				t.Fatalf("not killed after the accept: %v", err)
+			}
+			const fakeDir, pkiDir = "fake-executor", "pki"
+			snapshot := t.TempDir()
+			copyTree(t, h.StateDir(), snapshot, fakeDir, pkiDir)
+			if err := h.Restart(); err != nil {
+				t.Fatal(err)
+			}
+			ref := server.TaskRef(opstore.OpRef{EnrolmentID: id.EnrolmentID, OpID: id.OpID})
+			if _, err := tg.WaitTask(ctx, hostA, ref, 20*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.Stop(); err != nil {
+				t.Fatal(err)
+			}
+			resetTree(t, h.StateDir(), fakeDir, pkiDir)
+			copyTree(t, snapshot, h.StateDir())
+			if foreign {
+				vmFile := filepath.Join(h.FakeDir(), "vms", vmUID+".json")
+				if err := os.WriteFile(vmFile, []byte(`{"binding":"00","power":"off","generation":0}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := h.Restart(); err != nil {
+				t.Fatal(err)
+			}
+			if h.State() != providerv1.AgentState_AGENT_STATE_READY {
+				t.Fatalf("a joint restore of the whole state set started %s", h.State())
+			}
+			if _, err := tg.WaitTask(ctx, hostA, ref, 20*time.Second); err != nil {
+				t.Fatal(err)
+			}
+			a := signedState(t, tg, h, id)
+			switch {
+			case !foreign && a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED:
+				t.Fatalf("own effect found: state %s, want COMPLETED", a.GetState())
+			case foreign && a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_OUTCOME_UNKNOWN &&
+				a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_FAILED_DIRTY:
+				t.Fatalf("foreign effect: state %s, want OUTCOME_UNKNOWN or FAILED_DIRTY", a.GetState())
+			}
+			if n := effectsOf(t, h, id.OpID)["define"]; n != 1 {
+				t.Fatalf("define effects = %d, want 1", n)
+			}
+		})
+	}
+}
