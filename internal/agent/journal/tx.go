@@ -215,6 +215,15 @@ func (t *Tx) createBucket(name string) error {
 // not allowed. A reserved bucket name is refused. A record that does not verify stops the iteration with an
 // error that wraps ErrCorruptRecord (see Get).
 func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) error {
+	return t.ForEachAfter(bucket, prefix, nil, fn)
+}
+
+// ForEachAfter is ForEach that starts after the key after: it visits the keys
+// that start with prefix and are strictly greater than after. A nil after, or
+// one that sorts before prefix, starts at the first key of the prefix. It lets
+// a caller that processes a bucket in bounded chunks continue where the last
+// chunk ended without reading (and verifying) the records it already passed.
+func (t *Tx) ForEachAfter(bucket string, prefix, after []byte, fn func(k, v []byte) error) error {
 	if err := checkClientBucket(bucket); err != nil {
 		return err
 	}
@@ -223,7 +232,15 @@ func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) e
 		return nil
 	}
 	c := b.Cursor()
-	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+	start := prefix
+	if len(after) > 0 && bytes.Compare(after, prefix) > 0 {
+		start = after
+	}
+	k, v := c.Seek(start)
+	if len(after) > 0 && bytes.Equal(k, after) {
+		k, v = c.Next()
+	}
+	for ; k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
 		if v == nil {
 			return t.fail(&recordError{bucket: bucket, key: append([]byte(nil), k...), why: nestedBucketWhy})
 		}

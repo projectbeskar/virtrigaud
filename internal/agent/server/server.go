@@ -67,6 +67,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
@@ -175,7 +176,32 @@ type Agent interface {
 	TrustState() (providerv1.AgentState, string)
 	// ClockFloor returns the host's clock floor; zero when it has none.
 	ClockFloor() time.Time
+	// ClockFloorState returns the clock floor's health; the empty state when
+	// the agent has no floor (its store could not give it one).
+	ClockFloorState() clockfloor.StateKind
+	// UnattestedCause names why a ready store still refuses operations (one
+	// of the Cause constants), or "" when nothing does.
+	UnattestedCause() string
 }
+
+// The causes of an UNATTESTED refusal besides the store's own continuity. A
+// refused mutating call carries the reserved UNATTESTED reason (the
+// published contract's, exempt from the circuit breaker) and the cause in the
+// ErrorInfo metadata under MetadataCause and in the message; a signed host
+// answer carries no state reason for them.
+const (
+	// MetadataCause is the ErrorInfo metadata key that names the cause.
+	MetadataCause = "cause"
+	// CauseClockFloorAhead: the clock floor is ahead of the host clock by more
+	// than its bound (the clock was rolled back, or jumped forward and was
+	// corrected). Mutating calls are refused until the clock catches up.
+	CauseClockFloorAhead = "clock_floor_ahead"
+	// CauseClockFloorUnavailable: the clock floor failed (a clock source
+	// failed or it could not be saved) or does not exist.
+	CauseClockFloorUnavailable = "clock_floor_unavailable"
+	// CauseFreezeIncomplete: a re-enrolment's freeze stopped partway.
+	CauseFreezeIncomplete = "freeze_incomplete"
+)
 
 // Options configures New.
 type Options struct {
@@ -302,11 +328,35 @@ func MutatingMethods() map[string]bool {
 
 // refusal is a gRPC status with a google.rpc.ErrorInfo reason.
 func refusal(code codes.Code, reason, msg string) error {
+	return refusalWith(code, reason, msg, nil)
+}
+
+// refusalWith is refusal with ErrorInfo metadata.
+func refusalWith(code codes.Code, reason, msg string, metadata map[string]string) error {
 	st := status.New(code, msg)
-	if withInfo, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: ErrorInfoDomain}); err == nil {
+	if withInfo, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: ErrorInfoDomain, Metadata: metadata}); err == nil {
 		return withInfo.Err()
 	}
 	return st.Err()
+}
+
+// verifyNow is the time a client certificate's validity is judged at: the
+// later of the host clock and the agent's clock floor while the floor is
+// healthy, so that rolling the host clock back does not make an expired
+// certificate valid again, as it does not for an expired grant key. While the
+// floor is ahead of the clock beyond its bound, failed or missing, the floor
+// is not used (a floor far ahead would refuse every call, GetHostInfo
+// included, and the manager could no longer see why); certificates are
+// judged at the host clock, and gate refuses every mutating call instead.
+func (s *Server) verifyNow() time.Time {
+	now := s.opts.Now()
+	if s.opts.Agent.ClockFloorState() != clockfloor.StateOK {
+		return now
+	}
+	if floor := s.opts.Agent.ClockFloor(); floor.After(now) {
+		return floor
+	}
+	return now
 }
 
 // checkPeer authenticates the caller of one call: an allowed Provider
@@ -331,7 +381,7 @@ func (s *Server) checkPeer(ctx context.Context) error {
 		inter.AddCert(ic)
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: c.Trust.ProviderCAPool, Intermediates: inter,
-		CurrentTime: s.opts.Now(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		CurrentTime: s.verifyNow(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		return status.Error(codes.PermissionDenied, "the caller's certificate is no longer valid for this agent")
 	}
 	_, uid, err := c.Trust.AuthorizeProvider(leaf)
@@ -356,15 +406,19 @@ func (s *Server) gate(ctx context.Context, method string) error {
 	}
 	state, reason := s.opts.Agent.TrustState()
 	var err error
-	switch state {
-	case providerv1.AgentState_AGENT_STATE_READY:
-		err = status.Error(codes.Unimplemented, "this agent executes no operations")
-	case providerv1.AgentState_AGENT_STATE_QUARANTINED:
+	cause := s.opts.Agent.UnattestedCause()
+	switch {
+	case state == providerv1.AgentState_AGENT_STATE_QUARANTINED:
 		err = refusal(codes.FailedPrecondition, opstore.ReasonQuarantined, "the host's operation store is quarantined ("+reason+")")
+	case cause != "":
+		err = refusalWith(codes.Unavailable, opstore.ReasonUnattested, "the host refuses operations: "+cause,
+			map[string]string{MetadataCause: cause})
+	case state == providerv1.AgentState_AGENT_STATE_READY:
+		err = status.Error(codes.Unimplemented, "this agent executes no operations")
 	default:
 		err = refusal(codes.Unavailable, opstore.ReasonUnattested, "the host's operation store has not established its continuity")
 	}
-	s.opts.Log.Info("mutation refused", "method", method, "state", state.String())
+	s.opts.Log.Info("mutation refused", "method", method, "state", state.String(), "cause", cause)
 	return err
 }
 

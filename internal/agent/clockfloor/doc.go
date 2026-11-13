@@ -31,7 +31,7 @@ limitations under the License.
 //     (floor, boot time) pair is credited only when the current boot_id equals
 //     the persisted one, so a boot-time reading from another boot is never
 //     replayed as elapsed time.
-//   - The floor is persisted. After a restart or a reboot it holds even when
+//   - The floor is persisted, in the agent's operation store. After a restart or a reboot it holds even when
 //     the wall clock is behind it. Within the new boot the floor keeps
 //     advancing with CLOCK_BOOTTIME, so a wall clock that restarted behind
 //     stays behind: the host refuses grants (floor ahead of the wall clock
@@ -48,12 +48,16 @@ limitations under the License.
 //     agent wiring should report StateFailed with its error and rely on its
 //     supervisor to restart the process.
 //   - There is no reset path. If the floor is ahead of the wall clock by more
-//     than Config.MaxAhead (the clock jumped forward and was corrected), the
-//     host refuses every grant and reports StateClockFloorAhead until the wall
-//     clock catches up. Recovery is re-enrolment, which starts a new floor;
-//     that is a documented residual, not something this package works around.
-//     Status.Ahead should be exported as a metric with an alert, so a forward
-//     jump is visible before the clock is corrected.
+//     than Config.MaxAhead, the host refuses every grant and reports
+//     StateClockFloorAhead until the wall clock catches up. A wall clock that
+//     was rolled back heals as soon as it is corrected, with no restart. A
+//     clock that jumped forward and was corrected leaves the floor at the
+//     jump, within a boot and across restarts and reboots: recovery is
+//     re-enrolment (which starts a new floor), or a power-off longer than the
+//     lead. That is a documented residual, not something this package works
+//     around. Status.Ahead should be exported as a metric with an alert, and
+//     that alert is the primary control: it makes a forward jump visible
+//     before the clock is corrected.
 //   - It fails closed. A floor that cannot be read, that does not decode, that
 //     is missing without Config.FirstUse, or whose clock sources fail makes
 //     Open return an error, and a floor that fails to persist, whose boot
@@ -75,27 +79,51 @@ limitations under the License.
 // floor atomically and durably (write a temporary file, fsync it, rename it,
 // fsync the directory; or one committed transaction) before a Save returns,
 // and must return an error rather than an older value when it cannot read
-// what it stored. MemStore is an in-memory Store for tests. The adapter that
-// keeps the floor in the agent's operation store comes with that store; this
-// package does not depend on it.
+// what it stored. MemStore is an in-memory Store for tests. The agent's Store
+// keeps the floor as one record in its chain-anchored operation store (one
+// committed transaction per Save, which also refuses a value below the stored
+// one), so the floor is covered by the store's record trailers and live-state
+// digest, and rolling the floor back is rolling the store back, which the
+// store's continuity checks detect.
+//
+// That store must not commit before its continuity is established, so a
+// Floor has two phases. Open only reads: it starts from the stored floor,
+// raises it in memory from the agent's own clocks, and writes nothing. The
+// in-memory floor is never lower than the stored one, so grant verification
+// is never given an older floor, whatever the store holds. StartPersisting,
+// called as the first write after continuity is established, saves the raised
+// floor; from then on Observe saves it when it advanced by
+// Config.PersistInterval, and Flush saves it at shutdown. Every value saved is
+// at least the one Open read, because the floor only moves up, so no Save
+// lowers what was stored. A crash loses an unsaved raise, never a saved one:
+// the floor after a restart is at least the last saved value, and in the same
+// boot the boot-time credit restores the rest. StopPersisting returns a Floor
+// to memory only when the store can no longer commit. Config.NewBootSlack
+// covers the unsaved advance across a reboot after an unclean end: Drain, the
+// clean-shutdown save, marks the record so that a clean end adds nothing, and
+// the raise stops at the wall clock plus MaxAhead (repeated unclean fast
+// reboots that each commit can climb to that bound, no further).
+//
+// A Floor that is ahead leaves the ahead state only when the lead is
+// AheadHysteresis below MaxAhead.
 //
 // The record carries a CRC-32 that detects accidental corruption only. The
 // floor's resistance to rollback of the whole store (an older, consistent
-// copy restored) is that of the Store: it is defended by the future store
-// adapter's anchoring and by the manager-side check that a host's reported
-// position does not go backwards, not by this package.
+// copy restored) is that of the Store: the agent's store detects an older
+// store against its anchor log, and the manager-side check that a host's
+// reported position does not go backwards covers a restore of both.
 //
 // # Calling pattern
 //
-// The agent calls Observe at a period no longer than Config.PersistInterval
-// and Flush on graceful shutdown. A restart in another boot loses the
-// boot-time credit accumulated since the last successful save: the
-// PersistInterval plus the Observe period, or all of the time since the last
-// save when the process is killed without Flush or the host loses power. The
-// floor itself is never lost. Floor.Now does no I/O and never blocks on a
-// Save.
+// The agent calls Observe at a period no longer than Config.PersistInterval,
+// StartPersisting once after its store's continuity is established, and
+// Flush on graceful shutdown. A restart in another boot loses the boot-time
+// credit accumulated since the last successful save: up to PersistInterval
+// plus the Observe period, or all of the time since the last save when the
+// process is killed without Flush or the host loses power. The floor itself
+// is never lost below what was saved. Floor.Now does no I/O and never blocks
+// on a Save.
 //
-// This package is not used by any binary yet. It must not import
-// controller-runtime, the API types or Kubernetes client packages
-// (importboundary_test.go).
+// This package must not import controller-runtime, the API types or
+// Kubernetes client packages (importboundary_test.go).
 package clockfloor

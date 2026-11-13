@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
@@ -84,8 +85,11 @@ func TestStartEmptyStore(t *testing.T) {
 	if js, r := st.Journal().State(); js != journal.StateUnattested {
 		t.Fatalf("reopened store = %v{%s}", js, r)
 	}
-	if !exists(t, filepath.Join(h.stateDir, daemon.FloorFile)) {
-		t.Fatal("no clock floor saved")
+	if _, found, err := st.LoadClockFloor(context.Background()); err != nil || !found {
+		t.Fatalf("the clock floor record is not in the store: found %v, err %v", found, err)
+	}
+	if exists(t, filepath.Join(h.stateDir, "clock.floor")) {
+		t.Fatal("a clock floor file was written beside the store")
 	}
 	// A second run starts READY again, without enrolling again.
 	_ = st.Close()
@@ -334,23 +338,122 @@ func TestQuarantinedStoreServesReads(t *testing.T) {
 	}
 }
 
-// TestMissingClockFloorQuarantines: an enrolled store whose clock floor is
-// gone is quarantined (inconsistent_store), never given a new floor.
+// TestMissingClockFloorQuarantines: an enrolled store with no clock floor
+// record is quarantined (inconsistent_store), never given a new floor.
 func TestMissingClockFloorQuarantines(t *testing.T) {
+	h := newHost(t)
+	// A store that was enrolled without ever committing a floor.
+	st, err := opstore.Open(context.Background(), opstore.Options{Journal: journal.Options{Dir: h.stateDir}, Executor: none.Executor{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := st.EstablishContinuity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id := h.pki.Record
+	if err := st.Enrol(ctx, opstore.Enrolment{ID: id.EnrolmentID, ProviderUID: id.ProviderUID, HostID: h.pki.HostURI,
+		InstallID: id.InstallID, StartEpoch: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, state := h.run()
+	if !strings.Contains(h.logs.text(), "clock floor cannot be read") {
+		t.Fatalf("the quarantine is not the floor's\n%s", h.logs.text())
+	}
+	if state != providerv1.AgentState_AGENT_STATE_QUARANTINED ||
+		!h.notes.has(systemd.NotifyReady+"\nSTATUS=AGENT_STATE_QUARANTINED ("+string(journal.LostInconsistentStore)+")") {
+		t.Fatalf("state = %v, notifications %v", state, h.notes.snapshot())
+	}
+}
+
+// TestClockFloorFileIsIgnored: a clock.floor file left in the state directory
+// is not read, and not written: the floor is the store's record.
+func TestClockFloorFileIsIgnored(t *testing.T) {
+	h := newHost(t)
+	stale := filepath.Join(h.stateDir, "clock.floor")
+	if err := os.WriteFile(stale, []byte("not a floor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, state := h.run()
+	if state != providerv1.AgentState_AGENT_STATE_READY {
+		t.Fatalf("state = %v\n%s", state, h.logs.text())
+	}
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(stale); err != nil || string(b) != "not a floor" {
+		t.Fatalf("the stale file was touched: %q %v", b, err)
+	}
+}
+
+// TestClockFloorRollbackIsStoreRollback: restoring an older copy of the store
+// (the only place the floor lives) is detected by the store's anchor checks:
+// the floor cannot be rolled back without rolling back the store.
+func TestClockFloorRollbackIsStoreRollback(t *testing.T) {
 	h := newHost(t)
 	r, _ := h.run()
 	if err := r.stop(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(h.stateDir, daemon.FloorFile)); err != nil {
+	dbPath := filepath.Join(h.stateDir, journal.StoreFile)
+	older, err := os.ReadFile(dbPath)
+	if err != nil {
 		t.Fatal(err)
 	}
+	// Another run raises and commits the floor again.
+	h.boot.start = h.boot.start.Add(-2 * time.Minute) // within the floor's ahead bound
 	r, state := h.run()
-	if state != providerv1.AgentState_AGENT_STATE_QUARANTINED {
+	if state != providerv1.AgentState_AGENT_STATE_READY {
 		t.Fatalf("state = %v", state)
 	}
-	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostInconsistentStore) {
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath, older, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, state = h.run()
+	if state != providerv1.AgentState_AGENT_STATE_QUARANTINED {
+		t.Fatalf("state = %v\n%s", state, h.logs.text())
+	}
+	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostRolledBack) {
 		t.Fatalf("answer = %v", a)
+	}
+}
+
+// TestClockFloorStoreNeverGoesDown: the store refuses to commit a floor below
+// the stored one.
+func TestClockFloorStoreNeverGoesDown(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := opstore.Open(ctx, opstore.Options{Journal: journal.Options{Dir: dir}, Executor: none.Executor{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.EstablishContinuity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fs := daemon.NewFloorStore(st)
+	t0 := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	if err := fs.Save(ctx, clockfloor.State{Floor: t0, BootID: "b", BootTime: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Save(ctx, clockfloor.State{Floor: t0.Add(-time.Second), BootID: "b", BootTime: 2 * time.Second}); err == nil {
+		t.Fatal("a lower floor was committed")
+	}
+	if err := fs.Save(ctx, clockfloor.State{Floor: t0, BootID: "b", BootTime: 3 * time.Second}); err != nil {
+		t.Fatalf("an equal floor: %v", err)
+	}
+	got, err := fs.Load(ctx)
+	if err != nil || !got.Floor.Equal(t0) || got.BootTime != 3*time.Second {
+		t.Fatalf("stored = %+v, %v", got, err)
 	}
 }
 
@@ -576,6 +679,119 @@ func TestScrubFindsDamageAndReflectsItInStatus(t *testing.T) {
 	waitLog(t, h, "journal scrub failed")
 	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostJournalCorrupt) {
 		t.Fatalf("answer = %v", a)
+	}
+}
+
+// TestClockFloorAheadReportsAndRefusesMutations: the host clock is rolled back
+// far beyond the floor's bound (and beyond a certificate's lifetime). The
+// floor is then ahead: reads still answer (UNATTESTED, no state reason), the
+// service status and the log name the cause, and mutating calls are refused
+// UNATTESTED with the cause in the ErrorInfo metadata.
+func TestClockFloorAheadReportsAndRefusesMutations(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if a := r.hello(); a == nil || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_READY {
+		t.Fatalf("answer before the rollback = %v", a)
+	}
+	h.wallOff.Store(int64(-400 * 24 * time.Hour))
+	a := r.hello()
+	if a == nil {
+		t.Fatalf("no answer while the floor is ahead\n%s", h.logs.text())
+	}
+	if a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_UNATTESTED || a.GetContext().GetStateReason() != "" {
+		t.Fatalf("answer = %v %q", a.GetContext().GetAgentState(), a.GetContext().GetStateReason())
+	}
+	if code, reason := r.create(); code != "Unavailable" || reason != opstore.ReasonUnattested {
+		t.Fatalf("Create = %s %s", code, reason)
+	}
+	waitNotify := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !h.notes.has(want) {
+			if time.Now().After(deadline) {
+				t.Fatalf("no %q in %v", want, h.notes.snapshot())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	waitNotify(systemd.NotifyReady + "\nSTATUS=AGENT_STATE_UNATTESTED (clock_floor_ahead)")
+	if !strings.Contains(h.logs.text(), "clock_floor_ahead") {
+		t.Fatalf("the cause is not logged\n%s", h.logs.text())
+	}
+	// The clock is corrected: the host is READY again.
+	h.wallOff.Store(0)
+	if a := r.hello(); a == nil || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_READY {
+		t.Fatalf("answer after the correction = %v", a)
+	}
+}
+
+// TestDrainMarksTheFloorDrained: a clean stop commits the floor marked as
+// drained (the clockfloor tests cover that the next run's first write clears
+// the mark).
+func TestDrainMarksTheFloorDrained(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	load := func() clockfloor.State {
+		t.Helper()
+		st, err := opstore.Open(context.Background(), opstore.Options{Journal: journal.Options{Dir: h.stateDir}, Executor: none.Executor{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		s, err := daemon.NewFloorStore(st).Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if !load().Drained {
+		t.Fatal("the floor was not marked drained at a clean stop")
+	}
+}
+
+// TestLostJournalWithoutADatabaseStillStarts: a store whose database is gone
+// (journal_missing) or unopenable (journal_corrupt) starts QUARANTINED and
+// answers reads, instead of refusing to start.
+func TestLostJournalWithoutADatabaseStillStarts(t *testing.T) {
+	for name, tc := range map[string]struct {
+		damage func(t *testing.T, path string)
+		want   journal.LostReason
+	}{
+		"missing": {func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}, journal.LostJournalMissing},
+		"garbage": {func(t *testing.T, path string) {
+			if err := os.WriteFile(path, bytes.Repeat([]byte("garbage!"), 1024), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, journal.LostJournalCorrupt},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHost(t)
+			r, _ := h.run()
+			if err := r.stop(); err != nil {
+				t.Fatal(err)
+			}
+			tc.damage(t, filepath.Join(h.stateDir, journal.StoreFile))
+			r, state := h.run()
+			if state != providerv1.AgentState_AGENT_STATE_QUARANTINED ||
+				!h.notes.has(systemd.NotifyReady+"\nSTATUS=AGENT_STATE_QUARANTINED ("+string(tc.want)+")") {
+				t.Fatalf("state = %v, notifications %v\n%s", state, h.notes.snapshot(), h.logs.text())
+			}
+			// Reads are served: Hello succeeds (unsigned, the store has no
+			// enrolment to read) and a mutation is refused as quarantined.
+			if _, err := agentv1.NewAgentServiceClient(r.conn()).Hello(callCtx(t), &agentv1.HelloRequest{AnswerNonce: bytes.Repeat([]byte{1}, 16), CallerApiVersion: 1}); err != nil {
+				t.Fatalf("Hello = %v", err)
+			}
+			if code, reason := r.create(); code != "FailedPrecondition" || reason != opstore.ReasonQuarantined {
+				t.Fatalf("Create = %s %s", code, reason)
+			}
+		})
 	}
 }
 

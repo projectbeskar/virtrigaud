@@ -240,10 +240,46 @@ func (a *agentState) HostView(ctx context.Context, continuitySeq uint64) (opstor
 	return a.store.HostView(ctx, continuitySeq)
 }
 
-// TrustState implements server.Agent.
+// TrustState implements server.Agent. A store that is ready and recovered
+// reports READY only while nothing keeps the host from running operations
+// (UnattestedCause); otherwise it reports UNATTESTED. The signed answer
+// carries no state reason for these causes: they reach the operator through
+// the service status and the logs, and a refused call through its ErrorInfo
+// metadata.
 func (a *agentState) TrustState() (providerv1.AgentState, string) {
 	st, lost := a.store.Journal().State()
-	return answer.StoreState(st, lost, a.store.Recovered())
+	state, reason := answer.StoreState(st, lost, a.store.Recovered())
+	if state == providerv1.AgentState_AGENT_STATE_READY && a.UnattestedCause() != "" {
+		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ""
+	}
+	return state, reason
+}
+
+// UnattestedCause implements server.Agent: why a ready store still refuses
+// operations, or "".
+func (a *agentState) UnattestedCause() string {
+	if st, _ := a.store.Journal().State(); st == journal.StateLost {
+		return "" // a quarantine says why
+	}
+	if a.store.Freezing() {
+		return server.CauseFreezeIncomplete
+	}
+	switch a.ClockFloorState() {
+	case clockfloor.StateOK:
+		return ""
+	case clockfloor.StateClockFloorAhead:
+		return server.CauseClockFloorAhead
+	}
+	return server.CauseClockFloorUnavailable
+}
+
+// ClockFloorState implements server.Agent.
+func (a *agentState) ClockFloorState() clockfloor.StateKind {
+	f := a.floor.Load()
+	if f == nil {
+		return ""
+	}
+	return f.Status().State
 }
 
 // ClockFloor implements server.Agent.
@@ -472,7 +508,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 		srv.Shutdown(dctx)
 		if f := agent.floor.Load(); f != nil {
-			if err := f.Flush(dctx); err != nil {
+			if js, _ := st.Journal().State(); js == journal.StateLost {
+				f.StopPersisting()
+			}
+			if err := f.Drain(dctx); err != nil {
 				d.log.Error(err, "save the clock floor")
 			}
 		}
@@ -481,7 +520,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 
 	// Steps 6 to 8.
-	d.establish(ctx, st)
+	d.establish(ctx, st, agent.floor.Load())
 	if ctx.Err() == nil {
 		state, reason := agent.TrustState()
 		if err := d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent)); err != nil {
@@ -494,6 +533,13 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 	}
 
+	// The cause that keeps a ready host from running operations (an incomplete
+	// freeze, the clock floor's state) is logged when it appears or goes, and
+	// shown in the service status.
+	lastCause := agent.UnattestedCause()
+	if lastCause != "" {
+		d.log.Error(nil, "the host refuses operations", "cause", lastCause)
+	}
 	ticker := time.NewTicker(d.o.ObserveEvery)
 	defer ticker.Stop()
 	for {
@@ -516,8 +562,23 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			}
 		case <-ticker.C:
 			if f := agent.floor.Load(); f != nil {
+				if js, _ := st.Journal().State(); js == journal.StateLost {
+					// The store can no longer commit; the floor goes on in memory.
+					f.StopPersisting()
+				}
 				if err := f.Observe(ctx); err != nil {
 					d.log.Error(err, "raise the clock floor")
+				}
+			}
+			if c := agent.UnattestedCause(); c != lastCause {
+				if c != "" {
+					d.log.Error(nil, "the host refuses operations", "cause", c)
+				} else {
+					d.log.Info("the host accepts operations again", "was", lastCause)
+				}
+				lastCause = c
+				if d.started.Load() {
+					_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent))
 				}
 			}
 		}
@@ -664,6 +725,9 @@ func (d *daemon) reload(ctx context.Context) error {
 func trustStatus(a *agentState) string {
 	state, reason := a.TrustState()
 	if reason == "" {
+		reason = a.UnattestedCause()
+	}
+	if reason == "" {
 		return state.String()
 	}
 	return state.String() + " (" + reason + ")"
@@ -688,17 +752,24 @@ func reloadRefusalReason(err error) string {
 	return ReasonIdentityInvalid
 }
 
-// openFloor opens the clock floor (step 4). A floor that cannot be read or
-// written quarantines the store; a clock source the floor cannot use refuses
-// the start.
+// openFloor opens the clock floor (step 4): it reads the floor record of the
+// store and raises it in memory, and writes nothing, because the store does
+// not commit before continuity is established (startFloor commits it). A floor
+// record that is missing for an enrolled store, or cannot be read,
+// quarantines the store; a clock source the floor cannot use refuses the
+// start.
 func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
+	if left, err := d.o.JournalFS.Exists(filepath.Join(d.o.Config.StateDir, "clock.floor")); err == nil && left {
+		d.log.Info("ignoring a clock.floor file in the state directory: the clock floor is kept in the operation store")
+	}
 	firstUse := false
 	if v, err := agent.store.HostView(ctx, 0); err == nil {
 		firstUse = v.LastStartEpoch == 0
 	}
 	f, err := clockfloor.Open(ctx, clockfloor.Config{
-		Store: floorFile{fsys: d.o.JournalFS, dir: d.o.Config.StateDir}, FirstUse: firstUse,
-		Wall: d.o.Floor.Wall, Boot: d.o.Floor.Boot, BootID: d.o.Floor.BootID, TimeNS: d.o.Floor.TimeNS,
+		Store: floorStore{st: agent.store}, FirstUse: firstUse, PersistInterval: FloorPersistInterval,
+		NewBootSlack: FloorPersistInterval + d.o.ObserveEvery,
+		Wall:         d.o.Floor.Wall, Boot: d.o.Floor.Boot, BootID: d.o.Floor.BootID, TimeNS: d.o.Floor.TimeNS,
 	})
 	switch {
 	case err == nil:
@@ -710,23 +781,23 @@ func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
 		// gone or damaged, the same shape as a missing store marker.
 		agent.store.Journal().Quarantine(journal.LostInconsistentStore, "clock floor unreadable")
 		return nil
-	case errors.Is(err, errFloorWrite):
-		d.log.Error(err, "the clock floor cannot be written; the store is quarantined")
-		agent.store.Journal().Quarantine(journal.LostIOError, "clock floor not written")
-		return nil
 	}
 	d.log.Error(err, "start refused: the host's clocks cannot keep a floor", "reason", hostcheck.ReasonUnsupportedHost)
 	return fmt.Errorf("%w: %s: %v", ErrStartRefused, hostcheck.ReasonUnsupportedHost, err)
 }
 
-// establish runs steps 6 and 7: continuity, the development enrolment
-// stand-in, and recovery.
-func (d *daemon) establish(ctx context.Context, st *opstore.Store) {
+// establish runs steps 6 and 7: continuity, the first commit of the clock
+// floor, the development enrolment stand-in, and recovery. floor is nil when
+// the floor could not be opened (the store is quarantined).
+func (d *daemon) establish(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) {
 	if js, _ := st.Journal().State(); js != journal.StateUnattested {
 		return
 	}
 	if err := st.EstablishContinuity(ctx); err != nil {
 		d.log.Error(err, "continuity not established")
+		return
+	}
+	if !d.startFloor(ctx, st, floor) {
 		return
 	}
 	d.enrol(ctx, st)
@@ -749,6 +820,30 @@ func (d *daemon) establish(ctx context.Context, st *opstore.Store) {
 	if len(refs) > 0 {
 		d.log.Info("operations remain runnable; this agent starts no runner", "count", len(refs))
 	}
+}
+
+// startFloor commits the clock floor, raised in memory since step 4, as the
+// first write after continuity is established, before an enrolment or any
+// recovery commit. It reports whether start-up may go on. A floor that cannot
+// be committed quarantines the store (io_error): nothing is run on a floor
+// the store does not hold.
+func (d *daemon) startFloor(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) bool {
+	if floor == nil {
+		return true
+	}
+	if err := floor.StartPersisting(ctx); err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		if errors.Is(err, clockfloor.ErrStoreLost) {
+			d.log.Error(err, "the store cannot commit the clock floor; it is quarantined")
+			return false
+		}
+		d.log.Error(err, "the clock floor cannot be written; the store is quarantined")
+		st.Journal().Quarantine(journal.LostIOError, "clock floor not written")
+		return false
+	}
+	return true
 }
 
 // enrol is the development enrolment stand-in: a fresh store is enrolled with

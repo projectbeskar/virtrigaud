@@ -446,3 +446,30 @@ func TestClose_AppliesAPendingFault(t *testing.T) {
 	assert.True(t, hasFileRecord(e))
 	assert.True(t, hasAnchorRecord(t, e))
 }
+
+// ForEachAfter continues a prefix scan strictly after a key, so a caller that
+// works in chunks does not read what it passed again.
+func TestForEachAfter(t *testing.T) {
+	e := newEnv(t)
+	s := e.ready()
+	for _, k := range []string{"p1", "p2", "p3", "q1", "o9"} {
+		put(t, s, k, "v")
+	}
+	collect := func(prefix, after string) []string {
+		var seen []string
+		require.NoError(t, s.View(context.Background(), func(tx *journal.Tx) error {
+			return tx.ForEachAfter(testBucket, []byte(prefix), []byte(after), func(k, _ []byte) error {
+				seen = append(seen, string(k))
+				return nil
+			})
+		}))
+		return seen
+	}
+	assert.Equal(t, []string{"p1", "p2", "p3"}, collect("p", ""), "no cursor starts at the prefix")
+	assert.Equal(t, []string{"p2", "p3"}, collect("p", "p1"), "strictly after the cursor")
+	assert.Equal(t, []string{"p3"}, collect("p", "p2"))
+	assert.Empty(t, collect("p", "p3"), "nothing after the last key")
+	assert.Equal(t, []string{"p2", "p3"}, collect("p", "p15"), "a cursor that is not a key")
+	assert.Equal(t, []string{"p1", "p2", "p3"}, collect("p", "o9"), "a cursor before the prefix is ignored")
+	assert.Empty(t, collect("p", "q1"), "a cursor past the prefix")
+}

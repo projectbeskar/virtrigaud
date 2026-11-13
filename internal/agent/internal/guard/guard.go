@@ -82,6 +82,18 @@ const (
 	// KnownBeforeMismatch: admission answers a known op_id from its record
 	// or tombstone before refusing on the enrolment.
 	KnownBeforeMismatch Name = "known-before-mismatch"
+	// FreezeResumeRecover: recovery finishes a re-enrolment freeze that a
+	// crash left incomplete, before it classifies any operation.
+	FreezeResumeRecover Name = "freeze-resume-recover"
+	// FreezeResumeReenrol: Reenrol finishes an incomplete freeze before it
+	// activates the new enrolment.
+	FreezeResumeReenrol Name = "freeze-resume-reenrol"
+	// ClockFloorNeverLower: the clock floor's commit refuses a value below
+	// the one stored.
+	ClockFloorNeverLower Name = "clock-floor-never-lower"
+	// ClockFloorReadOnlyOpen: the clock floor writes nothing until the agent
+	// starts persisting it after continuity is established.
+	ClockFloorReadOnlyOpen Name = "clock-floor-read-only-open"
 	// SignerPeerCheck: the signer serves only the agent's uid.
 	SignerPeerCheck Name = "signer-peer-check"
 	// SignerClientPeerCheck: the agent talks only to the signer's uid.
@@ -109,7 +121,8 @@ func All() []Name {
 		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
-		CloseAfterIOError, UnknownEnrolmentNotDefinite, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
+		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
+		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
 	}
 }

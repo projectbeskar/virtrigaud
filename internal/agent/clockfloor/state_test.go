@@ -86,3 +86,23 @@ func FuzzStateDecode(f *testing.F) {
 		assert.Equal(t, b, again)
 	})
 }
+
+// TestState_DrainedFlag: the drained flag round-trips, and a flags byte with
+// an unknown bit is corrupt.
+func TestState_DrainedFlag(t *testing.T) {
+	for _, drained := range []bool{false, true} {
+		in := clockfloor.State{Floor: t0, BootID: "boot", BootTime: time.Second, Drained: drained}
+		b, err := in.MarshalBinary()
+		require.NoError(t, err)
+		var out clockfloor.State
+		require.NoError(t, out.UnmarshalBinary(b))
+		assert.Equal(t, drained, out.Drained)
+	}
+	in := clockfloor.State{Floor: t0, BootID: "boot", BootTime: time.Second}
+	b, err := in.MarshalBinary()
+	require.NoError(t, err)
+	b[4+1+16] = 0x80 // the flags byte
+	binary.BigEndian.PutUint32(b[len(b)-4:], crc32.ChecksumIEEE(b[:len(b)-4]))
+	var out clockfloor.State
+	require.ErrorIs(t, out.UnmarshalBinary(b), clockfloor.ErrCorrupt)
+}
