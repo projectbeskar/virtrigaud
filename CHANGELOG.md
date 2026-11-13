@@ -41,6 +41,22 @@ The manager half of enrolment was merged; the agent could not produce a request 
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-11-13 15:30] - Adopters list
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `ADOPTERS.md`: a list of organizations using VirtRigaud, in the format common to CNCF projects (organization, contact, since, stage, description of use), with how to add, update or remove an entry.
+- `README.md`: an Adopters section linking to it.
+
+### Why
+Lets new users see where the project is in use and lets adopters list themselves through a pull request.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-11-13 12:00] - Operation store: clock floor inside the store, bounded re-enrolment freeze (development builds only)
 **Author:** @wrkode (William Rizzo)
 
