@@ -642,6 +642,12 @@ is not the one the certificate names, reads answer unsigned.
   operation again whose effect survived. The fake executor recognises its own
   effect (by the placement) and reports the step done, never a definite
   failure; a manager that tracks the host's chain position narrows the rest.
+- A run that recovery resumes, after a restart, has no request payload: the
+  store never writes request bytes. The fake executor needs none; a real
+  executor must resolve such a step by inspection only, or park it with its
+  effect in doubt, and never perform an effect it cannot reconstruct
+  (documented on `executor.Operation.Payload`). How a real executor parks a
+  step and how the manager re-delivers the request for it is a follow-up.
 - The re-enrolment freeze, compaction and certificate installation are not
   reachable from the agent process yet, so their crash points are tested in
   the store library only.

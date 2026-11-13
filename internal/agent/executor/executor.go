@@ -70,7 +70,14 @@ type Operation struct {
 	Attempt uint64
 	// Payload is the verified request, held in memory only for the duration
 	// of the call. It is nil when the store resumes an operation after a
-	// restart.
+	// restart (its recovery runs, and the runners that recovery starts): the
+	// store never writes request bytes, so nothing can give them back. An
+	// executor whose step needs the request must then resolve that step by
+	// inspection only (Inspect or Goal, reporting the effect present or
+	// absent), or park it by failing without ErrNotPerformed, which leaves
+	// the effect in doubt; it must never perform an effect it cannot
+	// reconstruct, nor report a nil-payload step not performed unless that
+	// is true. The development fake executor needs no payload.
 	Payload []byte
 }
 
