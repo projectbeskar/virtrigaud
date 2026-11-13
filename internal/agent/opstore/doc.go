@@ -34,6 +34,8 @@ limitations under the License.
 //     accepted attempt per VM and kind (for the life of the enrolment), and a
 //     VM tombstone per completed Delete of a placement, kept across
 //     re-enrolments.
+//   - The clock floor record (SaveClockFloor, LoadClockFloor): the agent's
+//     persisted lower bound of time, part of the chain like every record.
 //   - The store marker's binding to the host and the active enrolment, and
 //     the ids of discarded enrolments, never activated again.
 //   - An audit bucket of accepted operations and state changes.
@@ -78,7 +80,10 @@ limitations under the License.
 //   - Re-enrolment freezes the predecessor's open operations (retired when
 //     no step intent exists, otherwise OutcomeUnknown) before the new
 //     enrolment becomes active, and discards the predecessor's records only
-//     when the freeze is confirmed.
+//     when the freeze is confirmed. The freeze commits in chunks of at most
+//     DefaultFreezeChunk operations; a freeze-in-progress marker, written with
+//     each chunk, lets recovery or the next Reenrol finish it after a crash,
+//     and the host refuses every operation until it is finished.
 //
 // # Limits
 //

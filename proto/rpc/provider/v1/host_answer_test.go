@@ -35,7 +35,7 @@ import (
 )
 
 // These tests pin the signed host answer wire shape: the messages, enums,
-// field numbers and the thirteen additive request and response fields are a
+// field numbers and the fourteen additive request and response fields are a
 // frozen contract, and a change to any of them must fail here until it has
 // been reviewed.
 
@@ -136,6 +136,7 @@ func fullHostAnswer() *HostAnswer {
 		JournalSchemaVersion:    1,
 		ClockFloor:              timestamppb.New(time.Unix(1700000000, 5)),
 		StagedCertificateSha256: fill(0x0e, 32),
+		Inventory:               fullHostInventory(),
 	}
 }
 
@@ -339,10 +340,11 @@ func TestHostAnswer_FieldNumbersPinned(t *testing.T) {
 		{"journal_schema_version", 6, protoreflect.Uint32Kind, "", false},
 		{"clock_floor", 7, protoreflect.MessageKind, timestampMessageName, false},
 		{"staged_certificate_sha256", 8, protoreflect.BytesKind, "", false},
+		{"inventory", 9, protoreflect.MessageKind, hostInventoryMessageName, false},
 	}, true)
 }
 
-// TestHostAnswer_AdditiveRequestFieldsPinned pins the thirteen additive
+// TestHostAnswer_AdditiveRequestFieldsPinned pins the fourteen additive
 // fields on six existing messages, the field count of each message (so no
 // other field was added with them) and that each added field is the
 // highest number of its message.
@@ -374,7 +376,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 		{&GetHostInfoRequest{}, []fieldSpec{
 			{"answer_nonce", 2, protoreflect.BytesKind, "", false},
 			{"continuity_seq", 3, protoreflect.Uint64Kind, "", false},
-		}, 3, "continuity_seq"},
+			{"inventory_version", 4, protoreflect.Uint32Kind, "", false},
+		}, 4, "inventory_version"},
 		{&HostInfo{}, []fieldSpec{
 			{"host_answer", 12, protoreflect.MessageKind, signedBlobMessageName, false},
 		}, 12, "host_answer"},
@@ -391,8 +394,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			t.Errorf("%s: %s is not the highest field number (%d)", md.FullName(), c.highest, highestFieldNumber(md))
 		}
 	}
-	if added != 13 {
-		t.Errorf("pinned %d additive fields, want 13", added)
+	if added != 14 {
+		t.Errorf("pinned %d additive fields, want 14", added)
 	}
 }
 

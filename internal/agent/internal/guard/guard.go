@@ -82,6 +82,37 @@ const (
 	// KnownBeforeMismatch: admission answers a known op_id from its record
 	// or tombstone before refusing on the enrolment.
 	KnownBeforeMismatch Name = "known-before-mismatch"
+	// FreezeResumeRecover: recovery finishes a re-enrolment freeze that a
+	// crash left incomplete, before it classifies any operation.
+	FreezeResumeRecover Name = "freeze-resume-recover"
+	// FreezeResumeReenrol: Reenrol finishes an incomplete freeze before it
+	// activates the new enrolment.
+	FreezeResumeReenrol Name = "freeze-resume-reenrol"
+	// ClockFloorNeverLower: the clock floor's commit refuses a value below
+	// the one stored.
+	ClockFloorNeverLower Name = "clock-floor-never-lower"
+	// ClockFloorReadOnlyOpen: the clock floor writes nothing until the agent
+	// starts persisting it after continuity is established.
+	ClockFloorReadOnlyOpen Name = "clock-floor-read-only-open"
+	// SignerPeerCheck: the signer serves only the agent's uid.
+	SignerPeerCheck Name = "signer-peer-check"
+	// SignerClientPeerCheck: the agent talks only to the signer's uid.
+	SignerClientPeerCheck Name = "signer-client-peer-check"
+	// SignerDigestCheck: the signer signs only a SHA-256 digest of exactly
+	// 32 bytes.
+	SignerDigestCheck Name = "signer-digest-check"
+	// SignerRateLimit: the signer refuses signatures above its rate limit.
+	SignerRateLimit Name = "signer-rate-limit"
+	// SignerVerify: the agent verifies the signature the signer returns.
+	SignerVerify Name = "signer-verify"
+	// SourceThrottle: connections above a source address's rate are closed
+	// before the TLS handshake.
+	SourceThrottle Name = "source-throttle"
+	// HandshakeCap: at most a fixed number of TLS handshakes run at once.
+	HandshakeCap Name = "handshake-cap"
+	// HostKeyUnreadable: the agent refuses to start when it can read the
+	// host key file.
+	HostKeyUnreadable Name = "host-key-unreadable"
 )
 
 // All lists every guard, in a fixed order.
@@ -90,6 +121,8 @@ func All() []Name {
 		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
-		CloseAfterIOError, UnknownEnrolmentNotDefinite,
+		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
+		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
+		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
 	}
 }

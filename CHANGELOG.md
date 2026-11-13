@@ -21,6 +21,92 @@ Lets new users see where the project is in use and lets adopters list themselves
 - [ ] Config change only
 - [x] Documentation only
 
+## [2026-11-13 12:00] - Operation store: clock floor inside the store, bounded re-enrolment freeze (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/opstore/floor.go`: `LoadClockFloor` (a read, allowed before continuity) and `UpdateClockFloor` (a commit whose transaction hands the stored record to the caller, so a check of it is atomic with the write). The clock floor is a record in the chain-anchored store, covered by the record trailers and the live-state digest.
+- `internal/agent/clockfloor/floor.go`: `Floor.StartPersisting` and `Floor.StopPersisting`. `Open` now only reads and raises the floor in memory, starting from the stored one, so the in-memory floor is never lower than the stored one; the first write is `StartPersisting`, after the store's continuity is established.
+- `internal/agent/daemon/floorstore.go`: the clock floor's `Store` over the store record. Its commit refuses a floor below the stored one. The floor is committed again only after it advanced by `FloorPersistInterval` (one minute), at most once per observe period, and at drain.
+- `internal/agent/opstore/reenrol.go`: the freeze of a re-enrolment commits in chunks of at most `DefaultFreezeChunk` (128) operations (`Options.FreezeChunk` overrides it), with a freeze-in-progress marker in the store that each chunk advances and the last removes. A crash between chunks (new crash point `PointMidFreeze`) leaves the marker; `Recover`, or the next `Reenrol`, finishes the freeze before the new enrolment is activated. While a freeze is incomplete the host refuses every operation and `ConfirmFreeze` is refused.
+- `internal/agent/journal/tx.go`: `Tx.ForEachAfter`, a prefix scan that continues after a key.
+- `internal/agent/internal/guard/guard.go`: four mutation guards (`freeze-resume-recover`, `freeze-resume-reenrol`, `clock-floor-never-lower`, `clock-floor-read-only-open`).
+- Tests in `internal/agent/opstore/` (chunked freeze with more operations than several chunks, crashes between and inside chunks, resume at recovery and at `Reenrol`, no operation frozen twice, activation only after completion, refusal while incomplete; the reference model now freezes in random chunk sizes and crashes between chunks), `internal/agent/clockfloor/persist_test.go`, `internal/agent/daemon/daemon_test.go` (floor rollback is store rollback, missing floor, leftover file ignored, floor never goes down) and `internal/agent/server/server_test.go`.
+
+### Changed
+- `internal/agent/daemon/daemon.go`: step 4 reads and raises the floor without writing; step 6 commits it as the first write after continuity, before the enrolment and recovery. A floor that cannot be committed quarantines the store (`io_error`). A `clock.floor` file in the state directory is no longer read or written (it is ignored; nothing is deployed outside development builds). A missing floor record for an enrolled store still quarantines the store (`inconsistent_store`).
+- `internal/agent/server/server.go`: the per-call check of the Provider's client certificate judges validity at the later of the host clock and the clock floor while the floor is healthy. While the floor is ahead of the clock beyond its bound, failed or missing, the floor is not used (a far-ahead floor would otherwise refuse every call, reads included), reads still answer, and every mutating call is refused (see below). `Agent` gains `ClockFloorState` and `UnattestedCause`.
+- `internal/agent/daemon/daemon.go`, `internal/agent/server/server.go`: while the floor is not OK or a freeze is incomplete, the host reports UNATTESTED with no state reason (the signed answer's contract is unchanged), refuses mutating calls with the reserved `UNATTESTED` reason and the cause (`clock_floor_ahead`, `clock_floor_unavailable`, `freeze_incomplete`) in the ErrorInfo metadata and message, and shows the cause in the service status and the logs.
+- `internal/agent/clockfloor/floor.go`: `Config.NewBootSlack`: opening in another boot after an unclean end raises the stored floor by the unsaved advance a crash may have lost (the agent passes the persist interval plus the observe period), never beyond the wall clock plus the ahead bound and never after a clean drain (`Floor.Drain` marks the record). The raise lives in memory until the first commit; repeated unclean fast reboots that each commit are capped at the ahead bound. The ahead state is left only when the lead is `AheadHysteresis` (10 s) below the bound, so a jittering clock does not flip the status and logs. `ErrStoreLost` from a `Store` makes the floor stop persisting instead of failing.
+- `internal/agent/opstore/`: a damaged freeze marker (or a cursor that is not an operation of the frozen enrolment) no longer fails `Open` (other read errors, such as a cancelled context, still do and quarantine nothing): the host refuses every operation, the store is quarantined (`inconsistent_store`) and serves reads. One freeze transaction reads at most `FreezeScanCap` records (default 8 times the chunk), advancing the marker's cursor over finished operations. `Store.Freezing` reports an incomplete freeze.
+- `internal/agent/daemon/daemon.go`: logs once when a leftover `clock.floor` file is ignored.
+- `internal/agent/clockfloor/`, `internal/agent/opstore/doc.go`, `docs/per-host-agent-development.md`: documentation of the two-phase floor, its write-rate and crash-loss bounds, the freeze, and the limits (the floor-file limit and the certificate-clock limit are replaced).
+- `internal/agent/opstore/store.go`: a store whose journal is already lost (no database, or one that cannot be opened) starts quarantined and serves reads, as before, instead of failing `Open`.
+- A clock floor record written by an earlier development build of this change (a different record version) is not readable and quarantines the store (`inconsistent_store`); it must be enrolled again.
+
+### Why
+The floor was a file beside the store, so rolling it back alone was not detected, and the grant-expiry checks rest on it. The re-enrolment freeze wrote every open operation in one transaction, with size and latency unbounded in the number of operations.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only: no deployed agent exists yet; an existing development state directory with a `clock.floor` file but no floor record in the store is quarantined (`inconsistent_store`) once enrolled and must be enrolled again.
+
+## [2026-11-13 15:10] - Per-host agent: the host key moves into a separate signer process (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/signer/`: the signer. `vrtg-agent signer` runs as its own user, loads the host private key and serves a Unix socket; the agent holds a `signer.Client`, a `crypto.Signer` whose `Public()` is the key the signer reports (it must be the host certificate's key) and whose `Sign` sends the digest to the signer. The protocol is one framed request and response per connection (frames of at most 256 bytes), with two operations: public key, and sign over exactly 32 bytes with SHA-256 (what `crypto/tls` signs for an ECDSA P-256 key in TLS 1.3, and what host answers use); every other operation, hash, size or version is refused, and the client also refuses locally and verifies each returned signature. Both ends check the peer's uid with `SO_PEERCRED` on every connection; every call has a deadline; the signer bounds its connections (32) and starts no unbounded goroutine; the client connects per call, so a restarted signer is reached again without action. The signer is a digest oracle: it prevents exfiltration and later offline use of the key, not online forgery by a compromised TLS-facing process (documented in the package, in `docs/per-host-agent-development.md` and in `docs/operation-grants-wire-shape.md`); a separate answer key held by a process that never terminates TLS is a later requirement for the regulated profile.
+- `internal/agent/signer/ratelimit.go`, `server.go`, `client.go`: two token-bucket budgets chosen by a purpose byte in the sign request: TLS handshakes (default 20 per second, burst 40) and signed answers (50 per second, burst 100), so a flood of handshakes cannot starve answers; the purpose is declared by the agent and taken on trust, so this protects against outside floods, not a compromised agent. `Client.AnswerSigner` is the answers view, which `trust.LoadIdentity` uses for `Identity.Signer`. The signer logs counters (signatures and rate-limited requests per purpose, malformed requests, refused peers, once per interval and only while they change; never a digest, a signature or key material).
+- `internal/agent/server/throttle.go`: limits before the TLS handshake, because in TLS 1.3 the server signs before it checks the client certificate, so any peer that could connect cost the host key a signature. A source may open 2 connections per second (burst 10; IPv6 per /64; the source table forgets the least recently seen sources in constant time). A connection must send its ClientHello within 2 seconds and holds no slot until then; the slot (16 at once, 2 per source) is taken when the hello arrives, before anything is signed, the client then has 2.5 seconds for each next flight, and the slot is given back when the handshake ends. Signed answers are limited per Provider identity (10 per second, burst 20) before the signer is asked. Refusals, and the "no signed answer" error, are logged once per 30 seconds with the count held back. Only the Provider's pods may reach the agent's port: a NetworkPolicy is required in addition to the firewall (which still covers `hostNetwork` pods and the node itself). A caller whose client certificate has no URI gets no signed answer.
+- `cmd/vrtg-agent/signer.go`: the `signer` subcommand (flags `--socket`, `--key-file`, `--agent-user`, `--max-signs-per-second`, `--sign-burst`, `--log-interval`); it refuses to run as root, requires a private key file and socket directory, notifies `READY=1`, reloads the key on SIGHUP and stops on SIGTERM. It has no development-only setting and is the same in a release and a development build.
+- `packaging/systemd/vrtg-agent-signer.service`: reference unit for the signer, hardened like the agent's (no capability, `NoNewPrivileges`, `ProtectSystem=strict`, syscall filter) and additionally with a private network namespace, `RestrictAddressFamilies=AF_UNIX`, its own user, group and state directory, `Type=notify` and `Restart=always`.
+- `internal/agent/hostcheck/`: `CheckHostKeyUnreadable` (`HostKeyReadable`: the agent refuses to start unless an open of the key file for reading is refused by permission; a missing path or any other error refuses too, and so does a `host.key` in its own `pki/`) and `CheckSignerSocketDir` (`SignerSocketInsecure`); `Probe.Readable`.
+- `internal/agent/internal/guard/guard.go`: eight mutation guards (`signer-peer-check`, `signer-client-peer-check`, `signer-digest-check`, `signer-rate-limit`, `signer-verify`, `host-key-unreadable`, `source-throttle`, `handshake-cap`), each killed by a test.
+- Tests: `internal/agent/signer/*_test.go` (protocol refusals, oversized and truncated frames, peer checks over a real socket, restart, re-keyed signer, rate limit, connection bound, log content, key file and socket directory checks, the run loop, fuzz tests of the request dispatch, the frame reader and the client's response and key parsing), `internal/agent/server/throttle_test.go` and `server_test.go` (every TLS 1.3 handshake and signed answer goes through a real signer socket; signer down fails closed), `internal/agent/daemon/` (start-up refusals, restart, reload), `cmd/vrtg-agent/signer_test.go` and `units_test.go` (the new unit, the dependency choice, sysusers and tmpfiles).
+
+### Changed
+- `internal/agent/trust/identity.go`: `LoadIdentity` takes the host key as a `crypto.Signer` instead of reading a key file; `Identity.TLS` and `Identity.Signer` hold the signer client, never the private key. `trust.ParseHostKey` is exported for the signer.
+- `internal/agent/daemon/daemon.go`, `config/config.go`: the agent reaches the signer at start-up and on reload; new flags `--signer-socket`, `--signer-user`, `--signer-key-file`; new start refusal reason `SignerUnavailable`. A signer that is not there yet is waited for without a limit, serving nothing, with `READY=1` and a status line so that the boot and `systemctl start` are not held up and the agent's start rate limit is not used up; `STATUS=starting` replaces the waiting status once the signer is reached; a signer user that is root or the agent's own user, a peer that is not the signer's user, and an unusable key are refused at once.
+- `internal/agent/trust/identity.go`, `packaging/systemd/vrtg-agent-signer.service`: `ParseHostKey` overwrites its input and its decoded bytes; the signer unit sets `LimitCORE=0`, `MemorySwapMax=0` and `ReadOnlyPaths=` for its key directory (made by tmpfiles.d, so no `StateDirectory=`).
+- `packaging/systemd/vrtg-agent.service`: `Wants=` and `After=vrtg-agent-signer.service`. It is `Wants=`, not `Requires=`: with `Requires=` a restart of the signer would restart the agent, which already fails closed while the signer is away.
+- `packaging/systemd/virtrigaud-agent.sysusers.conf`, `virtrigaud-agent.tmpfiles.conf`: the signer's user, its state directory and the socket directory (owned by the signer, group the agent's, setgid `2750`).
+- `internal/agent/trust/trusttest`: `WritePKI` writes the certificate only; `WriteKey` writes the key for the signer.
+- `docs/per-host-agent-development.md`: layout, users, units, start-up, host checks, the signer's protocol, authentication, bounds, failure behaviour and rate limit; the "key held in the agent process" limit is replaced by the digest-oracle limit; the firewall requirement, the pre-handshake throttle, the handshake and answer budgets, the brief fail-closed window while a key is rotated, install order, binary ownership, memory handling and the assumption that the attacker has not reached root or the signer's uid.
+
+### Why
+Before the agent's answers become authoritative, the process that terminates TLS and parses Provider input must never hold the host private key bytes, so that its compromise cannot copy the key out or use it later.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Development builds only: no release artefact ships the agent or the signer. A development host needs the signer's user, state directory and socket directory (see `packaging/systemd/`) and the key file moved out of the agent's `pki/`.
+
+## [2026-11-13 12:00] - Host inventory in the signed host answer (wire shape only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/host_answer.proto`: `HostAnswer.inventory` (9) and the messages and enums it uses (`HostInventory`, `HostComponent`, `ComponentFile`, `HostFeature`, `HostExtension`, `InventoryState`, `ComponentState`, `ManifestOrigin`, `FeatureResult`, `ProcessIdentityTier`, `ExtensionKind`): a host's signed report of its components, feature probes and unexpected extensions, with the requested and supported versions echoed inside it.
+- `proto/provider/v1/provider.proto`: `GetHostInfoRequest.inventory_version` (4), the way a caller asks for the inventory.
+- `proto/rpc/provider/v1/`: regenerated Go bindings, and `host_inventory_test.go`, which pins every new field number, type and enum value, a maximal inventory's encoded size, the published encoding vectors (the request, and an inventory inside a signed body with its signature input and SHA-256), and that the existing framing vector is unchanged. `host_answer_test.go` is updated for the new fields.
+- `docs/operation-grants-wire-shape.md`: the new fields in the request and response table (fourteen additive fields), a "Host inventory" section (shape, bounds, the versioning and echo rule, vectors) and the compatibility note.
+
+### Why
+A per-host agent will report what it runs virtual machines with inside the answer it already signs, so that the Provider relaying it cannot alter, replay or downgrade the report. This change fixes the wire shape on its own so that it can be reviewed before any agent or manager uses it.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+No behaviour change: nothing sets or reads the new fields yet, no RPC is added, the signature framing and `body_type` set are unchanged, and the buf breaking-change check is clean.
+
 ## [2026-11-13 00:19] - Operation store journal: verify every record, scrub, and harder open (development builds only)
 **Author:** @wrkode (William Rizzo)
 

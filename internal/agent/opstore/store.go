@@ -57,6 +57,9 @@ const (
 	// PointMidReenrolment: the predecessor enrolment is frozen; the new one
 	// is not active.
 	PointMidReenrolment journal.Point = "mid-reenrolment"
+	// PointMidFreeze: one chunk of a re-enrolment's freeze is durable and
+	// the freeze-in-progress marker names the rest.
+	PointMidFreeze journal.Point = "mid-freeze"
 )
 
 // DefaultMaxStoreBytes is the default store size above which new operations
@@ -79,6 +82,13 @@ type Options struct {
 	// MaxStoreBytes is the store size above which new operations are
 	// refused. Zero uses DefaultMaxStoreBytes.
 	MaxStoreBytes int64
+	// FreezeChunk is the largest number of operations one re-enrolment
+	// freeze transaction freezes. Zero uses DefaultFreezeChunk; tests set a
+	// small value to exercise a freeze that takes several transactions.
+	FreezeChunk int
+	// FreezeScanCap is the most records (of any state) one re-enrolment
+	// freeze transaction reads. Zero uses eight times the chunk size.
+	FreezeScanCap int
 	// Audit receives every admission decision and state change, including
 	// refusals that write nothing, for example to write a structured
 	// system-journal line. It never receives request bytes. Nil discards. It
@@ -110,7 +120,7 @@ type AuditEvent struct {
 // Errors returned by the store.
 var (
 	// ErrNotReady is returned before Recover has run.
-	ErrNotReady = errors.New("operation store not ready: recovery has not run")
+	ErrNotReady = errors.New("operation store not ready: recovery has not run or a re-enrolment freeze is incomplete")
 	// ErrNoEnrolment is returned when no enrolment is active.
 	ErrNoEnrolment = errors.New("operation store has no active enrolment")
 	// ErrUnknownOperation is returned for an operation the store has no
@@ -133,6 +143,11 @@ type Store struct {
 	// transitions, enrolment changes and compaction batches.
 	mu    sync.Mutex
 	ready bool
+	// freezing is set while a re-enrolment's freeze is incomplete (its
+	// marker is in the store, or the marker cannot be read). The host refuses
+	// every operation while it is set; Recover and Reenrol finish the freeze.
+	// It is written under mu and read without it (Freezing).
+	freezing atomic.Bool
 	// recovered mirrors ready for readers that must not wait for s.mu
 	// (Ready), which Recover holds while it runs.
 	recovered atomic.Bool
@@ -163,8 +178,40 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		_ = j.Close()
 		return nil, fmt.Errorf("open operation store: %w", err)
 	}
+	if err := j.View(ctx, func(tx *journal.Tx) error {
+		fm, err := readFreeze(tx)
+		s.freezing.Store(fm != nil)
+		return err
+	}); err != nil {
+		var lostErr *journal.LostError
+		if st, _ := j.State(); errors.As(err, &lostErr) || st == journal.StateLost {
+			// The journal is already lost (no database, one bbolt cannot open):
+			// the store is returned as before, quarantined and serving what
+			// reads it can, and the host refuses every operation.
+			s.freezing.Store(true)
+			return s, nil
+		}
+		if !errors.Is(err, journal.ErrCorruptRecord) && !errors.Is(err, errCorruptRecord) {
+			// Not damage (a cancelled context, a closed store): the caller
+			// retries; nothing is quarantined on it.
+			_ = j.Close()
+			return nil, fmt.Errorf("open operation store: read freeze marker: %w", err)
+		}
+		// Fail closed: a marker that is damaged may name an incomplete freeze.
+		// The host refuses every operation, the store is quarantined (unless
+		// the failed read already did it) and keeps serving reads.
+		s.freezing.Store(true)
+		if st, _ := j.State(); st != journal.StateLost {
+			j.Quarantine(journal.LostInconsistentStore, "freeze marker unreadable")
+		}
+	}
 	return s, nil
 }
+
+// Freezing reports whether a re-enrolment's freeze is incomplete: the host
+// refuses every operation until Recover or Reenrol finishes it. It does not
+// wait for a freeze in progress.
+func (s *Store) Freezing() bool { return s.freezing.Load() }
 
 // Journal returns the underlying journal.
 func (s *Store) Journal() *journal.Store { return s.j }

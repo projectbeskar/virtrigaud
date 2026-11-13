@@ -49,6 +49,14 @@ const (
 // keyAgentMeta is the key of the AgentMeta record in bucketMeta.
 var keyAgentMeta = []byte("agent")
 
+// keyFreeze is the key of the freeze-in-progress marker in bucketMeta. It
+// exists exactly while a re-enrolment's freeze of the predecessor's open
+// operations has more chunks to commit.
+var keyFreeze = []byte("freeze")
+
+// keyClockFloor is the key of the clock floor record in bucketMeta.
+var keyClockFloor = []byte("clock_floor")
+
 // buckets lists every bucket of the operation store.
 func buckets() []string {
 	return []string{bucketMeta, bucketEnrolments, bucketOps, bucketTombstones, bucketVMs, bucketVMTombstones,

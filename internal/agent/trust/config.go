@@ -140,9 +140,10 @@ func TrustFileReader(owner uint32) func(string) ([]byte, error) {
 	}
 }
 
-// KeyFileReader returns a reader for the key material: each file, checked on
-// its open descriptor, must be a regular file owned by the agent's user uid
-// with no permission for group or others, of at most 1 MiB.
+// KeyFileReader returns a reader for the agent's key material directory (the
+// host certificate; the private key is not there): each file, checked on its
+// open descriptor, must be a regular file owned by the agent's user uid with
+// no permission for group or others, of at most 1 MiB.
 func KeyFileReader(uid uint32) func(string) ([]byte, error) {
 	return func(path string) ([]byte, error) {
 		return safefile.Read(path, safefile.Policy{Owner: &uid, DenyMode: 0o077, Max: maxTrustFileBytes})

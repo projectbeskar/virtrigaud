@@ -17,30 +17,107 @@ limitations under the License.
 package opstore
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	pb "github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// Reenrol replaces the active enrolment with e, in two transactions:
+// DefaultFreezeChunk is the largest number of operations one freeze
+// transaction freezes (Options.FreezeChunk overrides it). A re-enrolment's
+// freeze commits in as many transactions as the predecessor has open
+// operations divided by this number, so the size and latency of one commit
+// do not depend on how many operations were open. Each frozen operation
+// writes a handful of records (its own, and for a retired one its tombstone,
+// its VM record and an audit event), so one chunk is bounded at a few
+// hundred records.
+const DefaultFreezeChunk = 128
+
+// freezeScanFactor is how many times DefaultFreezeChunk's records one freeze
+// transaction may read, open or not.
+const freezeScanFactor = 8
+
+// errChunkFull stops the scan of a freeze chunk that found one more open
+// operation than the chunk holds.
+var errChunkFull = errors.New("freeze chunk full")
+
+// freezeMarker is the freeze-in-progress marker: the predecessor enrolment
+// whose freeze has more chunks to commit and the key of the last operation
+// the committed chunks froze (empty before the first chunk). It is written in
+// the same transaction as the chunk it describes, so a crash leaves the
+// marker and the frozen operations in step.
+type freezeMarker struct {
+	prev   []byte
+	cursor []byte
+}
+
+func (m *freezeMarker) encode() []byte {
+	return append(append([]byte(nil), m.prev...), m.cursor...)
+}
+
+// readFreeze returns the freeze-in-progress marker, or nil when none exists.
+func readFreeze(tx *journal.Tx) (*freezeMarker, error) {
+	b, err := tx.Get(bucketMeta, keyFreeze)
+	if err != nil {
+		return nil, fmt.Errorf("read freeze marker: %w", err)
+	}
+	if b == nil {
+		return nil, nil
+	}
+	if len(b) != idLen && len(b) != idLen+2*idLen {
+		return nil, fmt.Errorf("%w: freeze marker has %d bytes", errCorruptRecord, len(b))
+	}
+	m := &freezeMarker{prev: append([]byte(nil), b[:idLen]...), cursor: append([]byte(nil), b[idLen:]...)}
+	if len(m.cursor) > 0 && !bytes.HasPrefix(m.cursor, m.prev) {
+		return nil, fmt.Errorf("%w: freeze cursor is not an operation of the frozen enrolment", errCorruptRecord)
+	}
+	return m, nil
+}
+
+// freezeScanCap is the most records one freeze transaction reads, of any
+// state, so that a predecessor with very many finished operations cannot make
+// one transaction scan them all.
+func (s *Store) freezeScanCap() int {
+	if s.opts.FreezeScanCap > 0 {
+		return s.opts.FreezeScanCap
+	}
+	return freezeScanFactor * s.freezeChunk()
+}
+
+func (s *Store) freezeChunk() int {
+	if s.opts.FreezeChunk > 0 {
+		return s.opts.FreezeChunk
+	}
+	return DefaultFreezeChunk
+}
+
+// Reenrol replaces the active enrolment with e:
 //
 //  1. freeze: every non-terminal operation of the predecessor enrolment
 //     with no step intent at all is retired (Retired{provider_changed}, with
 //     its tombstone); every other one becomes
 //     OutcomeUnknown{provider_changed} and keeps holding its VM; the
-//     predecessor enrolment becomes frozen and no enrolment is active;
-//  2. activate: e becomes the active enrolment.
+//     predecessor enrolment becomes frozen and no enrolment is active. The
+//     freeze commits in chunks of at most Options.FreezeChunk operations
+//     (DefaultFreezeChunk), in key order. The first chunk also freezes the
+//     enrolment and writes the freeze-in-progress marker, which every chunk
+//     advances and the last one removes, so a crash between chunks leaves a
+//     marker that names where the freeze resumes;
+//  2. activate: e becomes the active enrolment, only after the freeze is
+//     complete.
 //
-// A crash between the two leaves the host with no active enrolment, which
-// refuses every operation; calling Reenrol again completes it. The frozen
-// enrolment's tombstones, VM tombstones, attempt marks and witnesses are kept,
-// read-only, until ConfirmFreeze, and their op_ids are answered from them.
-// e.StartEpoch must exceed every earlier start epoch. No runner may be
-// active. The freeze is one transaction over every open operation of the
-// predecessor.
+// A crash during the freeze or between the two steps leaves the host with no
+// active enrolment, which refuses every operation. Recover, or calling
+// Reenrol again, finishes the freeze; every operation is frozen exactly once.
+// The frozen enrolment's tombstones, VM tombstones, attempt marks and
+// witnesses are kept, read-only, until ConfirmFreeze, and their op_ids are
+// answered from them. e.StartEpoch must exceed every earlier start epoch. No
+// runner may be active.
 func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -49,12 +126,16 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 	}
 	var last uint64
 	var prev []byte
+	var pending *freezeMarker
 	if err := s.j.View(ctx, func(tx *journal.Tx) error {
 		m, err := readAgentMeta(tx)
 		if err != nil {
 			return err
 		}
 		last, prev = m.GetLastStartEpoch(), m.GetCurrentEnrolmentId()
+		if pending, err = readFreeze(tx); err != nil {
+			return err
+		}
 		// Refuse a used id before freezing anything.
 		retired, err := isRetired(tx, e.ID)
 		if err != nil {
@@ -77,12 +158,19 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 	if err := e.validate(last); err != nil {
 		return fmt.Errorf("re-enrol: %w", err)
 	}
-	if len(prev) > 0 {
-		buf := &auditBuf{}
-		if _, err := s.j.Update(ctx, func(tx *journal.Tx) error { return freeze(tx, prev, buf) }); err != nil {
+	switch {
+	case pending != nil && !guard.Off(guard.FreezeResumeReenrol):
+		// A freeze that an earlier call or process began: finish it first.
+		if err := s.freezeLocked(ctx, pending.prev); err != nil {
+			return fmt.Errorf("re-enrol: resume freeze: %w", err)
+		}
+		if err := s.j.CrashPoint(PointMidReenrolment); err != nil {
+			return err
+		}
+	case len(prev) > 0:
+		if err := s.freezeLocked(ctx, prev); err != nil {
 			return fmt.Errorf("re-enrol: freeze: %w", err)
 		}
-		s.flush(buf)
 		if err := s.j.CrashPoint(PointMidReenrolment); err != nil {
 			return err
 		}
@@ -93,58 +181,135 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 	return nil
 }
 
-// freeze freezes the enrolment prev and its open operations.
-func freeze(tx *journal.Tx, prev []byte, buf *auditBuf) error {
+// freezeLocked freezes the open operations of the enrolment prev, one chunk
+// per transaction, until none remain, and clears the freeze-in-progress
+// marker with the last chunk. s.mu is held. s.freezing stays set until the
+// last chunk commits, so a failure leaves the host refusing every operation.
+func (s *Store) freezeLocked(ctx context.Context, prev []byte) error {
+	s.freezing.Store(true)
+	for {
+		buf := &auditBuf{}
+		var more bool
+		if _, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+			var err error
+			more, err = freezeChunk(tx, prev, s.freezeChunk(), s.freezeScanCap(), buf)
+			return err
+		}); err != nil {
+			return err
+		}
+		s.flush(buf)
+		if !more {
+			s.freezing.Store(false)
+			return nil
+		}
+		if err := s.j.CrashPoint(PointMidFreeze); err != nil {
+			return err
+		}
+	}
+}
+
+// freezeChunk freezes up to limit open operations of prev, in key order,
+// after those the marker's cursor already passed. The first chunk (no marker)
+// also marks the enrolment frozen and clears the active enrolment. It writes
+// the marker with the new cursor and reports more when open operations
+// may remain; the last chunk deletes the marker instead. The scan stops
+// after scanCap records of any state; the cursor then advances to the last
+// record read, so a later chunk never reads it again, and a chunk may freeze
+// no operation at all (progress is the cursor).
+func freezeChunk(tx *journal.Tx, prev []byte, limit, scanCap int, buf *auditBuf) (more bool, err error) {
+	fm, err := readFreeze(tx)
+	if err != nil {
+		return false, err
+	}
+	begun := fm != nil
+	switch {
+	case !begun:
+		e := &pb.Enrolment{}
+		ok, err := get(tx, bucketEnrolments, prev, e)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, fmt.Errorf("%w: enrolment to freeze is unknown", ErrEnrolment)
+		}
+		e.State = pb.EnrolmentState_ENROLMENT_STATE_FROZEN
+		if err := put(tx, bucketEnrolments, prev, e); err != nil {
+			return false, err
+		}
+		m, err := readAgentMeta(tx)
+		if err != nil {
+			return false, err
+		}
+		m.CurrentEnrolmentId = nil
+		if err := put(tx, bucketMeta, keyAgentMeta, m); err != nil {
+			return false, err
+		}
+		fm = &freezeMarker{prev: append([]byte(nil), prev...)}
+	case !sameBytes(fm.prev, prev):
+		return false, fmt.Errorf("%w: a freeze of another enrolment is in progress", ErrEnrolment)
+	}
 	var open []*pb.OpRecord
-	if err := tx.ForEach(bucketOps, prev, func(_, v []byte) error {
+	lastKey := fm.cursor
+	scanned := 0
+	err = tx.ForEachAfter(bucketOps, prev, fm.cursor, func(k, v []byte) error {
+		if scanned == scanCap {
+			more = true
+			return errChunkFull
+		}
+		scanned++
 		rec := &pb.OpRecord{}
 		if err := unmarshalRecord(v, rec); err != nil {
 			return err
 		}
-		if rec.GetState() == StateAccepted || rec.GetState() == StateExecuting {
-			open = append(open, rec)
+		if rec.GetState() != StateAccepted && rec.GetState() != StateExecuting {
+			lastKey = k
+			return nil
 		}
+		if len(open) == limit {
+			more = true
+			return errChunkFull
+		}
+		open = append(open, rec)
+		lastKey = k
 		return nil
-	}); err != nil {
-		return err
+	})
+	if err != nil && !errors.Is(err, errChunkFull) {
+		return false, err
 	}
 	for _, rec := range open {
-		id := rec.GetIdentity()
-		key := opKey(id.GetEnrolmentId(), id.GetOpId())
-		rec.Reason = ReasonProviderChanged
-		if anyIntent(rec) {
-			rec.State = StateOutcomeUnknown
-			if err := put(tx, bucketOps, key, rec); err != nil {
-				return err
-			}
-			if err := buf.write(tx, AuditEvent{Event: "frozen", Ref: OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()},
-				VMUID: id.GetVmUid(), Kind: providerv1.OperationKind(id.GetKind()), Reason: rec.GetReason(), State: rec.GetState()}); err != nil {
-				return err
-			}
-			continue
+		if err := freezeOp(tx, rec, buf); err != nil {
+			return false, err
 		}
-		rec.State = StateRetired
+	}
+	switch {
+	case more:
+		fm.cursor = lastKey
+		return true, tx.Put(bucketMeta, keyFreeze, fm.encode())
+	case begun:
+		return false, tx.Delete(bucketMeta, keyFreeze)
+	}
+	return false, nil
+}
+
+// freezeOp freezes one open operation: OutcomeUnknown when a step intent is
+// durable, Retired (with its tombstone) otherwise.
+func freezeOp(tx *journal.Tx, rec *pb.OpRecord, buf *auditBuf) error {
+	id := rec.GetIdentity()
+	key := opKey(id.GetEnrolmentId(), id.GetOpId())
+	rec.Reason = ReasonProviderChanged
+	if anyIntent(rec) {
+		rec.State = StateOutcomeUnknown
 		if err := put(tx, bucketOps, key, rec); err != nil {
 			return err
 		}
-		if err := terminalWrites(tx, rec, buf); err != nil {
-			return err
-		}
+		return buf.write(tx, AuditEvent{Event: "frozen", Ref: OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()},
+			VMUID: id.GetVmUid(), Kind: providerv1.OperationKind(id.GetKind()), Reason: rec.GetReason(), State: rec.GetState()})
 	}
-	e := &pb.Enrolment{}
-	if _, err := get(tx, bucketEnrolments, prev, e); err != nil {
+	rec.State = StateRetired
+	if err := put(tx, bucketOps, key, rec); err != nil {
 		return err
 	}
-	e.State = pb.EnrolmentState_ENROLMENT_STATE_FROZEN
-	if err := put(tx, bucketEnrolments, prev, e); err != nil {
-		return err
-	}
-	m, err := readAgentMeta(tx)
-	if err != nil {
-		return err
-	}
-	m.CurrentEnrolmentId = nil
-	return put(tx, bucketMeta, keyAgentMeta, m)
+	return terminalWrites(tx, rec, buf)
 }
 
 func anyIntent(rec *pb.OpRecord) bool {
@@ -167,6 +332,9 @@ func anyIntent(rec *pb.OpRecord) bool {
 func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.freezing.Load() {
+		return fmt.Errorf("confirm freeze: %w: a freeze is still in progress", ErrEnrolment)
+	}
 	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
 		e := &pb.Enrolment{}
 		ok, err := get(tx, bucketEnrolments, prev, e)

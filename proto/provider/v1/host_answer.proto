@@ -266,4 +266,213 @@ message HostAnswer {
   // a renewed identity certificate the host has staged and not yet put in
   // use; empty when none is staged.
   bytes staged_certificate_sha256 = 8;
+
+  // inventory is what the host's agent observed of its host components,
+  // feature probes and extensions: set only in the answer to a
+  // GetHostInfoRequest whose inventory_version is at least 1, never in
+  // another answer. It is a statement by the host, not a proof: a host whose
+  // agent is compromised can report anything. Additive.
+  HostInventory inventory = 9;
+}
+
+// HostInventory is a host's report of the components it runs virtual
+// machines with. The agent collects it in the background and puts its latest
+// collection in each answer that asks for it; the answer's signature and
+// nonce make the report fresh and unaltered in transit, not true.
+message HostInventory {
+  // inventory_version is the version of this message's content the agent
+  // used: the lower of requested_version and supported_version. A field,
+  // enum value or reason introduced in version n is used only when this is
+  // at least n.
+  uint32 inventory_version = 1;
+  // state says whether components, features and extensions are complete.
+  InventoryState state = 2;
+  // snapshot_age_seconds is how long before the answer was made the agent
+  // finished the collection it reports, measured on a clock that does not
+  // jump and that counts time the host spent suspended; 0 when state is
+  // PENDING.
+  uint32 snapshot_age_seconds = 3;
+  // components are the host components, sorted by name, each name once.
+  // Empty unless state is COMPLETE.
+  repeated HostComponent components = 4;
+  // features are the results of the agent's feature probes, sorted by name,
+  // each name once. Empty unless state is COMPLETE.
+  repeated HostFeature features = 5;
+  // process_identity_tier is the strongest way the agent can identify the
+  // processes it starts on this host. Unspecified unless state is COMPLETE.
+  ProcessIdentityTier process_identity_tier = 6;
+  // unexpected_extensions are system extensions merged on the host that no
+  // component declares, sorted by name, each name once. Empty unless state is
+  // COMPLETE.
+  repeated HostExtension unexpected_extensions = 7;
+  // state_reason qualifies a state of OVER_LIMIT or UNREADABLE; empty
+  // otherwise. A value from a closed set; never a path.
+  string state_reason = 8;
+  // requested_version is the inventory_version of the request, echoed.
+  uint32 requested_version = 9;
+  // supported_version is the highest inventory version the agent
+  // implements.
+  uint32 supported_version = 10;
+}
+
+// InventoryState is the completeness of a HostInventory.
+enum InventoryState {
+  // INVENTORY_STATE_UNSPECIFIED is never valid in an answer.
+  INVENTORY_STATE_UNSPECIFIED = 0;
+  // INVENTORY_STATE_COMPLETE: every component, feature and extension the
+  // agent observed is listed.
+  INVENTORY_STATE_COMPLETE = 1;
+  // INVENTORY_STATE_PENDING: the agent has not finished its first
+  // collection since it started.
+  INVENTORY_STATE_PENDING = 2;
+  // INVENTORY_STATE_OVER_LIMIT: the agent observed more than the report can
+  // hold; nothing is listed.
+  INVENTORY_STATE_OVER_LIMIT = 3;
+  // INVENTORY_STATE_UNREADABLE: the agent could not read the component
+  // manifests or finish its probes; nothing is listed.
+  INVENTORY_STATE_UNREADABLE = 4;
+}
+
+// HostComponent is one host component: declared by a component manifest, or
+// known to the agent and found present without one.
+message HostComponent {
+  // name is the component name: lower-case letters, digits and hyphens.
+  string name = 1;
+  // state is the component's readiness.
+  ComponentState state = 2;
+  // state_reason qualifies state, from a closed set; empty when state is
+  // READY.
+  string state_reason = 3;
+  // observed_version is the version the agent read for the installed
+  // component (never by running it); empty when it found none.
+  string observed_version = 4;
+  // declared_version is the version the manifest declares; empty when no
+  // usable manifest declares the component.
+  string declared_version = 5;
+  // required_range is the version range the agent requires, set only when
+  // state is INCOMPATIBLE.
+  string required_range = 6;
+  // source is how the manifest says the component was delivered (for
+  // example "sysext" or "package"); empty when no manifest declares it.
+  string source = 7;
+  // manifest_origin is where the manifest that declares the component lies.
+  ManifestOrigin manifest_origin = 8;
+  // artifact_sha256 is the SHA-256 digest of the delivered artifact the
+  // component came in (for example a system extension image), computed by
+  // the agent: 32 bytes; empty when the component has no such artifact.
+  bytes artifact_sha256 = 9;
+  // files are the component's files that the agent executes or loads,
+  // sorted by name, each name once, with the digests the agent computed.
+  repeated ComponentFile files = 10;
+}
+
+// ComponentState is the readiness of a host component.
+enum ComponentState {
+  // COMPONENT_STATE_UNSPECIFIED is never valid in an answer.
+  COMPONENT_STATE_UNSPECIFIED = 0;
+  // COMPONENT_STATE_READY: declared, present, in the required version range
+  // and healthy.
+  COMPONENT_STATE_READY = 1;
+  // COMPONENT_STATE_MISSING: required or declared, but not present.
+  COMPONENT_STATE_MISSING = 2;
+  // COMPONENT_STATE_INCOMPATIBLE: present, but its version is outside
+  // required_range.
+  COMPONENT_STATE_INCOMPATIBLE = 3;
+  // COMPONENT_STATE_UNHEALTHY: present and compatible, but a check failed
+  // (state_reason says which).
+  COMPONENT_STATE_UNHEALTHY = 4;
+  // COMPONENT_STATE_UNMANIFESTED: present, but no manifest declares it.
+  COMPONENT_STATE_UNMANIFESTED = 5;
+  // COMPONENT_STATE_MANIFEST_INVALID: a manifest for it exists but cannot be
+  // used (state_reason says why).
+  COMPONENT_STATE_MANIFEST_INVALID = 6;
+}
+
+// ManifestOrigin is where a component manifest was read from.
+enum ManifestOrigin {
+  // MANIFEST_ORIGIN_UNSPECIFIED is never valid in an answer.
+  MANIFEST_ORIGIN_UNSPECIFIED = 0;
+  // MANIFEST_ORIGIN_NONE: no manifest declares the component.
+  MANIFEST_ORIGIN_NONE = 1;
+  // MANIFEST_ORIGIN_READ_ONLY: the read-only, image-provided manifest
+  // directory.
+  MANIFEST_ORIGIN_READ_ONLY = 2;
+  // MANIFEST_ORIGIN_WRITABLE: the writable host-configuration manifest
+  // directory.
+  MANIFEST_ORIGIN_WRITABLE = 3;
+}
+
+// ComponentFile is one file of a host component.
+message ComponentFile {
+  // name is the file's name within the component, never a path: letters,
+  // digits, ".", "_", "+" and "-".
+  string name = 1;
+  // sha256 is the SHA-256 digest of the file's content: 32 bytes.
+  bytes sha256 = 2;
+}
+
+// HostFeature is the result of one feature probe.
+message HostFeature {
+  // name is the probe name, from a closed set.
+  string name = 1;
+  // result is what the probe found.
+  FeatureResult result = 2;
+  // reason qualifies a result of ERROR, from a closed set; empty otherwise.
+  string reason = 3;
+}
+
+// FeatureResult is the result of a feature probe.
+enum FeatureResult {
+  // FEATURE_RESULT_UNSPECIFIED is never valid in an answer.
+  FEATURE_RESULT_UNSPECIFIED = 0;
+  // FEATURE_RESULT_PRESENT: the feature is available.
+  FEATURE_RESULT_PRESENT = 1;
+  // FEATURE_RESULT_ABSENT: the feature is not available.
+  FEATURE_RESULT_ABSENT = 2;
+  // FEATURE_RESULT_ERROR: the probe could not decide.
+  FEATURE_RESULT_ERROR = 3;
+}
+
+// ProcessIdentityTier is the strongest mechanism by which an agent can
+// identify a process it started. The values are names, not an order.
+enum ProcessIdentityTier {
+  // PROCESS_IDENTITY_TIER_UNSPECIFIED: not reported.
+  PROCESS_IDENTITY_TIER_UNSPECIFIED = 0;
+  // PROCESS_IDENTITY_TIER_PIDFD_STORE: process file descriptors held by the
+  // service manager across agent restarts.
+  PROCESS_IDENTITY_TIER_PIDFD_STORE = 1;
+  // PROCESS_IDENTITY_TIER_PIDFS_HANDLE: persistent pidfs file handles.
+  PROCESS_IDENTITY_TIER_PIDFS_HANDLE = 2;
+  // PROCESS_IDENTITY_TIER_PIDFS_INODE: pidfs inode numbers.
+  PROCESS_IDENTITY_TIER_PIDFS_INODE = 3;
+  // PROCESS_IDENTITY_TIER_START_TIME: process start time and boot
+  // identifier only.
+  PROCESS_IDENTITY_TIER_START_TIME = 4;
+}
+
+// HostExtension is a system extension merged on the host that no component
+// declares.
+message HostExtension {
+  // name is the extension's name, never a path.
+  string name = 1;
+  // kind says how the extension is unexpected.
+  ExtensionKind kind = 2;
+  // image_sha256 is the SHA-256 digest of the extension image, computed by
+  // the agent: 32 bytes; empty for a directory extension.
+  bytes image_sha256 = 3;
+}
+
+// ExtensionKind says how a merged system extension is unexpected.
+enum ExtensionKind {
+  // EXTENSION_KIND_UNSPECIFIED is never valid in an answer.
+  EXTENSION_KIND_UNSPECIFIED = 0;
+  // EXTENSION_KIND_DIRECTORY: a directory extension, which merges under any
+  // image policy.
+  EXTENSION_KIND_DIRECTORY = 1;
+  // EXTENSION_KIND_UNDECLARED_IMAGE: an image extension no manifest
+  // declares.
+  EXTENSION_KIND_UNDECLARED_IMAGE = 2;
+  // EXTENSION_KIND_OVERLAYS_COMPONENT: an extension that overlays the files
+  // of a declared component.
+  EXTENSION_KIND_OVERLAYS_COMPONENT = 3;
 }

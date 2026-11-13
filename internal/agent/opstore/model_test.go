@@ -27,6 +27,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -86,7 +87,7 @@ var modelKinds = []providerv1.OperationKind{kCreate, kPowerOn, kPowerOff, kRecon
 var modelPoints = []journal.Point{
 	opstore.PointBeforeAccept, journal.PointAfterStoreCommit, journal.PointAfterAnchor, opstore.PointAfterIntent,
 	opstore.PointAfterWitness, opstore.PointAfterEffect, opstore.PointAfterLastDone, opstore.PointAfterTerminal,
-	opstore.PointMidReenrolment,
+	opstore.PointMidReenrolment, opstore.PointMidFreeze,
 }
 
 func TestReferenceModel(t *testing.T) {
@@ -176,15 +177,19 @@ type model struct {
 	start     uint64
 	lastStart uint64
 	frozen    [][]byte
-	ops       map[string]*mOp
-	order     []string
-	vms       map[string]*mVM
-	vmTomb    map[string]bool
-	attempts  map[string]uint64
-	bindings  map[string][]byte
-	crash     *journaltest.Crasher // the model's own counter, armed like the store's
-	crashed   bool
-	ids       uint64
+	// pending is the enrolment whose freeze a crash left incomplete; the
+	// next recovery finishes it.
+	pending  []byte
+	chunk    int
+	ops      map[string]*mOp
+	order    []string
+	vms      map[string]*mVM
+	vmTomb   map[string]bool
+	attempts map[string]uint64
+	bindings map[string][]byte
+	crash    *journaltest.Crasher // the model's own counter, armed like the store's
+	crashed  bool
+	ids      uint64
 }
 
 func (m *model) fail(format string, args ...any) {
@@ -210,6 +215,8 @@ func runModel(seed uint64) (err error) {
 	m := &model{h: h, rnd: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), ops: map[string]*mOp{},
 		vms: map[string]*mVM{}, vmTomb: map[string]bool{}, attempts: map[string]uint64{}, bindings: map[string][]byte{}}
 	h.enrol, h.holder, h.start = m.newID(), m.newID(), 2
+	m.chunk = 1 + m.rnd.IntN(3)
+	h.opts = func(o *opstore.Options) { o.FreezeChunk, o.FreezeScanCap = m.chunk, 1<<30 } // the scan cap has its own tests
 	defer func() {
 		if h.s != nil {
 			_ = h.s.Close()
@@ -304,6 +311,10 @@ func (m *model) step() {
 	case x < 92:
 		m.compact()
 	case x < 97:
+		// Leave several operations open, so that the freeze takes chunks.
+		for i, n := 0, m.rnd.IntN(6); i < n; i++ {
+			m.deliver()
+		}
 		m.reenrol()
 	default:
 		m.confirm()
@@ -625,6 +636,12 @@ func failState(op *mOp) opstore.OpState {
 // recoverAll is the model's recovery, then the runners for the active
 // enrolment (the harness's boot runs them).
 func (m *model) recoverAll() {
+	if m.pending != nil {
+		// Recovery finishes an interrupted freeze before it classifies anything.
+		for m.pending != nil {
+			m.freezeChunk(m.pending, 1<<30)
+		}
+	}
 	var runnable []*mOp
 	for _, op := range m.openOps() {
 		still := true
@@ -683,12 +700,29 @@ func (m *model) compact() {
 
 func (m *model) reenrol() {
 	next := opstore.Enrolment{HostID: "host-1", ID: m.newID(), ProviderUID: m.h.provider, StartEpoch: m.lastStart + 1}
-	m.arm(0.3)
+	m.arm(0.5)
+	if m.h.crash != nil && m.rnd.IntN(2) == 0 {
+		// Aim at the freeze: a crash between its chunks.
+		n := 1 + m.rnd.IntN(3)
+		m.h.crash = &journaltest.Crasher{Point: opstore.PointMidFreeze, N: n}
+		m.crash = &journaltest.Crasher{Point: opstore.PointMidFreeze, N: n}
+	}
 	err := m.h.s.Reenrol(context.Background(), next)
 	prev := m.active
 	crashed := false
 	if prev != nil {
-		crashed = m.commit(func() { m.freeze(prev) }) || m.point(opstore.PointMidReenrolment)
+		// The freeze commits in chunks, with a crash point between them.
+		chunks := (len(m.openOpsOf(prev)) + m.chunk - 1) / m.chunk
+		if chunks == 0 {
+			chunks = 1
+		}
+		for i := 0; i < chunks && !crashed; i++ {
+			crashed = m.commit(func() { m.freezeChunk(prev, m.chunk) })
+			if !crashed && i < chunks-1 {
+				crashed = m.point(opstore.PointMidFreeze)
+			}
+		}
+		crashed = crashed || m.point(opstore.PointMidReenrolment)
 	}
 	if !crashed {
 		m.commit(func() {
@@ -702,11 +736,35 @@ func (m *model) reenrol() {
 	m.settle()
 }
 
-func (m *model) freeze(prev []byte) {
+// openOpsOf is the open operations of one enrolment, in the store's key
+// order (op id).
+func (m *model) openOpsOf(enrol []byte) []*mOp {
+	var out []*mOp
 	for _, op := range m.openOps() {
-		if !bytes.Equal(op.r.EnrolmentID, prev) {
-			continue
+		if bytes.Equal(op.r.EnrolmentID, enrol) {
+			out = append(out, op)
 		}
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].r.OpID, out[j].r.OpID) < 0 })
+	return out
+}
+
+// freezeChunk is one freeze transaction: the first one freezes the
+// enrolment, each freezes at most limit open operations, and the one that
+// leaves none open completes the freeze.
+func (m *model) freezeChunk(prev []byte, limit int) {
+	if m.pending == nil {
+		m.frozen = append(m.frozen, prev)
+		m.active = nil
+		m.pending = prev
+	}
+	open := m.openOpsOf(prev)
+	if len(open) > limit {
+		open = open[:limit]
+	} else {
+		m.pending = nil
+	}
+	for _, op := range open {
 		intent := false
 		for _, st := range op.steps {
 			intent = intent || st.intent
@@ -717,8 +775,6 @@ func (m *model) freeze(prev []byte) {
 		}
 		m.finish(op, opstore.StateRetired, opstore.ReasonProviderChanged)
 	}
-	m.frozen = append(m.frozen, prev)
-	m.active = nil
 }
 
 func (m *model) confirm() {

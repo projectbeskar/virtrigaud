@@ -68,6 +68,7 @@ func runScript(t testing.TB, script []byte) {
 			var err error
 			f, err = clockfloor.Open(ctx, cfgFor(c, s))
 			require.NoError(t, err)
+			require.NoError(t, f.StartPersisting(ctx))
 		case 5: // the host reboots
 			require.NoError(t, f.Flush(ctx))
 			bootN++
@@ -76,6 +77,7 @@ func runScript(t testing.TB, script []byte) {
 			var err error
 			f, err = clockfloor.Open(ctx, cfgFor(c, s))
 			require.NoError(t, err)
+			require.NoError(t, f.StartPersisting(ctx))
 		case 6: // a boot-time reading that moved a little, as scheduling can make it
 			c.boot += time.Duration(arg) * time.Millisecond
 		}

@@ -39,7 +39,7 @@ const (
 var TrustFiles = []string{"grant-anchors.pem", "host-ca.pem", "provider-ca.pem", "provider-sans"}
 
 // PKIFiles are the entries a healthy fake key material directory holds.
-var PKIFiles = []string{"host.crt", "host.key"}
+var PKIFiles = []string{"host.crt"}
 
 // Fake is a hostcheck.Probe over a fixed, editable description of a host.
 // The zero value is not usable; use Healthy.
@@ -56,6 +56,12 @@ type Fake struct {
 	Namespaces map[string]uint64
 	// WritablePaths are the paths the process may write.
 	WritablePaths map[string]bool
+	// ReadablePaths are the paths the process may read; DeniedPaths are the
+	// paths whose open is refused by permission; any other path does not
+	// exist (an error).
+	ReadablePaths map[string]bool
+	// DeniedPaths are the paths the process is refused by permission.
+	DeniedPaths map[string]bool
 	// UID is the process's effective uid.
 	UID uint32
 }
@@ -70,6 +76,8 @@ func Healthy(cfg hostcheck.Config, hostURI string) *Fake {
 		Content:       map[string][]byte{},
 		Namespaces:    map[string]uint64{"pid": InitPID, "cgroup": InitCgroup, "user": InitUser, "time": InitTime},
 		WritablePaths: map[string]bool{},
+		ReadablePaths: map[string]bool{},
+		DeniedPaths:   map[string]bool{},
 		UID:           cfg.UID,
 		Mounts: []hostcheck.Mount{
 			{MountPoint: "/", FSType: "ext4", Source: "/dev/vda1"},
@@ -89,6 +97,12 @@ func Healthy(cfg hostcheck.Config, hostURI string) *Fake {
 	f.Files[cfg.PKIDir] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o700, UID: cfg.UID}
 	for _, n := range PKIFiles {
 		f.Files[filepath.Join(cfg.PKIDir, n)] = hostcheck.FileInfo{Mode: 0o600, UID: cfg.UID}
+	}
+	if cfg.SignerKeyFile != "" {
+		f.DeniedPaths[cfg.SignerKeyFile] = true
+	}
+	if cfg.SignerSocketDir != "" {
+		f.Files[cfg.SignerSocketDir] = hostcheck.FileInfo{Mode: fs.ModeDir | fs.ModeSetgid | 0o750, UID: cfg.SignerUID}
 	}
 	marker := filepath.Join(cfg.StateDir, hostcheck.HostMarkerFile)
 	f.Files[marker] = hostcheck.FileInfo{Mode: 0o600, UID: cfg.UID}
@@ -180,6 +194,19 @@ func (f *Fake) Writable(path string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.WritablePaths[path], nil
+}
+
+// Readable implements hostcheck.Probe.
+func (f *Fake) Readable(path string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ReadablePaths[path] {
+		return true, nil
+	}
+	if f.DeniedPaths[path] {
+		return false, nil
+	}
+	return false, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 }
 
 // EUID implements hostcheck.Probe.

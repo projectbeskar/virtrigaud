@@ -67,6 +67,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
@@ -128,12 +129,21 @@ func (s *CredentialStore) Store(c *Credentials) { s.p.Store(c) }
 // certificate, and a required client certificate that chains to the pinned
 // Provider identity issuer and names an allowed Provider. Each handshake
 // reads the current Credentials.
-func TLSConfig(creds *CredentialStore) *tls.Config {
+func TLSConfig(creds *CredentialStore) *tls.Config { return tlsConfig(creds, nil) }
+
+// tlsConfig is TLSConfig with a hook that runs when a ClientHello has
+// arrived, before anything is signed: a non-nil error ends the handshake.
+func tlsConfig(creds *CredentialStore, onHello func(net.Conn) error) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		MaxVersion: tls.VersionTLS13,
 		NextProtos: []string{"h2"},
-		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			if onHello != nil {
+				if err := onHello(hello.Conn); err != nil {
+					return nil, err
+				}
+			}
 			c := creds.Load()
 			if c == nil {
 				return nil, errors.New("no server credentials")
@@ -166,7 +176,32 @@ type Agent interface {
 	TrustState() (providerv1.AgentState, string)
 	// ClockFloor returns the host's clock floor; zero when it has none.
 	ClockFloor() time.Time
+	// ClockFloorState returns the clock floor's health; the empty state when
+	// the agent has no floor (its store could not give it one).
+	ClockFloorState() clockfloor.StateKind
+	// UnattestedCause names why a ready store still refuses operations (one
+	// of the Cause constants), or "" when nothing does.
+	UnattestedCause() string
 }
+
+// The causes of an UNATTESTED refusal besides the store's own continuity. A
+// refused mutating call carries the reserved UNATTESTED reason (the
+// published contract's, exempt from the circuit breaker) and the cause in the
+// ErrorInfo metadata under MetadataCause and in the message; a signed host
+// answer carries no state reason for them.
+const (
+	// MetadataCause is the ErrorInfo metadata key that names the cause.
+	MetadataCause = "cause"
+	// CauseClockFloorAhead: the clock floor is ahead of the host clock by more
+	// than its bound (the clock was rolled back, or jumped forward and was
+	// corrected). Mutating calls are refused until the clock catches up.
+	CauseClockFloorAhead = "clock_floor_ahead"
+	// CauseClockFloorUnavailable: the clock floor failed (a clock source
+	// failed or it could not be saved) or does not exist.
+	CauseClockFloorUnavailable = "clock_floor_unavailable"
+	// CauseFreezeIncomplete: a re-enrolment's freeze stopped partway.
+	CauseFreezeIncomplete = "freeze_incomplete"
+)
 
 // Options configures New.
 type Options struct {
@@ -183,13 +218,38 @@ type Options struct {
 	Log logr.Logger
 	// Now is the clock for answers; nil uses time.Now.
 	Now func() time.Time
+	// Throttle sets the pre-handshake limits (see Throttle); zero fields
+	// take their defaults.
+	Throttle Throttle
+	// AnswersPerSecond and AnswerBurst limit the signed answers made for one
+	// Provider identity (the verified client certificate's URI), so that one
+	// Provider cannot use up the signer's answer budget; a read above the
+	// limit is answered without a signed answer. Zero fields take
+	// DefaultAnswersPerSecond and DefaultAnswerBurst.
+	AnswersPerSecond float64
+	// AnswerBurst is the burst of the per-identity answer limit.
+	AnswerBurst int
 }
+
+// Defaults of the per-identity answer limit, below the signer's answer budget
+// (50 per second) so that one identity cannot use all of it.
+const (
+	// DefaultAnswersPerSecond is the sustained signed answers per second for
+	// one Provider identity.
+	DefaultAnswersPerSecond = 10.0
+	// DefaultAnswerBurst is the burst of signed answers for one identity.
+	DefaultAnswerBurst = 20
+)
 
 // Server is the agent's gRPC server.
 type Server struct {
 	opts      Options
 	grpc      *grpc.Server
 	mutating  map[string]bool
+	throttle  *throttle
+	answers   *sourceLimiter
+	noAnswer  logGate
+	limited   logGate
 	providerS *providerService
 	agentS    *agentService
 }
@@ -202,9 +262,19 @@ func New(opts Options) (*Server, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	s := &Server{opts: opts, mutating: MutatingMethods()}
+	s := &Server{opts: opts, mutating: MutatingMethods(), noAnswer: logGate{every: refusalLogEvery}}
+	s.throttle = newThrottle(opts.Throttle, opts.Log, time.Now)
+	if opts.AnswersPerSecond <= 0 {
+		opts.AnswersPerSecond = DefaultAnswersPerSecond
+	}
+	if opts.AnswerBurst <= 0 {
+		opts.AnswerBurst = DefaultAnswerBurst
+	}
+	s.answers = newSourceLimiter(opts.AnswersPerSecond, opts.AnswerBurst)
+	s.limited = logGate{every: refusalLogEvery}
+	s.opts = opts
 	so := []grpc.ServerOption{
-		grpc.Creds(credentials.NewTLS(TLSConfig(opts.Credentials))),
+		grpc.Creds(s.throttle.creds(credentials.NewTLS(tlsConfig(opts.Credentials, s.throttle.acquire)))),
 		grpc.ConnectionTimeout(ConnectionTimeout),
 		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: MaxConnectionAge, MaxConnectionAgeGrace: MaxConnectionAgeGrace}),
@@ -221,9 +291,10 @@ func New(opts Options) (*Server, error) {
 	return s, nil
 }
 
-// Serve serves on lis until Stop or GracefulStop.
+// Serve serves on lis until Stop or GracefulStop. Connections pass the
+// pre-handshake throttle first (see Throttle).
 func (s *Server) Serve(lis net.Listener) error {
-	if err := s.grpc.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+	if err := s.grpc.Serve(s.throttle.listener(lis)); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return fmt.Errorf("agent server: %w", err)
 	}
 	return nil
@@ -257,11 +328,35 @@ func MutatingMethods() map[string]bool {
 
 // refusal is a gRPC status with a google.rpc.ErrorInfo reason.
 func refusal(code codes.Code, reason, msg string) error {
+	return refusalWith(code, reason, msg, nil)
+}
+
+// refusalWith is refusal with ErrorInfo metadata.
+func refusalWith(code codes.Code, reason, msg string, metadata map[string]string) error {
 	st := status.New(code, msg)
-	if withInfo, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: ErrorInfoDomain}); err == nil {
+	if withInfo, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: ErrorInfoDomain, Metadata: metadata}); err == nil {
 		return withInfo.Err()
 	}
 	return st.Err()
+}
+
+// verifyNow is the time a client certificate's validity is judged at: the
+// later of the host clock and the agent's clock floor while the floor is
+// healthy, so that rolling the host clock back does not make an expired
+// certificate valid again, as it does not for an expired grant key. While the
+// floor is ahead of the clock beyond its bound, failed or missing, the floor
+// is not used (a floor far ahead would refuse every call, GetHostInfo
+// included, and the manager could no longer see why); certificates are
+// judged at the host clock, and gate refuses every mutating call instead.
+func (s *Server) verifyNow() time.Time {
+	now := s.opts.Now()
+	if s.opts.Agent.ClockFloorState() != clockfloor.StateOK {
+		return now
+	}
+	if floor := s.opts.Agent.ClockFloor(); floor.After(now) {
+		return floor
+	}
+	return now
 }
 
 // checkPeer authenticates the caller of one call: an allowed Provider
@@ -286,7 +381,7 @@ func (s *Server) checkPeer(ctx context.Context) error {
 		inter.AddCert(ic)
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: c.Trust.ProviderCAPool, Intermediates: inter,
-		CurrentTime: s.opts.Now(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		CurrentTime: s.verifyNow(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		return status.Error(codes.PermissionDenied, "the caller's certificate is no longer valid for this agent")
 	}
 	_, uid, err := c.Trust.AuthorizeProvider(leaf)
@@ -311,15 +406,19 @@ func (s *Server) gate(ctx context.Context, method string) error {
 	}
 	state, reason := s.opts.Agent.TrustState()
 	var err error
-	switch state {
-	case providerv1.AgentState_AGENT_STATE_READY:
-		err = status.Error(codes.Unimplemented, "this agent executes no operations")
-	case providerv1.AgentState_AGENT_STATE_QUARANTINED:
+	cause := s.opts.Agent.UnattestedCause()
+	switch {
+	case state == providerv1.AgentState_AGENT_STATE_QUARANTINED:
 		err = refusal(codes.FailedPrecondition, opstore.ReasonQuarantined, "the host's operation store is quarantined ("+reason+")")
+	case cause != "":
+		err = refusalWith(codes.Unavailable, opstore.ReasonUnattested, "the host refuses operations: "+cause,
+			map[string]string{MetadataCause: cause})
+	case state == providerv1.AgentState_AGENT_STATE_READY:
+		err = status.Error(codes.Unimplemented, "this agent executes no operations")
 	default:
 		err = refusal(codes.Unavailable, opstore.ReasonUnattested, "the host's operation store has not established its continuity")
 	}
-	s.opts.Log.Info("mutation refused", "method", method, "state", state.String())
+	s.opts.Log.Info("mutation refused", "method", method, "state", state.String(), "cause", cause)
 	return err
 }
 
@@ -343,10 +442,17 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 	if len(nonce) == 0 {
 		return nil
 	}
+	id := peerIdentity(ctx)
+	if id == "" || !s.answers.allow(id, s.opts.Now()) {
+		if ok, n := s.limited.allow(s.opts.Now()); ok {
+			s.opts.Log.Info("no signed answer: the Provider is above its answer rate", "suppressedSinceLast", n)
+		}
+		return nil
+	}
 	c := s.opts.Credentials.Load()
 	view, err := s.opts.Agent.HostView(ctx, continuitySeq)
 	if err != nil {
-		s.opts.Log.Error(err, "no signed answer: the store cannot be read")
+		s.logNoAnswer(err, "no signed answer: the store cannot be read")
 		return nil
 	}
 	state, reason := s.opts.Agent.TrustState()
@@ -359,16 +465,45 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 		if errors.Is(err, answer.ErrNoAnswer) {
 			s.opts.Log.V(1).Info("no signed answer", "why", err.Error())
 		} else {
-			s.opts.Log.Error(err, "no signed answer")
+			s.logNoAnswer(err, "no signed answer")
 		}
 		return nil
 	}
 	blob, err := answer.Sign(c.Identity.Signer, c.Identity.Leaf.Raw, body)
 	if err != nil {
-		s.opts.Log.Error(err, "no signed answer")
+		// A signer that is away or refusing fails every answer.
+		s.logNoAnswer(err, "no signed answer")
 		return nil
 	}
 	return blob
+}
+
+// peerIdentity is the key of the verified caller for the answer limit: the
+// URI names of its client certificate (the Provider identity); empty when it
+// has none, which fails closed (no signed answer).
+func peerIdentity(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+	info, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(info.State.PeerCertificates) == 0 {
+		return ""
+	}
+	key := ""
+	for _, u := range info.State.PeerCertificates[0].URIs {
+		key += u.String() + " "
+	}
+	return key
+}
+
+// logNoAnswer logs why an answer could not be made, one line per interval
+// with the count held back: a signer that is away fails every answer, and a
+// log line per request would let any caller fill the journal.
+func (s *Server) logNoAnswer(err error, msg string) {
+	if ok, n := s.noAnswer.allow(s.opts.Now()); ok {
+		s.opts.Log.Error(err, msg, "suppressedSinceLast", n)
+	}
 }
 
 // checkNonce refuses a nonce that is set but not exactly 16 bytes.

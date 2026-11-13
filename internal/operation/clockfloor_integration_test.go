@@ -72,6 +72,7 @@ func TestVerify_WallClockRolledBackPastKeyExpiry(t *testing.T) {
 	store := &clockfloor.MemStore{}
 	f, err := clockfloor.Open(ctx, clockfloor.Config{Store: store, Wall: h, Boot: h, BootID: h, FirstUse: true, MaxAhead: 24 * time.Hour})
 	require.NoError(t, err)
+	require.NoError(t, f.StartPersisting(ctx))
 	h.wall, h.boot = h.wall.Add(2*time.Hour), h.boot+2*time.Hour
 	require.NoError(t, f.Flush(ctx))
 	h.wall = testEpoch // rolled back
@@ -103,8 +104,9 @@ func TestVerify_FloorAheadRefusesEveryGrant(t *testing.T) {
 
 	h := &hostClocks{wall: testEpoch.Add(30 * 24 * time.Hour), boot: time.Hour, bootID: "boot-a"}
 	store := &clockfloor.MemStore{}
-	_, err := clockfloor.Open(ctx, clockfloor.Config{Store: store, Wall: h, Boot: h, BootID: h, FirstUse: true})
-	require.NoError(t, err) // the clock jumped forward a month and was saved
+	f1, err := clockfloor.Open(ctx, clockfloor.Config{Store: store, Wall: h, Boot: h, BootID: h, FirstUse: true})
+	require.NoError(t, err)
+	require.NoError(t, f1.StartPersisting(ctx)) // the clock jumped forward a month and was saved
 	h.bootID, h.boot, h.wall = "boot-b", 3*time.Second, testEpoch
 	f, err := clockfloor.Open(ctx, clockfloor.Config{Store: store, Wall: h, Boot: h, BootID: h})
 	require.NoError(t, err)
