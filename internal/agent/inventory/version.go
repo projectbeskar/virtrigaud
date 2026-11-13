@@ -251,7 +251,8 @@ func parsePackageNotes(buf []byte, bo byteOrder) (string, bool) {
 // status file or an Alpine installed database and returns the installed
 // version of pkg. A line longer than maxPackageDBLine is skipped, not fatal.
 func packageDBVersion(r io.Reader, pkg string) (string, bool) {
-	br := bufio.NewReaderSize(io.LimitReader(r, maxPackageDBBytes), 4096)
+	cr := &countingReader{r: io.LimitReader(r, maxPackageDBBytes+1)}
+	br := bufio.NewReaderSize(cr, 4096)
 	var name, version string
 	installed := true
 	flush := func() (string, bool) {
@@ -264,8 +265,14 @@ func packageDBVersion(r io.Reader, pkg string) (string, bool) {
 	skipping := false
 	for {
 		chunk, isPrefix, err := br.ReadLine()
-		if err != nil {
+		if errors.Is(err, io.EOF) {
 			break
+		}
+		if err != nil {
+			return "", false // no half-read stanza
+		}
+		if cr.n > maxPackageDBBytes {
+			return "", false // the size cap was hit
 		}
 		if skipping {
 			skipping = isPrefix
@@ -301,5 +308,20 @@ func packageDBVersion(r io.Reader, pkg string) (string, bool) {
 			version = strings.TrimSpace(text[2:])
 		}
 	}
+	if cr.n > maxPackageDBBytes {
+		return "", false
+	}
 	return flush()
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }

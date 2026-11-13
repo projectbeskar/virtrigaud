@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"strings"
@@ -314,4 +315,55 @@ func TestDefaultAgentExecutableIsTheRunningImage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hashOK, res)
 	assert.Len(t, sum, 32)
+}
+
+func TestSameDirectoryExtensionKeyCollisionIsAnError(t *testing.T) {
+	tr := healthyTree(t)
+	tr.write("/var/lib/extensions/x.raw", []byte("image"))
+	tr.mkdir("/var/lib/extensions/x")
+	inv := collectInventory(t, tr, nil)
+	assert.Equal(t, providerv1.InventoryState_INVENTORY_STATE_UNREADABLE, inv.GetState())
+	assert.Equal(t, ReasonProbeFailed, inv.GetStateReason())
+	assert.Empty(t, inv.GetComponents())
+	// The same name in two directories is a precedence question, not a conflict.
+	tr2 := healthyTree(t)
+	tr2.write("/etc/extensions/x.raw", []byte("image"))
+	tr2.mkdir("/var/lib/extensions/x")
+	assert.Equal(t, providerv1.InventoryState_INVENTORY_STATE_COMPLETE, collectInventory(t, tr2, nil).GetState())
+}
+
+// failingReader returns its data and then a read error that is not EOF.
+type failingReader struct {
+	data string
+	done bool
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if f.done {
+		return 0, errors.New("disk fell over")
+	}
+	f.done = true
+	return copy(p, f.data), nil
+}
+
+// endless produces lines of a package database without end.
+type endless struct{}
+
+func (endless) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+		if i%100 == 99 {
+			p[i] = '\n'
+		}
+	}
+	return len(p), nil
+}
+
+func TestPackageDBReadFailuresGiveNoVersion(t *testing.T) {
+	// A complete stanza followed by a read error: nothing is trusted.
+	_, ok := packageDBVersion(&failingReader{data: "Package: tool\nStatus: install ok installed\nVersion: 1.1\n\nPackage: other\n"}, "tool")
+	assert.False(t, ok, "a read error gives no version, not even a finished stanza")
+	// The size cap: no half-read database is used.
+	_, ok = packageDBVersion(io.MultiReader(io.LimitReader(endless{}, 33<<20), strings.NewReader("Package: tool\nStatus: install ok installed\nVersion: 1.1\n\n")), "tool")
+	assert.False(t, ok, "hitting the size cap gives no version")
 }

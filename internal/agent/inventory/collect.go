@@ -349,7 +349,9 @@ func (e *env) masked(p string) bool {
 // without the image suffix) is listed as a directory extension, which carries
 // no digest and is valid under the field rules. The report errs towards
 // showing a stray entry rather than hiding it; one bad entry never turns the
-// whole snapshot into an error.
+// whole snapshot into an error. Hidden entries (a leading dot) are skipped:
+// the system extension tool's image discovery ignores them, so they are never
+// merged (stated from the tool's source, not checked against a local manual).
 func (e *env) classify(dir string, ent DirEntry) (extension, bool) {
 	if ent.Name == "" || strings.HasPrefix(ent.Name, ".") {
 		return extension{}, false
@@ -374,6 +376,7 @@ func (e *env) classify(dir string, ent DirEntry) (extension, bool) {
 func (e *env) readExtensions(ctx context.Context) (map[string]extension, error) {
 	out := map[string]extension{}
 	for _, dir := range e.layout.ExtensionDirs {
+		inDir := map[string]bool{}
 		entries, more, err := e.fs.ReadDir(dir, maxExtensionEntries)
 		if err != nil {
 			if isNotExist(err) {
@@ -392,6 +395,13 @@ func (e *env) readExtensions(ctx context.Context) (map[string]extension, error) 
 			if !ok {
 				continue
 			}
+			if inDir[x.key] {
+				// "x" and "x.raw" in one directory: which one the system
+				// extension tool takes is not defined, and neither may be
+				// dropped.
+				return nil, unreadable(ReasonProbeFailed, errors.New("two entries of one extension directory name the same extension"))
+			}
+			inDir[x.key] = true
 			if _, seen := out[x.key]; !seen {
 				out[x.key] = x
 			}

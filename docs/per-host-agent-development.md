@@ -457,7 +457,12 @@ file (or a link to one) is an undeclared image with its digest. A link to
 a directory extension, without a digest, so that nothing unusual in these
 directories is hidden: a directory, a dangling link, a device node, a FIFO, a
 versioned (`.v`) directory, a file without the `.raw` suffix, and an image
-that cannot be hashed (over the limit, unreadable). One such entry never makes
+that cannot be hashed (over the limit, unreadable). Two entries of one directory that name the
+same extension (`x` and `x.raw`) make the report `UNREADABLE`
+(`probe_failed`): which one the tool takes is not defined, and neither may be
+dropped. Entries whose name starts with a dot are skipped: the tool's image
+discovery ignores them, so they are never merged (stated from the tool's
+source, not checked against a local manual). One such entry never makes
 the whole report an error; the manager sees an unexpected extension and keeps
 the host out of service. Entries are listed whether or not the extension is
 merged. A directory extension that holds a catalog file of a component, and
@@ -521,7 +526,7 @@ flag, no package tool, no self-test. Versions are read as data: an
 the unprefixed `VERSION_ID` is the host release the extension fits and is never
 used), the packaging metadata note of an ELF file (only the note section, at
 most 64 KiB; the ELF header and section table are read to find it), or a Debian
-or Alpine package database (a line longer than 64 KiB is skipped). A package
+or Alpine package database (a line longer than 64 KiB is skipped; a read error or a database over 32 MiB gives no version, never a half-read answer). A package
 database in a binary format is not read. Every parser is Go code with a bounded
 input and is fuzzed; the collector links no C code. Files are looked at before
 they are opened, and a device node or FIFO is never opened. Logs carry a class

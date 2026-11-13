@@ -36,6 +36,7 @@ func TestErrorClassNamesNoText(t *testing.T) {
 		fmt.Errorf("%w: %w: %w", answer.ErrSign, signer.ErrSigner, fmt.Errorf("%w: %w: connect: %v", signer.ErrSigner, signer.ErrUnavailable, secret)): "signer_unavailable",
 		fmt.Errorf("%w: %w", answer.ErrSign, fmt.Errorf("%w: %w: x", signer.ErrSigner, signer.ErrRefused)):                                             "signer_refused",
 		fmt.Errorf("%w: %w", answer.ErrSign, fmt.Errorf("%w: %w: x", signer.ErrSigner, signer.ErrRateLimited)):                                         "signer_rate_limited",
+		fmt.Errorf("%w: %w", answer.ErrSign, fmt.Errorf("%w: %w: %w", signer.ErrSigner, signer.ErrUnavailable, signer.ErrPeer)):                        "signer_peer_refused",
 		secret: "other",
 	} {
 		if got := errorClass(err); got != want {

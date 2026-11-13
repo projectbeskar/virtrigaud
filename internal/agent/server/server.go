@@ -581,6 +581,8 @@ func errorClass(err error) string {
 		return "invalid_inventory"
 	case errors.Is(err, signer.ErrRateLimited):
 		return "signer_rate_limited"
+	case errors.Is(err, signer.ErrPeer):
+		return "signer_peer_refused"
 	case errors.Is(err, signer.ErrUnavailable):
 		return "signer_unavailable"
 	case errors.Is(err, signer.ErrRefused):
