@@ -127,6 +127,9 @@ jobs:
           version: v2.12.2
           args: --timeout=10m
 
+      - name: Verify the reference systemd units
+        run: ./hack/verify-systemd-units.sh
+
   security:
     name: Security Scan
     runs-on: ubuntu-22.04

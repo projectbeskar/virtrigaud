@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
@@ -130,10 +131,13 @@ type Store struct {
 
 	// mu serialises every read-decide-write sequence: admissions, step
 	// transitions, enrolment changes and compaction batches.
-	mu      sync.Mutex
-	ready   bool
-	running map[string]bool
-	dirs    map[string]bool
+	mu    sync.Mutex
+	ready bool
+	// recovered mirrors ready for readers that must not wait for s.mu
+	// (Ready), which Recover holds while it runs.
+	recovered atomic.Bool
+	running   map[string]bool
+	dirs      map[string]bool
 }
 
 // Open opens the journal and the store. The store starts not ready: call

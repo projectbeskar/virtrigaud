@@ -11,7 +11,9 @@ Everything here is used only by development builds: a manager built with the
 `virtrigaud_dev` build tag and started with the `--dev-host-enrolment-*` flags.
 A release manager refuses those flags at startup, renders no agent credentials
 into any inventory, and leaves the new Host fields unused. The agent side
-(generating the key and the CSR on the host) is not part of this page.
+(generating the key and the CSR on the host) is not part of this page; the
+agent process itself is described in
+[`per-host-agent-development.md`](per-host-agent-development.md).
 
 ## Host fields
 

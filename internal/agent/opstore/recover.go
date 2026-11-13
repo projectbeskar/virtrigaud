@@ -267,6 +267,7 @@ func (s *Store) Recover(ctx context.Context) ([]OpRef, error) {
 		}
 	}
 	s.ready = true
+	s.recovered.Store(true)
 	return runnable, nil
 }
 

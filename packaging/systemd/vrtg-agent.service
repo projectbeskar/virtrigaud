@@ -1,0 +1,66 @@
+# Reference unit of the VirtRigaud per-host agent. Development builds only:
+# no release artefact ships the agent or this unit.
+#
+# The agent holds no capability and creates no scope, cgroup or process: it
+# serves the Provider that routes to this host and keeps its operation store
+# in its state directory. It is not upheld by any other unit, so an operator
+# can stop it for maintenance.
+[Unit]
+Description=VirtRigaud per-host agent (development builds only)
+Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
+Wants=network-online.target
+After=network-online.target local-fs.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/libexec/virtrigaud/vrtg-agent run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+# Exit status 2 is a configuration error: restarting cannot fix it.
+RestartPreventExitStatus=2
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=60
+User=virtrigaud-agent
+Group=virtrigaud-agent
+StateDirectory=virtrigaud-agent
+StateDirectoryMode=0700
+UMask=0077
+LimitNOFILE=4096
+TasksMax=128
+MemoryMax=256M
+
+# Hardening. The agent needs no privilege: it reads its own state and its
+# read-only trust configuration and listens on one TCP port.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+PrivateIPC=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -33,6 +33,8 @@ type File interface {
 	Truncate(size int64) error
 	// Close closes the file. It does not imply Sync.
 	Close() error
+	// Stat describes the open file.
+	Stat() (fs.FileInfo, error)
 }
 
 // FS is the file-system interface the journal and the operation store use for
@@ -82,6 +84,36 @@ func (OSFS) OpenFile(name string, flag int, perm fs.FileMode) (File, error) {
 // ReadFile implements FS.
 func (OSFS) ReadFile(name string) ([]byte, error) {
 	return os.ReadFile(name) // #nosec G304 -- the path is built by the journal from its own directory
+}
+
+// ReadFileBounded opens name with fsys, checks on the open file that it is
+// a regular file of at most limit bytes, and reads it. bounded is false, and
+// data nil, when the file is larger; the read stops one byte past limit, so
+// a file that grows while it is read is caught too.
+func ReadFileBounded(fsys FS, name string, limit int64) (data []byte, bounded bool, err error) {
+	f, err := fsys.OpenFile(name, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, false, fmt.Errorf("stat %s: %w", name, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("%s is not a regular file", name)
+	}
+	if fi.Size() > limit {
+		return nil, false, nil
+	}
+	data, err = io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s: %w", name, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, false, nil
+	}
+	return data, true, nil
 }
 
 // Exists implements FS.

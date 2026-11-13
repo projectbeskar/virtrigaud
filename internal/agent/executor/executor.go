@@ -114,3 +114,11 @@ type Executor interface {
 	// op (for example: the file is absent, the process positively absent).
 	Goal(ctx context.Context, op Operation, step Step) (bool, error)
 }
+
+// Stopper stops every VM an executor runs. The agent's shutdown command calls
+// it only while the host itself is shutting down, rebooting, halting or
+// powering off.
+type Stopper interface {
+	// StopAll stops every VM. It returns nil when nothing runs.
+	StopAll(ctx context.Context) error
+}
