@@ -329,6 +329,8 @@ func TestFeaturesAndTier(t *testing.T) {
 		tr := healthyTree(t)
 		tr.write(secureBootVariable, []byte{7, 0, 0, 0, 1})
 		tr.write(measuredBootLog, []byte("log"))
+		tr.write(kvmSysfsDev, []byte("10:232\n"))
+		tr.write(tunSysfsDev, []byte("10:200\n"))
 		inv := collectInventory(t, tr, nil)
 		f := features(inv)
 		require.Len(t, f, len(valueSets[1].features))
@@ -345,7 +347,7 @@ func TestFeaturesAndTier(t *testing.T) {
 	t.Run("old host", func(t *testing.T) {
 		h := healthyHost()
 		h.kernel, h.cgroup2, h.handle, h.pidfdErr = "5.4.0-1", false, false, syscall.ENOSYS
-		h.onPidfs, h.kvm, h.tun = false, false, false
+		h.onPidfs = false
 		h.ns["pid"] = 4026532000
 		delete(h.ns, "time")
 		inv := collectInventory(t, healthyTree(t), func(o *Options) { o.Host = h })

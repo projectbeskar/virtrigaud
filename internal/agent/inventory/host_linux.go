@@ -86,11 +86,9 @@ func (SystemHost) PidfdOpenSelf() error {
 	return unix.Close(fd)
 }
 
-// Magic numbers and device numbers the probes check.
+// Magic number the probes check.
 const (
-	pidfsMagic   = 0x50494446
-	kvmAPI       = 12
-	kvmGetAPIVer = 0xAE00 // KVM_GET_API_VERSION
+	pidfsMagic = 0x50494446
 )
 
 // openPidfdSelf opens a process file descriptor of the agent itself. The
@@ -147,52 +145,6 @@ func (SystemHost) PidfdOnPidfs() (bool, error) {
 	}
 	return uint64(st.Type) == pidfsMagic, nil // #nosec G115 -- a file system magic number
 }
-
-// deviceUsable reports whether path is the character device major:minor and
-// the agent can open it read-write; the descriptor is handed to use (may be
-// nil) and closed.
-func deviceUsable(path string, major, minor uint32, use func(fd int) error) (bool, error) {
-	var st unix.Stat_t
-	if err := unix.Stat(path, &st); err != nil {
-		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
-			return false, nil
-		}
-		return false, err
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFCHR || unix.Major(st.Rdev) != major || unix.Minor(st.Rdev) != minor {
-		return false, errors.New("not the expected character device")
-	}
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = unix.Close(fd) }()
-	if use != nil {
-		if err := use(fd); err != nil {
-			return false, err
-		}
-	}
-	return true, nil
-}
-
-// KVMUsable implements Host: /dev/kvm is character device 10:232, the agent
-// can open it, and KVM_GET_API_VERSION on that descriptor answers 12.
-func (SystemHost) KVMUsable() (bool, error) {
-	return deviceUsable("/dev/kvm", 10, 232, func(fd int) error {
-		v, err := unix.IoctlGetInt(fd, kvmGetAPIVer)
-		if err != nil {
-			return err
-		}
-		if v != kvmAPI {
-			return errors.New("unexpected KVM API version")
-		}
-		return nil
-	})
-}
-
-// TunUsable implements Host: /dev/net/tun is character device 10:200 and the
-// agent can open it.
-func (SystemHost) TunUsable() (bool, error) { return deviceUsable("/dev/net/tun", 10, 200, nil) }
 
 // FSMagic implements Host with statfs.
 func (SystemHost) FSMagic(path string) (uint64, error) {

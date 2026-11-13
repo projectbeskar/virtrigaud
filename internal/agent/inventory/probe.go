@@ -49,6 +49,12 @@ const (
 	securityfsDir = "/sys/kernel/security"
 	// measuredBootLog is the firmware's measured-boot event log.
 	measuredBootLog = "/sys/kernel/security/tpm0/binary_bios_measurements"
+	// kvmSysfsDev and tunSysfsDev hold the device numbers of the KVM and TUN
+	// miscellaneous devices.
+	kvmSysfsDev = "/sys/class/misc/kvm/dev"
+	tunSysfsDev = "/sys/class/misc/tun/dev"
+	// maxSysfsValueBytes bounds a sysfs value read.
+	maxSysfsValueBytes = 32
 	// maxVariableBytes bounds the firmware variable read.
 	maxVariableBytes = 16
 )
@@ -91,12 +97,6 @@ type Host interface {
 	// lives on the process file system (pidfs), which numbers processes
 	// uniquely. An absent pidfd_open is false, not an error.
 	PidfdOnPidfs() (bool, error)
-	// KVMUsable reports whether /dev/kvm is the KVM character device and the
-	// agent can open it; false when there is no such device.
-	KVMUsable() (bool, error)
-	// TunUsable reports whether /dev/net/tun is the TUN character device and
-	// the agent can open it; false when there is no such device.
-	TunUsable() (bool, error)
 	// FSMagic returns the file system type magic of the file system holding
 	// path.
 	FSMagic(path string) (uint64, error)
@@ -177,6 +177,33 @@ func namespaceProbe(name, kind string, initial uint64) probe {
 			return present, ""
 		}
 		return absent, ""
+	}}
+}
+
+// miscDeviceProbe decides from sysfs, as a data read, whether a miscellaneous
+// device is registered: the kernel publishes its number in
+// /sys/class/misc/<name>/dev, which stays readable when the service hides the
+// device nodes. The agent never opens the device. A device whose module is not
+// loaded yet (tun is often loaded on first use) is not registered and reads
+// ABSENT.
+func miscDeviceProbe(name, devFile, want string) probe {
+	return probe{name: name, run: func(_ context.Context, e *env) (providerv1.FeatureResult, string) {
+		f, err := e.fs.Open(devFile, false)
+		if err != nil {
+			if isNotExist(err) {
+				return absent, ""
+			}
+			return failure(err)
+		}
+		defer func() { _ = f.Close() }()
+		b, tooLarge, err := readLimited(f, maxSysfsValueBytes)
+		if err != nil || tooLarge {
+			return errored, FeatureReasonProbeFailed
+		}
+		if strings.TrimSpace(string(b)) != want {
+			return errored, FeatureReasonProbeFailed
+		}
+		return present, ""
 	}}
 }
 
@@ -300,12 +327,8 @@ func defaultProbes() []probe {
 		namespaceProbe(FeatureInitialCgroupNamespace, "cgroup", initCgroupNSInode),
 		namespaceProbe(FeatureInitialTimeNamespace, "time", initTimeNSInode),
 		{name: FeatureHypervisorPauseResume, run: notEvaluated},
-		{name: FeatureKVM, run: func(_ context.Context, e *env) (providerv1.FeatureResult, string) {
-			return boolProbe(e.host.KVMUsable())
-		}},
-		{name: FeatureTun, run: func(_ context.Context, e *env) (providerv1.FeatureResult, string) {
-			return boolProbe(e.host.TunUsable())
-		}},
+		miscDeviceProbe(FeatureKVM, kvmSysfsDev, "10:232"),
+		miscDeviceProbe(FeatureTun, tunSysfsDev, "10:200"),
 		{name: FeatureSecureBoot, run: secureBoot},
 		{name: FeatureMeasuredBoot, run: measuredBoot},
 		{name: FeatureExtensionImagePolicySigned, run: notEvaluated},

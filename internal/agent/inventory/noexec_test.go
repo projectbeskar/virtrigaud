@@ -186,3 +186,13 @@ func FuzzVersionRange(f *testing.F) {
 		}
 	})
 }
+
+// TestCollectorLinksNoTestingPackage: no test hook may put "testing" in the
+// agent binary through this package.
+func TestCollectorLinksNoTestingPackage(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "github.com/projectbeskar/virtrigaud/internal/agent/inventory").CombinedOutput()
+	require.NoError(t, err, string(out))
+	for _, dep := range strings.Fields(string(out)) {
+		assert.NotEqual(t, "testing", dep)
+	}
+}

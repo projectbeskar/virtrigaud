@@ -53,9 +53,13 @@ func collector(t *testing.T, collected bool) *inventory.Collector {
 	return c
 }
 
-func inventoryEnv(t *testing.T, src server.InventorySource) *env {
+func inventoryEnv(t *testing.T, src server.InventorySource) *env { return inventoryEnvLimit(t, src, 0) }
+
+// inventoryEnvLimit lowers the encoded size bound, to reach the size fallback
+// that the other bounds make unreachable with real data.
+func inventoryEnvLimit(t *testing.T, src server.InventorySource, limit int) *env {
 	t.Helper()
-	return newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.Inventory = src })
+	return newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.Inventory = src; o.InventoryMaxBytes = limit })
 }
 
 // TestGetHostInfoInventory: only GetHostInfo, only with a nonce and an
@@ -170,8 +174,7 @@ func TestInventoryTooLargeFallsBack(t *testing.T) {
 		return inv
 	})
 	t.Run("replaced by OVER_LIMIT", func(t *testing.T) {
-		inventory.SetEncodedLimitForTest(t, 300)
-		e := inventoryEnv(t, big)
+		e := inventoryEnvLimit(t, big, 300)
 		pc := providerv1.NewProviderClient(e.dial(e.provider(), 0))
 		info, err := pc.GetHostInfo(ctx(t), &providerv1.GetHostInfoRequest{AnswerNonce: nonce(3), InventoryVersion: 1})
 		require.NoError(t, err)
@@ -182,8 +185,7 @@ func TestInventoryTooLargeFallsBack(t *testing.T) {
 		assert.Empty(t, inv.GetComponents())
 	})
 	t.Run("a second failure leaves no inventory, not the answer", func(t *testing.T) {
-		inventory.SetEncodedLimitForTest(t, 10)
-		e := inventoryEnv(t, big)
+		e := inventoryEnvLimit(t, big, 10)
 		pc := providerv1.NewProviderClient(e.dial(e.provider(), 0))
 		info, err := pc.GetHostInfo(ctx(t), &providerv1.GetHostInfoRequest{AnswerNonce: nonce(3), InventoryVersion: 1})
 		require.NoError(t, err)

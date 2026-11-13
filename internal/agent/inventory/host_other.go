@@ -47,11 +47,5 @@ func (SystemHost) PidfsHandle() (bool, error) { return false, ErrUnsupported }
 // PidfdOnPidfs implements Host.
 func (SystemHost) PidfdOnPidfs() (bool, error) { return false, ErrUnsupported }
 
-// KVMUsable implements Host.
-func (SystemHost) KVMUsable() (bool, error) { return false, ErrUnsupported }
-
-// TunUsable implements Host.
-func (SystemHost) TunUsable() (bool, error) { return false, ErrUnsupported }
-
 // FSMagic implements Host.
 func (SystemHost) FSMagic(string) (uint64, error) { return 0, ErrUnsupported }

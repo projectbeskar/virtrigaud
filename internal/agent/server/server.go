@@ -223,6 +223,9 @@ type Options struct {
 	// Inventory supplies the host inventory for a GetHostInfo that asks for
 	// one; nil answers without an inventory.
 	Inventory InventorySource
+	// InventoryMaxBytes lowers the encoded size bound of an inventory in an
+	// answer; zero uses the standard bound. Only tests set it.
+	InventoryMaxBytes int
 	// Throttle sets the pre-handshake limits (see Throttle); zero fields
 	// take their defaults.
 	Throttle Throttle
@@ -481,7 +484,7 @@ func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, cont
 		Nonce: nonce, View: view, HostID: c.Identity.HostID(), Record: c.Identity.Record,
 		State: state, StateReason: reason, AgentVersion: s.opts.Version,
 		JournalSchemaVersion: s.opts.JournalSchemaVersion, ClockFloor: s.opts.Agent.ClockFloor(), Now: s.opts.Now(),
-		InventoryRequested: inventoryVersion,
+		InventoryRequested: inventoryVersion, InventoryMaxBytes: s.opts.InventoryMaxBytes,
 	}
 	if inventoryVersion != 0 && s.opts.Inventory != nil {
 		h.Inventory = s.opts.Inventory.Inventory(inventoryVersion)

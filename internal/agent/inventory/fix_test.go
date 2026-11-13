@@ -190,15 +190,28 @@ func TestBootProbes(t *testing.T) {
 		assert.Equal(t, presentR, feat(collectInventory(t, tr, nil), FeatureMeasuredBoot).GetResult())
 		assert.Equal(t, absentR, feat(collectInventory(t, healthyTree(t), nil), FeatureMeasuredBoot).GetResult())
 	})
-	t.Run("kvm and tun", func(t *testing.T) {
-		h := healthyHost()
-		h.kvm, h.tunErr = false, fmt.Errorf("x: %w", fs.ErrPermission)
-		inv := collectInventory(t, healthyTree(t), func(o *Options) { o.Host = h })
-		assert.Equal(t, absentR, feat(inv, FeatureKVM).GetResult())
-		assert.Equal(t, errR, feat(inv, FeatureTun).GetResult())
-		assert.Equal(t, FeatureReasonPermissionDenied, feat(inv, FeatureTun).GetReason())
-		h = healthyHost()
-		assert.Equal(t, presentR, feat(collectInventory(t, healthyTree(t), func(o *Options) { o.Host = h }), FeatureKVM).GetResult())
+	t.Run("kvm and tun from sysfs, never opened", func(t *testing.T) {
+		tr := healthyTree(t)
+		inv := collectInventory(t, tr, nil)
+		assert.Equal(t, absentR, feat(inv, FeatureKVM).GetResult(), "no registered device: absent (a tun module not loaded yet reads so too)")
+		assert.Equal(t, absentR, feat(inv, FeatureTun).GetResult())
+		tr.write(kvmSysfsDev, []byte("10:232\n"))
+		tr.write(tunSysfsDev, []byte("10:200"))
+		inv = collectInventory(t, tr, nil)
+		assert.Equal(t, presentR, feat(inv, FeatureKVM).GetResult())
+		assert.Equal(t, presentR, feat(inv, FeatureTun).GetResult())
+		tr.write(kvmSysfsDev, []byte("10:233\n"))
+		tr.write(tunSysfsDev, []byte(strings.Repeat("1", 100)))
+		inv = collectInventory(t, tr, nil)
+		for _, name := range []string{FeatureKVM, FeatureTun} {
+			assert.Equal(t, errR, feat(inv, name).GetResult(), name)
+			assert.Equal(t, FeatureReasonProbeFailed, feat(inv, name).GetReason(), name)
+		}
+		// A refused read is permission_denied; no /dev node is ever consulted.
+		inv = collectInventory(t, tr, func(o *Options) {
+			o.FS = failingFS{FS: o.FS, failOpen: map[string]error{kvmSysfsDev: fs.ErrPermission}}
+		})
+		assert.Equal(t, FeatureReasonPermissionDenied, feat(inv, FeatureKVM).GetReason())
 	})
 	t.Run("the tier follows the pidfs probes", func(t *testing.T) {
 		h := healthyHost()

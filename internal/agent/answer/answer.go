@@ -241,6 +241,10 @@ type Host struct {
 	// (Collector.Inventory); nil answers without one, which a manager treats
 	// as no inventory. It must be nil when InventoryRequested is 0.
 	Inventory *providerv1.HostInventory
+	// InventoryMaxBytes lowers the encoded size bound the inventory is
+	// checked against; zero uses inventory.MaxInventoryBytes. Only tests set
+	// it.
+	InventoryMaxBytes int
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no
@@ -274,7 +278,11 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 			return nil, fmt.Errorf("%w: an inventory for a request that asked for none", ErrInvalidInventory)
 		}
 		if h.InventoryRequested != 0 && !guard.Off(guard.InventoryValidate) {
-			if err := inventory.Validate(h.Inventory, h.InventoryRequested); err != nil {
+			limit := inventory.MaxInventoryBytes
+			if h.InventoryMaxBytes > 0 {
+				limit = min(limit, h.InventoryMaxBytes)
+			}
+			if err := inventory.ValidateWithLimit(h.Inventory, h.InventoryRequested, limit); err != nil {
 				return nil, fmt.Errorf("%w: %w", ErrInvalidInventory, err)
 			}
 		}

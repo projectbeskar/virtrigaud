@@ -23,7 +23,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -161,9 +160,11 @@ const (
 	// guest. It needs a self-test the agent does not run, so it is reported
 	// as ERROR with not_evaluated.
 	FeatureHypervisorPauseResume = "hypervisor_pause_resume"
-	// FeatureKVM: /dev/kvm is the KVM device and the agent can open it.
+	// FeatureKVM: the host exposes /dev/kvm: the kernel has registered the KVM
+	// device (read from sysfs; the agent never opens it).
 	FeatureKVM = "kvm"
-	// FeatureTun: /dev/net/tun is the TUN device and the agent can open it.
+	// FeatureTun: the host exposes /dev/net/tun: the kernel has registered the
+	// TUN device (read from sysfs; the agent never opens it).
 	FeatureTun = "tun"
 	// FeatureSecureBoot: the firmware booted with Secure Boot enabled.
 	FeatureSecureBoot = "secure_boot"
@@ -239,11 +240,6 @@ var (
 // be used and does not name a catalog component.
 const invalidManifestPrefix = "manifest-"
 
-// encodedLimit is the size bound Validate applies; only tests lower it.
-var encodedLimit atomic.Int64
-
-func init() { encodedLimit.Store(MaxInventoryBytes) }
-
 // ErrInvalid is wrapped by every violation of an inventory field rule.
 var ErrInvalid = errors.New("invalid host inventory")
 
@@ -261,6 +257,12 @@ func invalidf(format string, args ...any) error {
 // signed. The error wraps ErrInvalid (ErrTooLarge as well for the size
 // bound).
 func Validate(inv *providerv1.HostInventory, requested uint32) error {
+	return ValidateWithLimit(inv, requested, MaxInventoryBytes)
+}
+
+// ValidateWithLimit is Validate with a size bound of limit bytes (at most
+// MaxInventoryBytes is meaningful; a smaller one is stricter).
+func ValidateWithLimit(inv *providerv1.HostInventory, requested uint32, limit int) error {
 	if inv == nil {
 		return invalidf("no inventory")
 	}
@@ -295,7 +297,7 @@ func Validate(inv *providerv1.HostInventory, requested uint32) error {
 	if err := validateExtensions(inv.GetUnexpectedExtensions(), vs); err != nil {
 		return err
 	}
-	if n := proto.Size(inv); n > int(encodedLimit.Load()) {
+	if n := proto.Size(inv); n > limit {
 		return fmt.Errorf("%w: %w: %d bytes encoded", ErrInvalid, ErrTooLarge, n)
 	}
 	return nil
