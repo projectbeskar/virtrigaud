@@ -544,17 +544,22 @@ func (t *Target) addFault(host string, f fake.ScriptedFault) error {
 // cannot be made to reach from a power operation.
 var ErrCannotScript = errors.New("the per-host agent target cannot script this outcome")
 
-// ScriptOutcome implements clustered.OutcomeScripter for the outcomes a
-// power operation can reach at the agent: UNKNOWN (the step's effect is in
-// doubt and its inspection fails) and FAILED_CLEAN (the step reports it did
-// nothing). RETIRED arises only from a re-enrolment, and FAILED_DIRTY only
-// after an irreversible step, which a power operation has none of.
+// ScriptOutcome implements clustered.OutcomeScripter for the outcomes the
+// agent can reach: UNKNOWN (a power step's effect is in doubt and its
+// inspection fails), FAILED_CLEAN (a power step reports it did nothing) and
+// FAILED_DIRTY (a Create's start step reports it did nothing after the VM's
+// definition, which cannot be undone). RETIRED arises only from a
+// re-enrolment, which the agent process cannot do yet.
 func (t *Target) ScriptOutcome(host string, outcome providerv1.TaskOutcome, _ string) error {
 	switch outcome {
 	case providerv1.TaskOutcome_TASK_OUTCOME_UNKNOWN:
 		return t.addFault(host, fake.ScriptedFault{Step: "power", Fault: fake.FaultProbeError})
 	case providerv1.TaskOutcome_TASK_OUTCOME_FAILED_CLEAN:
 		return t.addFault(host, fake.ScriptedFault{Step: "power", Fault: fake.FaultNotPerformed})
+	case providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY:
+		// A Create's definition of the VM cannot be undone: its start then
+		// failing is a dirty failure.
+		return t.addFault(host, fake.ScriptedFault{Step: "start", Fault: fake.FaultNotPerformed})
 	}
 	return fmt.Errorf("%w: %s", ErrCannotScript, outcome)
 }

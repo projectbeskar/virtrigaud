@@ -821,8 +821,18 @@ func (p *provider) Create(ctx context.Context, outer *providerv1.CreateRequest) 
 	if p.v(CreateNoOwnerStamp) {
 		owner = clustered.Identity{}
 	}
-	hs.vms[id] = &vm{name: req.Name, owner: owner, cpu: 2, memMiB: 1024}
+	made := &vm{name: req.Name, owner: owner, cpu: 2, memMiB: 1024}
 	resp := &providerv1.CreateResponse{Id: id}
+	if adm != nil && adm.opID != "" && p.async && hs.script != nil {
+		// A signed Create whose outcome a test scripted runs as a task, so
+		// that its typed outcome can be read: the VM is made when the host
+		// finishes it (unless the outcome says nothing happened). Every
+		// other Create stays synchronous.
+		resp.Task = p.run(host, hs, func() { hs.vms[id] = made })
+		p.remember(host, hs, adm, resp, resp.Task)
+		return resp, nil
+	}
+	hs.vms[id] = made
 	p.remember(host, hs, adm, resp, nil)
 	return resp, nil
 }

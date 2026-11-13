@@ -34,16 +34,12 @@ func TestMain(m *testing.M) {
 }
 
 // agentExpectedFailures are the identity cases the per-host agent target
-// cannot drive: their outcomes are not reachable from a power operation at
-// the agent.
+// cannot drive. The waiver is pinned to the outcome, so a different failure,
+// or a pass, fails the run.
 var agentExpectedFailures = map[string]clustered.ExpectedFailure{
 	"identity.outcome-retired": {
-		Pointer:  "a per-host agent records RETIRED only when a re-enrolment freezes an operation that never started; the target cannot script it",
-		Contains: "cannot script this outcome",
-	},
-	"identity.outcome-failed-dirty": {
-		Pointer:  "a per-host agent records FAILED_DIRTY only after an irreversible step, and a power operation has none; the target cannot script it",
-		Contains: "cannot script this outcome",
+		Pointer:  "a per-host agent records RETIRED only when a re-enrolment freezes an operation that never started; the agent process cannot re-enrol yet",
+		Contains: "cannot script this outcome: TASK_OUTCOME_RETIRED",
 	},
 }
 

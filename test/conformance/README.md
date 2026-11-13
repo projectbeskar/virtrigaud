@@ -279,7 +279,7 @@ elsewhere or paired with other request bytes.
 | `identity.mint-epoch-first-delivery` | Recommended | the first delivery of an op_id minted before the host's enrolment started is refused, and nothing is performed: the host cannot know what an earlier enrolment did with it | `operation-identity` | pass | pass |
 | `identity.outcome-retired` | Required | a task that never started reports TASK_OUTCOME_RETIRED with done=true and a "not performed" error, the manager reads it as not performed, and it had no effect | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass | expected failure |
 | `identity.outcome-unknown` | Required | a task whose outcome the host cannot tell reports TASK_OUTCOME_UNKNOWN and is never done, and the VM stays busy for a new operation | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass | pass |
-| `identity.outcome-failed-dirty` | Required | a task that failed after an irreversible step reports TASK_OUTCOME_FAILED_DIRTY with done=true and an error, and the manager reads it as a failure, never as not performed | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass | expected failure |
+| `identity.outcome-failed-dirty` | Required | a task that failed after an irreversible step reports TASK_OUTCOME_FAILED_DIRTY with done=true and an error, and the manager reads it as a failure, never as not performed | `operation-identity`, `scripted-outcomes`, `async-tasks`, `create` | pass | pass |
 | `identity.tombstone-after-restart` | Required | a host's record of a finished op_id survives a crash of its agent: a re-delivery after the restart is answered as the first one was and never performed again, and a signed TaskStatus names it as tombstoned | `operation-identity`, `host-answers` | pass | pass |
 | `identity.taskstatus-bound` | Required | a signed TaskStatus answers for exactly the op_id asked about (its kind, attempt, VM and binding), and an op_id the host never saw is NO_RECORD, NotFound with UNKNOWN_TO_AGENT, never done | `operation-identity`, `host-answers` | pass | pass |
 | `identity.deleted-answer` | Required | a signed Describe answers DELETED, naming the Delete, only after that placement's Delete completed; a placement the host never had is NO_RECORD, never DELETED | `operation-identity`, `host-answers` | pass | pass |
@@ -324,9 +324,10 @@ listed as not applicable.
 case against real per-host agent processes: two hosts, each a separate process of the test binary
 that runs the agent's start-up sequence, operation store, mutual TLS server and the development
 fake executor, behind a thin in-test router that routes and forwards only. The agent's results
-are the last column above. Two cases are recorded as expected failures of that target, not of the
-agent: a power operation cannot reach `RETIRED` (only a re-enrolment freeze produces it) or
-`FAILED_DIRTY` (only an irreversible step does) at the agent, so the target cannot script them. A
+are the last column above. One case is recorded as an expected failure of that target, not of the
+agent: the agent reaches `RETIRED` only through a re-enrolment freeze, which the agent process
+cannot do yet, so the target cannot script it. `identity.outcome-failed-dirty` sends a Create,
+whose definition of the VM cannot be undone, so a failure of its later start is a dirty one. A
 per-host agent keys a VM by its owner's UID: two VMs of one owner on one host are one VM to it, and
 the target maps each seeded VM's name to that UID. The same package holds the crash-point tests:
 the agent process is killed with SIGKILL at each crash point of its operation path, restarted, and

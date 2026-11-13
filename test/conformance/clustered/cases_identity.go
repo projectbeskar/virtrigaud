@@ -450,9 +450,11 @@ func identityCases() []Case {
 			Rule:   "a task that failed after an irreversible step reports TASK_OUTCOME_FAILED_DIRTY with done=true and an error, and the manager reads it as a failure, never as not performed",
 			Source: srcOutcomes + " (FAILED_DIRTY: \"something may have happened, and the VM is held\")",
 			Run: func(e *Env) {
-				vm := seedStopped(e, e.HostA(), "id-dirty")
-				e.ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY, "disk_half_written")
-				a, err := e.SendSigned(e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON)))
+				// A Create: its definition of the VM is a step that cannot be
+				// undone, so a later failure is a dirty one.
+				host := e.HostA()
+				e.ScriptOutcome(host, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY, "disk_half_written")
+				a, err := e.SendSigned(e.NewOp(providerv1.OperationKind_OPERATION_KIND_CREATE, host, e.CreateRequest("id-dirty", host, OwnerA)))
 				require.NoError(e.T, err)
 				require.NotEmpty(e.T, a.TaskRef)
 				e.FinishTasks()
@@ -467,6 +469,6 @@ func identityCases() []Case {
 				assert.True(e.T, mgr.IsCompleted && mgr.Error != "", "the manager reads a failure")
 				assert.False(e.T, strings.HasPrefix(mgr.Error, "not performed"), "a dirty failure is never read as not performed: %q", mgr.Error)
 			},
-		}, FeatureScriptedOutcomes, FeatureAsyncTasks),
+		}, FeatureScriptedOutcomes, FeatureAsyncTasks, FeatureCreate),
 	}
 }
