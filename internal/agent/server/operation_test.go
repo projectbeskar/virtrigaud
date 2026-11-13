@@ -21,6 +21,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -477,8 +479,10 @@ func TestOperation_RedactionCanary(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, b := range seen {
-		if bytes.Contains(b, canary) || strings.Contains(string(b), string(canary)) {
-			t.Fatalf("the canary leaked (item %d)", i)
+		for _, enc := range canaryForms(canary) {
+			if bytes.Contains(b, enc) {
+				t.Fatalf("the canary leaked (item %d, form %q)", i, enc)
+			}
 		}
 	}
 	if len(e.logs.all()) == 0 {
@@ -507,4 +511,12 @@ func TestOperation_NewAdmissionNeedsTheCertificatesEnrolment(t *testing.T) {
 	if n := e.exec.total(); n != 0 {
 		t.Fatalf("effects = %d", n)
 	}
+}
+
+// canaryForms are the canary and its hexadecimal and base64 encodings.
+func canaryForms(c []byte) [][]byte {
+	h := hex.EncodeToString(c)
+	return [][]byte{c, []byte(h), []byte(strings.ToUpper(h)),
+		[]byte(base64.StdEncoding.EncodeToString(c)), []byte(base64.RawStdEncoding.EncodeToString(c)),
+		[]byte(base64.URLEncoding.EncodeToString(c)), []byte(base64.RawURLEncoding.EncodeToString(c))}
 }
