@@ -38,6 +38,26 @@ The floor was a file beside the store, so rolling it back alone was not detected
 - [ ] Documentation only
 - Development builds only: no deployed agent exists yet; an existing development state directory with a `clock.floor` file but no floor record in the store is quarantined (`inconsistent_store`) once enrolled and must be enrolled again.
 
+## [2026-11-13 12:00] - Host inventory in the signed host answer (wire shape only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/host_answer.proto`: `HostAnswer.inventory` (9) and the messages and enums it uses (`HostInventory`, `HostComponent`, `ComponentFile`, `HostFeature`, `HostExtension`, `InventoryState`, `ComponentState`, `ManifestOrigin`, `FeatureResult`, `ProcessIdentityTier`, `ExtensionKind`): a host's signed report of its components, feature probes and unexpected extensions, with the requested and supported versions echoed inside it.
+- `proto/provider/v1/provider.proto`: `GetHostInfoRequest.inventory_version` (4), the way a caller asks for the inventory.
+- `proto/rpc/provider/v1/`: regenerated Go bindings, and `host_inventory_test.go`, which pins every new field number, type and enum value, a maximal inventory's encoded size, the published encoding vectors (the request, and an inventory inside a signed body with its signature input and SHA-256), and that the existing framing vector is unchanged. `host_answer_test.go` is updated for the new fields.
+- `docs/operation-grants-wire-shape.md`: the new fields in the request and response table (fourteen additive fields), a "Host inventory" section (shape, bounds, the versioning and echo rule, vectors) and the compatibility note.
+
+### Why
+A per-host agent will report what it runs virtual machines with inside the answer it already signs, so that the Provider relaying it cannot alter, replay or downgrade the report. This change fixes the wire shape on its own so that it can be reviewed before any agent or manager uses it.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+No behaviour change: nothing sets or reads the new fields yet, no RPC is added, the signature framing and `body_type` set are unchanged, and the buf breaking-change check is clean.
+
 ## [2026-11-13 00:19] - Operation store journal: verify every record, scrub, and harder open (development builds only)
 **Author:** @wrkode (William Rizzo)
 
