@@ -104,7 +104,8 @@ func TestRestartWithANewCertificateReenrols(t *testing.T) {
 	waitLog(t, h, "enrolment from the host certificate failed")
 }
 
-// TestStoreOfAnotherHostIsNotReenrolled: a store that was cut short between
+// TestStoreOfAnotherHostIsNotReenrolled (end to end; each check alone is in
+// TestStoreOwnerMismatch): a store that was cut short between
 // the freeze and the activation of a re-enrolment has no active enrolment. A
 // certificate of a different host must not be enrolled into it, whether the
 // store marker or the frozen predecessor names the old host.
@@ -129,8 +130,11 @@ func TestStoreOfAnotherHostIsNotReenrolled(t *testing.T) {
 		t.Fatal(err)
 	}
 	hv, err := st.HostView(ctx, 0)
-	if err != nil || hv.Enrolment == nil || hv.LatestHostID != trusttest.HostName {
+	if err != nil || hv.Enrolment == nil {
 		t.Fatalf("host view: %+v %v", hv, err)
+	}
+	if latest, err := st.LatestEnrolmentHostID(ctx); err != nil || latest != trusttest.HostName {
+		t.Fatalf("newest enrolment's host = %q, %v", latest, err)
 	}
 	next := opstore.Enrolment{ID: make([]byte, 16), ProviderUID: trusttest.ProviderUID, HostID: trusttest.HostName, StartEpoch: hv.LastStartEpoch + 1}
 	next.ID[0] = 9

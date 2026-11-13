@@ -947,14 +947,14 @@ func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust
 	// Whose store is it? The active enrolment names its host; with none
 	// active, the store marker and the newest enrolment record still held
 	// (the frozen predecessor) do.
-	owners := []string{st.Journal().Marker().HostID, v.LatestHostID}
-	if v.Enrolment != nil {
-		owners = []string{v.Enrolment.HostID}
-	}
-	for _, owner := range owners {
-		if owner != "" && owner != id.HostID() {
-			return errStoreOfOtherHost
+	var latest string
+	if v.Enrolment == nil {
+		if latest, err = st.LatestEnrolmentHostID(ctx); err != nil {
+			return fmt.Errorf("read the store's enrolments: %w", err)
 		}
+	}
+	if storeOwnerMismatch(v.Enrolment, st.Journal().Marker().HostID, latest, id.HostID()) {
+		return errStoreOfOtherHost
 	}
 	switch {
 	case v.Enrolment != nil && bytes.Equal(v.Enrolment.ID, e.ID) && v.Enrolment.ProviderUID == e.ProviderUID &&
@@ -983,6 +983,25 @@ func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust
 	d.log.Info("re-enrolled from the host certificate; the previous enrolment's operations are frozen",
 		"enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
 	return nil
+}
+
+// storeOwnerMismatch reports whether a store belongs to a host other than
+// host. With an active enrolment, only its host counts. With none, the store
+// marker's host and the newest enrolment record's host (latestHost, "" when
+// none is held) each count when set. A store that names no host at all (a
+// marker with none and every record discarded) belongs to nobody and is
+// adopted by whichever host asks: nothing in the store says otherwise.
+func storeOwnerMismatch(active *opstore.ActiveEnrolment, markerHost, latestHost, host string) bool {
+	owners := []string{markerHost, latestHost}
+	if active != nil {
+		owners = []string{active.HostID}
+	}
+	for _, o := range owners {
+		if o != "" && o != host {
+			return true
+		}
+	}
+	return false
 }
 
 // journalEvent logs a journal event.
