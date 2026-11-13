@@ -105,8 +105,9 @@ func TestSystemProbe(t *testing.T) {
 	}
 }
 
-// TestSystemProbeReadable: the real probe tells a readable file from one the
-// process cannot read, and from a path that does not exist.
+// TestSystemProbeReadable: the real probe tells a file it can open from one
+// refused by permission, and reports a missing path or a symbolic link as an
+// error instead of "not readable".
 func TestSystemProbeReadable(t *testing.T) {
 	var p System
 	dir := t.TempDir()
@@ -117,18 +118,40 @@ func TestSystemProbeReadable(t *testing.T) {
 	if r, err := p.Readable(f); err != nil || !r {
 		t.Errorf("own file readable = %v, %v", r, err)
 	}
-	if err := os.Chmod(f, 0o000); err != nil {
-		t.Fatal(err)
-	}
 	if os.Geteuid() != 0 {
+		if err := os.Chmod(f, 0o000); err != nil {
+			t.Fatal(err)
+		}
 		if r, err := p.Readable(f); err != nil || r {
 			t.Errorf("mode 000 file readable = %v, %v", r, err)
 		}
+		sub := filepath.Join(dir, "closed")
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		inner := filepath.Join(sub, "k")
+		if err := os.WriteFile(inner, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(sub, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chmod(sub, 0o700) }()
+		if r, err := p.Readable(inner); err != nil || r {
+			t.Errorf("file in an unsearchable directory readable = %v, %v", r, err)
+		}
 	}
-	if r, err := p.Readable(filepath.Join(dir, "absent")); err != nil || r {
-		t.Errorf("absent file readable = %v, %v", r, err)
+	if _, err := p.Readable(filepath.Join(dir, "absent")); err == nil {
+		t.Error("absent file: no error")
 	}
-	if r, err := p.Readable(filepath.Join(f, "below")); err != nil || r {
-		t.Errorf("path below a file readable = %v, %v", r, err)
+	if _, err := p.Readable(filepath.Join(f, "below")); err == nil {
+		t.Error("path below a file: no error")
+	}
+	link := filepath.Join(dir, "l")
+	if err := os.Symlink(f, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Readable(link); err == nil {
+		t.Error("symbolic link: no error")
 	}
 }

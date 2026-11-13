@@ -139,8 +139,8 @@ func TestStartRefusals(t *testing.T) {
 		{"agent can read the signer's key file", func(f *hostchecktest.Fake) {
 			f.ReadablePaths[testCfg.SignerKeyFile] = true
 		}, hostcheck.ReasonHostKeyReadable},
-		{"agent can read a key file in its own pki dir", func(f *hostchecktest.Fake) {
-			f.ReadablePaths[filepath.Join(testCfg.PKIDir, "host.key")] = true
+		{"the signer's key file does not exist", func(f *hostchecktest.Fake) {
+			delete(f.DeniedPaths, testCfg.SignerKeyFile)
 		}, hostcheck.ReasonHostKeyReadable},
 		{"a key file in the agent's pki dir, even unreadable", func(f *hostchecktest.Fake) {
 			f.Files[filepath.Join(testCfg.PKIDir, "host.key")] = hostcheck.FileInfo{Mode: 0o600, UID: testUID}

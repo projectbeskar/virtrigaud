@@ -159,9 +159,11 @@ type Probe interface {
 	// Writable reports whether the process may write path (access(2) with
 	// W_OK, which accounts for a read-only mount).
 	Writable(path string) (bool, error)
-	// Readable reports whether the process may read path (access(2) with
-	// R_OK). A path that does not exist, or that the process cannot reach,
-	// is not readable.
+	// Readable reports whether the process may read path: true when an
+	// open for reading succeeds, false when it is refused by permission
+	// (EACCES, EPERM), an error for anything else (a missing path, a
+	// symbolic link, a loop): a path the process cannot be shown to be
+	// refused is not one it is known not to read.
 	Readable(path string) (bool, error)
 	// EUID is the process's effective user id.
 	EUID() uint32

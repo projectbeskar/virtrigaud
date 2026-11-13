@@ -56,10 +56,12 @@ type Fake struct {
 	Namespaces map[string]uint64
 	// WritablePaths are the paths the process may write.
 	WritablePaths map[string]bool
-	// ReadablePaths are the paths the process may read (by access(2)):
-	// files the fake does not list as owned by the process are not readable
-	// unless named here.
+	// ReadablePaths are the paths the process may read; DeniedPaths are the
+	// paths whose open is refused by permission; any other path does not
+	// exist (an error).
 	ReadablePaths map[string]bool
+	// DeniedPaths are the paths the process is refused by permission.
+	DeniedPaths map[string]bool
 	// UID is the process's effective uid.
 	UID uint32
 }
@@ -75,6 +77,7 @@ func Healthy(cfg hostcheck.Config, hostURI string) *Fake {
 		Namespaces:    map[string]uint64{"pid": InitPID, "cgroup": InitCgroup, "user": InitUser, "time": InitTime},
 		WritablePaths: map[string]bool{},
 		ReadablePaths: map[string]bool{},
+		DeniedPaths:   map[string]bool{},
 		UID:           cfg.UID,
 		Mounts: []hostcheck.Mount{
 			{MountPoint: "/", FSType: "ext4", Source: "/dev/vda1"},
@@ -94,6 +97,9 @@ func Healthy(cfg hostcheck.Config, hostURI string) *Fake {
 	f.Files[cfg.PKIDir] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o700, UID: cfg.UID}
 	for _, n := range PKIFiles {
 		f.Files[filepath.Join(cfg.PKIDir, n)] = hostcheck.FileInfo{Mode: 0o600, UID: cfg.UID}
+	}
+	if cfg.SignerKeyFile != "" {
+		f.DeniedPaths[cfg.SignerKeyFile] = true
 	}
 	if cfg.SignerSocketDir != "" {
 		f.Files[cfg.SignerSocketDir] = hostcheck.FileInfo{Mode: fs.ModeDir | fs.ModeSetgid | 0o750, UID: cfg.SignerUID}
@@ -194,7 +200,13 @@ func (f *Fake) Writable(path string) (bool, error) {
 func (f *Fake) Readable(path string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.ReadablePaths[path], nil
+	if f.ReadablePaths[path] {
+		return true, nil
+	}
+	if f.DeniedPaths[path] {
+		return false, nil
+	}
+	return false, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 }
 
 // EUID implements hostcheck.Probe.

@@ -206,18 +206,22 @@ func (System) Writable(path string) (bool, error) {
 	return false, fmt.Errorf("access %s: %w", path, err)
 }
 
-// Readable implements Probe with access(2) and R_OK. A path that does not
-// exist, is not a directory on the way or cannot be reached is "not
-// readable"; any other error is reported.
+// Readable implements Probe by really trying to open path for reading
+// (O_RDONLY, O_NOFOLLOW, O_NONBLOCK, never read from): a refusal by
+// permission (EACCES, EPERM) is "not readable"; success is "readable"; any
+// other error, a missing path included, is reported, because "cannot tell"
+// must not pass for "cannot read" (a misspelled key path would otherwise
+// pass the check).
 func (System) Readable(path string) (bool, error) {
-	err := unix.Access(path, unix.R_OK)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	switch {
 	case err == nil:
+		_ = unix.Close(fd)
 		return true, nil
-	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM), errors.Is(err, unix.ENOENT), errors.Is(err, unix.ENOTDIR):
+	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM):
 		return false, nil
 	}
-	return false, fmt.Errorf("access %s: %w", path, err)
+	return false, fmt.Errorf("open %s: %w", path, err)
 }
 
 // EUID implements Probe.

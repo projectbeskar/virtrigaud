@@ -281,7 +281,10 @@ func CheckPKI(p Probe, dir string, uid uint32) error {
 // TLS-facing agent never has its bytes; a key file the agent can read (at
 // keyFile, the signer's file) defeats that, and so does a file of that name
 // in the agent's own key material directory, readable or not, which is a
-// stale copy in the wrong place.
+// stale copy in the wrong place. The agent must be shown to be refused by
+// permission: a keyFile that does not exist, or any other error, also
+// refuses the start, so that a misspelled path cannot pass for a protected
+// one.
 func CheckHostKeyUnreadable(p Probe, pkiDir, keyFile string) error {
 	const check = "host-key"
 	if keyFile == "" || !filepath.IsAbs(keyFile) {
@@ -296,14 +299,12 @@ func CheckHostKeyUnreadable(p Probe, pkiDir, keyFile string) error {
 	if guard.Off(guard.HostKeyUnreadable) {
 		return nil
 	}
-	for _, path := range []string{keyFile, own} {
-		ok, err := p.Readable(path)
-		if err != nil {
-			return refuse(ReasonHostKeyReadable, check, "cannot tell whether %s is readable: %v", path, err)
-		}
-		if ok {
-			return refuse(ReasonHostKeyReadable, check, "the agent can read the host private key file %s; only the signer's user may", path)
-		}
+	ok, err := p.Readable(keyFile)
+	if err != nil {
+		return refuse(ReasonHostKeyReadable, check, "cannot confirm that the agent is refused the host private key file %s: %v", keyFile, err)
+	}
+	if ok {
+		return refuse(ReasonHostKeyReadable, check, "the agent can read the host private key file %s; only the signer's user may", keyFile)
 	}
 	return nil
 }
