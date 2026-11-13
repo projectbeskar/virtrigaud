@@ -66,22 +66,6 @@ func (s *Store) migrateLocked() error {
 		}
 		changed := false
 		from := meta.GetSchemaVersion()
-		if tx.legacy {
-			// The records of a store from before the trailers get theirs
-			// first, so that a client migration reads and writes verified
-			// records. The store then needs a reader that verifies them.
-			if err := tx.migrateRecords(); err != nil {
-				return err
-			}
-			if meta.GetSchemaVersion() < recordSchema {
-				meta.SchemaVersion = recordSchema
-			}
-			if meta.GetMinReaderVersion() < recordSchema {
-				meta.MinReaderVersion = recordSchema
-			}
-			meta.WriterVersion = meta.GetSchemaVersion()
-			changed = true
-		}
 		if from < s.opts.SchemaVersion {
 			for _, m := range migrations {
 				if m.ToVersion <= from || m.ToVersion > s.opts.SchemaVersion {
@@ -113,8 +97,5 @@ func (s *Store) migrateLocked() error {
 		tx.writes = append(tx.writes, write{op: writePut, bucket: bucketMeta, key: keyStoreMeta, value: b})
 		return nil
 	}, true)
-	if err == nil {
-		s.legacy = false
-	}
 	return err
 }

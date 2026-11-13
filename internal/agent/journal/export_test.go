@@ -60,3 +60,24 @@ func TxDigestPutsForTest(puts [][3][]byte) [32]byte {
 	}
 	return txDigest(ws)
 }
+
+// NextHeadForTest is nextHead.
+func NextHeadForTest(prev [32]byte, seq uint64, digest, state [32]byte) [32]byte {
+	return nextHead(prev, seq, digest, state)
+}
+
+// ChainEntrySizeForTest is the size of a stored chain entry.
+const ChainEntrySizeForTest = chainEntrySize
+
+// UnfinishedSuffixForTest names the set-aside store files of a restarted
+// first open.
+const UnfinishedSuffixForTest = unfinishedSuffix
+
+// AnchorNextFileForTest is the anchor rotation's temporary file.
+const AnchorNextFileForTest = anchorNextFile
+
+// LockForTest holds the store's mutex until the returned function is called.
+func (s *Store) LockForTest() (unlock func()) {
+	s.mu.Lock()
+	return s.mu.Unlock
+}

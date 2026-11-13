@@ -110,22 +110,112 @@ func TestRecord_TrailerFormat(t *testing.T) {
 	assert.Nil(t, missing)
 }
 
+// The chain step commits to the live-state digest: the head is the hash of
+// the previous head, the position, the transaction digest and the state. The
+// transaction digest covers the client writes only; the meta write of the state
+// digest is not repeated in it.
 func TestRecord_ChainCommitsToStateDigest(t *testing.T) {
 	e := newEnv(t)
 	s := e.ready()
+	before := s.Position()
 	pos := put(t, s, "a", "1")
 	var entry []byte
 	require.NoError(t, s.RawUpdateForTest(func(btx *bolt.Tx) error {
 		entry = append([]byte(nil), btx.Bucket([]byte(journal.BucketChainForTest)).Get(binary.BigEndian.AppendUint64(nil, pos.Seq))...)
 		return nil
 	}))
+	require.Len(t, entry, journal.ChainEntrySizeForTest)
 	sealed, d := journal.SealRecordForTest(pos.StoreID, testBucket, []byte("a"), pos.Seq, []byte("1"))
-	// The only live record's digest is the whole state.
-	want := journal.TxDigestPutsForTest([][3][]byte{
-		{[]byte(testBucket), []byte("a"), sealed},
-		{[]byte(journal.BucketMetaForTest), journal.KeyStateDigestForTest, d[:]},
+	want := journal.TxDigestPutsForTest([][3][]byte{{[]byte(testBucket), []byte("a"), sealed}})
+	assert.Equal(t, want[:], entry[:32], "the transaction digest covers the client writes")
+	assert.Equal(t, d[:], entry[32:64], "the only live record's digest is the whole state")
+	head := journal.NextHeadForTest(before.Head, pos.Seq, want, d)
+	assert.Equal(t, head[:], entry[64:], "the head commits to the state digest")
+	assert.Equal(t, head, pos.Head)
+}
+
+// forgeState replaces the record under key with another valid record and
+// edits the recorded live-state digest to match, as a consistent forgery of
+// everything but the chain.
+func forgeState(t *testing.T, dir, key string) {
+	t.Helper()
+	meta := readMeta(t, dir)
+	var id [16]byte
+	copy(id[:], meta.GetStoreId())
+	withBolt(t, dir, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(testBucket))
+		old := b.Get([]byte(key))
+		oldSeq := binary.BigEndian.Uint64(old[len(old)-journal.TrailerSizeForTest+1:])
+		body := old[:len(old)-journal.TrailerSizeForTest]
+		_, od := journal.SealRecordForTest(id, testBucket, []byte(key), oldSeq, body)
+		sealed, nd := journal.SealRecordForTest(id, testBucket, []byte(key), oldSeq, []byte("forged"))
+		if err := b.Put([]byte(key), sealed); err != nil {
+			return err
+		}
+		m := tx.Bucket([]byte(journal.BucketMetaForTest))
+		var st [32]byte
+		copy(st[:], m.Get(journal.KeyStateDigestForTest))
+		st = journal.AddSumForTest(journal.SubSumForTest(st, od), nd)
+		return m.Put(journal.KeyStateDigestForTest, st[:])
 	})
-	assert.Equal(t, want[:], entry[:32], "the chain step's digest covers the new state digest")
+}
+
+// A record changed together with the recorded state digest verifies against
+// the records and the digest, but not against the chain.
+func TestRecord_EditedStateDigestIsDetectedByTheChain(t *testing.T) {
+	for _, every := range []uint64{0, 3} {
+		for _, commits := range []int{1, 3, 4, 7} {
+			t.Run(fmt.Sprintf("every=%d commits=%d", every, commits), func(t *testing.T) {
+				e := newEnv(t)
+				e.opts.CheckpointEvery = every
+				s := e.ready()
+				for i := 0; i < commits; i++ {
+					put(t, s, fmt.Sprintf("k%d", i), "v")
+				}
+				require.NoError(t, s.Close())
+				// Untouched, the store opens (checkpoints keep verifying).
+				ok := e.open()
+				st, reason := ok.State()
+				require.Equal(t, journal.StateUnattested, st, reason)
+				require.NoError(t, ok.Scrub(context.Background()))
+				require.NoError(t, ok.Close())
+
+				forgeState(t, e.dir, "k0")
+				var events []journal.Event
+				bad := e.openEvents(&events)
+				wantLost(t, bad, journal.LostJournalCorrupt)
+				require.NotEmpty(t, events)
+				assert.Contains(t, events[0].Detail, "live-state digest", "the chain, not the record scan, found it")
+			})
+		}
+	}
+}
+
+// Scrub also checks the chain's commitment to the state digest of a running
+// store.
+func TestRecord_ScrubDetectsEditedStateDigest(t *testing.T) {
+	e := newEnv(t)
+	s := e.ready()
+	put(t, s, "a", "1")
+	put(t, s, "b", "2")
+	require.NoError(t, s.RawUpdateForTest(func(btx *bolt.Tx) error {
+		id := s.Position().StoreID
+		b := btx.Bucket([]byte(testBucket))
+		old := b.Get([]byte("a"))
+		oldSeq := binary.BigEndian.Uint64(old[len(old)-journal.TrailerSizeForTest+1:])
+		_, od := journal.SealRecordForTest(id, testBucket, []byte("a"), oldSeq, []byte("1"))
+		sealed, nd := journal.SealRecordForTest(id, testBucket, []byte("a"), oldSeq, []byte("forged"))
+		if err := b.Put([]byte("a"), sealed); err != nil {
+			return err
+		}
+		m := btx.Bucket([]byte(journal.BucketMetaForTest))
+		var st [32]byte
+		copy(st[:], m.Get(journal.KeyStateDigestForTest))
+		st = journal.AddSumForTest(journal.SubSumForTest(st, od), nd)
+		return m.Put(journal.KeyStateDigestForTest, st[:])
+	}))
+	err := s.Scrub(context.Background())
+	requireCorrupt(t, s, err)
 }
 
 func TestRecord_DigestArithmetic(t *testing.T) {
@@ -428,93 +518,89 @@ func TestRecord_ScrubOnLostStoreReturnsTheLoss(t *testing.T) {
 	assert.Equal(t, journal.LostJournalCorrupt, le.Reason)
 }
 
-// A store made before the trailers is rewritten once, at EstablishContinuity,
-// as one chained commit; reads before that return the old values.
-func TestSchema_MigrationAddsRecordTrailers(t *testing.T) {
+// A store from before record verification is refused, not migrated.
+func TestSchema_StoreBeforeRecordVerificationIsRefused(t *testing.T) {
 	e := newEnv(t)
-	e.opts.Buckets = []string{testBucket, "second"}
 	s := e.ready()
 	put(t, s, "a", "1")
-	_, err := s.Update(context.Background(), func(tx *journal.Tx) error {
-		require.NoError(t, tx.Put("second", []byte("x"), []byte("xv")))
-		return tx.Put(testBucket, []byte("b"), []byte("2"))
-	})
-	require.NoError(t, err)
-	before := s.Position()
 	require.NoError(t, s.Close())
-	// Rebuild the store as an older binary left it.
-	var oldStateless [][2]string
 	withBolt(t, e.dir, func(tx *bolt.Tx) error {
-		for _, name := range []string{testBucket, "second"} {
-			b := tx.Bucket([]byte(name))
-			type kv struct{ k, v []byte }
-			var all []kv
-			require.NoError(t, b.ForEach(func(k, v []byte) error {
-				all = append(all, kv{append([]byte(nil), k...), append([]byte(nil), v[:len(v)-journal.TrailerSizeForTest]...)})
-				return nil
-			}))
-			for _, e := range all {
-				require.NoError(t, b.Put(e.k, e.v))
-				oldStateless = append(oldStateless, [2]string{name + "/" + string(e.k), string(e.v)})
-			}
-		}
 		return tx.Bucket([]byte(journal.BucketMetaForTest)).Delete(journal.KeyStateDigestForTest)
 	})
 	rewriteMeta(t, e.dir, func(m *journalpb.StoreMeta) { m.SchemaVersion, m.MinReaderVersion = 1, 1 })
-	require.Len(t, oldStateless, 3)
-
-	s2 := e.open()
-	st, reason := s2.State()
-	require.Equal(t, journal.StateUnattested, st, reason)
-	v, err := get(t, s2, testBucket, "a")
-	require.NoError(t, err, "a read before the migration returns the old value")
-	assert.Equal(t, "1", string(v))
-	_, err = s2.Update(context.Background(), func(tx *journal.Tx) error { return tx.Put(testBucket, []byte("n"), []byte("1")) })
-	require.ErrorIs(t, err, journal.ErrUnattested)
-
-	require.NoError(t, s2.EstablishContinuity(context.Background()))
-	after := s2.Position()
-	assert.Equal(t, before.Seq+1, after.Seq, "the migration is one chained commit")
-	for _, c := range [][3]string{{testBucket, "a", "1"}, {testBucket, "b", "2"}, {"second", "x", "xv"}} {
-		v, err := get(t, s2, c[0], c[1])
-		require.NoError(t, err)
-		assert.Equal(t, c[2], string(v))
+	var events []journal.Event
+	got := e.openEvents(&events)
+	wantLost(t, got, journal.LostJournalCorrupt)
+	require.NotEmpty(t, events)
+	assert.Contains(t, events[0].Detail, "store predates record verification")
+	assert.Equal(t, uint64(1), events[0].Seq, "the loss names the store's position")
+	assert.True(t, hasFileRecord(e))
+	// The anchor's quarantine record names the store.
+	var found bool
+	for _, r := range anchorRecords(t, e) {
+		if r.Type == journal.AnchorQuarantine {
+			found = true
+			assert.Equal(t, got.Position().StoreID, r.StoreID)
+			assert.Equal(t, uint64(1), r.Seq)
+		}
 	}
-	require.NoError(t, s2.Scrub(context.Background()))
-	require.NoError(t, s2.VerifyChain(context.Background()))
-	info, err := s2.Schema(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, journal.SchemaVersion, info.SchemaVersion)
-	assert.Equal(t, journal.MinReaderVersion, info.MinReaderVersion)
-	put(t, s2, "c", "3")
-	require.NoError(t, s2.Close())
+	assert.True(t, found)
+}
 
-	s3 := e.open()
-	st, reason = s3.State()
-	require.Equal(t, journal.StateUnattested, st, reason)
-	require.NoError(t, s3.Scrub(context.Background()))
-	// An agent that predates the trailers refuses the migrated store.
-	require.NoError(t, s3.Close())
+// A store at the current schema that lost its digest is refused too.
+func TestSchema_MissingStateDigestIsRefused(t *testing.T) {
+	e := newEnv(t)
+	s := e.ready()
+	put(t, s, "a", "1")
+	require.NoError(t, s.Close())
+	withBolt(t, e.dir, func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(journal.BucketMetaForTest)).Delete(journal.KeyStateDigestForTest)
+	})
+	var events []journal.Event
+	wantLost(t, e.openEvents(&events), journal.LostJournalCorrupt)
+	require.NotEmpty(t, events)
+	assert.Contains(t, events[0].Detail, "live-state digest missing")
+}
+
+// A store that needs a newer reader is refused with ErrSchemaTooNew before
+// any loss decision: nothing is quarantined, and nothing is written.
+func TestOpen_NewerStoreIsNeverQuarantined(t *testing.T) {
+	e := newEnv(t)
+	s := e.ready()
+	put(t, s, "a", "1")
+	require.NoError(t, s.Close())
+	withBolt(t, e.dir, func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(journal.BucketMetaForTest)).Delete(journal.KeyStateDigestForTest)
+	})
+	rewriteMeta(t, e.dir, func(m *journalpb.StoreMeta) { m.MinReaderVersion = journal.ReaderMax + 1 })
+	anchorBefore := anchorRecords(t, e)
+	o := e.opts
+	o.Dir, o.FS = e.dir, e.mem
+	_, err := journal.Open(context.Background(), o)
+	require.ErrorIs(t, err, journal.ErrSchemaTooNew)
+	assert.False(t, hasFileRecord(e), "no quarantine file")
+	assert.Equal(t, anchorBefore, anchorRecords(t, e), "no anchor quarantine record")
+	assert.False(t, hasStoreRecord(t, e), "no store quarantine record")
+}
+
+// An agent that predates the record format refuses a current store.
+func TestSchema_OlderAgentRefusesCurrentStore(t *testing.T) {
+	e := newEnv(t)
+	s := e.ready()
+	put(t, s, "a", "1")
+	require.NoError(t, s.Close())
 	o := e.opts
 	o.Dir, o.FS, o.ReaderMax = e.dir, e.mem, 1
-	_, err = journal.Open(context.Background(), o)
+	_, err := journal.Open(context.Background(), o)
 	assert.ErrorIs(t, err, journal.ErrSchemaTooNew)
 }
 
-// A client migration runs after the record migration and reads and writes
-// verified records.
+// A client migration reads and writes verified records.
 func TestSchema_ClientMigrationSeesTrailers(t *testing.T) {
 	e := newEnv(t)
 	s := e.ready()
 	put(t, s, "a", "1")
 	require.NoError(t, s.Close())
-	withBolt(t, e.dir, func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(testBucket))
-		v := b.Get([]byte("a"))
-		require.NoError(t, b.Put([]byte("a"), append([]byte(nil), v[:len(v)-journal.TrailerSizeForTest]...)))
-		return tx.Bucket([]byte(journal.BucketMetaForTest)).Delete(journal.KeyStateDigestForTest)
-	})
-	rewriteMeta(t, e.dir, func(m *journalpb.StoreMeta) { m.SchemaVersion, m.MinReaderVersion = 1, 1 })
 	next := journal.SchemaVersion + 1
 	e.opts.SchemaVersion = next
 	e.opts.Migrations = []journal.Migration{{ToVersion: next, Apply: func(tx *journal.Tx) error {
@@ -531,17 +617,13 @@ func TestSchema_ClientMigrationSeesTrailers(t *testing.T) {
 	require.NoError(t, s2.Scrub(context.Background()))
 }
 
-// A store at the trailer schema that lost its digest is damage, not an old
-// store.
-func TestSchema_MissingStateDigestAtCurrentSchemaIsCorrupt(t *testing.T) {
+func TestOpen_RefusesSchemaBelowRecordVerification(t *testing.T) {
 	e := newEnv(t)
-	s := e.ready()
-	put(t, s, "a", "1")
-	require.NoError(t, s.Close())
-	withBolt(t, e.dir, func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte(journal.BucketMetaForTest)).Delete(journal.KeyStateDigestForTest)
-	})
-	wantLost(t, e.open(), journal.LostJournalCorrupt)
+	e.opts.SchemaVersion = 1
+	o := e.opts
+	o.Dir, o.FS = e.dir, e.mem
+	_, err := journal.Open(context.Background(), o)
+	require.Error(t, err)
 }
 
 // initialDB creates, in e.dir, the file bbolt writes before the journal

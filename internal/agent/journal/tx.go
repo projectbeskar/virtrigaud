@@ -48,9 +48,6 @@ type Tx struct {
 	// bad is the first record that did not verify; the store quarantines
 	// itself at the end of the transaction.
 	bad error
-	// legacy marks a store whose values carry no trailer yet (before its
-	// migration): reads return them raw and writes are refused.
-	legacy bool
 }
 
 // lookup returns the named bucket, or nil, caching the handle for the life
@@ -91,25 +88,42 @@ func checkClientBucket(name string) error {
 	return nil
 }
 
-// errNotMigrated is returned by a write before the record trailers exist.
-var errNotMigrated = errors.New("journal: store records not migrated yet")
+// record looks key up in b. found is false for an absent key. bbolt reports a
+// key that holds a nested bucket as a nil value, exactly like an absent key:
+// the cursor tells them apart, and a nested bucket in a client bucket is a
+// corrupt record.
+func (t *Tx) record(b *bolt.Bucket, bucket string, key []byte) (v []byte, found bool, err error) {
+	k, v := b.Cursor().Seek(key)
+	if k == nil || !bytes.Equal(k, key) {
+		return nil, false, nil
+	}
+	if v == nil {
+		return nil, false, t.fail(&recordError{bucket: bucket, key: append([]byte(nil), key...), why: nestedBucketWhy})
+	}
+	return v, true, nil
+}
+
+// nestedBucketWhy is the reason reported for a nested bucket in a client
+// bucket.
+const nestedBucketWhy = "nested bucket in a client bucket"
 
 // Get returns a copy of the value of key in bucket, or nil when the key is
-// absent. A record whose trailer does not verify (a changed byte, another
+// absent. A reserved bucket name is refused. A key that holds a nested bucket
+// is not absent: it is a corrupt record. A record whose trailer does not verify (a changed byte, another
 // record's value, a short value, a bad version, a position beyond the committed
 // one) is an error that wraps ErrCorruptRecord, never a missing key; the store
 // is quarantined with LostJournalCorrupt when the transaction ends.
 func (t *Tx) Get(bucket string, key []byte) ([]byte, error) {
+	if err := checkClientBucket(bucket); err != nil {
+		return nil, err
+	}
 	b := t.lookup(bucket)
 	if b == nil {
 		return nil, nil
 	}
-	v := b.Get(key)
-	if v == nil {
-		return nil, nil
-	}
-	if t.raw(bucket) {
-		return append([]byte{}, v...), nil
+	v, found, err := t.record(b, bucket, key)
+	if err != nil || !found {
+		return nil, err
 	}
 	val, _, err := t.unseal(bucket, key, v)
 	return val, err
@@ -126,15 +140,16 @@ func (t *Tx) Put(bucket string, key, value []byte) error {
 	if err := checkClientBucket(bucket); err != nil {
 		return err
 	}
-	if t.legacy {
-		return errNotMigrated
-	}
 	b, err := t.bucket(bucket)
 	if err != nil {
 		return err
 	}
 	k := append([]byte(nil), key...)
-	if old := b.Get(k); old != nil {
+	old, found, err := t.record(b, bucket, k)
+	if err != nil {
+		return err
+	}
+	if found {
 		_, od, err := t.unseal(bucket, k, old)
 		if err != nil {
 			return err
@@ -160,15 +175,16 @@ func (t *Tx) Delete(bucket string, key []byte) error {
 	if err := checkClientBucket(bucket); err != nil {
 		return err
 	}
-	if t.legacy {
-		return errNotMigrated
-	}
 	b, err := t.bucket(bucket)
 	if err != nil {
 		return err
 	}
 	k := append([]byte(nil), key...)
-	if old := b.Get(k); old != nil {
+	old, found, err := t.record(b, bucket, k)
+	if err != nil {
+		return err
+	}
+	if found {
 		_, od, err := t.unseal(bucket, k, old)
 		if err != nil {
 			return err
@@ -196,24 +212,24 @@ func (t *Tx) createBucket(name string) error {
 
 // ForEach calls fn for every key of bucket that starts with prefix, in key
 // order, with copies of the key and value. Writing to the bucket inside fn is
-// not allowed. A record that does not verify stops the iteration with an
+// not allowed. A reserved bucket name is refused. A record that does not verify stops the iteration with an
 // error that wraps ErrCorruptRecord (see Get).
 func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) error {
+	if err := checkClientBucket(bucket); err != nil {
+		return err
+	}
 	b := t.lookup(bucket)
 	if b == nil {
 		return nil
 	}
 	c := b.Cursor()
 	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-		val := append([]byte{}, v...)
-		if !t.raw(bucket) {
-			if v == nil {
-				return t.fail(&recordError{bucket: bucket, key: append([]byte(nil), k...), why: "nested bucket in a client bucket"})
-			}
-			var err error
-			if val, _, err = t.unseal(bucket, k, v); err != nil {
-				return err
-			}
+		if v == nil {
+			return t.fail(&recordError{bucket: bucket, key: append([]byte(nil), k...), why: nestedBucketWhy})
+		}
+		val, _, err := t.unseal(bucket, k, v)
+		if err != nil {
+			return err
 		}
 		if err := fn(append([]byte(nil), k...), val); err != nil {
 			return err

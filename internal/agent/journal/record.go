@@ -191,20 +191,14 @@ func (t *Tx) unseal(bucket string, key, stored []byte) (value []byte, d [32]byte
 	return value, d, nil
 }
 
-// raw reports whether values of bucket are returned without a trailer: a
-// reserved bucket, or any bucket of a store that has not been migrated yet.
-func (t *Tx) raw(bucket string) bool {
-	return t.legacy || len(bucket) >= len(reservedPrefix) && bucket[:len(reservedPrefix)] == reservedPrefix
-}
-
-// finishState writes the live-state digest into the meta bucket and records
-// the write, so that the chain step of the commit depends on it.
+// finishState writes the live-state digest into the meta bucket. The write is
+// not part of the transaction digest: the chain step hashes the state digest
+// itself (see nextHead), so recording the meta write too would say the same
+// thing twice.
 func (t *Tx) finishState() error {
-	d := append([]byte(nil), t.state[:]...)
-	if err := t.btx.Bucket([]byte(bucketMeta)).Put(keyStateDigest, d); err != nil {
+	if err := t.btx.Bucket([]byte(bucketMeta)).Put(keyStateDigest, append([]byte(nil), t.state[:]...)); err != nil {
 		return fmt.Errorf("write live-state digest: %w", err)
 	}
-	t.writes = append(t.writes, write{op: writePut, bucket: bucketMeta, key: keyStateDigest, value: d})
 	return nil
 }
 
@@ -215,9 +209,6 @@ func (t *Tx) loadState() error {
 		return t.fail(&recordError{why: "meta bucket missing"})
 	}
 	v := m.Get(keyStateDigest)
-	if t.legacy && v == nil {
-		return nil
-	}
 	if len(v) != len(t.state) {
 		return t.fail(&recordError{why: "live-state digest missing or damaged"})
 	}
@@ -225,52 +216,10 @@ func (t *Tx) loadState() error {
 	return nil
 }
 
-// migrateRecords rewrites every value of every client bucket with its
-// trailer, as the commit this transaction makes, and computes the live-state
-// digest from scratch. It reads the old values raw: they have no trailer.
-func (t *Tx) migrateRecords() error {
-	type kv struct{ k, v []byte }
-	var sum [32]byte
-	err := t.btx.ForEach(func(name []byte, b *bolt.Bucket) error {
-		bucket := string(name)
-		if checkClientBucket(bucket) != nil {
-			return nil
-		}
-		var all []kv
-		if err := b.ForEach(func(k, v []byte) error {
-			if v == nil {
-				return fmt.Errorf("bucket %s holds a nested bucket", bucket)
-			}
-			all = append(all, kv{append([]byte(nil), k...), append([]byte{}, v...)})
-			return nil
-		}); err != nil {
-			return err
-		}
-		for _, e := range all {
-			sealed, d := sealRecord(t.storeID, bucket, e.k, t.seq, e.v)
-			if err := b.Put(e.k, sealed); err != nil {
-				return fmt.Errorf("rewrite record in %s: %w", bucket, err)
-			}
-			t.writes = append(t.writes, write{op: writePut, bucket: bucket, key: e.k, value: sealed})
-			sum = addSum(sum, d)
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("add record trailers: %w", err)
-	}
-	t.state = sum
-	t.legacy = false
-	return nil
-}
-
 // scan verifies every record of every client bucket and compares the sum of
 // their digests with the live-state digest recorded in the store. A failure is
 // remembered in the transaction (see fail) and returned.
 func (t *Tx) scan(ctx context.Context) error {
-	if t.legacy {
-		return nil
-	}
 	m := t.btx.Bucket([]byte(bucketMeta))
 	if m == nil {
 		return t.fail(&recordError{why: "meta bucket missing"})
@@ -296,7 +245,7 @@ func (t *Tx) scan(ctx context.Context) error {
 				}
 			}
 			if v == nil {
-				return t.fail(&recordError{bucket: bucket, key: append([]byte(nil), k...), why: "nested bucket in a client bucket"})
+				return t.fail(&recordError{bucket: bucket, key: append([]byte(nil), k...), why: nestedBucketWhy})
 			}
 			_, d, err := t.unseal(bucket, k, v)
 			if err != nil {
@@ -315,6 +264,24 @@ func (t *Tx) scan(ctx context.Context) error {
 	return nil
 }
 
+// verifyChainState verifies the chain at the snapshot's committed position
+// against the live-state digest recorded in the snapshot. A failure is
+// remembered in the transaction (see fail) and returned.
+func (t *Tx) verifyChainState() error {
+	m := t.btx.Bucket([]byte(bucketMeta))
+	if m == nil {
+		return t.fail(&recordError{why: "meta bucket missing"})
+	}
+	pos, ok := decodePosition(m.Get(keyPosition))
+	if !ok {
+		return t.fail(&recordError{why: "store position invalid"})
+	}
+	if err := verifyChain(t.btx, pos); err != nil {
+		return t.fail(&recordError{why: err.Error()})
+	}
+	return nil
+}
+
 // panicOnFault turns a memory fault on the calling goroutine (SIGBUS on a
 // bbolt page whose backing blocks are unreadable, or whose file was
 // truncated) into a recoverable panic, and returns the function that
@@ -328,7 +295,12 @@ func panicOnFault() func() {
 // dbView runs fn in a read transaction of db. A panic before bbolt handed
 // out the transaction (reading the meta page) leaves bbolt's locks held and
 // the database unusable: it is recorded in s.tainted and the panic goes on.
+// Once tainted, no call enters bbolt again: it would wait for those locks for
+// good.
 func (s *Store) dbView(db *bolt.DB, fn func(btx *bolt.Tx) error) error {
+	if s.tainted.Load() {
+		return &LostError{Reason: LostJournalCorrupt}
+	}
 	begun := false
 	defer func() {
 		if r := recover(); r != nil {
@@ -346,6 +318,9 @@ func (s *Store) dbView(db *bolt.DB, fn func(btx *bolt.Tx) error) error {
 
 // dbUpdate is dbView for a write transaction.
 func (s *Store) dbUpdate(db *bolt.DB, fn func(btx *bolt.Tx) error) error {
+	if s.tainted.Load() {
+		return &LostError{Reason: LostJournalCorrupt}
+	}
 	begun := false
 	defer func() {
 		if r := recover(); r != nil {
