@@ -159,7 +159,7 @@ func deviceUsable(path string, major, minor uint32, use func(fd int) error) (boo
 		}
 		return false, err
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFCHR || unix.Major(uint64(st.Rdev)) != major || unix.Minor(uint64(st.Rdev)) != minor { // #nosec G115 -- device number
+	if st.Mode&unix.S_IFMT != unix.S_IFCHR || unix.Major(st.Rdev) != major || unix.Minor(st.Rdev) != minor {
 		return false, errors.New("not the expected character device")
 	}
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
