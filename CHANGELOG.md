@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-13 00:19] - Operation store journal: verify every record, scrub, and harder open (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/journal/record.go`: every client value is stored as value plus a trailer (format version 1, the commit position that wrote it, a SHA-256 over the store id, bucket, key, position and value). `Tx.Get` and `Tx.ForEach` verify and strip it. A changed byte, another record's value, a short value, an unknown version or a position above the committed one is an error wrapping `ErrCorruptRecord`, never a missing key, and quarantines the store (`journal_corrupt`) with a detail that names the bucket and key and never the value.
+- `internal/agent/journal/store.go`: a live-state digest (the sum modulo 2^256 of the digests of all live records) in the meta bucket, updated by every commit and covered by that commit's chain step. Open recomputes it from a full scan, after the chain check and before serving, and `Store.Scrub` does the same on demand. This finds a stale page version, a lost record and a resurrected delete. It resists corruption, not an attacker with root on the host.
+- `internal/agent/journal/schema.go`: a migration, run at `EstablishContinuity` as one chained commit, that rewrites the values of a store made before the trailers and computes the digest. Schema version and `min_reader_version` are now 2, so an older agent refuses the migrated store.
+- `internal/agent/journal/records_test.go`: tests for each detection, the migration and the hardening below.
+
+### Changed
+- `internal/agent/journal/tx.go`: `Tx.Get` returns `([]byte, error)`. `internal/agent/opstore/`: every caller handles the error (a new `has` helper replaces the nil checks), so a damaged record is never read as absent.
+- `internal/agent/journal/doc.go`: a damaged data page that still decodes moves from the limits to the guarantees (detected on read, at open and by scrub); new limits: the digest is not tamper-proof, detection is on read, open or scrub and not at write time, and a consistent rollback of the store and the anchor log together is still undetectable locally.
+
+### Fixed
+- `internal/agent/journal/store.go`: a first open that died after bbolt created the store file and before the journal's first commit left a store that was reported lost for good. With no anchor log, marker, quarantine record or bucket, the next open now starts again; any of those, or any committed data, keeps the store lost.
+- `internal/agent/journal/store.go`, `record.go`, `lock_unix.go`: after a panic inside bbolt's open, the file descriptor and its lock leaked, so a second open in the same process failed with `ErrLocked` instead of reporting the loss. The descriptor is kept and the lock dropped explicitly (a leaked mapping would keep it alive); the same is done when a panic leaves bbolt's locks held. The memory mapping stays until the process exits.
+- `internal/agent/journal/record.go`: a memory fault on bbolt's mapping (unreadable blocks, a truncated file) crashed the process with SIGBUS. The runtime's panic-on-fault setting is now on, and restored afterwards, on the calling goroutine in open, view, update, size and the quarantine write, so the fault becomes a loss (`journal_corrupt`).
+
+### Why
+Fault injection on real block devices showed that a data page damaged in place, and still decoding, was served as valid data with the store ready, that a crash during the first open left an unusable store, and that a fault on the mapping took the process down. The journal must report each of these as a loss.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-12 16:36] - Per-host agent process skeleton (development builds only)
 **Author:** @wrkode (William Rizzo)
 
