@@ -54,6 +54,12 @@ type InstallOptions struct {
 	// vrtg-agent enroll csr wrote). It names the host URI and the enrolment
 	// record the certificate must carry, and the key it must certify.
 	CSR []byte
+	// RequestURIs are the Host's current enrolment request URIs, as the
+	// manager publishes them (status.agent.requestURIs). Required: the
+	// request file must carry exactly these, so a stale request, from before
+	// the manager drew another enrolment record, is refused here instead of
+	// being installed for a record the manager no longer expects.
+	RequestURIs []string
 	// Certificate is the issued certificate, PEM, the host certificate first.
 	// Anything after the first certificate is ignored: the host certificate
 	// must chain to the pinned issuers directly, as the agent loads it.
@@ -94,7 +100,7 @@ type Result struct {
 //
 //   - the request file is one PEM request whose signature verifies, and its
 //     URI subject alternative names are exactly the host URI identity and an
-//     enrolment record (ParseURIs);
+//     enrolment record (ParseURIs) and exactly InstallOptions.RequestURIs;
 //   - the signer's key is ECDSA P-256 and is the request's key;
 //   - the certificate chains directly to a pinned host identity issuer for
 //     server authentication at Now, is not a CA, has server authentication as
@@ -125,6 +131,9 @@ func Install(o InstallOptions) (Result, error) {
 	parsed, hostURI, err := ParseURIs(uris)
 	if err != nil {
 		return Result{}, fmt.Errorf("%w: the request file: %v", ErrInstall, err)
+	}
+	if len(o.RequestURIs) == 0 || !sameSet(uris, o.RequestURIs) {
+		return Result{}, fmt.Errorf("%w: the request file does not carry exactly the Host's current request URIs (status.agent.requestURIs)", ErrInstall)
 	}
 	rec, err := hostidentity.RecordFromURIs(parsed, hostURI)
 	if err != nil {
@@ -274,4 +283,25 @@ func writeAtomic(path string, data []byte) error {
 		return fmt.Errorf("sync %s: %w", dir, err)
 	}
 	return nil
+}
+
+// sameSet reports whether a and b hold the same strings, each once.
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, x := range a {
+		if seen[x] {
+			return false
+		}
+		seen[x] = true
+	}
+	for _, x := range b {
+		if !seen[x] {
+			return false
+		}
+		delete(seen, x)
+	}
+	return len(seen) == 0
 }

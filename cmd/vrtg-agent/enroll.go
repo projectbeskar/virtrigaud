@@ -243,18 +243,29 @@ func enrollInstall(args []string, log logr.Logger, stdout, stderr io.Writer, dep
 	csrFile := fs.String("csr", "", "the request file that was submitted (written by enroll csr)")
 	certFile := fs.String("certificate", "", "the issued certificate, PEM, host certificate first")
 	replace := fs.Bool("replace", false, "replace an installed certificate (a re-enrolment: the certificate must name another enrolment)")
+	urisFile := fs.String("uris-file", "", "a file with the Host's current request URIs, one per line (status.agent.requestURIs)")
+	var uris uriList
+	fs.Var(&uris, "uri", "a current request URI of the Host (repeatable): its status.agent.requestURIs; the request file must carry exactly these")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *urisFile != "" {
+		more, err := readLines(*urisFile)
+		if err != nil {
+			log.Error(err, "read --uris-file")
+			return 2
+		}
+		uris = append(uris, more...)
 	}
 	if err := cfg.Validate(); err != nil {
 		log.Error(err, "invalid configuration")
 		return 2
 	}
-	if *csrFile == "" || *certFile == "" {
-		log.Error(errors.New("--csr and --certificate are required"), "invalid configuration")
+	if *csrFile == "" || *certFile == "" || len(uris) == 0 {
+		log.Error(errors.New("--csr, --certificate and the Host's current request URIs (--uri or --uris-file) are required"), "invalid configuration")
 		return 2
 	}
-	res, err := installCertificate(cfg, *csrFile, *certFile, *replace, deps)
+	res, err := installCertificate(cfg, *csrFile, *certFile, uris, *replace, deps)
 	if err != nil {
 		log.Error(err, "the certificate was not installed")
 		return 1
@@ -269,7 +280,7 @@ func enrollInstall(args []string, log logr.Logger, stdout, stderr io.Writer, dep
 
 // installCertificate runs the host checks, loads what enrol.Install needs
 // and installs.
-func installCertificate(cfg *config.Config, csrFile, certFile string, replace bool, deps enrollDeps) (enrol.Result, error) {
+func installCertificate(cfg *config.Config, csrFile, certFile string, uris []string, replace bool, deps enrollDeps) (enrol.Result, error) {
 	probe := deps.probe
 	uid := probe.EUID()
 	if err := hostcheck.CheckNotRoot(probe); err != nil {
@@ -317,7 +328,7 @@ func installCertificate(cfg *config.Config, csrFile, certFile string, replace bo
 		return enrol.Result{}, fmt.Errorf("reach the signer at %s (start it after enroll csr has made the key): %w", cfg.SignerSocket, err)
 	}
 	return enrol.Install(enrol.InstallOptions{
-		PKIDir: cfg.PKIDir(), UID: uid, CSR: csr, Certificate: cert, Trust: tc, Signer: sg, Now: deps.now(), Replace: replace,
+		PKIDir: cfg.PKIDir(), UID: uid, CSR: csr, RequestURIs: uris, Certificate: cert, Trust: tc, Signer: sg, Now: deps.now(), Replace: replace,
 	})
 }
 

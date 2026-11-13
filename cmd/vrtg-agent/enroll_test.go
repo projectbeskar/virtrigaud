@@ -107,9 +107,13 @@ func (e *enrollEnv) csrArgs(out string, extra ...string) []string {
 }
 
 func (e *enrollEnv) installArgs(csr, cert string, extra ...string) []string {
-	return append([]string{"install", "--state-dir=" + e.stateDir, "--signer-socket=" + e.socket,
+	args := []string{"install", "--state-dir=" + e.stateDir, "--signer-socket=" + e.socket,
 		"--signer-user=" + strconv.Itoa(os.Getuid()), "--signer-key-file=" + e.keyFile,
-		"--csr=" + csr, "--certificate=" + cert}, extra...)
+		"--csr=" + csr, "--certificate=" + cert}
+	for _, u := range e.uris {
+		args = append(args, "--uri="+u)
+	}
+	return append(args, extra...)
 }
 
 func (e *enrollEnv) run(args []string) (int, string) {
@@ -299,6 +303,8 @@ func TestEnrollInstallRefusals(t *testing.T) {
 	for name, args := range map[string][]string{
 		"a certificate of another CA": e.installArgs(csr, foreign),
 		"no certificate flag":         {"install", "--state-dir=" + e.stateDir, "--csr=" + csr},
+		"no current request URIs":     {"install", "--state-dir=" + e.stateDir, "--csr=" + csr, "--certificate=" + cert},
+		"a stale request":             append(e.installArgs(csr, cert)[:7:7], "--uri="+e.pki.HostURI),
 		"a missing file":              e.installArgs(csr, filepath.Join(e.workDir, "none.pem")),
 		"a root signer user":          append(e.installArgs(csr, cert), "--signer-user=0"),
 	} {

@@ -82,7 +82,7 @@ func bytes16(b byte) []byte {
 
 func (f *fixture) install(cert []byte, replace bool) (enrol.Result, error) {
 	return enrol.Install(enrol.InstallOptions{
-		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now, Replace: replace,
+		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, RequestURIs: f.uris, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now, Replace: replace,
 	})
 }
 
@@ -276,7 +276,7 @@ func TestInstallRefusesAnotherSignerKey(t *testing.T) {
 	cert := f.issue(t, hostidentitytest.IssueOptions{})
 	other := hostidentitytest.NewKey(t)
 	_, err := enrol.Install(enrol.InstallOptions{
-		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, Certificate: cert, Trust: f.cfg, Signer: other, Now: f.now,
+		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, RequestURIs: f.uris, Certificate: cert, Trust: f.cfg, Signer: other, Now: f.now,
 	})
 	require.ErrorIs(t, err, enrol.ErrInstall)
 	assert.Contains(t, err.Error(), "key other than the signer's")
@@ -287,7 +287,7 @@ func TestInstallRefusesAnotherSignerKey(t *testing.T) {
 	require.NoError(t, err)
 	cert2 := f.pki.HostCA.Issue(t, csr, hostidentitytest.IssueOptions{})
 	_, err = enrol.Install(enrol.InstallOptions{
-		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: csr, Certificate: cert2, Trust: f.cfg, Signer: f.key, Now: f.now,
+		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: csr, RequestURIs: f.uris, Certificate: cert2, Trust: f.cfg, Signer: f.key, Now: f.now,
 	})
 	require.ErrorIs(t, err, enrol.ErrInstall)
 	_, statErr := os.Lstat(f.hostCrt())
@@ -306,7 +306,7 @@ func TestInstallRefusesABadRequestFile(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := enrol.Install(enrol.InstallOptions{
-				PKIDir: f.pkiDir, UID: signer.EUID(), CSR: csr, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now,
+				PKIDir: f.pkiDir, UID: signer.EUID(), CSR: csr, RequestURIs: f.uris, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now,
 			})
 			require.ErrorIs(t, err, enrol.ErrInstall)
 		})
@@ -318,7 +318,7 @@ func TestInstallRefusesABadRequestFile(t *testing.T) {
 	}, f.key)
 	require.NoError(t, err)
 	_, err = enrol.Install(enrol.InstallOptions{
-		PKIDir: f.pkiDir, UID: signer.EUID(), Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now,
+		PKIDir: f.pkiDir, UID: signer.EUID(), RequestURIs: f.uris, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now,
 		CSR: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: other}),
 	})
 	require.ErrorIs(t, err, enrol.ErrInstall)
@@ -385,7 +385,7 @@ func TestInstallConfirmsWithTheLoader(t *testing.T) {
 	f := newFixture(t)
 	notAgent := signer.EUID() + 1
 	_, err := enrol.Install(enrol.InstallOptions{
-		PKIDir: f.pkiDir, UID: notAgent, CSR: f.csr, Certificate: f.issue(t, hostidentitytest.IssueOptions{}), Trust: f.cfg, Signer: f.key, Now: f.now,
+		PKIDir: f.pkiDir, UID: notAgent, CSR: f.csr, RequestURIs: f.uris, Certificate: f.issue(t, hostidentitytest.IssueOptions{}), Trust: f.cfg, Signer: f.key, Now: f.now,
 	})
 	require.ErrorIs(t, err, enrol.ErrInstall)
 	assert.Contains(t, err.Error(), "would not load")
@@ -402,11 +402,46 @@ func TestInstallConfirmsWithTheLoader(t *testing.T) {
 	f.csr, err = enrol.BuildCSR(f.key, hostidentity.RequestURIs(f.pki.HostURI, next))
 	require.NoError(t, err)
 	_, err = enrol.Install(enrol.InstallOptions{
-		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, Certificate: f.issue(t, hostidentitytest.IssueOptions{}), Trust: f.cfg,
+		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, RequestURIs: f.uris, Certificate: f.issue(t, hostidentitytest.IssueOptions{}), Trust: f.cfg,
 		Signer: f.key, Now: f.now.Add(-48 * time.Hour), Replace: true,
 	})
 	require.Error(t, err, "a certificate that is not yet valid is refused")
 	after, err := os.ReadFile(f.hostCrt())
 	require.NoError(t, err)
 	assert.Equal(t, before, after)
+}
+
+// TestInstallRefusesAStaleRequest: the request file must carry exactly the
+// Host's current request URIs, so a request made for an enrolment record the
+// manager has since replaced is not installed.
+func TestInstallRefusesAStaleRequest(t *testing.T) {
+	f := newFixture(t)
+	cert := f.issue(t, hostidentitytest.IssueOptions{})
+	next := f.rec
+	next.EnrolmentID = bytes16(0xF0)
+	current := hostidentity.RequestURIs(f.pki.HostURI, next)
+	for name, uris := range map[string][]string{
+		"none":           nil,
+		"another record": current,
+		"a subset":       f.uris[:4],
+		"a repeated URI": append(append([]string{}, f.uris[:4]...), f.uris[0]),
+		"an extra URI":   append(append([]string{}, f.uris...), "urn:virtrigaud:extra"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := enrol.Install(enrol.InstallOptions{
+				PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, RequestURIs: uris, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now,
+			})
+			require.ErrorIs(t, err, enrol.ErrInstall)
+			assert.Contains(t, err.Error(), "current request URIs")
+			_, statErr := os.Lstat(f.hostCrt())
+			assert.True(t, os.IsNotExist(statErr))
+		})
+	}
+	// Order does not matter.
+	rev := append([]string{}, f.uris...)
+	rev[0], rev[4] = rev[4], rev[0]
+	_, err := enrol.Install(enrol.InstallOptions{
+		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, RequestURIs: rev, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now,
+	})
+	require.NoError(t, err)
 }
