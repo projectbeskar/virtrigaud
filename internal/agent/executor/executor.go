@@ -115,6 +115,22 @@ type Executor interface {
 	Goal(ctx context.Context, op Operation, step Step) (bool, error)
 }
 
+// VMState is what an executor can read about one VM on the host.
+type VMState struct {
+	// Exists reports whether the VM is on the host.
+	Exists bool
+	// Running reports whether it is powered on.
+	Running bool
+}
+
+// Describer is implemented by an executor that can read a VM's state, for the
+// agent's Describe answers.
+type Describer interface {
+	// Describe reads the state of the VM vmUID. A VM that is not on the
+	// host is the zero VMState and no error.
+	Describe(ctx context.Context, vmUID string) (VMState, error)
+}
+
 // Stopper stops every VM an executor runs. The agent's shutdown command calls
 // it only while the host itself is shutting down, rebooting, halting or
 // powering off.

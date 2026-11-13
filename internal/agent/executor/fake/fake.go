@@ -91,11 +91,14 @@ type VM struct {
 type Executor struct {
 	dir string
 	mu  sync.Mutex
+	// probeErr names the steps whose inspection fails (FaultProbeError).
+	probeErr map[string]bool
 }
 
 var (
-	_ executor.Executor = (*Executor)(nil)
-	_ executor.Stopper  = (*Executor)(nil)
+	_ executor.Executor  = (*Executor)(nil)
+	_ executor.Stopper   = (*Executor)(nil)
+	_ executor.Describer = (*Executor)(nil)
 )
 
 // New returns a fake executor keeping its VMs under dir, created 0700.
@@ -105,7 +108,7 @@ func New(dir string) (*Executor, error) {
 			return nil, fmt.Errorf("fake executor: create %s: %w", d, err)
 		}
 	}
-	return &Executor{dir: dir}, nil
+	return &Executor{dir: dir, probeErr: map[string]bool{}}, nil
 }
 
 // Plan implements executor.Executor.
@@ -124,13 +127,54 @@ func (e *Executor) Plan(kind providerv1.OperationKind) ([]executor.Step, error) 
 	return nil, fmt.Errorf("%s: %w", kind, executor.ErrUnsupportedKind)
 }
 
-// Run implements executor.Executor.
+// Run implements executor.Executor. A step first waits while the hold file
+// exists, then applies the first scripted fault that matches it (see
+// Script), if any, instead of or after its effect. Every effect performed is
+// appended to the effects log.
 func (e *Executor) Run(ctx context.Context, op executor.Operation, step executor.Step) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, err)
 	}
+	if err := e.waitHold(ctx); err != nil {
+		// Nothing was done while the step was held.
+		return fmt.Errorf("%w: held: %v", executor.ErrNotPerformed, err)
+	}
 	e.mu.Lock()
+	fault, script, err := e.takeFault(op, step)
+	if err != nil {
+		e.mu.Unlock()
+		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, err)
+	}
+	switch fault {
+	case FaultNotPerformed:
+		e.mu.Unlock()
+		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, errScripted)
+	case FaultStall:
+		e.mu.Unlock()
+		<-ctx.Done()
+		return fmt.Errorf("%w: stalled: %v", errScripted, ctx.Err())
+	case FaultProbeError:
+		e.probeErr[probeKey(op, step)] = true
+		e.mu.Unlock()
+		return fmt.Errorf("%w: effect in doubt", errScripted)
+	}
 	defer e.mu.Unlock()
+	if err := e.runLocked(op, step, script); err != nil {
+		return err
+	}
+	if fault == FaultEffectThenError {
+		return fmt.Errorf("%w: effect performed, answer lost", errScripted)
+	}
+	return nil
+}
+
+// probeKey names a step whose inspection a scripted fault makes fail.
+func probeKey(op executor.Operation, step executor.Step) string {
+	return hex.EncodeToString(op.OpID) + "/" + step.Name
+}
+
+// runLocked performs step's effect. The caller holds e.mu.
+func (e *Executor) runLocked(op executor.Operation, step executor.Step, script Script) error {
 	path, err := e.vmPath(op.VMUID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, err)
@@ -154,13 +198,22 @@ func (e *Executor) Run(ctx context.Context, op executor.Operation, step executor
 		if err := writeFile(e.effectPath(op, step), nil); err != nil {
 			return err
 		}
-		return writeVM(path, VM{Binding: binding, Power: PowerOff})
+		if err := writeVM(path, VM{Binding: binding, Power: PowerOff}); err != nil {
+			return err
+		}
+		return e.logEffect(op, step)
 	case stepStart:
 		if !exists {
 			return fmt.Errorf("fake VM %s is not defined", op.VMUID)
 		}
+		if script.CreateStopped {
+			return nil
+		}
 		vm.Power = PowerOn
-		return writeVM(path, vm)
+		if err := writeVM(path, vm); err != nil {
+			return err
+		}
+		return e.logEffect(op, step)
 	case stepDestroy:
 		if !exists {
 			return nil
@@ -168,7 +221,10 @@ func (e *Executor) Run(ctx context.Context, op executor.Operation, step executor
 		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("remove fake VM %s: %w", op.VMUID, err)
 		}
-		return syncDir(filepath.Dir(path))
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			return err
+		}
+		return e.logEffect(op, step)
 	case stepPower:
 		if !exists {
 			return fmt.Errorf("%w: fake VM %s does not exist", executor.ErrNotPerformed, op.VMUID)
@@ -179,7 +235,10 @@ func (e *Executor) Run(ctx context.Context, op executor.Operation, step executor
 		default:
 			vm.Power = PowerOff
 		}
-		return writeVM(path, vm)
+		if err := writeVM(path, vm); err != nil {
+			return err
+		}
+		return e.logEffect(op, step)
 	case stepReconfigure:
 		if !exists {
 			return fmt.Errorf("%w: fake VM %s does not exist", executor.ErrNotPerformed, op.VMUID)
@@ -191,7 +250,10 @@ func (e *Executor) Run(ctx context.Context, op executor.Operation, step executor
 		if err := writeVM(path, vm); err != nil {
 			return err
 		}
-		return writeFile(e.effectPath(op, step), nil)
+		if err := writeFile(e.effectPath(op, step), nil); err != nil {
+			return err
+		}
+		return e.logEffect(op, step)
 	}
 	return fmt.Errorf("%w: unknown step %q", executor.ErrNotPerformed, step.Name)
 }
@@ -202,6 +264,9 @@ func (e *Executor) Run(ctx context.Context, op executor.Operation, step executor
 func (e *Executor) Inspect(_ context.Context, op executor.Operation, step executor.Step) (executor.Evidence, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.probeErr[probeKey(op, step)] {
+		return executor.EvidenceUnknown, fmt.Errorf("%w: inspection failed", errScripted)
+	}
 	if ok, err := fileExists(e.effectPath(op, step)); err != nil {
 		return executor.EvidenceUnknown, err
 	} else if ok {
@@ -228,6 +293,9 @@ func (e *Executor) Goal(_ context.Context, op executor.Operation, step executor.
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.probeErr[probeKey(op, step)] {
+		return false, fmt.Errorf("%w: goal check failed", errScripted)
+	}
 	path, err := e.vmPath(op.VMUID)
 	if err != nil {
 		return false, err
@@ -265,6 +333,21 @@ func (e *Executor) StopAll(ctx context.Context) error {
 		errs = append(errs, writeVM(path, vm))
 	}
 	return errors.Join(errs...)
+}
+
+// Describe implements executor.Describer: the fake VM's power state.
+func (e *Executor) Describe(_ context.Context, vmUID string) (executor.VMState, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	path, err := e.vmPath(vmUID)
+	if err != nil {
+		return executor.VMState{}, err
+	}
+	vm, exists, err := readVM(path)
+	if err != nil || !exists {
+		return executor.VMState{}, err
+	}
+	return executor.VMState{Exists: true, Running: vm.Power == PowerOn}, nil
 }
 
 // VMs returns the fake VMs by UID.
