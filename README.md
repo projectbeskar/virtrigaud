@@ -482,6 +482,10 @@ In-tree design decisions: [`docs/adr/`](docs/adr/)
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Adopters
+
+Organizations using VirtRigaud are listed in [ADOPTERS.md](ADOPTERS.md). If you use it, please add yours.
+
 ## Authors
 
 - **William Rizzo** ([@wrkode](https://github.com/wrkode)) — project maintainer
