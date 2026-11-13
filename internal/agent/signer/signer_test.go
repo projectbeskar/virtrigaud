@@ -605,7 +605,9 @@ func TestPurposesHaveSeparateBudgets(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		sig, err := answers.Sign(rand.Reader, d, crypto.SHA256)
 		require.NoError(t, err, "the answer budget is separate")
-		assert.True(t, ecdsa.VerifyASN1(answers.Public().(*ecdsa.PublicKey), d, sig))
+		pub, ok := answers.Public().(*ecdsa.PublicKey)
+		require.True(t, ok)
+		assert.True(t, ecdsa.VerifyASN1(pub, d, sig))
 	}
 	_, err = answers.Sign(rand.Reader, d, crypto.SHA256)
 	require.ErrorIs(t, err, ErrSigner)
