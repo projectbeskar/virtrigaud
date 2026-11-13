@@ -56,7 +56,16 @@ libvirt-monitoring-test.yaml
 # libvirt test fixtures created by main_test.go at test time
 internal/providers/libvirt/_fixture_images_*/
 
-# binaries built in place with `go build` inside a cmd directory (never source)
+# binaries built in place with `go build` inside a cmd directory: the exact
+# name `go build` gives each one (never a glob that could match source)
+/cmd/alpha-to-beta-dryrun/alpha-to-beta-dryrun
+/cmd/manager/manager
+/cmd/provider-libvirt/provider-libvirt
+/cmd/provider-mock/provider-mock
+/cmd/provider-proxmox/provider-proxmox
+/cmd/provider-vsphere/provider-vsphere
+/cmd/vcts/vcts
+/cmd/virtrigaud-loadgen/virtrigaud-loadgen
+/cmd/vrtg/vrtg
 /cmd/vrtg-agent/vrtg-agent
-/cmd/*/vrtg*
-!/cmd/*/*.go
+/cmd/vrtg-provider/vrtg-provider
