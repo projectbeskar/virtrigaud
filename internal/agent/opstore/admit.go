@@ -286,26 +286,30 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 	if err != nil {
 		return Decision{}, false, err
 	}
-	enrolmentCheck := func() (Decision, bool) {
+	enrolmentCheck := func() (Decision, bool, error) {
 		if enr == nil || !sameBytes(enr.GetEnrolmentId(), r.EnrolmentID) {
 			// Definite only for an enrolment whose records this store holds
 			// (the active one, or a frozen predecessor): then the op_id was
 			// provably never accepted. An enrolment the store has no record of
 			// (discarded, a predecessor of the enrolment this store was made
 			// for, or one of a store that was lost or wiped) may have run it.
-			if tx.Get(bucketEnrolments, r.EnrolmentID) == nil && !guard.Off(guard.UnknownEnrolmentNotDefinite) {
-				return refused(RefusalUnknownToAgent), true
+			known, err := has(tx, bucketEnrolments, r.EnrolmentID)
+			if err != nil {
+				return Decision{}, false, err
 			}
-			return refused(RefusalGrantMismatch), true
+			if !known && !guard.Off(guard.UnknownEnrolmentNotDefinite) {
+				return refused(RefusalUnknownToAgent), true, nil
+			}
+			return refused(RefusalGrantMismatch), true, nil
 		}
 		if enr.GetProviderUid() != r.ProviderUID {
-			return refused(RefusalProviderMismatch), true
+			return refused(RefusalProviderMismatch), true, nil
 		}
-		return Decision{}, false
+		return Decision{}, false, nil
 	}
 	if guard.Off(guard.KnownBeforeMismatch) {
-		if d, done := enrolmentCheck(); done {
-			return d, false, nil
+		if d, done, err := enrolmentCheck(); err != nil || done {
+			return d, false, err
 		}
 	}
 
@@ -335,8 +339,8 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 		}
 		return Decision{Outcome: OutcomeKnown, Op: viewOfRecord(rec)}, false, nil
 	}
-	if d, done := enrolmentCheck(); done {
-		return d, false, nil
+	if d, done, err := enrolmentCheck(); err != nil || done {
+		return d, false, err
 	}
 
 	if r.MintEpoch.Counter < enr.GetStartEpoch() && !guard.Off(guard.MintEpoch) {
@@ -357,7 +361,11 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 			if hasVM && (!sameBytes(vm.GetBindingId(), r.BindingID) || vm.GetLifecycle() == pb.VMLifecycle_VM_LIFECYCLE_PRESENT) {
 				return refused(RefusalVMBindingStale), false, nil
 			}
-			if tx.Get(bucketVMTombstones, vmTombstoneKey(r.VMUID, r.BindingID)) != nil {
+			stale, err := has(tx, bucketVMTombstones, vmTombstoneKey(r.VMUID, r.BindingID))
+			if err != nil {
+				return Decision{}, false, err
+			}
+			if stale {
 				return refused(RefusalVMBindingStale), false, nil
 			}
 		} else {

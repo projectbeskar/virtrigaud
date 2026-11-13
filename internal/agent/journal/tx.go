@@ -36,6 +36,21 @@ type Tx struct {
 	seq      uint64
 	writes   []write
 	buckets  map[string]*bolt.Bucket
+
+	// storeID binds every record digest to this store.
+	storeID [16]byte
+	// bound and boundSet cache the committed position of a read snapshot.
+	bound    uint64
+	boundSet bool
+	// state is the additive digest of the live client records, as updated by
+	// this transaction's writes.
+	state [32]byte
+	// bad is the first record that did not verify; the store quarantines
+	// itself at the end of the transaction.
+	bad error
+	// legacy marks a store whose values carry no trailer yet (before its
+	// migration): reads return them raw and writes are refused.
+	legacy bool
 }
 
 // lookup returns the named bucket, or nil, caching the handle for the life
@@ -76,20 +91,34 @@ func checkClientBucket(name string) error {
 	return nil
 }
 
-// Get returns a copy of the value of key in bucket, or nil.
-func (t *Tx) Get(bucket string, key []byte) []byte {
+// errNotMigrated is returned by a write before the record trailers exist.
+var errNotMigrated = errors.New("journal: store records not migrated yet")
+
+// Get returns a copy of the value of key in bucket, or nil when the key is
+// absent. A record whose trailer does not verify (a changed byte, another
+// record's value, a short value, a bad version, a position beyond the committed
+// one) is an error that wraps ErrCorruptRecord, never a missing key; the store
+// is quarantined with LostJournalCorrupt when the transaction ends.
+func (t *Tx) Get(bucket string, key []byte) ([]byte, error) {
 	b := t.lookup(bucket)
 	if b == nil {
-		return nil
+		return nil, nil
 	}
 	v := b.Get(key)
 	if v == nil {
-		return nil
+		return nil, nil
 	}
-	return append([]byte{}, v...)
+	if t.raw(bucket) {
+		return append([]byte{}, v...), nil
+	}
+	val, _, err := t.unseal(bucket, key, v)
+	return val, err
 }
 
-// Put writes key = value in a client bucket.
+// Put writes key = value in a client bucket. The stored value carries a
+// trailer that binds it to the store, bucket, key and this commit, and the
+// store's live-state digest follows the change. An existing record that does
+// not verify is an error wrapping ErrCorruptRecord.
 func (t *Tx) Put(bucket string, key, value []byte) error {
 	if !t.writable {
 		return errReadOnly
@@ -97,20 +126,33 @@ func (t *Tx) Put(bucket string, key, value []byte) error {
 	if err := checkClientBucket(bucket); err != nil {
 		return err
 	}
+	if t.legacy {
+		return errNotMigrated
+	}
 	b, err := t.bucket(bucket)
 	if err != nil {
 		return err
 	}
-	k, v := append([]byte(nil), key...), append([]byte{}, value...)
-	if err := b.Put(k, v); err != nil {
+	k := append([]byte(nil), key...)
+	if old := b.Get(k); old != nil {
+		_, od, err := t.unseal(bucket, k, old)
+		if err != nil {
+			return err
+		}
+		t.state = subSum(t.state, od)
+	}
+	sealed, d := sealRecord(t.storeID, bucket, k, t.seq, value)
+	if err := b.Put(k, sealed); err != nil {
 		return fmt.Errorf("journal: put %s: %w", bucket, err)
 	}
-	t.writes = append(t.writes, write{op: writePut, bucket: bucket, key: k, value: v})
+	t.state = addSum(t.state, d)
+	t.writes = append(t.writes, write{op: writePut, bucket: bucket, key: k, value: sealed})
 	return nil
 }
 
 // Delete removes key from a client bucket. Deleting a missing key is recorded
-// and is not an error.
+// and is not an error. An existing record that does not verify is an error
+// wrapping ErrCorruptRecord.
 func (t *Tx) Delete(bucket string, key []byte) error {
 	if !t.writable {
 		return errReadOnly
@@ -118,11 +160,21 @@ func (t *Tx) Delete(bucket string, key []byte) error {
 	if err := checkClientBucket(bucket); err != nil {
 		return err
 	}
+	if t.legacy {
+		return errNotMigrated
+	}
 	b, err := t.bucket(bucket)
 	if err != nil {
 		return err
 	}
 	k := append([]byte(nil), key...)
+	if old := b.Get(k); old != nil {
+		_, od, err := t.unseal(bucket, k, old)
+		if err != nil {
+			return err
+		}
+		t.state = subSum(t.state, od)
+	}
 	if err := b.Delete(k); err != nil {
 		return fmt.Errorf("journal: delete %s: %w", bucket, err)
 	}
@@ -144,7 +196,8 @@ func (t *Tx) createBucket(name string) error {
 
 // ForEach calls fn for every key of bucket that starts with prefix, in key
 // order, with copies of the key and value. Writing to the bucket inside fn is
-// not allowed.
+// not allowed. A record that does not verify stops the iteration with an
+// error that wraps ErrCorruptRecord (see Get).
 func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) error {
 	b := t.lookup(bucket)
 	if b == nil {
@@ -152,7 +205,17 @@ func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) e
 	}
 	c := b.Cursor()
 	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-		if err := fn(append([]byte(nil), k...), append([]byte{}, v...)); err != nil {
+		val := append([]byte{}, v...)
+		if !t.raw(bucket) {
+			if v == nil {
+				return t.fail(&recordError{bucket: bucket, key: append([]byte(nil), k...), why: "nested bucket in a client bucket"})
+			}
+			var err error
+			if val, _, err = t.unseal(bucket, k, v); err != nil {
+				return err
+			}
+		}
+		if err := fn(append([]byte(nil), k...), val); err != nil {
 			return err
 		}
 	}

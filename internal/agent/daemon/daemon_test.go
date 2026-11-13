@@ -168,10 +168,10 @@ func TestStoreNeedsNewerAgent(t *testing.T) {
 	if err := r0.stop(); err != nil {
 		t.Fatal(err)
 	}
-	// A newer agent migrates the store to a schema that needs readers of
-	// version 2.
+	// A newer agent migrates the store to a schema that needs readers newer
+	// than this binary.
 	st, err := opstore.Open(context.Background(), opstore.Options{Executor: none.Executor{}, Journal: journal.Options{
-		Dir: h.stateDir, SchemaVersion: 3, Migrations: []journal.Migration{{ToVersion: 3, MinReader: 2}}}})
+		Dir: h.stateDir, SchemaVersion: journal.SchemaVersion + 1, Migrations: []journal.Migration{{ToVersion: journal.SchemaVersion + 1, MinReader: journal.ReaderMax + 1}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestStoreNeedsNewerAgent(t *testing.T) {
 	r := h.start()
 	select {
 	case err := <-r.done:
-		if !errors.Is(err, journal.ErrSchemaTooNew) || !strings.Contains(err.Error(), "2") {
+		if !errors.Is(err, journal.ErrSchemaTooNew) || !strings.Contains(err.Error(), fmt.Sprint(journal.ReaderMax+1)) {
 			t.Fatalf("Run = %v", err)
 		}
 	case <-time.After(10 * time.Second):

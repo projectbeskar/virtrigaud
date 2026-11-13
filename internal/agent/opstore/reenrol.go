@@ -60,7 +60,11 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 		if err != nil {
 			return err
 		}
-		if retired || tx.Get(bucketEnrolments, e.ID) != nil {
+		used, err := has(tx, bucketEnrolments, e.ID)
+		if err != nil {
+			return err
+		}
+		if retired || used {
 			return fmt.Errorf("%w: enrolment id already used", ErrEnrolment)
 		}
 		return nil

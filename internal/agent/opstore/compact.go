@@ -73,7 +73,14 @@ func (s *Store) compactBatch(ctx context.Context, batch int) (int, bool, error) 
 			if err := unmarshalRecord(v, rec); err != nil {
 				return err
 			}
-			if !Terminal(rec.GetState()) || holdsVM(rec.GetState()) || tx.Get(bucketTombstones, k) == nil {
+			if !Terminal(rec.GetState()) || holdsVM(rec.GetState()) {
+				return nil
+			}
+			tombstoned, err := has(tx, bucketTombstones, k)
+			if err != nil {
+				return err
+			}
+			if !tombstoned {
 				return nil
 			}
 			if len(keys) == batch {

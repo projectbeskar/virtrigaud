@@ -308,8 +308,8 @@ func TestSchema_FailedMigrationLeavesStoreUnattested(t *testing.T) {
 	s := e.ready()
 	put(t, s, "a", "1")
 	_ = s.Close()
-	e.opts.SchemaVersion = 2
-	e.opts.Migrations = []journal.Migration{{ToVersion: 2, Apply: func(*journal.Tx) error { return errors.New("bad migration") }}}
+	e.opts.SchemaVersion = journal.SchemaVersion + 1
+	e.opts.Migrations = []journal.Migration{{ToVersion: journal.SchemaVersion + 1, Apply: func(*journal.Tx) error { return errors.New("bad migration") }}}
 	s2 := e.open()
 	before := s2.Position()
 	if err := s2.EstablishContinuity(context.Background()); err == nil {

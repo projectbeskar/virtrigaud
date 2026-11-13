@@ -148,7 +148,7 @@ func TestOpen_FreshCommitReopen(t *testing.T) {
 		t.Fatalf("position after reopen = %+v, want %+v", got, last)
 	}
 	var v []byte
-	_ = s2.View(context.Background(), func(tx *journal.Tx) error { v = tx.Get(testBucket, []byte("3")); return nil })
+	_ = s2.View(context.Background(), func(tx *journal.Tx) (err error) { v, err = tx.Get(testBucket, []byte("3")); return err })
 	if string(v) != "v" {
 		t.Fatalf("value = %q", v)
 	}
@@ -625,8 +625,8 @@ func TestQuarantine_WitnessOfLostStoreRefusesContinuity(t *testing.T) {
 func TestSchema_MinReaderTooNewRefusesToStart(t *testing.T) {
 	e := newEnv(t)
 	_ = e.ready().Close()
-	e.opts.SchemaVersion = 3
-	e.opts.Migrations = []journal.Migration{{ToVersion: 3, MinReader: 2}}
+	e.opts.SchemaVersion = journal.SchemaVersion + 1
+	e.opts.Migrations = []journal.Migration{{ToVersion: journal.SchemaVersion + 1, MinReader: journal.ReaderMax + 1}}
 	s := e.open()
 	if err := s.EstablishContinuity(context.Background()); err != nil {
 		t.Fatal(err)
@@ -637,7 +637,7 @@ func TestSchema_MinReaderTooNewRefusesToStart(t *testing.T) {
 	if !errors.Is(err, journal.ErrSchemaTooNew) {
 		t.Fatalf("err = %v, want ErrSchemaTooNew", err)
 	}
-	if want := "agent schema >= 2"; err == nil || !strings.Contains(err.Error(), want) {
+	if want := fmt.Sprintf("agent schema >= %d", journal.ReaderMax+1); err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("error %q does not name the required version", err)
 	}
 }
@@ -652,10 +652,11 @@ func TestSchema_AdditiveMigrationAfterContinuityKeepsUnknownFields(t *testing.T)
 	// Add an unknown field to the store meta, as a newer writer would.
 	addUnknownMetaField(t, e)
 
-	e.opts.SchemaVersion = 2
+	next := journal.SchemaVersion + 1
+	e.opts.SchemaVersion = next
 	e.opts.Buckets = append(e.opts.Buckets, "added")
 	applied := false
-	e.opts.Migrations = []journal.Migration{{ToVersion: 2, Apply: func(tx *journal.Tx) error {
+	e.opts.Migrations = []journal.Migration{{ToVersion: next, Apply: func(tx *journal.Tx) error {
 		applied = true
 		return tx.Put("added", []byte("k"), []byte("v"))
 	}}}
@@ -664,7 +665,7 @@ func TestSchema_AdditiveMigrationAfterContinuityKeepsUnknownFields(t *testing.T)
 		t.Fatal("migration ran before continuity")
 	}
 	info, _ := s2.Schema(context.Background())
-	if info.SchemaVersion != 1 {
+	if info.SchemaVersion != journal.SchemaVersion {
 		t.Fatalf("schema before continuity = %d", info.SchemaVersion)
 	}
 	if err := s2.EstablishContinuity(context.Background()); err != nil {
@@ -674,7 +675,7 @@ func TestSchema_AdditiveMigrationAfterContinuityKeepsUnknownFields(t *testing.T)
 		t.Fatal("migration did not run")
 	}
 	info, _ = s2.Schema(context.Background())
-	if info.SchemaVersion != 2 {
+	if info.SchemaVersion != next {
 		t.Fatalf("schema after = %d", info.SchemaVersion)
 	}
 	if !hasUnknownMetaField(t, e, s2) {

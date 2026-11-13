@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -77,6 +78,8 @@ var (
 	keyStoreMeta  = []byte("store")
 	keyPosition   = []byte("position")
 	keyQuarantine = []byte("quarantine")
+	// keyStateDigest holds the additive digest of the live client records.
+	keyStateDigest = []byte("state_digest")
 )
 
 // Defaults.
@@ -94,12 +97,17 @@ const (
 // Schema versions of this binary.
 const (
 	// SchemaVersion is the schema this binary writes.
-	SchemaVersion uint32 = 1
+	SchemaVersion uint32 = 2
 	// ReaderMax is the highest min_reader_version this binary can read.
-	ReaderMax uint32 = 1
+	ReaderMax uint32 = 2
 	// MinReaderVersion is the min_reader_version this binary writes into a
-	// new store.
-	MinReaderVersion uint32 = 1
+	// new store. Schema 2 is the first with record trailers and the
+	// live-state digest, which an older reader would not verify or maintain.
+	MinReaderVersion uint32 = 2
+	// recordSchema is the first schema whose values carry a trailer. A store
+	// below it, without a live-state digest, is migrated at
+	// EstablishContinuity.
+	recordSchema uint32 = 2
 )
 
 // testBoltOptions, when set by a test of this package, adjusts the bbolt
@@ -204,6 +212,15 @@ type Store struct {
 
 	db     *bolt.DB
 	anchor File
+	// boltFile is the descriptor bbolt opened (through Options.OpenFile). It
+	// lets the store release the file lock of a database it cannot close.
+	boltFile *os.File
+	// tainted is set when a panic left bbolt's locks held (see dbView).
+	tainted atomic.Bool
+	// legacy marks a store opened before its records had trailers.
+	legacy bool
+	// lossDetail is what Open found, for the quarantine event.
+	lossDetail string
 
 	storeID    [16]byte
 	seq        uint64
@@ -293,16 +310,25 @@ func Open(ctx context.Context, opts Options) (st *Store, err error) {
 		_ = s.lock.release()
 		return nil, fmt.Errorf("open journal: create %s: %w", opts.Dir, err)
 	}
+	// A memory fault on bbolt's mapping becomes a panic the recover below
+	// turns into a loss. Registered first, so it is restored last.
+	defer panicOnFault()()
 	defer func() {
 		// bbolt may panic on corrupt pages: a corrupt store is lost, never a
 		// crashed agent.
 		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
+			if s.db == nil {
+				// bolt.Open itself panicked: its descriptor and file lock
+				// are still held.
+				s.abandonLocked()
+			}
 			s.setLost(LostJournalCorrupt)
 			s.recordOpenLossSafe()
 			st, err = s, nil
 		}
 	}()
-	if err := s.open(); err != nil {
+	if err := s.open(ctx); err != nil {
 		_ = s.closeFiles()
 		_ = s.lock.release()
 		return nil, err
@@ -345,6 +371,9 @@ func (s *Store) recordOpenLoss() {
 	}
 	if s.opts.Events != nil {
 		d := "found when the store was opened"
+		if s.lossDetail != "" {
+			d = fmt.Sprintf("%s: %s", d, s.lossDetail)
+		}
 		if len(errs) > 0 {
 			d = fmt.Sprintf("%s (not every quarantine record was written: %v)", d, errors.Join(errs...))
 		}
@@ -430,7 +459,7 @@ func (s *Store) readAnchor() (raw []byte, bounded bool, err error) {
 }
 
 // open does the work of Open. The caller holds the lock file.
-func (s *Store) open() error {
+func (s *Store) open(ctx context.Context) error {
 	dbExists, err := fileExists(s.path(StoreFile))
 	if err != nil {
 		return fmt.Errorf("open journal: %w", err)
@@ -479,10 +508,26 @@ func (s *Store) open() error {
 	if s.db == nil {
 		return nil // lost{journal_corrupt}
 	}
-	meta, pos, quarantine, err := s.readMeta()
+	meta, pos, quarantine, hasState, err := s.readMeta()
 	if err != nil {
+		if s.neverInitialised(anchorExists, markerExists) {
+			// bbolt created the file and the first open died before it
+			// committed the store's buckets: nothing was ever written or
+			// acknowledged. Start again.
+			return s.restartFresh(anchorExists)
+		}
 		s.setLost(LostJournalCorrupt)
 		return nil
+	}
+	if !hasState {
+		// Records without trailers belong to a store from before the
+		// trailers; anything else without its digest is damage.
+		if meta.GetSchemaVersion() >= recordSchema {
+			s.lossDetail = "the live-state digest is missing"
+			s.setLost(LostJournalCorrupt)
+			return nil
+		}
+		s.legacy = true
 	}
 	if meta.GetMinReaderVersion() > s.opts.ReaderMax {
 		return fmt.Errorf("open journal: %w: the store requires agent schema >= %d, this agent reads up to %d",
@@ -498,16 +543,7 @@ func (s *Store) open() error {
 	if !markerExists && pos.Seq == 0 && s.state != StateLost && s.anchorHasNoCommit(anchorExists) {
 		// The very first open crashed before its anchor log or marker was
 		// complete: nothing was ever committed or acknowledged. Start again.
-		_ = s.closeFiles()
-		if anchorExists {
-			if err := s.fsys.Remove(s.path(AnchorFile)); err != nil {
-				return fmt.Errorf("open journal: remove unfinished anchor log: %w", err)
-			}
-		}
-		if err := os.Remove(s.path(StoreFile)); err != nil {
-			return fmt.Errorf("open journal: remove unfinished store: %w", err)
-		}
-		return s.initFresh()
+		return s.restartFresh(anchorExists)
 	}
 	if markerExists {
 		if err := s.readMarker(); err != nil {
@@ -523,7 +559,7 @@ func (s *Store) open() error {
 		s.setLost(LostAnchorMissing)
 		return nil
 	}
-	if err := s.db.View(func(btx *bolt.Tx) error { return verifyChain(btx, pos) }); err != nil {
+	if err := s.dbView(s.db, func(btx *bolt.Tx) error { return verifyChain(btx, pos) }); err != nil {
 		s.setLost(LostJournalCorrupt)
 		return nil
 	}
@@ -532,6 +568,17 @@ func (s *Store) open() error {
 	}
 	if s.state == StateLost {
 		return nil
+	}
+	if !s.legacy {
+		// Every record and the live-state digest, before anything is served.
+		if err := s.scanAtOpen(ctx); err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return fmt.Errorf("open journal: %w", cerr)
+			}
+			s.lossDetail = err.Error()
+			s.setLost(LostJournalCorrupt)
+			return nil
+		}
 	}
 	if !markerExists {
 		// A store that has committed must find its marker: a missing marker
@@ -549,6 +596,47 @@ func (s *Store) open() error {
 	}
 	s.state = StateUnattested
 	return nil
+}
+
+// restartFresh removes the unfinished first-open files and creates the store
+// again.
+func (s *Store) restartFresh(anchorExists bool) error {
+	_ = s.closeFiles()
+	if anchorExists {
+		if err := s.fsys.Remove(s.path(AnchorFile)); err != nil {
+			return fmt.Errorf("open journal: remove unfinished anchor log: %w", err)
+		}
+	}
+	if err := os.Remove(s.path(StoreFile)); err != nil {
+		return fmt.Errorf("open journal: remove unfinished store: %w", err)
+	}
+	return s.initFresh()
+}
+
+// neverInitialised reports whether the store file is one bbolt created and
+// no commit ever filled: there is no anchor log, marker or quarantine record,
+// and the file holds no bucket at all. The first open creates every bucket in
+// one transaction, so a file with any bucket was committed to.
+func (s *Store) neverInitialised(anchorExists, markerExists bool) bool {
+	if anchorExists || markerExists || s.state == StateLost || s.db == nil {
+		return false
+	}
+	empty := false
+	if err := s.dbView(s.db, func(btx *bolt.Tx) error {
+		k, _ := btx.Cursor().First()
+		empty = k == nil
+		return nil
+	}); err != nil {
+		return false
+	}
+	return empty
+}
+
+// scanAtOpen verifies every record and the live-state digest.
+func (s *Store) scanAtOpen(ctx context.Context) error {
+	return s.dbView(s.db, func(btx *bolt.Tx) error {
+		return (&Tx{btx: btx, storeID: s.storeID}).scan(ctx)
+	})
 }
 
 // anchorHasNoCommit reports whether the anchor log is missing or holds no
@@ -688,7 +776,7 @@ func (s *Store) checkAnchor(pos Position) error {
 		// head at the anchored position matches the anchor.
 		var at [32]byte
 		var ok bool
-		if err := s.db.View(func(btx *bolt.Tx) error {
+		if err := s.dbView(s.db, func(btx *bolt.Tx) error {
 			at, ok = headAt(btx, last.Seq)
 			return nil
 		}); err != nil || !ok || at != last.Head {
@@ -740,8 +828,22 @@ func (s *Store) openBolt() error {
 	if testBoltOptions != nil {
 		testBoltOptions(bo)
 	}
+	// Keep bbolt's descriptor: if bolt.Open panics after it took the file
+	// lock, only closing the descriptor releases it.
+	openFile := bo.OpenFile
+	if openFile == nil {
+		openFile = os.OpenFile
+	}
+	bo.OpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		f, err := openFile(name, flag, perm)
+		if err == nil {
+			s.boltFile = f
+		}
+		return f, err
+	}
 	db, err := bolt.Open(s.path(StoreFile), 0o600, bo)
 	if err != nil {
+		s.boltFile = nil
 		if errors.Is(err, berrors.ErrTimeout) {
 			return fmt.Errorf("open journal: %w", ErrLocked)
 		}
@@ -750,6 +852,7 @@ func (s *Store) openBolt() error {
 	}
 	if db.NoSync && !guard.Off(guard.RefuseNoSync) {
 		_ = db.Close()
+		s.boltFile = nil
 		return fmt.Errorf("open journal: %w", ErrNoSync)
 	}
 	s.db = db
@@ -779,7 +882,7 @@ func (s *Store) initFresh() error {
 	if err != nil {
 		return fmt.Errorf("open journal: encode meta: %w", err)
 	}
-	if err := s.db.Update(func(btx *bolt.Tx) error {
+	if err := s.dbUpdate(s.db, func(btx *bolt.Tx) error {
 		for _, name := range append([]string{bucketMeta, bucketChain, bucketCheckpoints}, s.opts.Buckets...) {
 			if _, err := btx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
@@ -790,6 +893,9 @@ func (s *Store) initFresh() error {
 			return err
 		}
 		if err := m.Put(keyPosition, encodePosition(0, [32]byte{})); err != nil {
+			return err
+		}
+		if err := m.Put(keyStateDigest, make([]byte, 32)); err != nil {
 			return err
 		}
 		return btx.Bucket([]byte(bucketCheckpoints)).Put(seqKey(0), make([]byte, 32))
@@ -834,8 +940,8 @@ func (s *Store) appendAnchor(r AnchorRecord) error {
 }
 
 // readMeta reads the store meta, the position and any quarantine record.
-func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalpb.Quarantine, err error) {
-	err = s.db.View(func(btx *bolt.Tx) error {
+func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalpb.Quarantine, hasState bool, err error) {
+	err = s.dbView(s.db, func(btx *bolt.Tx) error {
 		m := btx.Bucket([]byte(bucketMeta))
 		if m == nil || btx.Bucket([]byte(bucketChain)) == nil || btx.Bucket([]byte(bucketCheckpoints)) == nil {
 			return errors.New("journal buckets missing")
@@ -853,6 +959,7 @@ func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalp
 			return errors.New("store position invalid")
 		}
 		copy(pos.StoreID[:], meta.GetStoreId())
+		hasState = m.Get(keyStateDigest) != nil
 		if qb := m.Get(keyQuarantine); qb != nil {
 			q = &journalpb.Quarantine{}
 			if err := proto.Unmarshal(qb, q); err != nil {
@@ -861,7 +968,7 @@ func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalp
 		}
 		return nil
 	})
-	return meta, pos, q, err
+	return meta, pos, q, hasState, err
 }
 
 // readQuarantineFile returns the reason of the quarantine marker file.
@@ -1008,25 +1115,38 @@ func (s *Store) updateLocked(fn func(tx *Tx) error, migrating bool) (pos Positio
 		}
 		s.pendingAnchor = nil
 	}
+	defer panicOnFault()()
 	defer func() {
 		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
 			s.quarantineLocked(LostJournalCorrupt, "store read failed")
 			pos, err = Position{}, &LostError{Reason: LostJournalCorrupt}
 		}
 	}()
 
 	seq := s.seq + 1
+	var txRef *Tx
 	var head [32]byte
 	empty := false
 	errEmpty := errors.New("empty transaction")
-	berr := s.db.Update(func(btx *bolt.Tx) error {
-		tx := &Tx{btx: btx, writable: true, seq: seq}
+	berr := s.dbUpdate(s.db, func(btx *bolt.Tx) error {
+		tx := &Tx{btx: btx, writable: true, seq: seq, storeID: s.storeID, legacy: s.legacy && migrating}
+		txRef = tx
+		if err := tx.loadState(); err != nil {
+			return &txFuncError{err: err}
+		}
 		if err := fn(tx); err != nil {
 			return &txFuncError{err: err}
+		}
+		if tx.bad != nil {
+			return &txFuncError{err: tx.bad}
 		}
 		if len(tx.writes) == 0 {
 			empty = true
 			return &txFuncError{err: errEmpty}
+		}
+		if err := tx.finishState(); err != nil {
+			return &txFuncError{err: err}
 		}
 		digest := txDigest(tx.writes)
 		head = nextHead(s.head, seq, digest)
@@ -1055,6 +1175,9 @@ func (s *Store) updateLocked(fn func(tx *Tx) error, migrating bool) (pos Positio
 	if berr != nil {
 		var fe *txFuncError
 		if errors.As(berr, &fe) {
+			if txRef != nil && txRef.bad != nil {
+				return Position{}, s.corruptLocked(txRef.bad, fe.err)
+			}
 			return Position{}, fe.err
 		}
 		// Anything else came from bbolt's commit: a page write, an fdatasync
@@ -1087,6 +1210,20 @@ func (s *Store) updateLocked(fn func(tx *Tx) error, migrating bool) (pos Positio
 		return Position{}, err
 	}
 	return Position{StoreID: s.storeID, Seq: seq, Head: head}, nil
+}
+
+// corruptLocked quarantines the store because a record, or the live-state
+// digest, did not verify, and returns the error the caller sees: the
+// caller's own error (which names the record) joined with the loss. A store
+// that is already lost keeps its reason. The caller holds s.mu.
+func (s *Store) corruptLocked(bad, err error) error {
+	if s.state != StateLost {
+		s.quarantineLocked(LostJournalCorrupt, bad.Error())
+	}
+	if err == nil || errors.Is(err, ErrLost) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", err, &LostError{Reason: s.lost})
 }
 
 // commitError marks an injected commit failure.
@@ -1198,14 +1335,17 @@ func (s *Store) quarantineLocked(reason LostReason, detail string) {
 		// reads of this store are refused until it is reopened from disk.
 		_ = s.db.Close()
 		s.db = nil
+		s.boltFile = nil
 	}
 }
 
 // writeStoreQuarantine puts the quarantine record into the store's meta
 // bucket, outside the chain.
 func (s *Store) writeStoreQuarantine(reason LostReason, detail string) (err error) {
+	defer panicOnFault()()
 	defer func() {
 		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
 			err = errors.New("store write panicked")
 		}
 	}()
@@ -1213,7 +1353,7 @@ func (s *Store) writeStoreQuarantine(reason LostReason, detail string) (err erro
 	if err != nil {
 		return fmt.Errorf("encode quarantine: %w", err)
 	}
-	return s.db.Update(func(btx *bolt.Tx) error {
+	return s.dbUpdate(s.db, func(btx *bolt.Tx) error {
 		m := btx.Bucket([]byte(bucketMeta))
 		if m == nil {
 			return errors.New("meta bucket missing")
@@ -1233,6 +1373,7 @@ func (s *Store) View(ctx context.Context, fn func(tx *Tx) error) (err error) {
 	s.mu.Lock()
 	db := s.db
 	bad := s.closed || s.crashed
+	storeID, legacy := s.storeID, s.legacy
 	s.mu.Unlock()
 	if bad {
 		return ErrClosed
@@ -1244,13 +1385,48 @@ func (s *Store) View(ctx context.Context, fn func(tx *Tx) error) (err error) {
 		}
 		return &LostError{Reason: reason}
 	}
+	defer panicOnFault()()
 	defer func() {
 		if r := recover(); r != nil {
+			s.mu.Lock()
+			s.abandonIfTaintedLocked()
+			s.mu.Unlock()
 			s.Quarantine(LostJournalCorrupt, "store read failed")
 			err = &LostError{Reason: LostJournalCorrupt}
 		}
 	}()
-	return db.View(func(btx *bolt.Tx) error { return fn(&Tx{btx: btx}) })
+	var tx *Tx
+	err = s.dbView(db, func(btx *bolt.Tx) error {
+		tx = &Tx{btx: btx, storeID: storeID, legacy: legacy}
+		return fn(tx)
+	})
+	if tx != nil && tx.bad != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err == nil || !errors.Is(err, ErrCorruptRecord) {
+			err = fmt.Errorf("journal view: %w", tx.bad)
+		}
+		return s.corruptLocked(tx.bad, err)
+	}
+	return err
+}
+
+// Scrub reads every record of the store and compares the sum of their digests
+// with the live-state digest recorded in the store. It writes nothing, except
+// that a mismatch quarantines the store with LostJournalCorrupt, like any
+// other failed verification. It is meant to be called periodically. A lost,
+// closed or crashed store returns its error without scanning.
+func (s *Store) Scrub(ctx context.Context) error {
+	s.mu.Lock()
+	err := s.usableLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := s.View(ctx, func(tx *Tx) error { return tx.scan(ctx) }); err != nil {
+		return fmt.Errorf("scrub journal: %w", err)
+	}
+	return nil
 }
 
 // VerifyChain recomputes the chain from the last checkpoint to the current
@@ -1268,14 +1444,20 @@ func (s *Store) VerifyChain(ctx context.Context) error {
 
 // LiveSize returns the bytes the store's live pages use: its size less its
 // free and pending pages. Unlike Size, it falls when records are deleted.
-func (s *Store) LiveSize() int64 {
+func (s *Store) LiveSize() (n int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
 		return 0
 	}
-	var n int64
-	_ = s.db.View(func(btx *bolt.Tx) error {
+	defer panicOnFault()()
+	defer func() {
+		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
+			n = 0
+		}
+	}()
+	_ = s.dbView(s.db, func(btx *bolt.Tx) error {
 		n = btx.Size()
 		return nil
 	})
@@ -1288,14 +1470,20 @@ func (s *Store) LiveSize() int64 {
 }
 
 // Size returns the size of the bbolt store in bytes.
-func (s *Store) Size() int64 {
+func (s *Store) Size() (n int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
 		return 0
 	}
-	var n int64
-	_ = s.db.View(func(btx *bolt.Tx) error {
+	defer panicOnFault()()
+	defer func() {
+		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
+			n = 0
+		}
+	}()
+	_ = s.dbView(s.db, func(btx *bolt.Tx) error {
 		n = btx.Size()
 		return nil
 	})
