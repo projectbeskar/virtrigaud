@@ -142,7 +142,8 @@ func TestFloor_PersistRateAndCrashLoss(t *testing.T) {
 
 // After an unclean end (another boot_id, last save not a clean drain) the
 // floor is raised by NewBootSlack, the unsaved advance a crash may have lost,
-// but its lead over the wall clock never exceeds the slack.
+// even when the wall clock is behind; the raise stops at wall + MaxAhead and
+// never goes below the stored floor.
 func TestOpen_NewBootSlack(t *testing.T) {
 	ctx := context.Background()
 	const slack = 65 * time.Second
@@ -153,6 +154,7 @@ func TestOpen_NewBootSlack(t *testing.T) {
 	stored := f.Now()
 	cfg := cfgFor(c, s)
 	cfg.NewBootSlack = slack
+	cfg.MaxAhead = 5 * time.Minute
 
 	// Same boot: the boot-time credit restores the advance; no slack.
 	c.boot += 10 * time.Second
@@ -161,28 +163,37 @@ func TestOpen_NewBootSlack(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, stored.Add(10*time.Second), same.Status().Floor)
 
-	// A new boot with the wall clock just behind the stored floor: the raise
-	// stops at wall + slack.
+	// A new boot with the wall clock behind the stored floor by more than the
+	// slack: the full slack still applies.
 	c.reboot("boot-b")
-	c.wall = stored.Add(-10 * time.Second)
+	c.wall = stored.Add(-2 * time.Minute)
 	f2, err := clockfloor.Open(ctx, cfg)
 	require.NoError(t, err)
-	assert.Equal(t, c.wall.Add(slack), f2.Status().Floor)
+	assert.Equal(t, stored.Add(slack), f2.Status().Floor)
 	assert.Equal(t, clockfloor.StateOK, f2.Status().State)
 
-	// With the wall clock at the stored floor, the full slack.
+	// A wall clock at the stored floor: the full slack.
 	c.reboot("boot-c")
 	c.wall = stored
 	f3, err := clockfloor.Open(ctx, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, stored.Add(slack), f3.Status().Floor)
 
-	// A wall clock far behind: the stored floor is kept, nothing is added.
+	// A wall clock so far behind that wall + MaxAhead is below the stored
+	// floor: the stored floor is kept, nothing is added.
 	c.reboot("boot-d")
 	c.wall = stored.Add(-time.Hour)
 	f4, err := clockfloor.Open(ctx, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, stored, f4.Status().Floor)
+
+	// A wall clock whose wall + MaxAhead falls between stored and stored +
+	// slack: the raise stops there.
+	c.reboot("boot-f")
+	c.wall = stored.Add(-5*time.Minute + 20*time.Second)
+	f6, err := clockfloor.Open(ctx, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, stored.Add(20*time.Second), f6.Status().Floor)
 
 	// Without the setting nothing is added.
 	c.reboot("boot-e")
@@ -220,41 +231,65 @@ func TestOpen_NoSlackAfterCleanDrain(t *testing.T) {
 	assert.False(t, st.Drained)
 }
 
-// Many fast reboots cannot ratchet the floor's lead over the clock: clean
-// ones add nothing, unclean ones leave a lead of at most the slack.
-func TestOpen_FastRebootsDoNotRatchet(t *testing.T) {
+// Fast reboots: clean ones add nothing; unclean ones that never commit do not
+// stack (the raise lives in memory); unclean ones that each commit are capped
+// at wall + MaxAhead.
+func TestOpen_FastRebootsAreBounded(t *testing.T) {
 	const (
-		slack   = 65 * time.Second
-		reboots = 50
+		slack    = 65 * time.Second
+		maxAhead = 5 * time.Minute
+		reboots  = 50
 	)
-	for _, clean := range []bool{true, false} {
-		name := "unclean"
-		if clean {
-			name = "clean"
-		}
-		t.Run(name, func(t *testing.T) {
-			ctx := context.Background()
-			c, s := newClocks(), &clockfloor.MemStore{}
-			f := open(t, c, s)
-			cfg := cfgFor(c, s)
-			cfg.NewBootSlack = slack
-			for i := 0; i < reboots; i++ {
-				if clean {
-					require.NoError(t, f.Drain(ctx))
-				} else {
-					require.NoError(t, f.Flush(ctx)) // saved, not drained: a crash follows
-				}
-				c.reboot(fmt.Sprintf("boot-%d", i))
-				c.wall = c.wall.Add(time.Second) // a fast reboot
-				var err error
-				f, err = clockfloor.Open(ctx, cfg)
-				require.NoError(t, err)
-				require.NoError(t, f.StartPersisting(ctx))
-				lead := f.Status().Floor.Sub(c.wall)
-				assert.LessOrEqual(t, lead, slack, "reboot %d lead %s", i, lead)
-			}
-		})
+	newCfg := func(c *fakeClocks, s clockfloor.Store) clockfloor.Config {
+		cfg := cfgFor(c, s)
+		cfg.NewBootSlack, cfg.MaxAhead = slack, maxAhead
+		return cfg
 	}
+	ctx := context.Background()
+	t.Run("clean", func(t *testing.T) {
+		c, s := newClocks(), &clockfloor.MemStore{}
+		f := open(t, c, s)
+		for i := 0; i < reboots; i++ {
+			require.NoError(t, f.Drain(ctx))
+			c.reboot(fmt.Sprintf("boot-%d", i))
+			c.wall = c.wall.Add(time.Second)
+			var err error
+			f, err = clockfloor.Open(ctx, newCfg(c, s))
+			require.NoError(t, err)
+			require.NoError(t, f.StartPersisting(ctx))
+			assert.LessOrEqual(t, f.Status().Floor.Sub(c.wall), time.Duration(0)+time.Nanosecond, "reboot %d: nothing added after a clean drain", i)
+		}
+	})
+	t.Run("unclean without a commit", func(t *testing.T) {
+		c, s := newClocks(), &clockfloor.MemStore{}
+		f := open(t, c, s)
+		require.NoError(t, f.Flush(ctx))
+		stored, err := s.Load(ctx)
+		require.NoError(t, err)
+		for i := 0; i < reboots; i++ {
+			c.reboot(fmt.Sprintf("boot-%d", i))
+			c.wall = c.wall.Add(time.Second)
+			f, err = clockfloor.Open(ctx, newCfg(c, s)) // killed before any commit
+			require.NoError(t, err)
+			assert.Equal(t, stored.Floor.Add(slack), f.Status().Floor, "reboot %d: the slack does not stack", i)
+		}
+	})
+	t.Run("unclean with commits", func(t *testing.T) {
+		c, s := newClocks(), &clockfloor.MemStore{}
+		f := open(t, c, s)
+		for i := 0; i < reboots; i++ {
+			require.NoError(t, f.Flush(ctx))
+			c.reboot(fmt.Sprintf("boot-%d", i))
+			c.wall = c.wall.Add(time.Second)
+			var err error
+			f, err = clockfloor.Open(ctx, newCfg(c, s))
+			require.NoError(t, err)
+			require.NoError(t, f.StartPersisting(ctx))
+			lead := f.Status().Floor.Sub(c.wall)
+			assert.LessOrEqual(t, lead, maxAhead, "reboot %d lead %s", i, lead)
+			assert.Equal(t, clockfloor.StateOK, f.Status().State)
+		}
+	})
 }
 
 // A save that fails because the store can no longer commit stops persisting;
@@ -274,4 +309,29 @@ func TestFloor_StoreLostStopsPersisting(t *testing.T) {
 	require.NoError(t, f.Observe(ctx))
 	assert.Equal(t, saves, s.Saves, "no further saves")
 	assert.Equal(t, c.wall, f.Now())
+}
+
+// Leaving the ahead state needs the lead to fall AheadHysteresis below
+// MaxAhead, so a clock that jitters at the edge does not flip the state.
+func TestFloor_AheadHasHysteresis(t *testing.T) {
+	c, s := newClocks(), &clockfloor.MemStore{}
+	cfg := cfgFor(c, s)
+	cfg.MaxAhead = 5 * time.Minute
+	f, err := clockfloor.Open(context.Background(), cfg)
+	require.NoError(t, err)
+	floor := f.Status().Floor
+	state := func(lead time.Duration) clockfloor.StateKind {
+		c.wall = floor.Add(-lead)
+		return f.Status().State
+	}
+	assert.Equal(t, clockfloor.StateOK, state(cfg.MaxAhead-time.Second))
+	assert.Equal(t, clockfloor.StateClockFloorAhead, state(cfg.MaxAhead+time.Second), "enters beyond MaxAhead")
+	for i := 0; i < 5; i++ {
+		assert.Equal(t, clockfloor.StateClockFloorAhead, state(cfg.MaxAhead-5*time.Second), "jitter inside the band stays ahead")
+		assert.Equal(t, clockfloor.StateClockFloorAhead, state(cfg.MaxAhead+time.Second))
+	}
+	assert.True(t, f.Now().IsZero())
+	assert.Equal(t, clockfloor.StateOK, state(cfg.MaxAhead-clockfloor.AheadHysteresis-time.Second), "leaves below the band")
+	assert.False(t, f.Now().IsZero())
+	assert.Equal(t, clockfloor.StateOK, state(cfg.MaxAhead-5*time.Second), "once OK, the plain bound applies again")
 }

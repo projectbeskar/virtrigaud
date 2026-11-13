@@ -101,7 +101,11 @@ limitations under the License.
 // to memory only when the store can no longer commit. Config.NewBootSlack
 // covers the unsaved advance across a reboot after an unclean end: Drain, the
 // clean-shutdown save, marks the record so that a clean end adds nothing, and
-// the raise never leaves the floor more than the slack ahead of the clock.
+// the raise stops at the wall clock plus MaxAhead (repeated unclean fast
+// reboots that each commit can climb to that bound, no further).
+//
+// A Floor that is ahead leaves the ahead state only when the lead is
+// AheadHysteresis below MaxAhead.
 //
 // The record carries a CRC-32 that detects accidental corruption only. The
 // floor's resistance to rollback of the whole store (an older, consistent

@@ -141,13 +141,15 @@ restart. After a power loss, or a crash followed by a reboot (another
 marked as drained (and the first write of the next run clears the mark); when
 the agent opens the store in a new boot and the last commit was not a clean
 drain, it raises the stored floor by that bound (one minute plus the observe
-period, 65 seconds), but never beyond the wall clock plus 65 seconds, and
-never below the stored floor. So the raise leaves the floor at most 65 seconds
-ahead of the clock however often the host reboots (fast reboots cannot ratchet
-it), and nothing is added after a clean drain. The bound against grant expiry:
-after a power loss an expired grant-signing key stays expired unless the
-wall clock was rolled back by more than 65 seconds below the lost floor and the
-host then ran on that clock.
+period, 65 seconds), whatever the wall clock reads, but never beyond the wall
+clock plus the floor's ahead bound (5 minutes) and never below the stored
+floor. The raise lives in memory until the first commit, so it does not stack
+across reboots that never commit; nothing is added after a clean drain. The
+residual ratchet is repeated unclean fast reboots that each commit: each can
+add up to 65 seconds, capped at the wall clock plus the ahead bound. The bound
+against grant expiry: after a power loss an expired grant-signing key stays
+expired unless the wall clock was rolled back below the lost floor by more
+than the 65 second raise and the host then ran on that clock.
 
 A quarantined store cannot commit; the floor then keeps running in memory (a
 commit that fails because the store was quarantined stops persisting, it does
@@ -159,7 +161,9 @@ host's reported chain position does not go backwards covers it), and that
 restore brings back an older floor with it.
 
 **Floor ahead of the clock.** If the floor is ahead of the wall clock by more
-than 5 minutes, the floor is `ClockFloorAhead`: grants are refused and the host
+than 5 minutes, the floor is `ClockFloorAhead` (it is left only when the lead
+has fallen 10 seconds below that bound, so a clock jittering at the edge does
+not flip the state): grants are refused and the host
 refuses every mutating call. Export the floor's ahead state as a metric and
 alert on it: it is the primary control, because the state can have two very
 different causes. A wall clock that was rolled back heals without a restart as
@@ -332,7 +336,9 @@ is not the one the certificate names, reads answer unsigned.
 - The clock floor is as hard to roll back as the store: a joint restore of
   the store and its anchor log is not detected on the host and restores an
   older floor too, and a power loss can lose the last minute or so of the
-  floor's advance (see [The clock floor](#the-clock-floor)).
+  floor's advance (see [The clock floor](#the-clock-floor)); repeated unclean
+  fast reboots that each commit can leave the floor up to the wall clock plus
+  5 minutes ahead.
 - The shutdown unit is not ordered against the agent's unit; the order is
   decided when the agent runs real VMs.
 - The release-artefact test checks the release workflow, the CI workflow and

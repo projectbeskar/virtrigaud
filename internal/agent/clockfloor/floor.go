@@ -39,6 +39,12 @@ const (
 	DefaultMaxAhead = grantverify.DefaultMaxClockSkew
 )
 
+// AheadHysteresis is how far below MaxAhead the floor's lead over the wall
+// clock must fall before a Floor that is ahead leaves the ahead state, so a
+// clock that jitters at the edge does not flip the state (and the status and
+// logs that follow it) on every reading.
+const AheadHysteresis = 10 * time.Second
+
 // ReasonClockFloorAhead is the state reason a host reports while the floor is
 // ahead of its wall clock.
 const ReasonClockFloorAhead = "ClockFloorAhead"
@@ -94,10 +100,9 @@ type Config struct {
 	// floor may have advanced by up to the persist interval plus the observe
 	// period beyond the stored one without being saved, and no boot-time
 	// credit can restore it across boots. The agent sets it to that bound.
-	// The raise never takes the floor beyond the wall clock plus this slack
-	// (a stored floor already beyond that is kept as it is), so the lead it
-	// gives is at most the slack however often the host reboots, and it is
-	// not applied after a clean drain (State.Drained). Zero adds nothing.
+	// The raise never takes the floor beyond the wall clock plus MaxAhead (a
+	// stored floor already beyond that is kept as it is), and it is not
+	// applied after a clean drain (State.Drained). Zero adds nothing.
 	NewBootSlack time.Duration
 }
 
@@ -136,7 +141,25 @@ type Floor struct {
 	// persisting is set by StartPersisting and cleared by StopPersisting:
 	// only while it is set does the Floor call Store.Save.
 	persisting bool
-	failed     error
+	// aheadLatched is set while the floor is in the ahead state (see
+	// AheadHysteresis).
+	aheadLatched bool
+	failed       error
+}
+
+// aheadLocked reports whether the floor is ahead of wall beyond MaxAhead,
+// with hysteresis: once ahead, the lead must fall AheadHysteresis below
+// MaxAhead to leave. f.mu is held.
+func (f *Floor) aheadLocked(wall time.Time) (bool, time.Duration) {
+	lead := f.floor.Sub(wall)
+	limit := f.cfg.MaxAhead
+	if f.aheadLatched {
+		if limit -= AheadHysteresis; limit < 0 {
+			limit = 0
+		}
+	}
+	f.aheadLatched = lead > limit
+	return f.aheadLatched, lead
 }
 
 // Open reads the persisted floor and raises it from the agent's own clocks,
@@ -223,12 +246,13 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 			}
 		} else if cfg.NewBootSlack > 0 && !persisted.Drained {
 			// Another boot after a save that was not a clean drain: raise by
-			// the unsaved advance a crash may have lost. The raise stops at
-			// wall + slack (or at the stored floor, which is kept), so the
-			// floor's lead over the clock from this raise is at most the slack
-			// and fast repeated reboots cannot ratchet it up.
+			// the unsaved advance a crash may have lost. The raise lives in
+			// memory until the first commit, so it does not stack across
+			// reboots that never commit; it stops at wall + MaxAhead (or at the
+			// stored floor, which is kept), so repeated unclean reboots that
+			// each commit cannot push the floor beyond the ahead bound.
 			raised := persisted.Floor.Add(cfg.NewBootSlack)
-			limit := wall.Add(cfg.NewBootSlack)
+			limit := wall.Add(cfg.MaxAhead)
 			if limit.Before(persisted.Floor) {
 				limit = persisted.Floor
 			}
@@ -316,7 +340,10 @@ func (f *Floor) Now() time.Time {
 		return time.Time{}
 	}
 	wall, _, ok := f.observeLocked()
-	if !ok || f.floor.Sub(wall) > f.cfg.MaxAhead {
+	if !ok {
+		return time.Time{}
+	}
+	if ahead, _ := f.aheadLocked(wall); ahead {
 		return time.Time{}
 	}
 	return f.floor
@@ -406,8 +433,8 @@ func (f *Floor) Status() Status {
 		return Status{State: StateFailed, Err: f.failed}
 	}
 	st := Status{State: StateOK, Floor: f.floor, Wall: wall}
-	if ahead := f.floor.Sub(wall); ahead > f.cfg.MaxAhead {
-		st.State, st.Ahead = StateClockFloorAhead, ahead
+	if ahead, lead := f.aheadLocked(wall); ahead {
+		st.State, st.Ahead = StateClockFloorAhead, lead
 	}
 	return st
 }
