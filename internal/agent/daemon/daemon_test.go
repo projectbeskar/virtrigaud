@@ -19,9 +19,13 @@ package daemon_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +44,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
+	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -220,11 +225,36 @@ func TestStartRefusals(t *testing.T) {
 		"provisioning marker missing": {func(h *host) {
 			h.probe.Edit(func(f *hostchecktest.Fake) { delete(f.Content, filepath.Join(h.stateDir, hostcheck.HostMarkerFile)) })
 		}, hostcheck.ReasonStateNotPersistent},
-		"host key readable by group": {func(h *host) {
+		"host key copy in the agent's key directory": {func(h *host) {
 			h.probe.Edit(func(f *hostchecktest.Fake) {
-				f.Files[filepath.Join(h.cfg.PKIDir(), "host.key")] = hostcheck.FileInfo{Mode: 0o640, UID: testUID}
+				f.Files[filepath.Join(h.cfg.PKIDir(), "host.key")] = hostcheck.FileInfo{Mode: 0o600, UID: testUID}
 			})
-		}, hostcheck.ReasonPKIInsecure},
+		}, hostcheck.ReasonHostKeyReadable},
+		"host key readable by the agent": {func(h *host) {
+			h.probe.Edit(func(f *hostchecktest.Fake) { f.ReadablePaths[h.cfg.SignerKeyFile] = true })
+		}, hostcheck.ReasonHostKeyReadable},
+		"signer socket directory open to others": {func(h *host) {
+			h.probe.Edit(func(f *hostchecktest.Fake) {
+				f.Files[filepath.Dir(h.cfg.SignerSocket)] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o755, UID: testUID}
+			})
+		}, hostcheck.ReasonSignerSocketInsecure},
+		"signer is the agent's own user": {func(h *host) { h.refuseSameUser = true }, daemon.ReasonSignerUnavailable},
+		"signer is root": {func(h *host) {
+			h.signerUID = 0
+			h.probe.Edit(func(f *hostchecktest.Fake) {
+				f.Files[filepath.Dir(h.cfg.SignerSocket)] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o750, UID: 0}
+			})
+		}, daemon.ReasonSignerUnavailable},
+		"signer of another user": {func(h *host) {
+			h.signerUID = testUID + 1
+			h.probe.Edit(func(f *hostchecktest.Fake) {
+				f.Files[filepath.Dir(h.cfg.SignerSocket)] = hostcheck.FileInfo{Mode: fs.ModeDir | 0o750, UID: h.signerUID}
+			})
+		}, daemon.ReasonSignerUnavailable},
+		"signer serves another key": {func(h *host) {
+			h.signer.stop()
+			h.signer = startSigner(h.t, h.signer.socket, hostidentitytest.NewKey(h.t))
+		}, daemon.ReasonIdentityInvalid},
 		"trust configuration writable": {func(h *host) {
 			h.probe.Edit(func(f *hostchecktest.Fake) { f.WritablePaths[h.trustDir] = true })
 		}, hostcheck.ReasonTrustConfigInsecure},
@@ -233,8 +263,8 @@ func TestStartRefusals(t *testing.T) {
 				h.t.Fatal(err)
 			}
 		}, daemon.ReasonIdentityInvalid},
-		"host key readable by group, seen on the open file": {func(h *host) {
-			if err := os.Chmod(filepath.Join(h.cfg.PKIDir(), trust.FileHostKey), 0o640); err != nil {
+		"host certificate readable by group, seen on the open file": {func(h *host) {
+			if err := os.Chmod(filepath.Join(h.cfg.PKIDir(), trust.FileHostCert), 0o640); err != nil {
 				h.t.Fatal(err)
 			}
 		}, daemon.ReasonIdentityInvalid},
@@ -394,13 +424,66 @@ func TestLogsCarryNoKeyMaterial(t *testing.T) {
 	r, _ := h.run()
 	r.hello()
 	_ = r.stop()
-	key, err := os.ReadFile(filepath.Join(h.cfg.PKIDir(), trust.FileHostKey))
+	der, err := x509.MarshalPKCS8PrivateKey(h.pki.HostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := strings.Split(string(key), "\n")[1]
+	body := base64.StdEncoding.EncodeToString(der)
 	if strings.Contains(h.logs.text(), body[:32]) || strings.Contains(h.logs.text(), fmt.Sprintf("%x", rawKey(t, h))) {
 		t.Fatal("the logs contain key material")
+	}
+}
+
+// TestAgentHoldsNoKeyFile: the agent's key material directory holds the
+// certificate only; the key is in the signer's hands.
+func TestAgentHoldsNoKeyFile(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	r.hello()
+	_ = r.stop()
+	names, err := os.ReadDir(h.cfg.PKIDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if n.Name() != trust.FileHostCert {
+			t.Errorf("the agent's key material directory holds %s", n.Name())
+		}
+	}
+}
+
+// TestSignerRestartWhileRunning: the signer restarting under a running agent
+// breaks signing only while it is down: answers are unsigned then (never
+// signed by the agent), and signed again afterwards, with no agent restart.
+func TestSignerRestartWhileRunning(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if r.hello() == nil {
+		t.Fatal("no signed answer with the signer up")
+	}
+	socket := h.signer.socket
+	h.signer.stop()
+	if resp, err := agentv1.NewAgentServiceClient(r.conn()).Hello(callCtx(t),
+		&agentv1.HelloRequest{AnswerNonce: bytes.Repeat([]byte{2}, 16), CallerApiVersion: 1}); err == nil && resp.GetHostAnswer() != nil {
+		t.Fatal("a signed answer with the signer down")
+	}
+	h.signer = startSigner(t, socket, h.pki.HostKey)
+	if r.hello() == nil {
+		t.Fatal("no signed answer after the signer restarted")
+	}
+}
+
+// TestReloadReachesTheSigner: a reload fetches the signer's key again, and a
+// reload with the signer down is refused with the running credentials kept.
+func TestReloadReachesTheSigner(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	r.hello()
+	h.signer.stop()
+	r.signals <- syscall.SIGHUP
+	waitLog(t, h, "reload refused")
+	if !strings.Contains(h.logs.text(), "reach the signer") {
+		t.Fatalf("the refusal does not name the signer:\n%s", h.logs.text())
 	}
 }
 
@@ -493,5 +576,66 @@ func TestScrubFindsDamageAndReflectsItInStatus(t *testing.T) {
 	waitLog(t, h, "journal scrub failed")
 	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostJournalCorrupt) {
 		t.Fatalf("answer = %v", a)
+	}
+}
+
+// TestStartWaitsForTheSigner: with the signer down at start-up the agent
+// does not exit (it would exhaust its start rate limit and stay failed); it
+// sends READY=1 with a status naming the wait (so the boot is not held up)
+// but serves nothing, and starts when the signer comes up.
+func TestStartWaitsForTheSigner(t *testing.T) {
+	h := newHost(t)
+	socket := h.signer.socket
+	h.signer.stop()
+	r := h.start()
+	waitLog(t, h, "waiting for the host key signer")
+	select {
+	case s := <-r.started:
+		t.Fatalf("the agent started (%v) without the signer", s)
+	case err := <-r.done:
+		t.Fatalf("the agent exited while waiting for the signer: %v", err)
+	default:
+	}
+	// READY=1 with a status naming the wait, so that the boot and
+	// systemctl start are not held up; but nothing is served: a TLS
+	// handshake gets no answer.
+	if !h.notes.has(systemd.NotifyReady + "\nSTATUS=waiting for the host key signer") {
+		t.Fatalf("no wait status: %v", h.notes.snapshot())
+	}
+	d := &net.Dialer{Timeout: 300 * time.Millisecond}
+	if c, err := tls.DialWithDialer(d, "tcp", r.addr, &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true}); err == nil { // #nosec G402 -- a probe that must not complete
+		_ = c.Close()
+		t.Fatal("the agent served a handshake while waiting for the signer")
+	}
+	h.signer = startSigner(t, socket, h.pki.HostKey)
+	select {
+	case s := <-r.started:
+		// The waiting status does not stand through the rest of the start-up.
+		if !h.notes.has("STATUS=starting") {
+			t.Fatalf("no STATUS=starting after the signer arrived: %v", h.notes.snapshot())
+		}
+		if s != providerv1.AgentState_AGENT_STATE_READY {
+			t.Fatalf("state = %v", s)
+		}
+	case err := <-r.done:
+		t.Fatalf("the agent exited: %v\n%s", err, h.logs.text())
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the agent did not start once the signer was up\n%s", h.logs.text())
+	}
+	if r.hello() == nil {
+		t.Fatal("no signed answer")
+	}
+	_ = r.stop()
+}
+
+// TestStopWhileWaitingForTheSigner: a stop during the wait ends the agent
+// cleanly (exit status 0).
+func TestStopWhileWaitingForTheSigner(t *testing.T) {
+	h := newHost(t)
+	h.signer.stop()
+	r := h.start()
+	waitLog(t, h, "waiting for the host key signer")
+	if err := r.stop(); err != nil {
+		t.Fatalf("Run = %v, want nil", err)
 	}
 }

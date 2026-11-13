@@ -81,6 +81,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync/atomic"
 	"syscall"
@@ -95,6 +96,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
+	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/systemd"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
@@ -107,6 +109,41 @@ const DefaultObserveEvery = 5 * time.Second
 // ReasonIdentityInvalid is the start refusal reason for a trust
 // configuration or host identity that does not load.
 const ReasonIdentityInvalid = "IdentityInvalid"
+
+// ReasonSignerUnavailable is the start refusal reason for a signer process
+// that cannot be reached, is not the signer's user, or does not serve a key
+// of the host certificate. The agent cannot sign without it and starts
+// nothing.
+const ReasonSignerUnavailable = "SignerUnavailable"
+
+// signerPollEvery is the pause between start-up attempts to reach the
+// signer. The start waits for the signer without a limit, in a not-ready
+// state that the service status names, because the signer is a separate unit
+// that may be down for as long as it takes to restart or repair it, and an
+// agent that exited instead would exhaust its start rate limit and stay
+// failed. A variable so that this package's tests can shorten it.
+var signerPollEvery = 2 * time.Second
+
+// signerWaitLogEvery is the shortest interval between two log lines about a
+// signer that is not there yet.
+const signerWaitLogEvery = 30 * time.Second
+
+// signerWaitStatus is the notification while the start waits for the
+// signer: READY=1 with a status line. The wait can last as long as the signer
+// is down, and an agent that sent nothing would hold up the boot
+// (multi-user.target) and `systemctl start` for as long. Nothing is served
+// while it waits: the agent has not opened its listener or its store, so
+// "ready" here means the unit has started and is waiting, never that it
+// answers; every call fails (connection refused) until the signer arrives,
+// which is failing closed. READY=1 is sent again, with the trust state, when
+// the start-up sequence ends.
+const (
+	// signerStartingStatus replaces the waiting status once the signer is
+	// reached.
+	signerStartingStatus = "STATUS=starting"
+	signerWaitStatus     = systemd.NotifyReady + "\nSTATUS=waiting for the host key signer"
+	signerWaitMessage    = "waiting for the host key signer"
+)
 
 // ErrStartRefused is wrapped by every refused start.
 var ErrStartRefused = errors.New("the agent refused to start")
@@ -134,7 +171,7 @@ type Hooks struct {
 
 // Options configures Run.
 //
-// Probe, UID, Listener, TrustDir, TrustFileOwner, JournalFS, Floor, Hooks and
+// Probe, UID, SignerUID, Listener, TrustDir, TrustFileOwner, JournalFS, Floor, Hooks and
 // Now are test overrides: they replace what the host itself provides, the
 // agent binary never sets them, and a release build refuses to start when
 // any of them is set.
@@ -164,6 +201,13 @@ type Options struct {
 	// material must have (test override); nil uses the process's effective
 	// uid.
 	UID *uint32
+	// SignerUID is the signer user's id (test override); nil resolves
+	// Config.SignerUser.
+	SignerUID *uint32
+	// AllowSignerSameUser lets the signer's user be the agent's own (test
+	// override): a signer that is the agent's user protects nothing, so the
+	// agent refuses it otherwise. Root is always refused.
+	AllowSignerSameUser bool
 	// Listener replaces listening on Config.ListenAddress (test override).
 	Listener net.Listener
 	// TrustDir replaces the configured trust directory, for example the
@@ -221,7 +265,7 @@ var allowTestOverrides = false
 func (o Options) testOverrides() []string {
 	var set []string
 	for name, on := range map[string]bool{
-		"Probe": o.Probe != nil, "UID": o.UID != nil, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
+		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
 		"TrustFileOwner": o.TrustFileOwner != nil, "Listener": o.Listener != nil, "Now": o.Now != nil,
 		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
 	} {
@@ -238,6 +282,9 @@ type daemon struct {
 	o   Options
 	log logr.Logger
 	uid uint32
+	// signerUID is the signer process's user: the only peer the agent signs
+	// through.
+	signerUID uint32
 	// trustOwner is the owner the trust configuration's files must have:
 	// root.
 	trustOwner uint32
@@ -284,6 +331,11 @@ func Run(ctx context.Context, o Options, signals <-chan os.Signal) error {
 		d.trustOwner = *o.TrustFileOwner
 	}
 	var err error
+	if o.SignerUID != nil {
+		d.signerUID = *o.SignerUID
+	} else if d.signerUID, err = signer.ResolveUID(o.Config.SignerUser); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrStartRefused, ReasonSignerUnavailable, err)
+	}
 	if d.trustDir, err = o.Config.TrustDir(); err != nil {
 		return fmt.Errorf("%w: %v", ErrStartRefused, err)
 	}
@@ -321,11 +373,16 @@ func Run(ctx context.Context, o Options, signals <-chan os.Signal) error {
 // run is the start-up sequence and the main loop.
 func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	// Step 0: host checks, trust configuration, identity.
-	creds, err := d.loadCredentials()
+	creds, err := d.loadCredentials(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil // stopped while waiting for the signer
+		}
 		reason := ReasonIdentityInvalid
 		if f, ok := hostcheck.AsFailure(err); ok {
 			reason = f.Reason
+		} else if errors.Is(err, signer.ErrSigner) {
+			reason = ReasonSignerUnavailable
 		}
 		d.log.Error(err, "start refused", "reason", reason)
 		return fmt.Errorf("%w: %s: %v", ErrStartRefused, reason, err)
@@ -449,7 +506,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			return err
 		case <-reload:
 			_ = d.notifier.Notify(systemd.NotifyReloading)
-			if err := d.reload(); err != nil {
+			if err := d.reload(ctx); err != nil {
 				reason := reloadRefusalReason(err)
 				d.log.Error(err, "reload refused; the running credentials stay in use", "reason", reason)
 				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent) + "; reload refused: " + reason)
@@ -514,17 +571,35 @@ func (d *daemon) scrubLoop(ctx context.Context, agent *agentState) {
 
 // loadCredentials runs the start-up host checks and loads the trust
 // configuration and the host identity.
-func (d *daemon) loadCredentials() (*server.Credentials, error) {
+func (d *daemon) loadCredentials(ctx context.Context) (*server.Credentials, error) {
 	cfg := d.o.Config
-	if err := hostcheck.Run(d.o.Probe, hostcheck.Config{StateDir: cfg.StateDir, PKIDir: cfg.PKIDir(),
-		TrustDir: d.trustDir, UID: d.uid}); err != nil {
+	if err := hostcheck.Run(d.o.Probe, d.hostcheckConfig()); err != nil {
 		return nil, err
 	}
+	// The host key is in the signer process; the agent only reaches it. The
+	// start waits for a signer that is not there yet, without a limit.
+	if d.signerUID == 0 || (d.signerUID == d.uid && !d.o.AllowSignerSameUser) {
+		return nil, fmt.Errorf("%w: the signer's user (uid %d) must be neither root nor the agent's own user: %w", signer.ErrSigner, d.signerUID, signer.ErrPeer)
+	}
+	var lastLog time.Time
+	sg, err := signer.ConnectWithRetry(ctx, d.signerOptions(ctx), signerPollEvery, func(err error) {
+		_ = d.notifier.Notify(signerWaitStatus)
+		if now := d.o.Now(); lastLog.IsZero() || now.Sub(lastLog) >= signerWaitLogEvery {
+			lastLog = now
+			d.log.Info(signerWaitMessage, "error", err.Error())
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reach the signer: %w", err)
+	}
+	// The wait is over: do not leave the waiting status standing through the
+	// rest of the start-up.
+	_ = d.notifier.Notify(signerStartingStatus)
 	tc, err := trust.LoadConfig(d.trustDir, trust.TrustFileReader(d.trustOwner))
 	if err != nil {
 		return nil, err
 	}
-	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid))
+	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid), sg)
 	if err != nil {
 		return nil, err
 	}
@@ -534,12 +609,36 @@ func (d *daemon) loadCredentials() (*server.Credentials, error) {
 	return &server.Credentials{Identity: id, Trust: tc}, nil
 }
 
+// hostcheckConfig is what the start-up host checks look at.
+func (d *daemon) hostcheckConfig() hostcheck.Config {
+	cfg := d.o.Config
+	return hostcheck.Config{StateDir: cfg.StateDir, PKIDir: cfg.PKIDir(), TrustDir: d.trustDir, UID: d.uid,
+		SignerKeyFile: cfg.SignerKeyFile, SignerSocketDir: filepath.Dir(cfg.SignerSocket), SignerUID: d.signerUID}
+}
+
+// signerOptions is how the agent reaches the signer: its socket, and only
+// its user as the peer. The signing client lives as long as the run, so it
+// takes the run's context, not that of the start-up wait.
+func (d *daemon) signerOptions(run context.Context) signer.ClientOptions {
+	return signer.ClientOptions{Socket: d.o.Config.SignerSocket, ServerUID: d.signerUID, Lifetime: run}
+}
+
 // reload checks and loads the key material and trust configuration again,
 // and replaces the running credentials when they name the same enrolment.
-func (d *daemon) reload() error {
+func (d *daemon) reload(ctx context.Context) error {
 	cfg := d.o.Config
+	hc := d.hostcheckConfig()
 	if err := hostcheck.CheckPKI(d.o.Probe, cfg.PKIDir(), d.uid); err != nil {
 		return err
+	}
+	if err := hostcheck.CheckHostKeyUnreadable(d.o.Probe, hc.PKIDir, hc.SignerKeyFile); err != nil {
+		return err
+	}
+	// A reload fetches the signer's key again: a renewed certificate may name
+	// a new key, which the signer loads on its own reload.
+	sg, err := signer.Connect(ctx, d.signerOptions(ctx))
+	if err != nil {
+		return fmt.Errorf("reach the signer: %w", err)
 	}
 	if err := hostcheck.CheckTrustDir(d.o.Probe, d.trustDir); err != nil {
 		return err
@@ -548,7 +647,7 @@ func (d *daemon) reload() error {
 	if err != nil {
 		return err
 	}
-	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid))
+	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid), sg)
 	if err != nil {
 		return err
 	}

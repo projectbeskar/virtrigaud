@@ -19,7 +19,9 @@ limitations under the License.
 // a unified cgroup v2 hierarchy, that its state directory is private, owned
 // by the agent's user and on a persistent, block-device-backed file system
 // that carries the host's provisioning marker, that its key material is
-// private, and that its trust configuration comes from a location the agent
+// private and that the host private key is not readable by the agent at all
+// (it is held by the separate signer process), that the signer's socket
+// directory is reachable by only the signer and the agent, and that its trust configuration comes from a location the agent
 // cannot write. A failed check refuses the start with a Failure naming the
 // reason; the agent changes nothing on the host.
 //
@@ -57,6 +59,14 @@ const (
 	// ReasonPKIInsecure: the key material directory or a file in it is not
 	// private to the agent's user, or is a symbolic link.
 	ReasonPKIInsecure = "PKIInsecure"
+	// ReasonHostKeyReadable: the agent can read the host private key file,
+	// or a file of that name is in its own key material directory. The key
+	// belongs to the signer process, whose user only may read it.
+	ReasonHostKeyReadable = "HostKeyReadable"
+	// ReasonSignerSocketInsecure: the signer's socket directory is not owned
+	// by the signer's user, or grants others any access or its group write
+	// access.
+	ReasonSignerSocketInsecure = "SignerSocketInsecure"
 	// ReasonTrustConfigInsecure: the trust configuration is writable by the
 	// agent, by a user other than root, or by group or others, or reached
 	// through a symbolic link.
@@ -149,6 +159,12 @@ type Probe interface {
 	// Writable reports whether the process may write path (access(2) with
 	// W_OK, which accounts for a read-only mount).
 	Writable(path string) (bool, error)
+	// Readable reports whether the process may read path: true when an
+	// open for reading succeeds, false when it is refused by permission
+	// (EACCES, EPERM), an error for anything else (a missing path, a
+	// symbolic link, a loop): a path the process cannot be shown to be
+	// refused is not one it is known not to read.
+	Readable(path string) (bool, error)
 	// EUID is the process's effective user id.
 	EUID() uint32
 }

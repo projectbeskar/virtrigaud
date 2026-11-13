@@ -1,0 +1,83 @@
+# Reference unit of the VirtRigaud per-host agent's host key signer.
+# Development builds only: no release artefact ships the agent, the signer or
+# this unit.
+#
+# The signer is the only process that holds the host private key. The agent,
+# which terminates TLS, runs as another user and reaches the key only through
+# this unit's Unix socket, which serves the agent's user and nobody else
+# (SO_PEERCRED). It is a digest oracle: it stops the key being copied out of
+# the agent process, not an agent process that is already compromised from
+# asking for signatures while it runs (see docs/per-host-agent-development.md).
+#
+# It holds no capability, opens no network socket (it has no network
+# namespace to open one in) and reads one file, the key, from its own state
+# directory. The socket directory /run/virtrigaud-signer is made by tmpfiles.d
+# (owned by the signer's user, group the agent's, mode 2750, so that the agent
+# can reach the socket and cannot replace it).
+[Unit]
+Description=VirtRigaud per-host agent host key signer (development builds only)
+Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
+After=local-fs.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/libexec/virtrigaud/vrtg-agent signer
+# SIGHUP loads a replaced key file; a key that does not load keeps the old one.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+# Exit status 2 is a configuration error: restarting cannot fix it.
+RestartPreventExitStatus=2
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30
+User=virtrigaud-signer
+Group=virtrigaud-signer
+# The key is read from /var/lib/virtrigaud-signer, made by tmpfiles.d (0700,
+# owned by the signer's user); the signer never writes there, so it is
+# read-only to it (ProtectSystem=strict also makes it so).
+ReadOnlyPaths=/var/lib/virtrigaud-signer
+ReadWritePaths=/run/virtrigaud-signer
+# No core dump (it would hold the key) and no swap. (Hibernation still
+# writes all memory to disk; that is not covered.)
+LimitCORE=0
+MemorySwapMax=0
+UMask=0077
+LimitNOFILE=256
+TasksMax=64
+MemoryMax=64M
+
+# Hardening. The signer needs no privilege, no network and no other file than
+# its key.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+PrivateIPC=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

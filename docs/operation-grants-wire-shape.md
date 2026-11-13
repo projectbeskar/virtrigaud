@@ -237,9 +237,11 @@ These are requirements on a per-host agent; no agent implements them yet.
 
 Accepted risk: because one key serves both TLS and signed answers, a compromise of the
 TLS-serving process of an agent can produce answers that verify for that host's VMs;
-keeping the key in a separate signer process limits key exfiltration, not this online
-forgery. A separate answer key, held by a process that never terminates TLS, is
-required before a regulated deployment relies on signed host answers.
+keeping the key in a separate signer process (see
+[`per-host-agent-development.md`](per-host-agent-development.md#host-key-signer)) limits
+key exfiltration, not this online forgery. A separate answer key, held by a process that
+never terminates TLS, is required before a regulated deployment relies on signed host
+answers.
 
 ### What a manager will verify
 

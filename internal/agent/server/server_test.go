@@ -19,12 +19,15 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -43,6 +46,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
+	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
@@ -87,9 +91,75 @@ type env struct {
 	creds *server.CredentialStore
 	agent *fakeAgent
 	addr  string
+	// signer is the process-separated host key: the agent holds only a
+	// signer.Client, so every handshake and signed answer in these tests goes
+	// through a real Unix socket.
+	signer *signerProc
+	// signs counts the signatures requested from the signer.
+	signs *countingSigner
 }
 
-func newEnv(t *testing.T) *env {
+// signerProc is the signer's server on a real socket.
+type signerProc struct {
+	t      *testing.T
+	socket string
+	key    *ecdsa.PrivateKey
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// startSigner serves key on socket (a new short path when empty).
+func startSigner(t *testing.T, socket string, key *ecdsa.PrivateKey) *signerProc {
+	t.Helper()
+	if socket == "" {
+		dir, err := os.MkdirTemp("", "vsg")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		socket = filepath.Join(dir, "s.sock")
+	}
+	srv, err := signer.NewServer(signer.ServerOptions{Key: key, AllowedUID: signer.EUID(), Log: logr.Discard()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lis, err := signer.Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &signerProc{t: t, socket: socket, key: key, cancel: cancel, done: make(chan struct{})}
+	go func() {
+		_ = srv.Serve(ctx, lis)
+		close(p.done)
+	}()
+	t.Cleanup(p.stop)
+	return p
+}
+
+// stop stops the signer and waits for it.
+func (p *signerProc) stop() {
+	p.cancel()
+	<-p.done
+}
+
+func newEnv(t *testing.T) *env { return newEnvWith(t, server.Throttle{}) }
+
+// withOptions changes the server options of an environment.
+type withOptions func(*server.Options)
+
+// countingSigner counts the signatures the agent asks the signer for.
+type countingSigner struct {
+	crypto.Signer
+	n atomic.Int64
+}
+
+func (c *countingSigner) Sign(r io.Reader, d []byte, o crypto.SignerOpts) ([]byte, error) {
+	c.n.Add(1)
+	return c.Signer.Sign(r, d, o)
+}
+
+func newEnvWith(t *testing.T, th server.Throttle, mods ...withOptions) *env {
 	t.Helper()
 	p := trusttest.New(t)
 	dir := t.TempDir()
@@ -99,7 +169,15 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := trust.LoadIdentity(filepath.Join(dir, "pki"), cfg, time.Now(), nil)
+	sp := startSigner(t, "", p.HostKey)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	t.Cleanup(cancelRun)
+	sg, err := signer.Connect(runCtx, signer.ClientOptions{Socket: sp.socket, ServerUID: signer.EUID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := &countingSigner{Signer: sg}
+	id, err := trust.LoadIdentity(filepath.Join(dir, "pki"), cfg, time.Now(), nil, counter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,10 +187,14 @@ func newEnv(t *testing.T) *env {
 		Position: journal.Position{Seq: 3},
 	}
 	view.Position.StoreID[0], view.Position.Head[0] = 7, 8
-	e := &env{t: t, pki: p, creds: server.NewCredentialStore(&server.Credentials{Identity: id, Trust: cfg}),
+	e := &env{t: t, pki: p, signer: sp, signs: counter, creds: server.NewCredentialStore(&server.Credentials{Identity: id, Trust: cfg}),
 		agent: &fakeAgent{view: view, state: providerv1.AgentState_AGENT_STATE_READY}}
-	srv, err := server.New(server.Options{Agent: e.agent, Credentials: e.creds, Version: "test", JournalSchemaVersion: 1, Log: logr.Discard(),
-		Now: func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) }})
+	opts := server.Options{Agent: e.agent, Credentials: e.creds, Version: "test", JournalSchemaVersion: 1, Log: logr.Discard(),
+		Now: func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) }, Throttle: th}
+	for _, m := range mods {
+		m(&opts)
+	}
+	srv, err := server.New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,5 +544,100 @@ func TestExpiredClientCertOnOpenConnection(t *testing.T) {
 	e.skew.Store(int64(60 * 24 * time.Hour))
 	if _, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("after expiry: %v", err)
+	}
+}
+
+// TestHandshakeAndAnswerNeedTheSigner: with the signer process down, a new
+// TLS handshake cannot be completed (the host key cannot sign) and a signed
+// answer is not made, not even a locally signed one; when the signer is back
+// both work again, without rebuilding anything in the agent.
+func TestHandshakeAndAnswerNeedTheSigner(t *testing.T) {
+	e := newEnv(t)
+	hello := func() (*agentv1.HelloResponse, error) {
+		return agentv1.NewAgentServiceClient(e.dial(e.provider(), 0)).Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1})
+	}
+	resp, err := hello()
+	if err != nil || resp.GetHostAnswer() == nil {
+		t.Fatalf("Hello with the signer up = %v, %v", resp, err)
+	}
+	verifyAnswer(t, e, resp.GetHostAnswer())
+
+	socket, key := e.signer.socket, e.signer.key
+	e.signer.stop()
+	if resp, err := hello(); err == nil {
+		t.Fatalf("a handshake succeeded with the signer down: %v", resp)
+	}
+
+	e.signer = startSigner(t, socket, key)
+	resp, err = hello()
+	if err != nil || resp.GetHostAnswer() == nil {
+		t.Fatalf("Hello after the signer restarted = %v, %v", resp, err)
+	}
+	verifyAnswer(t, e, resp.GetHostAnswer())
+}
+
+// TestSignedAnswerNeedsTheSignerOnAnEstablishedConnection: on a connection
+// that is already up (no new handshake), a signer that is down leaves the
+// answer unsigned; the agent never signs for itself.
+func TestSignedAnswerNeedsTheSignerOnAnEstablishedConnection(t *testing.T) {
+	e := newEnv(t)
+	c := agentv1.NewAgentServiceClient(e.dial(e.provider(), 0))
+	if resp, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(1), CallerApiVersion: 1}); err != nil || resp.GetHostAnswer() == nil {
+		t.Fatalf("Hello = %v, %v", resp, err)
+	}
+	e.signer.stop()
+	resp, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(2), CallerApiVersion: 1})
+	if err != nil {
+		t.Fatalf("Hello on an established connection: %v", err)
+	}
+	if resp.GetHostAnswer() != nil {
+		t.Fatal("a signed answer was made with the signer down")
+	}
+}
+
+// TestUnauthenticatedFloodDoesNotReachTheSigner: TLS 1.3 signs the server's
+// CertificateVerify before it looks at the client certificate, so every
+// ClientHello would cost one signature. The pre-handshake throttle closes the
+// connections above a source's rate before the handshake: the signer is asked
+// for no more signatures than the burst, however many connections come.
+func TestUnauthenticatedFloodDoesNotReachTheSigner(t *testing.T) {
+	e := newEnvWith(t, server.Throttle{PerSourceRate: 0.0001, PerSourceBurst: 3})
+	before := e.signs.n.Load()
+	cfg := &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true} // #nosec G402 -- a test client that sends a ClientHello and nothing else
+	for i := 0; i < 30; i++ {
+		d := &net.Dialer{Timeout: 2 * time.Second}
+		c, err := tls.DialWithDialer(d, "tcp", e.addr, cfg)
+		if err == nil {
+			_ = c.Close()
+		}
+	}
+	if got := e.signs.n.Load() - before; got > 3 {
+		t.Fatalf("%d signatures for 30 unauthenticated connections with a burst of 3", got)
+	}
+}
+
+// TestAnswerRatePerProviderIdentity: signed answers for one Provider identity
+// are limited; a read above the limit is answered without a signed answer,
+// and the signer is not asked.
+func TestAnswerRatePerProviderIdentity(t *testing.T) {
+	e := newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.AnswersPerSecond, o.AnswerBurst = 0.0001, 3 })
+	c := agentv1.NewAgentServiceClient(e.dial(e.provider(), 0))
+	before := e.signs.n.Load()
+	signed := 0
+	for i := 0; i < 10; i++ {
+		resp, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(byte(i)), CallerApiVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetHostAnswer() != nil {
+			signed++
+		}
+	}
+	if signed != 3 {
+		t.Fatalf("%d signed answers with a burst of 3", signed)
+	}
+	// One signature for the TLS handshake and one per signed answer.
+	if got := e.signs.n.Load() - before; got != 4 {
+		t.Fatalf("the signer was asked for %d signatures, want 4", got)
 	}
 }
