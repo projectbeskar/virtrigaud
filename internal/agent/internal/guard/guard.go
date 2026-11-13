@@ -125,10 +125,6 @@ const (
 	// RecoveredOpsRun: the agent starts a runner for every operation that
 	// recovery left runnable, so that no operation stays running without one.
 	RecoveredOpsRun Name = "recovered-ops-run"
-	// AnswerFromOneRead: a signed operation answer reports the state of the
-	// same store read as its chain position, never a state cached from an
-	// earlier answer.
-	AnswerFromOneRead Name = "answer-from-one-read"
 )
 
 // All lists every guard, in a fixed order.
@@ -140,6 +136,6 @@ func All() []Name {
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
 		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
-		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun, AnswerFromOneRead,
+		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun,
 	}
 }

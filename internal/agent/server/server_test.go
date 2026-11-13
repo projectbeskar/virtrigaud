@@ -130,7 +130,7 @@ func (f *fakeAgent) set(state providerv1.AgentState, reason string) {
 }
 
 type env struct {
-	t     *testing.T
+	t     testing.TB
 	skew  atomic.Int64
 	pki   *trusttest.PKI
 	creds *server.CredentialStore
@@ -146,7 +146,7 @@ type env struct {
 
 // signerProc is the signer's server on a real socket.
 type signerProc struct {
-	t      *testing.T
+	t      testing.TB
 	socket string
 	key    *ecdsa.PrivateKey
 	cancel context.CancelFunc
@@ -154,7 +154,7 @@ type signerProc struct {
 }
 
 // startSigner serves key on socket (a new short path when empty).
-func startSigner(t *testing.T, socket string, key *ecdsa.PrivateKey) *signerProc {
+func startSigner(t testing.TB, socket string, key *ecdsa.PrivateKey) *signerProc {
 	t.Helper()
 	if socket == "" {
 		dir, err := os.MkdirTemp("", "vsg")
@@ -204,7 +204,7 @@ func (c *countingSigner) Sign(r io.Reader, d []byte, o crypto.SignerOpts) ([]byt
 	return c.Signer.Sign(r, d, o)
 }
 
-func newEnvWith(t *testing.T, th server.Throttle, mods ...withOptions) *env {
+func newEnvWith(t testing.TB, th server.Throttle, mods ...withOptions) *env {
 	t.Helper()
 	p := trusttest.New(t)
 	dir := t.TempDir()
@@ -307,7 +307,7 @@ func (e *env) provider() *tls.Certificate {
 
 func nonce(b byte) []byte { return bytes.Repeat([]byte{b}, 16) }
 
-func ctx(t *testing.T) context.Context {
+func ctx(t testing.TB) context.Context {
 	c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
 	return c
