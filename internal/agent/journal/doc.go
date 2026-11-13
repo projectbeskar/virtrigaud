@@ -22,9 +22,13 @@ limitations under the License.
 // # Commit path
 //
 // Every write transaction is one chain step: seq = previous + 1 (counting
-// from 1) and head = SHA-256("vrtg-journal-v1" || previous head || be64(seq)
-// || digest), where digest is SHA-256 over the transaction's (bucket, key,
-// value) writes, sorted, as written. The order is: bbolt commit (fsync), then
+// from 1) and head = SHA-256("vrtg-journal-v2" || previous head || be64(seq)
+// || digest || state), where digest is SHA-256 over the transaction's client
+// (bucket, key, value) writes, sorted, as written, and state is the
+// live-state digest after the commit (see below). The chain entry stored for
+// the step is digest || state || head, and a checkpoint stores the head and
+// the head before it, so that the newest step can still be recomputed from a
+// checkpoint after older entries are pruned. The order is: bbolt commit (fsync), then
 // append (seq, head, store_id) to the anchor log and fsync it, then return.
 // A caller makes a change observable only after Update returns, so nothing
 // acknowledged is ever ahead of the anchor log.
@@ -45,22 +49,31 @@ limitations under the License.
 // The meta bucket also holds a live-state digest: the sum, modulo 2^256, of
 // the digests of all live client records. Every commit updates it
 // incrementally (the old record's digest is subtracted on an overwrite or a
-// delete, the new one added) and writes it as part of the commit, so the
-// chain step of that commit covers it: the transaction digest includes the
-// meta write of the new state digest. Open recomputes it from a full scan,
-// after the chain check and before anything is served, and Store.Scrub does
-// the same on demand. Together with the per-record trailers this catches a
-// stale page version of a record, a lost record and a resurrected delete.
-// The scan also verifies every trailer.
+// delete, the new one added) and writes it as part of the commit. The chain
+// head of that commit hashes the state digest (the meta write itself is not
+// repeated in the transaction digest), so a recorded digest that was edited,
+// even together with the records, no longer matches the chain: Open checks
+// that the newest chain entry's state is the recorded one, and that the chain
+// recomputes. Open also recomputes the state from a full scan, after the
+// chain check and before anything is served; Store.Scrub does the same, and
+// the chain check, on demand, and the agent daemon runs it periodically.
+// Together with the per-record trailers this catches a stale page version of
+// a record, a lost record and a resurrected delete. The scan also verifies
+// every trailer.
 //
 // # Guarantees
 //
 //   - An acknowledged commit survives a crash or power loss on storage that
 //     honours fsync.
-//   - At open, before any commit, the store checks its schema and
-//     min_reader_version (a store that needs a newer reader refuses to open,
-//     with the required version in the error), recomputes the chain from its
-//     last checkpoint, and compares its position with the anchor log:
+//   - At open, before any commit, the store first checks min_reader_version
+//     (a store that needs a newer reader refuses to open, with the required
+//     version in the error, and nothing is written to it, so an older binary
+//     never quarantines a newer store), then reads its identity, position and
+//     quarantine record, so that any loss names the store and the position.
+//     A store whose schema predates record verification, or whose meta has no
+//     live-state digest, is lost{journal_corrupt}: it is not migrated. The
+//     chain is recomputed from its last checkpoint, including the state
+//     digest it committed to, and the position is compared with the anchor log:
 //     store behind the anchor ⇒ rolled_back; store more than one ahead, or
 //     at the same position with another head, or of another store ⇒
 //     inconsistent_store; store missing ⇒ journal_missing; anchor missing ⇒
@@ -82,7 +95,12 @@ limitations under the License.
 //     finds a loss writes the missing ones again (the store record is not
 //     written into a rolled-back, corrupt or inconsistent store, nor one
 //     whose anchor log is missing, which are kept as evidence; a missing
-//     anchor log is re-created holding only the quarantine record). A failed fsync is never retried.
+//     anchor log is re-created holding only the quarantine record). The same
+//     rule applies when a loss is found while the store runs: a store found
+//     corrupt gets no record written into it, and the marker file and the
+//     anchor log record the loss. The corruption is found again by the next
+//     open's scan, so no record is needed in the store itself. A failed fsync
+//     is never retried.
 //   - A store marker binds the store_id to the host and its enrolment
 //     (written by the operation store). A store that has committed and whose
 //     marker is missing, or names another store, is inconsistent_store.
@@ -103,10 +121,11 @@ limitations under the License.
 //     the same process reports the loss instead of failing with ErrLocked; the
 //     memory mapping stays until the process exits.
 //   - A first open that died after bbolt created the store file and before the
-//     journal committed anything (no anchor log, marker, quarantine record or
-//     bucket exists) is started again, like one that died before its anchor log
-//     was complete. Any such record, or any committed data, keeps the store
-//     lost.
+//     journal committed anything (no anchor log, marker, quarantine record,
+//     anchor-rotation file or bucket exists) is started again, like one that
+//     died before its anchor log was complete. The old store file is renamed
+//     to state.db.unfinished-<unix nanoseconds> and the directory fsynced, not
+//     removed. Any such record, or any committed data, keeps the store lost.
 //   - One writer at a time: Open takes an exclusive flock on the state
 //     directory itself and then on state.db.lock (re-checked against the
 //     file at the path) before it reads or changes any other file, and holds
@@ -153,7 +172,31 @@ limitations under the License.
 //     consistent rollback of the store and the anchor log to an earlier pair is
 //     still undetectable locally.
 //   - After a panic inside bbolt, a call that was already waiting on bbolt's
-//     locks in another goroutine is not released.
+//     locks in another goroutine is not released. The goroutine that faulted
+//     never waits for the store lock: if a writer holds it, the quarantine is
+//     applied by the next call that takes it. After the fault no call enters
+//     bbolt again; every call returns the loss.
+//   - A record whose bytes vanish, or revert, after the last open or scrub
+//     reads as absent (or as the older version, which its trailer cannot tell)
+//     until the next scrub finds the live-state digest wrong. Reads verify what
+//     they find, not what they fail to find.
+//   - Any panic inside a caller's transaction function quarantines the store
+//     with journal_corrupt: the journal cannot tell a bbolt fault from the
+//     caller's own, and a loss is the safe answer. A Tx must not be used from
+//     any other goroutine than the one running the function: the runtime's
+//     panic-on-fault setting is per goroutine and does not cover them.
+//   - Size and cost. The store holds the live records of one host's
+//     operations, one chain entry (96 bytes) for each of the last two
+//     checkpoint intervals (2048 commits by default) and a 64 byte checkpoint
+//     for every interval, for the life of the store; it is expected to stay in
+//     the order of megabytes. Open reads every live byte once, so its cost is
+//     linear in the live bytes; it is bounded by the context given to Open,
+//     and a context that ends first fails the open with the context's error
+//     (the store is not served). Open's full scan does not run for a store
+//     that is already lost: such a store serves reads, each of which still
+//     verifies its trailer, but nothing verifies the whole. Store.Scrub holds
+//     one read transaction for its whole run: commits proceed, but a writer
+//     that needs the file to grow waits until the scrub ends.
 //   - Options.Events is called with the store lock held: it must not call
 //     back into the store.
 package journal
