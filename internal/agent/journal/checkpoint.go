@@ -99,59 +99,99 @@ func headAt(btx *bolt.Tx, seq uint64) ([32]byte, bool) {
 // errChainBroken reports a chain that does not verify.
 var errChainBroken = errors.New("journal chain does not verify")
 
-// verifyChain recomputes the chain from the last checkpoint at or below
-// pos.Seq, compares every stored head and the position's head, and checks that
-// the newest entry's state digest is the live-state digest recorded in the
-// meta bucket. The head of every step commits to its state digest, so a
-// recorded digest that was edited (with or without the records adjusted to
-// match) does not verify. The entry at pos.Seq is never pruned: pruning keeps
-// every entry from one checkpoint interval before the newest checkpoint, and
-// a checkpoint at pos.Seq keeps its own entry.
-func verifyChain(btx *bolt.Tx, pos Position) error {
-	cpSeq, head, cpPrev, ok := lastCheckpointFull(btx, pos.Seq)
+// retainedEntries reports whether the chain holds an entry for every position
+// in (from, to].
+func retainedEntries(chain *bolt.Bucket, from, to uint64) bool {
+	for seq := from + 1; seq <= to; seq++ {
+		if len(chain.Get(seqKey(seq))) != chainEntrySize {
+			return false
+		}
+	}
+	return true
+}
+
+// verifyChain recomputes the chain and checks that the newest step committed
+// to the live-state digest recorded in the meta bucket. It returns the head
+// before the newest step, as it recomputed it (the zero head for an empty
+// store), which the anchor tail rule compares with the anchor log.
+//
+// The walk starts at the newest checkpoint at or below pos.Seq, or at the
+// checkpoint before it when the entries between them are still retained, which
+// authenticates the newest checkpoint against an older one. Every checkpoint
+// met on the walk must hold the head recomputed for its position and the head
+// before it. When the walk starts at the newest checkpoint itself, that
+// checkpoint is authenticated from its own entry (recomputed from the
+// checkpoint's previous head) and its previous head is compared with the
+// retained entry before it. The head of every step commits to its state
+// digest, so a recorded digest that was edited, with or without the records
+// adjusted to match, does not verify.
+//
+// What no local check can do is authenticate a chain whose every retained
+// entry and checkpoint was rewritten together; that needs a party outside the
+// host (see the package documentation).
+func verifyChain(btx *bolt.Tx, pos Position) (prevHead [32]byte, err error) {
+	cpSeq, cpHead, cpPrev, ok := lastCheckpointFull(btx, pos.Seq)
 	if !ok {
-		return fmt.Errorf("%w: no checkpoint", errChainBroken)
+		return prevHead, fmt.Errorf("%w: no checkpoint", errChainBroken)
 	}
 	chain := btx.Bucket([]byte(bucketChain))
-	var state [32]byte // the empty store's state digest, for pos.Seq == cpSeq == 0
-	for seq := cpSeq + 1; seq <= pos.Seq; seq++ {
-		v := chain.Get(seqKey(seq))
+	cps := btx.Bucket([]byte(bucketCheckpoints))
+	start, head, startPrev := cpSeq, cpHead, cpPrev
+	if cpSeq > 0 {
+		if s0, h0, p0, ok0 := lastCheckpointFull(btx, cpSeq-1); ok0 && retainedEntries(chain, s0, cpSeq) {
+			start, head, startPrev = s0, h0, p0
+		}
+	}
+	var state [32]byte // the empty store's state digest
+	prevHead = startPrev
+	if start == cpSeq && cpSeq > 0 {
+		// The walk starts at the newest checkpoint: authenticate it from its
+		// own entry and the entry before it.
+		v := chain.Get(seqKey(cpSeq))
 		if len(v) != chainEntrySize {
-			return fmt.Errorf("%w: entry %d missing", errChainBroken, seq)
+			return prevHead, fmt.Errorf("%w: entry %d missing", errChainBroken, cpSeq)
 		}
 		var digest, stored [32]byte
 		copy(digest[:], v[:32])
 		copy(state[:], v[32:64])
 		copy(stored[:], v[64:])
-		head = nextHead(head, seq, digest, state)
-		if head != stored {
-			return fmt.Errorf("%w: head mismatch at %d", errChainBroken, seq)
+		if stored != cpHead || nextHead(cpPrev, cpSeq, digest, state) != cpHead {
+			return prevHead, fmt.Errorf("%w: checkpoint %d does not match its entry", errChainBroken, cpSeq)
+		}
+		if pv := chain.Get(seqKey(cpSeq - 1)); len(pv) == chainEntrySize && !bytes.Equal(pv[64:], cpPrev[:]) {
+			return prevHead, fmt.Errorf("%w: checkpoint %d does not follow its predecessor", errChainBroken, cpSeq)
 		}
 	}
-	if head != pos.Head {
-		return fmt.Errorf("%w: position head mismatch", errChainBroken)
-	}
-	if pos.Seq == cpSeq && pos.Seq > 0 {
-		// The newest step is the checkpoint itself: its entry is retained but
-		// was not part of the loop above. Recompute it from the checkpoint's
-		// previous head, which authenticates the state it holds.
-		v := chain.Get(seqKey(pos.Seq))
+	for seq := start + 1; seq <= pos.Seq; seq++ {
+		v := chain.Get(seqKey(seq))
 		if len(v) != chainEntrySize {
-			return fmt.Errorf("%w: entry %d missing", errChainBroken, pos.Seq)
+			return prevHead, fmt.Errorf("%w: entry %d missing", errChainBroken, seq)
 		}
-		var digest [32]byte
+		var digest, stored [32]byte
 		copy(digest[:], v[:32])
 		copy(state[:], v[32:64])
-		if nextHead(cpPrev, pos.Seq, digest, state) != pos.Head {
-			return fmt.Errorf("%w: head mismatch at %d", errChainBroken, pos.Seq)
+		copy(stored[:], v[64:])
+		before := head
+		head = nextHead(head, seq, digest, state)
+		if head != stored {
+			return prevHead, fmt.Errorf("%w: head mismatch at %d", errChainBroken, seq)
 		}
+		if cv := cps.Get(seqKey(seq)); cv != nil {
+			if len(cv) != checkpointSize || !bytes.Equal(cv[:32], head[:]) || !bytes.Equal(cv[32:], before[:]) {
+				return prevHead, fmt.Errorf("%w: checkpoint %d does not match the chain", errChainBroken, seq)
+			}
+		}
+		prevHead = before
+	}
+	if head != pos.Head {
+		return prevHead, fmt.Errorf("%w: position head mismatch", errChainBroken)
 	}
 	m := btx.Bucket([]byte(bucketMeta))
 	if m == nil {
-		return fmt.Errorf("%w: meta bucket missing", errChainBroken)
+		return prevHead, fmt.Errorf("%w: meta bucket missing", errChainBroken)
 	}
 	if v := m.Get(keyStateDigest); len(v) != len(state) || !bytes.Equal(v, state[:]) {
-		return fmt.Errorf("%w: the recorded live-state digest is not the one the chain committed to", errChainBroken)
+		return prevHead, fmt.Errorf("%w: the recorded live-state digest is not the one the chain committed to", errChainBroken)
 	}
-	return nil
+	return prevHead, nil
 }

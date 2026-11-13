@@ -238,8 +238,12 @@ func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) e
 	return nil
 }
 
-// Last returns a copy of the last key of bucket, or nil.
+// Last returns a copy of the last key of bucket, or nil (also for a reserved
+// bucket name).
 func (t *Tx) Last(bucket string) []byte {
+	if checkClientBucket(bucket) != nil {
+		return nil
+	}
 	b := t.lookup(bucket)
 	if b == nil {
 		return nil

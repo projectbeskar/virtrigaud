@@ -276,7 +276,7 @@ func (t *Tx) verifyChainState() error {
 	if !ok {
 		return t.fail(&recordError{why: "store position invalid"})
 	}
-	if err := verifyChain(t.btx, pos); err != nil {
+	if _, err := verifyChain(t.btx, pos); err != nil {
 		return t.fail(&recordError{why: err.Error()})
 	}
 	return nil
