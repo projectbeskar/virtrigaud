@@ -369,6 +369,11 @@ type Bundle struct {
 	SubjectAltNameURIs []string `json:"subjectAltNameURIs"`
 	// ExtendedKeyUsages are the usages the certificate must carry.
 	ExtendedKeyUsages []string `json:"extendedKeyUsages"`
+	// KeyUsages are the key usages the certificate must carry.
+	KeyUsages []string `json:"keyUsages"`
+	// ForbiddenKeyUsages are the key usages the certificate must not carry:
+	// it is not allowed to sign certificates or CRLs.
+	ForbiddenKeyUsages []string `json:"forbiddenKeyUsages"`
 	// MaxLifetime is the longest lifetime the certificate may have.
 	MaxLifetime string `json:"maxLifetime"`
 	// CA is false: the certificate must not be a CA.

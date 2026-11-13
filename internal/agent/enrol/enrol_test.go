@@ -99,7 +99,7 @@ func TestBuildCSRIsWhatTheManagerApproves(t *testing.T) {
 	f := newFixture(t)
 	policy := hostidentity.Policy{AdminGroup: "admins", HostName: trusttest.HostName, HostURI: f.pki.HostURI, Record: f.rec}
 	req := hostidentity.Request{
-		CSRPEM: f.csr, Usages: []string{hostidentity.UsageServerAuth}, Duration: hostidentity.MaxLifetime, Groups: []string{"admins"},
+		CSRPEM: f.csr, Usages: []string{hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature}, Duration: hostidentity.MaxLifetime, Groups: []string{"admins"},
 	}
 	auth, err := hostidentity.Authorise(policy, req)
 	require.NoError(t, err, "the manager authorises the agent's own request")

@@ -47,6 +47,11 @@ const (
 	UsageDigitalSignature = "digital signature"
 	// UsageKeyEncipherment is the key encipherment key usage.
 	UsageKeyEncipherment = "key encipherment"
+	// UsageCertSign is the certificate signing key usage. It is refused: an
+	// agent certificate never signs certificates.
+	UsageCertSign = "cert sign"
+	// UsageCRLSign is the CRL signing key usage. It is refused.
+	UsageCRLSign = "crl sign"
 )
 
 // Denial reasons. Each is a condition reason (CamelCase, no spaces) and names
@@ -170,8 +175,8 @@ type Authorisation struct {
 // signature verifies (proof of possession) over an accepted key; its subject
 // alternative names are exactly the host URI and the pending record; its
 // subject is empty or the host name; it asks for no extension but those and
-// no CA; usages are client and server authentication (digital signature and
-// key encipherment are tolerated); a lifetime is requested and is at most
+// no CA; usages are server authentication and digital signature (key encipherment is
+// tolerated; client authentication, cert sign and CRL sign are refused); a lifetime is requested and is at most
 // MaxLifetime.
 func Authorise(p Policy, req Request) (Authorisation, error) {
 	if p.AdminGroup == "" || !slices.Contains(req.Groups, p.AdminGroup) {
@@ -245,24 +250,33 @@ func trimSpace(b []byte) []byte {
 	return b
 }
 
-// checkUsages requires server authentication, refuses client authentication
-// (the per-host agent is only ever a TLS server) and tolerates only digital
-// signature and key encipherment besides.
+// checkUsages requires server authentication and the digital signature key
+// usage, refuses client authentication (the per-host agent is only ever a TLS
+// server) and certificate or CRL signing, and tolerates only key encipherment
+// besides. It matches the certificate profile (CheckLeafProfile) the issued
+// certificate is held to.
 func checkUsages(usages []string) error {
-	var server bool
+	var server, signature bool
 	for _, u := range usages {
 		switch u {
 		case UsageClientAuth:
 			return deny(ReasonUsages, "usage %q is refused: the agent certificate is for server authentication only", u)
+		case UsageCertSign, UsageCRLSign:
+			return deny(ReasonUsages, "usage %q is refused: an agent certificate never signs certificates", u)
 		case UsageServerAuth:
 			server = true
-		case UsageDigitalSignature, UsageKeyEncipherment:
+		case UsageDigitalSignature:
+			signature = true
+		case UsageKeyEncipherment:
 		default:
 			return deny(ReasonUsages, "usage %q is not allowed", u)
 		}
 	}
 	if !server {
 		return deny(ReasonUsages, "usages must include %q", UsageServerAuth)
+	}
+	if !signature {
+		return deny(ReasonUsages, "usages must include %q", UsageDigitalSignature)
 	}
 	return nil
 }

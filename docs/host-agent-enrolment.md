@@ -85,7 +85,7 @@ state write, no event, no hint whether the Host exists).
 | The subject is empty or a common name equal to the host name | `SubjectRefused` |
 | The CSR asks for no extension other than the subject alternative names (and basic constraints with the CA bit clear) | `ExtensionRefused` |
 | No CA certificate (`spec.isCA` false, no CA bit in the CSR) | `CARequested` |
-| `spec.usages` include `server auth` and not `client auth`: the per-host agent is only ever a TLS server (`digital signature` and `key encipherment` are tolerated, nothing else) | `UsagesRefused` |
+| `spec.usages` include `server auth` and `digital signature`, and neither `client auth` (the per-host agent is only ever a TLS server) nor `cert sign` or `crl sign` (`key encipherment` is tolerated, nothing else) | `UsagesRefused` |
 | `spec.duration` is set and at most 30 days (`720h`) | `LifetimeRefused` |
 
 Before approving, the manager records the authorisation (request UID, record,
@@ -102,7 +102,7 @@ enrolment namespace, so the API server authenticates the requester.
 - **External PKI**: `spec.issuerRef` names the external-PKI reference
   (`--dev-host-enrolment-external-pki-issuer`, `group/kind/name` with a group
   other than `cert-manager.io`, so no cert-manager controller acts on it). After approval, an operator writes the authorised bundle (the CSR
-  and the issuance policy) with `vrtg host enroll --bundle-out`, has the
+  and the issuance policy: server authentication as the only extended key usage, the digital signature key usage, no certificate or CRL signing, no CA, the exact URI names and the maximum lifetime) with `vrtg host enroll --bundle-out`, has the
   enterprise CA sign it, and returns the certificate with
   `vrtg host enroll --certificate`, which writes it into
   `status.certificate`. The manager then sets `Ready=True` (pinned) or
@@ -115,7 +115,8 @@ In both paths the manager pins the key only after the issued certificate
 passes these checks against the authorisation: it chains to the configured
 subordinate CA bundle (`--dev-host-enrolment-ca-bundle-file`) for server
 authentication; its only extended key usage is server authentication (client
-authentication is refused); it is not a CA; its lifetime is at most 30 days; its
+authentication is refused); it has the digital signature key usage and no
+certificate or CRL signing key usage; it is not a CA; its lifetime is at most 30 days; its
 subject is empty or a common name equal to the host name; its subject
 alternative names are exactly the authorised URIs; and its key is the
 authorised key. A certificate issued after the Host was revoked is refused.

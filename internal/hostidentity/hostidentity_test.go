@@ -161,6 +161,16 @@ func TestAuthoriseDeniesEachBrokenRule(t *testing.T) {
 		{"client auth with server auth", func(r *hostidentity.Request) {
 			r.Usages = []string{hostidentity.UsageClientAuth, hostidentity.UsageServerAuth}
 		}, hostidentity.ReasonUsages},
+		{"server auth without digital signature", func(r *hostidentity.Request) { r.Usages = []string{hostidentity.UsageServerAuth} }, hostidentity.ReasonUsages},
+		{"server auth and key encipherment only", func(r *hostidentity.Request) {
+			r.Usages = []string{hostidentity.UsageServerAuth, hostidentity.UsageKeyEncipherment}
+		}, hostidentity.ReasonUsages},
+		{"cert sign", func(r *hostidentity.Request) {
+			r.Usages = []string{hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature, hostidentity.UsageCertSign}
+		}, hostidentity.ReasonUsages},
+		{"crl sign", func(r *hostidentity.Request) {
+			r.Usages = []string{hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature, hostidentity.UsageCRLSign}
+		}, hostidentity.ReasonUsages},
 		{"an extra usage", func(r *hostidentity.Request) { r.Usages = append(r.Usages, "cert sign") }, hostidentity.ReasonUsages},
 		{"default usages", func(r *hostidentity.Request) { r.Usages = nil }, hostidentity.ReasonUsages},
 		{"a subject other than the host name", func(r *hostidentity.Request) {
