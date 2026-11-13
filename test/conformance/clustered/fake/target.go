@@ -100,7 +100,12 @@ func build(identity *IdentityConfig, opts []Option) (*Target, error) {
 		reasons[clustered.FeatureAsyncTasks] = "the fake is configured with synchronous calls"
 	}
 	if t.ident != nil {
-		feats = append(feats, clustered.FeatureOperationIdentity, clustered.FeatureScriptedOutcomes, clustered.FeatureHostAnswers)
+		feats = append(feats, clustered.FeatureOperationIdentity, clustered.FeatureScriptedOutcomes)
+		if t.violations[StorelessUnknownEnrolment] {
+			reasons[clustered.FeatureHostAnswers] = "the fake commits storeless-unknown-enrolment"
+		} else {
+			feats = append(feats, clustered.FeatureHostAnswers)
+		}
 		if t.ident.required {
 			feats = append(feats, clustered.FeatureOperationIdentityRequired)
 		} else {

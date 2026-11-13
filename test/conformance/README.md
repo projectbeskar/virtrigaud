@@ -374,10 +374,10 @@ that its coverage is reduced.
 ## The instrumented fake and the mutation test
 
 [`clustered/fake`](clustered/fake/) is an in-memory clustered Provider that obeys every rule above
-and can be told to break any one of them (`fake.WithViolations(...)`: 86 violations, such as
+and can be told to break any one of them (`fake.WithViolations(...)`: 87 violations, such as
 `AllowEmptyHost`, `IgnoreOwnerMutate`, `ListDropsUnreachable`, `TaskWrongHost`). In its
 asynchronous mode its effects happen when the host finishes the task, as a real asynchronous
-provider's do. 25 of the violations need its operation-identity mode (`fake.IdentityViolations()`),
+provider's do. 26 of the violations need its operation-identity mode (`fake.IdentityViolations()`),
 such as `AcceptsUnsigned`, `AcceptsWrongKindGrant`, `IgnoresDigest`, `ExecutesDuplicateOpID` and
 `DropsTombstones`; the mutation test runs them against the identity fake that requires a grant. In
 that mode the fake uses the shared verifier (`internal/operation`), the one a per-host agent is to

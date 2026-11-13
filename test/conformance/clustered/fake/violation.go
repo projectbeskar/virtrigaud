@@ -272,6 +272,10 @@ const (
 	// StalledRunsForever reports an operation whose step stalled as running
 	// past the step deadline.
 	StalledRunsForever Violation = "stalled-runs-forever"
+	// StorelessUnknownEnrolment answers a grant for another enrolment with
+	// UNKNOWN_TO_AGENT although its hosts keep no durable records (it does
+	// not declare host answers), instead of GRANT_MISMATCH.
+	StorelessUnknownEnrolment Violation = "storeless-unknown-enrolment"
 )
 
 // All returns every violation, in declaration order.
@@ -296,7 +300,7 @@ func All() []Violation {
 		IgnoresDigest, IgnoresBinding, ExecutesDuplicateOpID, DropsTombstones, TombstonesInProviderMemory,
 		IgnoresOpIDConflict, IgnoresVMBusy, IgnoresMintEpoch, RetiredAsSucceeded, UnknownAsDone, DirtyAsClean,
 		ForgetsOpsOnHostCrash, AnswersAnotherOp, DeletedWithoutTombstone, StaleAnswerNonce, AcceptsAttemptRegression,
-		AcceptsInnerUnknownField, QuarantineAcceptsMutations, StalledRunsForever,
+		AcceptsInnerUnknownField, QuarantineAcceptsMutations, StalledRunsForever, StorelessUnknownEnrolment,
 	}
 }
 
@@ -308,6 +312,6 @@ func IdentityViolations() []Violation {
 		IgnoresDigest, IgnoresBinding, ExecutesDuplicateOpID, DropsTombstones, TombstonesInProviderMemory,
 		IgnoresOpIDConflict, IgnoresVMBusy, IgnoresMintEpoch, RetiredAsSucceeded, UnknownAsDone, DirtyAsClean,
 		ForgetsOpsOnHostCrash, AnswersAnotherOp, DeletedWithoutTombstone, StaleAnswerNonce, AcceptsAttemptRegression,
-		AcceptsInnerUnknownField, QuarantineAcceptsMutations, StalledRunsForever,
+		AcceptsInnerUnknownField, QuarantineAcceptsMutations, StalledRunsForever, StorelessUnknownEnrolment,
 	}
 }

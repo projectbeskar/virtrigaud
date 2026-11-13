@@ -278,6 +278,12 @@ func (p *provider) admit(fullMethod string, outer proto.Message) (proto.Message,
 	if !ok {
 		return nil, nil, status.Error(codes.Internal, "the grant could not be verified")
 	}
+	if refusal.Rule == operation.RuleBinding && p.v(StorelessUnknownEnrolment) {
+		body := &providerv1.GrantBody{}
+		if proto.Unmarshal(env.GetGrant().GetBody(), body) == nil && !bytes.Equal(body.GetEnrolmentId(), p.ident.enrolments[host]) {
+			return nil, nil, withInfo(codes.NotFound, "no record of the enrolment", contracts.UnknownToAgentReason, contracts.ErrorInfoDomain, nil)
+		}
+	}
 	if !p.ignored(refusal.Rule) {
 		return nil, nil, identityRefusal(refusal)
 	}

@@ -43,6 +43,15 @@ func idCase(c Case, more ...Feature) Case {
 	return c
 }
 
+// durableRecords reports whether the Target's hosts keep durable operation
+// records and answer for them (FeatureHostAnswers and HostAnswerTarget):
+// only such a host may answer UNKNOWN_TO_AGENT for an enrolment it holds no
+// record of.
+func durableRecords(e *Env) bool {
+	_, ok := e.Target.(HostAnswerTarget)
+	return ok && e.Target.Capabilities().Has(FeatureHostAnswers)
+}
+
 // seedStopped seeds a stopped VM of OwnerA on host.
 func seedStopped(e *Env, host, name string) VM {
 	return e.Seed(SeedSpec{Host: host, Name: name, Owner: OwnerA})
@@ -267,12 +276,16 @@ func identityCases() []Case {
 				} {
 					_, err := e.SendEnvelope(providerv1.Provider_Power_FullMethodName,
 						&providerv1.OperationEnvelope{Request: op.Request, Grant: e.Resign(op, mutate)}, nil)
-					if name == "another enrolment" {
-						// The host cannot tell another host's enrolment from a
-						// predecessor of its own whose records it lost: it may
-						// only refuse without claiming that the op_id never ran.
-						if _, unknown := WireOf(err).Reason(contracts.UnknownToAgentReason); unknown {
-							continue
+					if name == "another enrolment" && durableRecords(e) {
+						// A host that keeps durable operation records cannot
+						// tell another host's enrolment from a predecessor of
+						// its own whose records it lost: it may refuse without
+						// claiming that the op_id never ran.
+						if w := WireOf(err); w.Code == codes.NotFound {
+							if r, unknown := w.Reason(contracts.UnknownToAgentReason); unknown {
+								assert.Equal(e.T, contracts.ErrorInfoDomain, r.Domain, "UNKNOWN_TO_AGENT ErrorInfo domain")
+								continue
+							}
 						}
 					}
 					requireRefusedWith(e, err, contracts.GrantMismatchReason, "a grant for "+name)
