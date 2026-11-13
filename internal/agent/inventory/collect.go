@@ -533,7 +533,7 @@ func (e *env) declaredComponent(ctx context.Context, h *hasher, entry *CatalogEn
 	}
 	c.ObservedVersion = e.observedVersion(entry, decl.artifactName)
 	c.ArtifactSha256, c.Files = artifact, sums.files
-	// IA-6a: the first defect, in the order of the states.
+	// The first defect, in the order of the states.
 	rng, err := parseRange(entry.Range)
 	if err != nil {
 		return nil, unreadable(ReasonProbeFailed, err)

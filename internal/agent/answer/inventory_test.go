@@ -37,7 +37,7 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// iv1Inventory is the inventory of the published vector IV-1.
+// iv1Inventory is the inventory of the published vector for an inventory inside the signed body.
 func iv1Inventory() *providerv1.HostInventory {
 	empty := sha256.Sum256(nil)
 	return &providerv1.HostInventory{
@@ -50,10 +50,10 @@ func iv1Inventory() *providerv1.HostInventory {
 	}
 }
 
-// TestInventoryVectorIV1 reproduces the published vector of an inventory
+// TestInventoryVector reproduces the published vector of an inventory
 // inside the signed body from the generated types, and signs it through a
 // test signer.
-func TestInventoryVectorIV1(t *testing.T) {
+func TestInventoryVector(t *testing.T) {
 	body := &providerv1.HostAnswer{AgentVersion: "v0.0.1", Inventory: iv1Inventory()}
 	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
 	require.NoError(t, err)
