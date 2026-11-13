@@ -258,6 +258,11 @@ func TestOperation_AdversarialGrants(t *testing.T) {
 			_, err := e.send(o)
 			return err
 		}, code: codes.FailedPrecondition, reason: contracts.GrantMismatchReason},
+		"VM UID not a UID": {send: func() error {
+			o := e.newOp(kOn, "VM/1", b, 1, powerReq("VM/1", providerv1.PowerOp_POWER_OP_ON))
+			_, err := e.send(o)
+			return err
+		}, code: codes.FailedPrecondition, reason: contracts.GrantMismatchReason},
 		"unsigned": {send: func() error {
 			_, err := e.client().Power(ctx(t), powerReq("vm-1", providerv1.PowerOp_POWER_OP_ON))
 			return err

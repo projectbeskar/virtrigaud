@@ -126,7 +126,9 @@ func (s *Server) verifier() (*grantverify.Verifier, error) {
 //  1. the grant is verified (signature, chain and validity at the clock
 //     floor, body rules, kind against the method and request type, request
 //     decoding, intent digest, installation and host);
-//  2. the decoded request must name this host and the grant's VM;
+//  2. the grant's VM and Provider UIDs have the shape of a UID, and the
+//     decoded request names this host and the grant's VM (GRANT_MISMATCH:
+//     nothing is recorded, so the refusal is definite);
 //  3. a kind the executor does not implement is Unimplemented;
 //  4. the operation store decides: a known op_id is answered from its record
 //     or tombstone before the grant's Provider and enrolment are compared
@@ -162,6 +164,12 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 			"op", opHex, "enrolment", hex.EncodeToString(body.GetEnrolmentId()), "vm", body.GetVmUid(),
 			"kind", body.GetKind().String(), "attempt", body.GetAttempt(), "actor", actor)
 	}
+	if !uidRE.MatchString(body.GetVmUid()) || !uidRE.MatchString(body.GetProviderUid()) {
+		// A grant whose UIDs the host could never name in an answer is
+		// refused before admission; nothing was recorded or performed.
+		audit("refused", grantverify.ReasonGrantMismatch)
+		return nil, refusal(codes.FailedPrecondition, grantverify.ReasonGrantMismatch, "the grant's VM or Provider UID is not a UID")
+	}
 	if err := checkInner(verified, s.opts.Credentials.Load().Identity.HostID()); err != nil {
 		audit("refused", grantverify.ReasonGrantMismatch)
 		return nil, refusal(codes.FailedPrecondition, grantverify.ReasonGrantMismatch, err.Error())
@@ -178,6 +186,12 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		Actor:        truncate(actor, actorMax),
 	}
 	d, err := s.opts.Operations.Admit(ctx, r)
+	if errors.Is(err, opstore.ErrInvalidRequest) {
+		// The store refused a malformed field before reading or writing
+		// anything: the request was not, and will never be, performed.
+		audit("refused", grantverify.ReasonGrantMismatch)
+		return nil, refusal(codes.FailedPrecondition, grantverify.ReasonGrantMismatch, "the grant carries a field the host cannot record")
+	}
 	if err != nil {
 		// The store could not decide; nothing may be said about the op_id.
 		audit("error", "store")
