@@ -278,7 +278,7 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 				return nil, fmt.Errorf("%w: %w", ErrInvalidInventory, err)
 			}
 		}
-		a.Inventory = proto.Clone(h.Inventory).(*providerv1.HostInventory)
+		a.Inventory = proto.CloneOf(h.Inventory)
 	}
 	return a, nil
 }

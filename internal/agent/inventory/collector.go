@@ -190,13 +190,13 @@ func (c *Collector) Inventory(requested uint32) *providerv1.HostInventory {
 	inv.SnapshotAgeSeconds = uint32(min(age, math.MaxUint32)) // #nosec G115 -- clamped
 	if s.core != nil {
 		for _, comp := range s.core.components {
-			inv.Components = append(inv.Components, proto.Clone(comp).(*providerv1.HostComponent))
+			inv.Components = append(inv.Components, proto.CloneOf(comp))
 		}
 		for _, f := range s.core.features {
-			inv.Features = append(inv.Features, proto.Clone(f).(*providerv1.HostFeature))
+			inv.Features = append(inv.Features, proto.CloneOf(f))
 		}
 		for _, x := range s.core.extensions {
-			inv.UnexpectedExtensions = append(inv.UnexpectedExtensions, proto.Clone(x).(*providerv1.HostExtension))
+			inv.UnexpectedExtensions = append(inv.UnexpectedExtensions, proto.CloneOf(x))
 		}
 		inv.ProcessIdentityTier = s.core.tier
 	}

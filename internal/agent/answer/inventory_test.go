@@ -27,6 +27,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
@@ -197,4 +200,49 @@ func TestMaximalInventorySigns(t *testing.T) {
 	verify(t, blob, got)
 	assert.True(t, proto.Equal(inv, got.GetInventory()))
 	assert.True(t, bytes.Equal(h.Nonce, got.GetContext().GetNonce()))
+}
+
+// TestAnswerWithoutInventoryHasNoNewField simulates an older manager: with the
+// descriptor of HostAnswer from before the inventory field, an answer to a
+// request that did not ask for an inventory decodes with no unknown field
+// (the strict decoding a verifier uses), and one that carries an inventory
+// does not.
+func TestAnswerWithoutInventoryHasNoNewField(t *testing.T) {
+	fdp := protodesc.ToFileDescriptorProto(providerv1.File_provider_v1_host_answer_proto)
+	for _, m := range fdp.GetMessageType() {
+		if m.GetName() != "HostAnswer" {
+			continue
+		}
+		kept := m.Field[:0]
+		for _, f := range m.GetField() {
+			if f.GetNumber() != 9 {
+				kept = append(kept, f)
+			}
+		}
+		m.Field = kept
+	}
+	fd, err := protodesc.NewFile(fdp, protoregistry.GlobalFiles)
+	require.NoError(t, err)
+	old := fd.Messages().ByName("HostAnswer")
+	require.NotNil(t, old)
+	require.Nil(t, old.Fields().ByNumber(9))
+
+	p := trusttest.New(t)
+	h := testHost(p)
+	a, err := answer.HostAnswer(h)
+	require.NoError(t, err)
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(a)
+	require.NoError(t, err)
+	msg := dynamicpb.NewMessage(old)
+	require.NoError(t, proto.UnmarshalOptions{DiscardUnknown: false}.Unmarshal(raw, msg))
+	assert.Empty(t, msg.GetUnknown(), "no inventory field in an answer that asked for none")
+
+	h.InventoryRequested, h.Inventory = 1, iv1Inventory()
+	a, err = answer.HostAnswer(h)
+	require.NoError(t, err)
+	raw, err = proto.MarshalOptions{Deterministic: true}.Marshal(a)
+	require.NoError(t, err)
+	msg = dynamicpb.NewMessage(old)
+	require.NoError(t, proto.UnmarshalOptions{DiscardUnknown: false}.Unmarshal(raw, msg))
+	assert.NotEmpty(t, msg.GetUnknown(), "the old decoder sees field 9 as unknown: that is why it is sent only when asked")
 }

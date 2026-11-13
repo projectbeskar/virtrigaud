@@ -259,8 +259,7 @@ func (e *env) tier(features []*providerv1.HostFeature) providerv1.ProcessIdentit
 	for _, f := range features {
 		results[f.Name] = f.Result
 	}
-	switch {
-	case results[FeaturePidfsHandle] == present:
+	if results[FeaturePidfsHandle] == present {
 		return providerv1.ProcessIdentityTier_PROCESS_IDENTITY_TIER_PIDFS_HANDLE
 	}
 	if res, _ := kernelAtLeast(e.host, kernelPidfsInode); res == present && results[FeaturePidfd] == present {
