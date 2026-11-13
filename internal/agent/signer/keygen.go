@@ -28,6 +28,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 )
 
 // CheckKeyDir refuses a key directory that is not a real directory owned by
@@ -71,7 +73,7 @@ func CreateKey(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, er
 	if err := CheckKeyDir(dir, uid); err != nil {
 		return nil, false, err
 	}
-	if _, err := os.Lstat(path); err == nil {
+	if _, err := os.Lstat(path); err == nil && !guard.Off(guard.EnrolKeyNeverReplaced) {
 		k, err := LoadKey(path, uid)
 		return k, false, err
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -109,7 +111,11 @@ func CreateKey(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, er
 	if err := f.Close(); err != nil {
 		return nil, false, fmt.Errorf("close the host key: %w", err)
 	}
-	if err := os.Link(tmp, path); err != nil {
+	link := os.Link
+	if guard.Off(guard.EnrolKeyNeverReplaced) {
+		link = os.Rename // the mutation: replace what is there
+	}
+	if err := link(tmp, path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			// Another run won: use its key, never ours.
 			existing, lerr := LoadKey(path, uid)

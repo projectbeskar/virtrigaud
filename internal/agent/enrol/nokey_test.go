@@ -84,4 +84,8 @@ func TestRestorePutsTheOldCertificateBack(t *testing.T) {
 	_, err = os.Lstat(path)
 	assert.True(t, os.IsNotExist(err), "with no previous file the refused one is removed")
 	require.NoError(t, restore(path, nil, false), "removing nothing is fine")
+	require.NoError(t, os.WriteFile(path, []byte("new"), 0o600))
+	require.NoError(t, restore(path, nil, true))
+	_, err = os.Lstat(path)
+	assert.True(t, os.IsNotExist(err), "a previous file that could not be read is not restored, and the refused one is not left")
 }

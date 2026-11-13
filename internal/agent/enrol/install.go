@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 )
@@ -145,7 +146,7 @@ func Install(o InstallOptions) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("%w: the request file: %v", ErrInstall, err)
 	}
-	if csrPin != signerPin {
+	if csrPin != signerPin && !guard.Off(guard.EnrolRequestKey) {
 		return Result{}, fmt.Errorf("%w: the request file was made with a key other than the signer's", ErrInstall)
 	}
 	certs, err := hostidentity.ParseCertificates(o.Certificate)
@@ -171,22 +172,22 @@ func install(o InstallOptions, leafPEM []byte, issued hostidentity.Issued, hostU
 		return Result{}, err
 	}
 	if hadOld {
-		if !o.Replace {
+		if !o.Replace && !guard.Off(guard.EnrolNoReplace) {
 			return Result{}, fmt.Errorf("%w: %s exists; to replace it with a new enrolment, run again with --replace", ErrExists, path)
 		}
-		if prev, ok := installedRecord(old, hostURI); ok && prev.Equal(issued.Record) {
+		if prev, ok := installedRecord(old, hostURI); ok && prev.Equal(issued.Record) && !guard.Off(guard.EnrolSameEnrolment) {
 			return Result{}, fmt.Errorf("%w: it names the enrolment that is already installed", ErrExists)
 		}
 	}
 	if err := writeAtomic(path, leafPEM); err != nil {
 		return Result{}, err
 	}
-	id, err := trust.LoadIdentity(o.PKIDir, o.Trust, o.Now, trust.KeyFileReader(o.UID), o.Signer)
-	if err != nil {
+	_, err = trust.LoadIdentity(o.PKIDir, o.Trust, o.Now, trust.KeyFileReader(o.UID), o.Signer)
+	if err != nil && !guard.Off(guard.EnrolLoaderCheck) {
 		rerr := restore(path, old, hadOld)
 		return Result{}, errors.Join(fmt.Errorf("%w: the agent would not load it: %v", ErrInstall, err), rerr)
 	}
-	return Result{HostURI: id.HostURI, Record: id.Record, KeyPin: issued.KeyPin, NotAfter: id.Leaf.NotAfter, Replaced: hadOld}, nil
+	return Result{HostURI: hostURI, Record: issued.Record, KeyPin: issued.KeyPin, NotAfter: issued.Leaf.NotAfter, Replaced: hadOld}, nil
 }
 
 // readInstalled reads the installed certificate file, if there is one. A
@@ -219,13 +220,12 @@ func installedRecord(b []byte, hostURI string) (hostidentity.Record, bool) {
 	return rec, err == nil
 }
 
-// restore puts the previous host certificate back, or removes the new one.
+// restore puts the previous host certificate back, or, when there is none
+// (or it could not be read), removes the new one: a refused certificate is
+// never left in place.
 func restore(path string, old []byte, hadOld bool) error {
 	if hadOld && len(old) > 0 {
 		return writeAtomic(path, old)
-	}
-	if hadOld {
-		return nil
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove the refused certificate: %w", err)

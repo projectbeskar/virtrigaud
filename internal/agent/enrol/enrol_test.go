@@ -340,12 +340,17 @@ func TestInstallReplacement(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "a refusal leaves the installed certificate")
 
-	// A new enrolment record (re-enrolment) replaces it.
+	// A new enrolment record (re-enrolment) replaces it, on request only.
 	next := f.rec
 	next.EnrolmentID = bytes16(0xD0)
 	f.uris = hostidentity.RequestURIs(f.pki.HostURI, next)
 	f.csr, err = enrol.BuildCSR(f.key, f.uris)
 	require.NoError(t, err)
+	_, err = f.install(f.issue(t, hostidentitytest.IssueOptions{}), false)
+	require.ErrorIs(t, err, enrol.ErrExists, "another enrolment does not replace it without --replace either")
+	still, err := os.ReadFile(f.hostCrt())
+	require.NoError(t, err)
+	assert.Equal(t, before, still)
 	res, err := f.install(f.issue(t, hostidentitytest.IssueOptions{}), true)
 	require.NoError(t, err)
 	assert.True(t, res.Replaced)
@@ -371,4 +376,37 @@ func TestHostNameAndParseURIs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, parsed, 5)
 	assert.Equal(t, f.pki.HostURI, host)
+}
+
+// TestInstallConfirmsWithTheLoader: a file the daemon's loader would refuse
+// (here: not owned by the agent's uid, which ValidateIssued does not look at)
+// is removed, or the previous one put back.
+func TestInstallConfirmsWithTheLoader(t *testing.T) {
+	f := newFixture(t)
+	notAgent := signer.EUID() + 1
+	_, err := enrol.Install(enrol.InstallOptions{
+		PKIDir: f.pkiDir, UID: notAgent, CSR: f.csr, Certificate: f.issue(t, hostidentitytest.IssueOptions{}), Trust: f.cfg, Signer: f.key, Now: f.now,
+	})
+	require.ErrorIs(t, err, enrol.ErrInstall)
+	assert.Contains(t, err.Error(), "would not load")
+	_, statErr := os.Lstat(f.hostCrt())
+	assert.True(t, os.IsNotExist(statErr), "the refused certificate is not left in place")
+
+	// A refused replacement leaves the installed certificate as it was.
+	_, err = f.install(f.issue(t, hostidentitytest.IssueOptions{}), false)
+	require.NoError(t, err)
+	before, err := os.ReadFile(f.hostCrt())
+	require.NoError(t, err)
+	next := f.rec
+	next.EnrolmentID = bytes16(0xE0)
+	f.csr, err = enrol.BuildCSR(f.key, hostidentity.RequestURIs(f.pki.HostURI, next))
+	require.NoError(t, err)
+	_, err = enrol.Install(enrol.InstallOptions{
+		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, Certificate: f.issue(t, hostidentitytest.IssueOptions{}), Trust: f.cfg,
+		Signer: f.key, Now: f.now.Add(-48 * time.Hour), Replace: true,
+	})
+	require.Error(t, err, "a certificate that is not yet valid is refused")
+	after, err := os.ReadFile(f.hostCrt())
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
 }

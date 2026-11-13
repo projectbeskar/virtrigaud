@@ -29,6 +29,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 )
 
@@ -86,13 +87,15 @@ func BuildCSR(key crypto.Signer, uris []string) ([]byte, error) {
 	if key == nil {
 		return nil, fmt.Errorf("%w: no key", ErrRequest)
 	}
-	pub, ok := key.Public().(*ecdsa.PublicKey)
-	if !ok || pub.Curve != elliptic.P256() {
+	if pub, ok := key.Public().(*ecdsa.PublicKey); !guard.Off(guard.EnrolCSRKeyType) && (!ok || pub.Curve != elliptic.P256()) {
 		return nil, fmt.Errorf("%w: the host key is not ECDSA P-256", ErrRequest)
 	}
 	parsed, hostURI, err := ParseURIs(uris)
-	if err != nil {
+	if err != nil && !guard.Off(guard.EnrolCSRURIs) {
 		return nil, err
+	}
+	if guard.Off(guard.EnrolCSRURIs) {
+		parsed, hostURI = lenientURIs(uris)
 	}
 	name, err := HostName(hostURI)
 	if err != nil {
@@ -122,4 +125,20 @@ func BuildCSR(key crypto.Signer, uris []string) ([]byte, error) {
 // the manager pins and an administrator can compare.
 func KeyPin(pub crypto.PublicKey) (string, error) {
 	return hostidentity.SPKIPin(pub)
+}
+
+// lenientURIs parses uris without any check. It exists only for the mutation
+// test build, which switches the URI check off.
+func lenientURIs(uris []string) ([]*url.URL, string) {
+	var host string
+	parsed := make([]*url.URL, 0, len(uris))
+	for _, s := range uris {
+		if u, err := url.Parse(s); err == nil {
+			parsed = append(parsed, u)
+			if hostidentity.ValidateHostURI(s) == nil {
+				host = s
+			}
+		}
+	}
+	return parsed, host
 }
