@@ -64,25 +64,29 @@ func (s *Store) migrateLocked() error {
 		if err := proto.Unmarshal(mb.Get(keyStoreMeta), meta); err != nil {
 			return fmt.Errorf("decode store meta: %w", err)
 		}
-		if meta.GetSchemaVersion() >= s.opts.SchemaVersion {
-			return nil
-		}
+		changed := false
 		from := meta.GetSchemaVersion()
-		for _, m := range migrations {
-			if m.ToVersion <= from || m.ToVersion > s.opts.SchemaVersion {
-				continue
-			}
-			if m.Apply != nil {
-				if err := m.Apply(tx); err != nil {
-					return fmt.Errorf("migration to schema %d: %w", m.ToVersion, err)
+		if from < s.opts.SchemaVersion {
+			for _, m := range migrations {
+				if m.ToVersion <= from || m.ToVersion > s.opts.SchemaVersion {
+					continue
+				}
+				if m.Apply != nil {
+					if err := m.Apply(tx); err != nil {
+						return fmt.Errorf("migration to schema %d: %w", m.ToVersion, err)
+					}
+				}
+				if m.MinReader > meta.GetMinReaderVersion() {
+					meta.MinReaderVersion = m.MinReader
 				}
 			}
-			if m.MinReader > meta.GetMinReaderVersion() {
-				meta.MinReaderVersion = m.MinReader
-			}
+			meta.SchemaVersion = s.opts.SchemaVersion
+			meta.WriterVersion = s.opts.SchemaVersion
+			changed = true
 		}
-		meta.SchemaVersion = s.opts.SchemaVersion
-		meta.WriterVersion = s.opts.SchemaVersion
+		if !changed {
+			return nil
+		}
 		b, err := proto.MarshalOptions{Deterministic: true}.Marshal(meta)
 		if err != nil {
 			return fmt.Errorf("encode store meta: %w", err)

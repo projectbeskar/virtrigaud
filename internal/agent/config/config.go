@@ -49,6 +49,9 @@ const (
 	DefaultListenAddress = ":9460"
 	// DefaultDrainTimeout bounds how long a stop waits for running calls.
 	DefaultDrainTimeout = 30 * time.Second
+	// DefaultScrubInterval is the period of the operation store's scrub: a
+	// read of every record against the store's live-state digest.
+	DefaultScrubInterval = time.Hour
 	// PKIDirName is the key material directory inside the state directory.
 	PKIDirName = "pki"
 	// FakeExecutorDirName is the fake executor's directory inside the state
@@ -64,6 +67,8 @@ const (
 	FlagListenAddress = "listen-address"
 	// FlagDrainTimeout names the drain timeout flag.
 	FlagDrainTimeout = "drain-timeout"
+	// FlagScrubInterval names the scrub interval flag.
+	FlagScrubInterval = "scrub-interval"
 	// FlagExecutor names the executor flag.
 	FlagExecutor = "executor"
 	// FlagDevTrustDir names the development-only trust directory flag.
@@ -90,6 +95,10 @@ type Config struct {
 	ListenAddress string
 	// DrainTimeout bounds a graceful stop.
 	DrainTimeout time.Duration
+	// ScrubInterval is the period of the operation store's scrub. It must be
+	// positive: the scrub cannot be switched off, because it is what finds a
+	// damaged record that nothing reads.
+	ScrubInterval time.Duration
 	// Executor names the executor: ExecutorNone, or ExecutorFake in a
 	// development build.
 	Executor string
@@ -108,6 +117,7 @@ func Register(fs *flag.FlagSet) *Config {
 	fs.StringVar(&c.StateDir, FlagStateDir, DefaultStateDir, "the agent's state directory (persistent, owned by the agent's user, mode 0700)")
 	fs.StringVar(&c.ListenAddress, FlagListenAddress, DefaultListenAddress, "the address the agent serves the Provider on")
 	fs.DurationVar(&c.DrainTimeout, FlagDrainTimeout, DefaultDrainTimeout, "how long a stop waits for running calls")
+	fs.DurationVar(&c.ScrubInterval, FlagScrubInterval, DefaultScrubInterval, "how often the operation store reads every record to verify it (cannot be disabled)")
 	fs.StringVar(&c.Executor, FlagExecutor, ExecutorNone, "the executor: none (every build) or fake (development builds only)")
 	fs.StringVar(&c.DevTrustDir, FlagDevTrustDir, "", "development builds only: read the trust configuration from this directory")
 	fs.StringVar(&c.DevEnrolmentFile, FlagDevEnrolmentFile, "", "development builds only: enrol a fresh store from this file and the host certificate")
@@ -125,6 +135,9 @@ func (c *Config) Validate() error {
 	}
 	if c.DrainTimeout <= 0 {
 		return fmt.Errorf("--%s must be positive", FlagDrainTimeout)
+	}
+	if c.ScrubInterval <= 0 {
+		return fmt.Errorf("--%s must be positive", FlagScrubInterval)
 	}
 	if _, err := c.TrustDir(); err != nil {
 		return err

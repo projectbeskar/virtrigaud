@@ -18,7 +18,10 @@ limitations under the License.
 
 package journal
 
-import "errors"
+import (
+	"errors"
+	"os"
+)
 
 const noFollow = 0
 
@@ -30,3 +33,6 @@ func acquireLock(string) (*fileLock, error) {
 }
 
 func (l *fileLock) release() error { return nil }
+
+// unlockFile has nothing to drop off Unix: the journal does not open there.
+func unlockFile(*os.File) {}

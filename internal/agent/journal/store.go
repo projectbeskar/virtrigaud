@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -55,6 +56,11 @@ const (
 	LockFile = "state.db.lock"
 )
 
+// unfinishedSuffix, followed by a Unix timestamp in nanoseconds, names a store
+// file of a first open that never finished, set aside when the store is
+// created again.
+const unfinishedSuffix = ".unfinished-"
+
 // maxAnchorBytes bounds the anchor log Open reads. A log the store wrote is
 // bounded by rotation; a larger one is anchor_corrupt.
 const maxAnchorBytes = 64 << 20
@@ -77,6 +83,8 @@ var (
 	keyStoreMeta  = []byte("store")
 	keyPosition   = []byte("position")
 	keyQuarantine = []byte("quarantine")
+	// keyStateDigest holds the additive digest of the live client records.
+	keyStateDigest = []byte("state_digest")
 )
 
 // Defaults.
@@ -94,12 +102,17 @@ const (
 // Schema versions of this binary.
 const (
 	// SchemaVersion is the schema this binary writes.
-	SchemaVersion uint32 = 1
+	SchemaVersion uint32 = 2
 	// ReaderMax is the highest min_reader_version this binary can read.
-	ReaderMax uint32 = 1
+	ReaderMax uint32 = 2
 	// MinReaderVersion is the min_reader_version this binary writes into a
-	// new store.
-	MinReaderVersion uint32 = 1
+	// new store. Schema 2 is the first with record trailers and the
+	// live-state digest, which an older reader would not verify or maintain.
+	MinReaderVersion uint32 = 2
+	// recordSchema is the first schema whose values carry a trailer and whose
+	// chain commits to the live-state digest. A store below it is refused as
+	// lost{journal_corrupt}: it is never migrated.
+	recordSchema uint32 = 2
 )
 
 // testBoltOptions, when set by a test of this package, adjusts the bbolt
@@ -204,10 +217,23 @@ type Store struct {
 
 	db     *bolt.DB
 	anchor File
+	// boltFile is the descriptor bbolt opened (through Options.OpenFile). It
+	// lets the store release the file lock of a database it cannot close.
+	boltFile *os.File
+	// tainted is set when a panic left bbolt's locks held (see dbView).
+	tainted atomic.Bool
+	// faultPending is set when a read faulted while a writer held s.mu (see
+	// onViewFault): the next call that takes the lock applies the quarantine.
+	faultPending atomic.Bool
+	// lossDetail is what Open found, for the quarantine event.
+	lossDetail string
 
-	storeID    [16]byte
-	seq        uint64
-	head       [32]byte
+	storeID [16]byte
+	seq     uint64
+	head    [32]byte
+	// prevHead is the head before the newest step, as verifyChain recomputed
+	// it at open: what the anchor tail rule compares with the anchor log.
+	prevHead   [32]byte
 	anchorSize int64
 
 	state   State
@@ -267,6 +293,9 @@ func Open(ctx context.Context, opts Options) (st *Store, err error) {
 	if opts.SchemaVersion == 0 {
 		opts.SchemaVersion = SchemaVersion
 	}
+	if opts.SchemaVersion < recordSchema {
+		return nil, fmt.Errorf("open journal: schema version %d is below %d, the first with record verification", opts.SchemaVersion, recordSchema)
+	}
 	if opts.ReaderMax == 0 {
 		opts.ReaderMax = ReaderMax
 	}
@@ -293,16 +322,25 @@ func Open(ctx context.Context, opts Options) (st *Store, err error) {
 		_ = s.lock.release()
 		return nil, fmt.Errorf("open journal: create %s: %w", opts.Dir, err)
 	}
+	// A memory fault on bbolt's mapping becomes a panic the recover below
+	// turns into a loss. Registered first, so it is restored last.
+	defer panicOnFault()()
 	defer func() {
 		// bbolt may panic on corrupt pages: a corrupt store is lost, never a
 		// crashed agent.
 		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
+			if s.db == nil {
+				// bolt.Open itself panicked: its descriptor and file lock
+				// are still held.
+				s.abandonLocked()
+			}
 			s.setLost(LostJournalCorrupt)
 			s.recordOpenLossSafe()
 			st, err = s, nil
 		}
 	}()
-	if err := s.open(); err != nil {
+	if err := s.open(ctx); err != nil {
 		_ = s.closeFiles()
 		_ = s.lock.release()
 		return nil, err
@@ -345,6 +383,9 @@ func (s *Store) recordOpenLoss() {
 	}
 	if s.opts.Events != nil {
 		d := "found when the store was opened"
+		if s.lossDetail != "" {
+			d = fmt.Sprintf("%s: %s", d, s.lossDetail)
+		}
 		if len(errs) > 0 {
 			d = fmt.Sprintf("%s (not every quarantine record was written: %v)", d, errors.Join(errs...))
 		}
@@ -430,10 +471,20 @@ func (s *Store) readAnchor() (raw []byte, bounded bool, err error) {
 }
 
 // open does the work of Open. The caller holds the lock file.
-func (s *Store) open() error {
+func (s *Store) open(ctx context.Context) error {
 	dbExists, err := fileExists(s.path(StoreFile))
 	if err != nil {
 		return fmt.Errorf("open journal: %w", err)
+	}
+	// A store that needs a newer reader is refused before anything is written
+	// to the state directory: its minimum reader version is read through a
+	// read-only handle, before the store is opened for writing and before an
+	// unfinished anchor rotation is cleaned up.
+	if dbExists {
+		if min, ok := s.peekMinReader(); ok && min > s.opts.ReaderMax {
+			return fmt.Errorf("open journal: %w: the store requires agent schema >= %d, this agent reads up to %d",
+				ErrSchemaTooNew, min, s.opts.ReaderMax)
+		}
 	}
 	anchorExists, err := s.fsys.Exists(s.path(AnchorFile))
 	if err != nil {
@@ -444,11 +495,17 @@ func (s *Store) open() error {
 		return fmt.Errorf("open journal: %w", err)
 	}
 	// A rotation that did not finish leaves the next file behind; the old
-	// anchor log is still complete.
-	if ok, _ := s.fsys.Exists(s.path(anchorNextFile)); ok && anchorExists {
+	// anchor log is still complete. Without an anchor log, the next file is
+	// evidence of a store that had committed, never of a first open.
+	nextExists, err := s.fsys.Exists(s.path(anchorNextFile))
+	if err != nil {
+		return fmt.Errorf("open journal: %w", err)
+	}
+	if nextExists && anchorExists {
 		if err := s.fsys.Remove(s.path(anchorNextFile)); err != nil {
 			return fmt.Errorf("open journal: remove unfinished anchor rotation: %w", err)
 		}
+		nextExists = false
 	}
 	if q, ok := s.readQuarantineFile(); ok {
 		s.setLost(q)
@@ -466,7 +523,7 @@ func (s *Store) open() error {
 	}
 
 	if !dbExists {
-		if anchorExists || markerExists || s.state == StateLost {
+		if anchorExists || markerExists || nextExists || s.state == StateLost {
 			s.setLost(LostJournalMissing)
 			return nil
 		}
@@ -479,11 +536,20 @@ func (s *Store) open() error {
 	if s.db == nil {
 		return nil // lost{journal_corrupt}
 	}
-	meta, pos, quarantine, err := s.readMeta()
+	meta, pos, quarantine, hasState, err := s.readMeta()
 	if err != nil {
+		if s.neverInitialised(anchorExists, markerExists, nextExists) {
+			// bbolt created the file and the first open died before it
+			// committed the store's buckets: nothing was ever written or
+			// acknowledged. Start again.
+			return s.restartFresh(anchorExists)
+		}
 		s.setLost(LostJournalCorrupt)
 		return nil
 	}
+	// The store's identity, position and quarantine record come first, so that
+	// any loss found below names the store and the position, and a store that
+	// needs a newer reader is refused before anything can be written to it.
 	if meta.GetMinReaderVersion() > s.opts.ReaderMax {
 		return fmt.Errorf("open journal: %w: the store requires agent schema >= %d, this agent reads up to %d",
 			ErrSchemaTooNew, meta.GetMinReaderVersion(), s.opts.ReaderMax)
@@ -494,20 +560,23 @@ func (s *Store) open() error {
 		s.setLost(parseReason(quarantine.GetReason()))
 		s.had.store = true
 	}
+	switch {
+	case meta.GetSchemaVersion() < recordSchema:
+		// A store from before record verification is not migrated: its values
+		// carry no trailer, so nothing in it can be verified.
+		s.lossDetail = "store predates record verification"
+		s.setLost(LostJournalCorrupt)
+		return nil
+	case !hasState:
+		s.lossDetail = "live-state digest missing"
+		s.setLost(LostJournalCorrupt)
+		return nil
+	}
 
-	if !markerExists && pos.Seq == 0 && s.state != StateLost && s.anchorHasNoCommit(anchorExists) {
+	if !markerExists && pos.Seq == 0 && s.state != StateLost && !nextExists && s.anchorHasNoCommit(anchorExists) {
 		// The very first open crashed before its anchor log or marker was
 		// complete: nothing was ever committed or acknowledged. Start again.
-		_ = s.closeFiles()
-		if anchorExists {
-			if err := s.fsys.Remove(s.path(AnchorFile)); err != nil {
-				return fmt.Errorf("open journal: remove unfinished anchor log: %w", err)
-			}
-		}
-		if err := os.Remove(s.path(StoreFile)); err != nil {
-			return fmt.Errorf("open journal: remove unfinished store: %w", err)
-		}
-		return s.initFresh()
+		return s.restartFresh(anchorExists)
 	}
 	if markerExists {
 		if err := s.readMarker(); err != nil {
@@ -523,7 +592,11 @@ func (s *Store) open() error {
 		s.setLost(LostAnchorMissing)
 		return nil
 	}
-	if err := s.db.View(func(btx *bolt.Tx) error { return verifyChain(btx, pos) }); err != nil {
+	if err := s.dbView(s.db, func(btx *bolt.Tx) (verr error) {
+		s.prevHead, verr = verifyChain(btx, pos)
+		return verr
+	}); err != nil {
+		s.lossDetail = err.Error()
 		s.setLost(LostJournalCorrupt)
 		return nil
 	}
@@ -531,6 +604,15 @@ func (s *Store) open() error {
 		return err
 	}
 	if s.state == StateLost {
+		return nil
+	}
+	// Every record and the live-state digest, before anything is served.
+	if err := s.scanAtOpen(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("open journal: %w", cerr)
+		}
+		s.lossDetail = err.Error()
+		s.setLost(LostJournalCorrupt)
 		return nil
 	}
 	if !markerExists {
@@ -549,6 +631,64 @@ func (s *Store) open() error {
 	}
 	s.state = StateUnattested
 	return nil
+}
+
+// restartFresh sets the unfinished first-open files aside and creates the
+// store again. The old store file is renamed (and the directory fsynced), not
+// removed: it held nothing that was ever acknowledged, but a file that was
+// mistaken for such a store is then still there to examine.
+func (s *Store) restartFresh(anchorExists bool) error {
+	// A second unfinished first open is not tidied away: the files set aside
+	// do not pile up, and an operator looks at why the first open keeps dying.
+	if old, _ := filepath.Glob(s.path(StoreFile + unfinishedSuffix + "*")); len(old) > 0 {
+		return fmt.Errorf("open journal: an earlier unfinished first open left %s; examine and remove it, then start again", filepath.Base(old[0]))
+	}
+	_ = s.closeFiles()
+	if anchorExists {
+		if err := s.fsys.Remove(s.path(AnchorFile)); err != nil {
+			return fmt.Errorf("open journal: remove unfinished anchor log: %w", err)
+		}
+	}
+	aside := fmt.Sprintf("%s%s%d", StoreFile, unfinishedSuffix, time.Now().UnixNano())
+	// Link then unlink, never rename: a name that exists is never replaced.
+	if err := os.Link(s.path(StoreFile), s.path(aside)); err != nil {
+		return fmt.Errorf("open journal: set aside unfinished store: %w", err)
+	}
+	if err := os.Remove(s.path(StoreFile)); err != nil {
+		return fmt.Errorf("open journal: set aside unfinished store: %w", err)
+	}
+	if err := s.fsys.SyncDir(s.opts.Dir); err != nil {
+		return fmt.Errorf("open journal: set aside unfinished store: %w", err)
+	}
+	return s.initFresh()
+}
+
+// neverInitialised reports whether the store file is one bbolt created and
+// no commit ever filled: there is no anchor log, marker or quarantine record,
+// and the file holds no bucket at all. The first open creates every bucket in
+// one transaction, so a file with any bucket was committed to. A leftover
+// anchor-rotation file counts as evidence too: only a store that had committed
+// rotates its anchor log.
+func (s *Store) neverInitialised(anchorExists, markerExists, nextExists bool) bool {
+	if anchorExists || markerExists || nextExists || s.state == StateLost || s.db == nil {
+		return false
+	}
+	empty := false
+	if err := s.dbView(s.db, func(btx *bolt.Tx) error {
+		k, _ := btx.Cursor().First()
+		empty = k == nil
+		return nil
+	}); err != nil {
+		return false
+	}
+	return empty
+}
+
+// scanAtOpen verifies every record and the live-state digest.
+func (s *Store) scanAtOpen(ctx context.Context) error {
+	return s.dbView(s.db, func(btx *bolt.Tx) error {
+		return (&Tx{btx: btx, storeID: s.storeID}).scan(ctx)
+	})
 }
 
 // anchorHasNoCommit reports whether the anchor log is missing or holds no
@@ -684,14 +824,9 @@ func (s *Store) checkAnchor(pos Position) error {
 		return nil
 	case pos.Seq == last.Seq+1:
 		// The store committed and the process died before the anchor append:
-		// that commit was never acknowledged. Accept it only when the store's
-		// head at the anchored position matches the anchor.
-		var at [32]byte
-		var ok bool
-		if err := s.db.View(func(btx *bolt.Tx) error {
-			at, ok = headAt(btx, last.Seq)
-			return nil
-		}); err != nil || !ok || at != last.Head {
+		// that commit was never acknowledged. Accept it only when the head
+		// before it, as the chain check recomputed it, matches the anchor.
+		if s.prevHead != last.Head {
 			s.setLost(LostInconsistentStore)
 			return nil
 		}
@@ -733,6 +868,50 @@ func checkDirMode(dir string) error {
 	return nil
 }
 
+// peekMinReader reads min_reader_version from the store file through a
+// read-only bbolt handle, which writes nothing, and closes it. ok is false
+// when it cannot be read: the regular open then decides what that means. A
+// panic on the way (a damaged file) releases the descriptor and its lock.
+func (s *Store) peekMinReader() (min uint32, ok bool) {
+	var f *os.File
+	defer func() {
+		if r := recover(); r != nil {
+			if f != nil {
+				unlockFile(f)
+				_ = f.Close()
+			}
+			min, ok = 0, false
+		}
+	}()
+	db, err := bolt.Open(s.path(StoreFile), 0o600, &bolt.Options{
+		Timeout: s.opts.OpenTimeout, ReadOnly: true,
+		OpenFile: func(name string, flag int, perm os.FileMode) (*os.File, error) {
+			file, oerr := os.OpenFile(name, flag, perm)
+			if oerr == nil {
+				f = file
+			}
+			return file, oerr
+		},
+	})
+	if err != nil {
+		return 0, false
+	}
+	defer func() { _ = db.Close() }()
+	verr := db.View(func(btx *bolt.Tx) error {
+		m := btx.Bucket([]byte(bucketMeta))
+		if m == nil {
+			return errors.New("no meta bucket")
+		}
+		meta := &journalpb.StoreMeta{}
+		if err := proto.Unmarshal(m.Get(keyStoreMeta), meta); err != nil {
+			return err
+		}
+		min = meta.GetMinReaderVersion()
+		return nil
+	})
+	return min, verr == nil
+}
+
 // openBolt opens the bbolt store. A failure to open is lost{journal_corrupt},
 // except a lock timeout, which is ErrLocked.
 func (s *Store) openBolt() error {
@@ -740,8 +919,22 @@ func (s *Store) openBolt() error {
 	if testBoltOptions != nil {
 		testBoltOptions(bo)
 	}
+	// Keep bbolt's descriptor: if bolt.Open panics after it took the file
+	// lock, only closing the descriptor releases it.
+	openFile := bo.OpenFile
+	if openFile == nil {
+		openFile = os.OpenFile
+	}
+	bo.OpenFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		f, err := openFile(name, flag, perm)
+		if err == nil {
+			s.boltFile = f
+		}
+		return f, err
+	}
 	db, err := bolt.Open(s.path(StoreFile), 0o600, bo)
 	if err != nil {
+		s.boltFile = nil
 		if errors.Is(err, berrors.ErrTimeout) {
 			return fmt.Errorf("open journal: %w", ErrLocked)
 		}
@@ -750,6 +943,7 @@ func (s *Store) openBolt() error {
 	}
 	if db.NoSync && !guard.Off(guard.RefuseNoSync) {
 		_ = db.Close()
+		s.boltFile = nil
 		return fmt.Errorf("open journal: %w", ErrNoSync)
 	}
 	s.db = db
@@ -779,7 +973,7 @@ func (s *Store) initFresh() error {
 	if err != nil {
 		return fmt.Errorf("open journal: encode meta: %w", err)
 	}
-	if err := s.db.Update(func(btx *bolt.Tx) error {
+	if err := s.dbUpdate(s.db, func(btx *bolt.Tx) error {
 		for _, name := range append([]string{bucketMeta, bucketChain, bucketCheckpoints}, s.opts.Buckets...) {
 			if _, err := btx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
@@ -792,7 +986,10 @@ func (s *Store) initFresh() error {
 		if err := m.Put(keyPosition, encodePosition(0, [32]byte{})); err != nil {
 			return err
 		}
-		return btx.Bucket([]byte(bucketCheckpoints)).Put(seqKey(0), make([]byte, 32))
+		if err := m.Put(keyStateDigest, make([]byte, 32)); err != nil {
+			return err
+		}
+		return btx.Bucket([]byte(bucketCheckpoints)).Put(seqKey(0), make([]byte, checkpointSize))
 	}); err != nil {
 		return fmt.Errorf("open journal: initialise store: %w", err)
 	}
@@ -834,8 +1031,8 @@ func (s *Store) appendAnchor(r AnchorRecord) error {
 }
 
 // readMeta reads the store meta, the position and any quarantine record.
-func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalpb.Quarantine, err error) {
-	err = s.db.View(func(btx *bolt.Tx) error {
+func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalpb.Quarantine, hasState bool, err error) {
+	err = s.dbView(s.db, func(btx *bolt.Tx) error {
 		m := btx.Bucket([]byte(bucketMeta))
 		if m == nil || btx.Bucket([]byte(bucketChain)) == nil || btx.Bucket([]byte(bucketCheckpoints)) == nil {
 			return errors.New("journal buckets missing")
@@ -853,6 +1050,7 @@ func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalp
 			return errors.New("store position invalid")
 		}
 		copy(pos.StoreID[:], meta.GetStoreId())
+		hasState = m.Get(keyStateDigest) != nil
 		if qb := m.Get(keyQuarantine); qb != nil {
 			q = &journalpb.Quarantine{}
 			if err := proto.Unmarshal(qb, q); err != nil {
@@ -861,7 +1059,7 @@ func (s *Store) readMeta() (meta *journalpb.StoreMeta, pos Position, q *journalp
 		}
 		return nil
 	})
-	return meta, pos, q, err
+	return meta, pos, q, hasState, err
 }
 
 // readQuarantineFile returns the reason of the quarantine marker file.
@@ -891,6 +1089,7 @@ func (s *Store) setLost(r LostReason) {
 func (s *Store) State() (State, LostReason) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.applyPendingFaultLocked()
 	return s.state, s.lost
 }
 
@@ -934,6 +1133,7 @@ func (s *Store) EstablishContinuity(ctx context.Context) error {
 
 // usableLocked fails for a crashed or closed store.
 func (s *Store) usableLocked() error {
+	s.applyPendingFaultLocked()
 	switch {
 	case s.closed:
 		return ErrClosed
@@ -1008,33 +1208,46 @@ func (s *Store) updateLocked(fn func(tx *Tx) error, migrating bool) (pos Positio
 		}
 		s.pendingAnchor = nil
 	}
+	defer panicOnFault()()
 	defer func() {
 		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
 			s.quarantineLocked(LostJournalCorrupt, "store read failed")
 			pos, err = Position{}, &LostError{Reason: LostJournalCorrupt}
 		}
 	}()
 
 	seq := s.seq + 1
+	var txRef *Tx
 	var head [32]byte
 	empty := false
 	errEmpty := errors.New("empty transaction")
-	berr := s.db.Update(func(btx *bolt.Tx) error {
-		tx := &Tx{btx: btx, writable: true, seq: seq}
+	berr := s.dbUpdate(s.db, func(btx *bolt.Tx) error {
+		tx := &Tx{btx: btx, writable: true, seq: seq, storeID: s.storeID}
+		txRef = tx
+		if err := tx.loadState(); err != nil {
+			return &txFuncError{err: err}
+		}
 		if err := fn(tx); err != nil {
 			return &txFuncError{err: err}
+		}
+		if tx.bad != nil {
+			return &txFuncError{err: tx.bad}
 		}
 		if len(tx.writes) == 0 {
 			empty = true
 			return &txFuncError{err: errEmpty}
 		}
+		if err := tx.finishState(); err != nil {
+			return &txFuncError{err: err}
+		}
 		digest := txDigest(tx.writes)
-		head = nextHead(s.head, seq, digest)
-		if err := btx.Bucket([]byte(bucketChain)).Put(seqKey(seq), chainEntry(digest, head)); err != nil {
+		head = nextHead(s.head, seq, digest, tx.state)
+		if err := btx.Bucket([]byte(bucketChain)).Put(seqKey(seq), chainEntry(digest, tx.state, head)); err != nil {
 			return &txFuncError{err: fmt.Errorf("write chain entry: %w", err)}
 		}
 		if seq%s.opts.CheckpointEvery == 0 {
-			if err := checkpoint(btx, seq, head, s.opts.CheckpointEvery); err != nil {
+			if err := checkpoint(btx, seq, head, s.head, s.opts.CheckpointEvery); err != nil {
 				return &txFuncError{err: err}
 			}
 		}
@@ -1055,7 +1268,16 @@ func (s *Store) updateLocked(fn func(tx *Tx) error, migrating bool) (pos Positio
 	if berr != nil {
 		var fe *txFuncError
 		if errors.As(berr, &fe) {
+			if txRef != nil && txRef.bad != nil {
+				return Position{}, s.corruptLocked(txRef.bad, fe.err)
+			}
 			return Position{}, fe.err
+		}
+		var lost *LostError
+		if errors.As(berr, &lost) && s.tainted.Load() {
+			// A concurrent read faulted after the check above.
+			s.applyPendingFaultLocked()
+			return Position{}, &LostError{Reason: s.lost}
 		}
 		// Anything else came from bbolt's commit: a page write, an fdatasync
 		// (returned by bbolt as a bare errno), or the meta write. The state of
@@ -1087,6 +1309,20 @@ func (s *Store) updateLocked(fn func(tx *Tx) error, migrating bool) (pos Positio
 		return Position{}, err
 	}
 	return Position{StoreID: s.storeID, Seq: seq, Head: head}, nil
+}
+
+// corruptLocked quarantines the store because a record, or the live-state
+// digest, did not verify, and returns the error the caller sees: the
+// caller's own error (which names the record) joined with the loss. A store
+// that is already lost keeps its reason. The caller holds s.mu.
+func (s *Store) corruptLocked(bad, err error) error {
+	if s.state != StateLost {
+		s.quarantineLocked(LostJournalCorrupt, bad.Error())
+	}
+	if err == nil || errors.Is(err, ErrLost) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", err, &LostError{Reason: s.lost})
 }
 
 // commitError marks an injected commit failure.
@@ -1171,15 +1407,21 @@ func (s *Store) quarantineLocked(reason LostReason, detail string) {
 	s.state, s.lost = StateLost, reason
 	var errs []error
 	if !guard.Off(guard.QuarantinePersist) {
+		fileFailed, anchorFailed := false, s.anchor == nil
 		if err := WriteFileDurable(s.fsys, s.opts.Dir, s.path(QuarantineFile), []byte(reason)); err != nil {
 			errs = append(errs, err)
+			fileFailed = true
 		}
 		if s.anchor != nil {
 			if err := s.appendAnchor(AnchorRecord{Type: AnchorQuarantine, Reason: reason, StoreID: s.storeID, Seq: s.seq, Head: s.head}); err != nil {
 				errs = append(errs, err)
+				anchorFailed = true
 			}
 		}
-		if s.db != nil && reason != LostIOError {
+		// The same policy as at open: no write into a store kept as evidence,
+		// unless neither the marker file nor the anchor log took the record:
+		// then the store record is the only one that can keep the loss.
+		if s.db != nil && reason != LostIOError && (storeWriteSafe(reason) || fileFailed && anchorFailed) {
 			if err := s.writeStoreQuarantine(reason, detail); err != nil {
 				errs = append(errs, err)
 			}
@@ -1198,14 +1440,17 @@ func (s *Store) quarantineLocked(reason LostReason, detail string) {
 		// reads of this store are refused until it is reopened from disk.
 		_ = s.db.Close()
 		s.db = nil
+		s.boltFile = nil
 	}
 }
 
 // writeStoreQuarantine puts the quarantine record into the store's meta
 // bucket, outside the chain.
 func (s *Store) writeStoreQuarantine(reason LostReason, detail string) (err error) {
+	defer panicOnFault()()
 	defer func() {
 		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
 			err = errors.New("store write panicked")
 		}
 	}()
@@ -1213,7 +1458,7 @@ func (s *Store) writeStoreQuarantine(reason LostReason, detail string) (err erro
 	if err != nil {
 		return fmt.Errorf("encode quarantine: %w", err)
 	}
-	return s.db.Update(func(btx *bolt.Tx) error {
+	return s.dbUpdate(s.db, func(btx *bolt.Tx) error {
 		m := btx.Bucket([]byte(bucketMeta))
 		if m == nil {
 			return errors.New("meta bucket missing")
@@ -1231,8 +1476,10 @@ func (s *Store) View(ctx context.Context, fn func(tx *Tx) error) (err error) {
 		return fmt.Errorf("journal view: %w", err)
 	}
 	s.mu.Lock()
+	s.applyPendingFaultLocked()
 	db := s.db
 	bad := s.closed || s.crashed
+	storeID := s.storeID
 	s.mu.Unlock()
 	if bad {
 		return ErrClosed
@@ -1244,13 +1491,91 @@ func (s *Store) View(ctx context.Context, fn func(tx *Tx) error) (err error) {
 		}
 		return &LostError{Reason: reason}
 	}
+	defer panicOnFault()()
 	defer func() {
 		if r := recover(); r != nil {
-			s.Quarantine(LostJournalCorrupt, "store read failed")
+			s.onViewFault()
 			err = &LostError{Reason: LostJournalCorrupt}
 		}
 	}()
-	return db.View(func(btx *bolt.Tx) error { return fn(&Tx{btx: btx}) })
+	var tx *Tx
+	err = s.dbView(db, func(btx *bolt.Tx) error {
+		tx = &Tx{btx: btx, storeID: storeID}
+		return fn(tx)
+	})
+	if tx != nil && tx.bad != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err == nil || !errors.Is(err, ErrCorruptRecord) {
+			err = fmt.Errorf("journal view: %w", tx.bad)
+		}
+		return s.corruptLocked(tx.bad, err)
+	}
+	return err
+}
+
+// onViewFault handles a panic in a read. When it left bbolt's locks held (the
+// store is tainted), a writer may be blocked inside bbolt holding s.mu for
+// good, so the faulting goroutine never waits for the lock: if it cannot take
+// it at once, the quarantine is left pending and the next call that takes the
+// lock applies it (see applyPendingFaultLocked). The caller returns the loss
+// either way.
+func (s *Store) onViewFault() {
+	if s.tainted.Load() {
+		if !s.mu.TryLock() {
+			s.faultPending.Store(true)
+			return
+		}
+	} else {
+		s.mu.Lock()
+	}
+	defer s.mu.Unlock()
+	s.faultPending.Store(false)
+	s.abandonIfTaintedLocked()
+	if !s.crashed && !s.closed && s.state != StateLost {
+		s.quarantineLocked(LostJournalCorrupt, "store read failed")
+	}
+}
+
+// applyPendingFaultLocked abandons a database that a panic left unusable and
+// quarantines the store, when a fault is pending (see onViewFault) or the
+// database is tainted. The caller holds s.mu.
+func (s *Store) applyPendingFaultLocked() {
+	pending := s.faultPending.Swap(false)
+	if !pending && !s.tainted.Load() {
+		return
+	}
+	s.abandonIfTaintedLocked()
+	if s.state != StateLost && !s.crashed && !s.closed {
+		s.quarantineLocked(LostJournalCorrupt, "store read failed")
+	}
+}
+
+// Scrub reads every record of the store, compares the sum of their digests
+// with the live-state digest recorded in the store, and verifies the chain from
+// its last checkpoint, including that the newest step committed to that digest.
+// It writes nothing, except that a mismatch quarantines the store with
+// LostJournalCorrupt, like any other failed verification. It holds one read
+// transaction for its whole run: it does not block commits, but a writer that
+// needs the file to grow waits for it. A lost, closed or crashed store returns
+// its error without scanning. Its cost is linear in the live bytes of the
+// store; ctx bounds it.
+func (s *Store) Scrub(ctx context.Context) error {
+	s.mu.Lock()
+	err := s.usableLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := s.View(ctx, func(tx *Tx) error {
+		if err := tx.scan(ctx); err != nil {
+			return err
+		}
+		return tx.verifyChainState()
+	}); err != nil {
+		return fmt.Errorf("scrub journal: %w", err)
+	}
+	return nil
 }
 
 // VerifyChain recomputes the chain from the last checkpoint to the current
@@ -1262,20 +1587,27 @@ func (s *Store) VerifyChain(ctx context.Context) error {
 		if !ok {
 			return errors.New("store position invalid")
 		}
-		return verifyChain(tx.btx, pos)
+		_, err := verifyChain(tx.btx, pos)
+		return err
 	})
 }
 
 // LiveSize returns the bytes the store's live pages use: its size less its
 // free and pending pages. Unlike Size, it falls when records are deleted.
-func (s *Store) LiveSize() int64 {
+func (s *Store) LiveSize() (n int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
 		return 0
 	}
-	var n int64
-	_ = s.db.View(func(btx *bolt.Tx) error {
+	defer panicOnFault()()
+	defer func() {
+		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
+			n = 0
+		}
+	}()
+	_ = s.dbView(s.db, func(btx *bolt.Tx) error {
 		n = btx.Size()
 		return nil
 	})
@@ -1288,28 +1620,39 @@ func (s *Store) LiveSize() int64 {
 }
 
 // Size returns the size of the bbolt store in bytes.
-func (s *Store) Size() int64 {
+func (s *Store) Size() (n int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
 		return 0
 	}
-	var n int64
-	_ = s.db.View(func(btx *bolt.Tx) error {
+	defer panicOnFault()()
+	defer func() {
+		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
+			n = 0
+		}
+	}()
+	_ = s.dbView(s.db, func(btx *bolt.Tx) error {
 		n = btx.Size()
 		return nil
 	})
 	return n
 }
 
-// Close closes the store's files. It writes nothing.
+// Close closes the store's files. It writes nothing, except the quarantine
+// records of a read fault that was still pending (see onViewFault).
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil
 	}
+	// A fault that is still pending is recorded first (marker file and anchor
+	// record; a corrupt store gets no record written into it).
+	s.applyPendingFaultLocked()
 	s.closed = true
+	s.abandonIfTaintedLocked()
 	return errors.Join(s.closeFiles(), s.lock.release())
 }
 
@@ -1321,6 +1664,7 @@ func (s *Store) closeFiles() error {
 		}
 		s.db = nil
 	}
+	s.boltFile = nil
 	if s.anchor != nil {
 		if err := s.anchor.Close(); err != nil {
 			errs = append(errs, err)

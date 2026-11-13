@@ -36,6 +36,18 @@ type Tx struct {
 	seq      uint64
 	writes   []write
 	buckets  map[string]*bolt.Bucket
+
+	// storeID binds every record digest to this store.
+	storeID [16]byte
+	// bound and boundSet cache the committed position of a read snapshot.
+	bound    uint64
+	boundSet bool
+	// state is the additive digest of the live client records, as updated by
+	// this transaction's writes.
+	state [32]byte
+	// bad is the first record that did not verify; the store quarantines
+	// itself at the end of the transaction.
+	bad error
 }
 
 // lookup returns the named bucket, or nil, caching the handle for the life
@@ -76,20 +88,51 @@ func checkClientBucket(name string) error {
 	return nil
 }
 
-// Get returns a copy of the value of key in bucket, or nil.
-func (t *Tx) Get(bucket string, key []byte) []byte {
-	b := t.lookup(bucket)
-	if b == nil {
-		return nil
+// record looks key up in b. found is false for an absent key. bbolt reports a
+// key that holds a nested bucket as a nil value, exactly like an absent key:
+// the cursor tells them apart, and a nested bucket in a client bucket is a
+// corrupt record.
+func (t *Tx) record(b *bolt.Bucket, bucket string, key []byte) (v []byte, found bool, err error) {
+	k, v := b.Cursor().Seek(key)
+	if k == nil || !bytes.Equal(k, key) {
+		return nil, false, nil
 	}
-	v := b.Get(key)
 	if v == nil {
-		return nil
+		return nil, false, t.fail(&recordError{bucket: bucket, key: append([]byte(nil), key...), why: nestedBucketWhy})
 	}
-	return append([]byte{}, v...)
+	return v, true, nil
 }
 
-// Put writes key = value in a client bucket.
+// nestedBucketWhy is the reason reported for a nested bucket in a client
+// bucket.
+const nestedBucketWhy = "nested bucket in a client bucket"
+
+// Get returns a copy of the value of key in bucket, or nil when the key is
+// absent. A reserved bucket name is refused. A key that holds a nested bucket
+// is not absent: it is a corrupt record. A record whose trailer does not verify (a changed byte, another
+// record's value, a short value, a bad version, a position beyond the committed
+// one) is an error that wraps ErrCorruptRecord, never a missing key; the store
+// is quarantined with LostJournalCorrupt when the transaction ends.
+func (t *Tx) Get(bucket string, key []byte) ([]byte, error) {
+	if err := checkClientBucket(bucket); err != nil {
+		return nil, err
+	}
+	b := t.lookup(bucket)
+	if b == nil {
+		return nil, nil
+	}
+	v, found, err := t.record(b, bucket, key)
+	if err != nil || !found {
+		return nil, err
+	}
+	val, _, err := t.unseal(bucket, key, v)
+	return val, err
+}
+
+// Put writes key = value in a client bucket. The stored value carries a
+// trailer that binds it to the store, bucket, key and this commit, and the
+// store's live-state digest follows the change. An existing record that does
+// not verify is an error wrapping ErrCorruptRecord.
 func (t *Tx) Put(bucket string, key, value []byte) error {
 	if !t.writable {
 		return errReadOnly
@@ -101,16 +144,30 @@ func (t *Tx) Put(bucket string, key, value []byte) error {
 	if err != nil {
 		return err
 	}
-	k, v := append([]byte(nil), key...), append([]byte{}, value...)
-	if err := b.Put(k, v); err != nil {
+	k := append([]byte(nil), key...)
+	old, found, err := t.record(b, bucket, k)
+	if err != nil {
+		return err
+	}
+	if found {
+		_, od, err := t.unseal(bucket, k, old)
+		if err != nil {
+			return err
+		}
+		t.state = subSum(t.state, od)
+	}
+	sealed, d := sealRecord(t.storeID, bucket, k, t.seq, value)
+	if err := b.Put(k, sealed); err != nil {
 		return fmt.Errorf("journal: put %s: %w", bucket, err)
 	}
-	t.writes = append(t.writes, write{op: writePut, bucket: bucket, key: k, value: v})
+	t.state = addSum(t.state, d)
+	t.writes = append(t.writes, write{op: writePut, bucket: bucket, key: k, value: sealed})
 	return nil
 }
 
 // Delete removes key from a client bucket. Deleting a missing key is recorded
-// and is not an error.
+// and is not an error. An existing record that does not verify is an error
+// wrapping ErrCorruptRecord.
 func (t *Tx) Delete(bucket string, key []byte) error {
 	if !t.writable {
 		return errReadOnly
@@ -123,6 +180,17 @@ func (t *Tx) Delete(bucket string, key []byte) error {
 		return err
 	}
 	k := append([]byte(nil), key...)
+	old, found, err := t.record(b, bucket, k)
+	if err != nil {
+		return err
+	}
+	if found {
+		_, od, err := t.unseal(bucket, k, old)
+		if err != nil {
+			return err
+		}
+		t.state = subSum(t.state, od)
+	}
 	if err := b.Delete(k); err != nil {
 		return fmt.Errorf("journal: delete %s: %w", bucket, err)
 	}
@@ -144,23 +212,38 @@ func (t *Tx) createBucket(name string) error {
 
 // ForEach calls fn for every key of bucket that starts with prefix, in key
 // order, with copies of the key and value. Writing to the bucket inside fn is
-// not allowed.
+// not allowed. A reserved bucket name is refused. A record that does not verify stops the iteration with an
+// error that wraps ErrCorruptRecord (see Get).
 func (t *Tx) ForEach(bucket string, prefix []byte, fn func(k, v []byte) error) error {
+	if err := checkClientBucket(bucket); err != nil {
+		return err
+	}
 	b := t.lookup(bucket)
 	if b == nil {
 		return nil
 	}
 	c := b.Cursor()
 	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-		if err := fn(append([]byte(nil), k...), append([]byte{}, v...)); err != nil {
+		if v == nil {
+			return t.fail(&recordError{bucket: bucket, key: append([]byte(nil), k...), why: nestedBucketWhy})
+		}
+		val, _, err := t.unseal(bucket, k, v)
+		if err != nil {
+			return err
+		}
+		if err := fn(append([]byte(nil), k...), val); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// Last returns a copy of the last key of bucket, or nil.
+// Last returns a copy of the last key of bucket, or nil (also for a reserved
+// bucket name).
 func (t *Tx) Last(bucket string) []byte {
+	if checkClientBucket(bucket) != nil {
+		return nil
+	}
 	b := t.lookup(bucket)
 	if b == nil {
 		return nil

@@ -34,7 +34,8 @@ limitations under the License.
 //     refuses every mutation.
 //  4. The clock floor is read and raised from the host's own clocks. A
 //     floor that is missing for an enrolled store, or unreadable, quarantines
-//     the store (journal_corrupt).
+//     the store (inconsistent_store: a state file beside a store that
+//     verifies is gone or damaged, like a missing store marker).
 //  5. The server starts serving in the unattested state: reads, Hello and
 //     GetHostInfo answer; every mutation is refused UNATTESTED. Nothing is
 //     committed before step 6.
@@ -50,6 +51,17 @@ limitations under the License.
 // A quarantined store also notifies READY=1, with the quarantine in STATUS=,
 // so that systemd keeps the agent running to answer reads instead of
 // restarting it.
+//
+// # Scrub
+//
+// While the agent runs, the operation store is scrubbed every
+// --scrub-interval (default one hour; it cannot be switched off, because the
+// scrub is what finds a damaged record that nothing reads). A scrub reads
+// every record, compares their digest sum with the store's recorded live-state
+// digest and verifies the chain's commitment to it. One goroutine runs it, so
+// scrubs never overlap, and it stops with the agent's context. A scrub that
+// finds damage quarantines the store (journal_corrupt): the loss is logged and
+// the service status shows it, like any other quarantine.
 //
 // # Signals
 //
@@ -232,6 +244,9 @@ type daemon struct {
 	trustDir   string
 	creds      *server.CredentialStore
 	notifier   systemd.Notifier
+	// started is set once the start-up sequence ended and READY was sent: a
+	// scrub before it leaves the status to the start-up notification.
+	started atomic.Bool
 }
 
 // Run runs the agent until ctx ends or a stop signal arrives on signals, and
@@ -379,10 +394,25 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	go func() { serveErr <- srv.Serve(lis) }()
 	d.log.Info("serving", "address", lis.Addr().String())
 
+	// The scrub runs until the agent drains; the drain waits for it, so it
+	// never reads a closed store.
+	scrubCtx, stopScrub := context.WithCancel(ctx)
+	scrubDone := make(chan struct{})
+	go func() {
+		defer close(scrubDone)
+		d.scrubLoop(scrubCtx, agent)
+	}()
+
 	drain := func() {
+		stopScrub()
 		_ = d.notifier.Notify(systemd.NotifyStopping)
 		dctx, cancel := context.WithTimeout(context.Background(), d.o.Config.DrainTimeout)
 		defer cancel()
+		select {
+		case <-scrubDone:
+		case <-dctx.Done():
+			d.log.Error(dctx.Err(), "the store scrub did not stop within the drain timeout; abandoned")
+		}
 		srv.Shutdown(dctx)
 		if f := agent.floor.Load(); f != nil {
 			if err := f.Flush(dctx); err != nil {
@@ -401,6 +431,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			d.log.Error(err, "notify systemd")
 		}
 		d.log.Info("started", "state", state.String(), "reason", reason)
+		d.started.Store(true)
 		if d.o.Hooks.Started != nil {
 			d.o.Hooks.Started(state)
 		}
@@ -431,6 +462,51 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 				if err := f.Observe(ctx); err != nil {
 					d.log.Error(err, "raise the clock floor")
 				}
+			}
+		}
+	}
+}
+
+// scrubInterval is the period of the store scrub.
+func (d *daemon) scrubInterval() time.Duration {
+	if d.o.Config.ScrubInterval > 0 {
+		return d.o.Config.ScrubInterval
+	}
+	return config.DefaultScrubInterval
+}
+
+// scrubLoop scrubs the operation store every scrub interval until ctx ends.
+// It is one goroutine, so a scrub never overlaps the next one: a tick that
+// arrives during a scrub waits for it. A scrub that finds damage has
+// quarantined the store; the loss is logged by the store's event and the
+// service status reflects it like any other loss. A store that is already
+// lost is not scrubbed again.
+func (d *daemon) scrubLoop(ctx context.Context, agent *agentState) {
+	log := d.log.WithName("scrub")
+	ticker := time.NewTicker(d.scrubInterval())
+	defer ticker.Stop()
+	j := agent.store.Journal()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		before, _ := j.State()
+		if before == journal.StateLost {
+			continue
+		}
+		err := j.Scrub(ctx)
+		switch {
+		case err == nil:
+			log.V(1).Info("journal scrub passed")
+		case ctx.Err() != nil:
+			return
+		default:
+			after, reason := j.State()
+			log.Error(err, "journal scrub failed", "state", after.String(), "reason", string(reason))
+			if after == journal.StateLost && d.started.Load() {
+				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent))
 			}
 		}
 	}
@@ -531,7 +607,9 @@ func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
 		return nil
 	case errors.Is(err, clockfloor.ErrFloorMissing), errors.Is(err, clockfloor.ErrCorrupt), errors.Is(err, errFloorUnreadable):
 		d.log.Error(err, "the clock floor cannot be read; the store is quarantined")
-		agent.store.Journal().Quarantine(journal.LostJournalCorrupt, "clock floor unreadable")
+		// Not journal_corrupt: the journal verified. A state file beside it is
+		// gone or damaged, the same shape as a missing store marker.
+		agent.store.Journal().Quarantine(journal.LostInconsistentStore, "clock floor unreadable")
 		return nil
 	case errors.Is(err, errFloorWrite):
 		d.log.Error(err, "the clock floor cannot be written; the store is quarantined")

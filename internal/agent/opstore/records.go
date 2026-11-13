@@ -73,7 +73,10 @@ func put(tx *journal.Tx, bucket string, key []byte, m proto.Message) error {
 
 // get decodes the record at key into m; it reports false when absent.
 func get(tx *journal.Tx, bucket string, key []byte, m proto.Message) (bool, error) {
-	b := tx.Get(bucket, key)
+	b, err := tx.Get(bucket, key)
+	if err != nil {
+		return false, fmt.Errorf("read %s record: %w", bucket, err)
+	}
 	if b == nil {
 		return false, nil
 	}
@@ -81,6 +84,16 @@ func get(tx *journal.Tx, bucket string, key []byte, m proto.Message) (bool, erro
 		return false, fmt.Errorf("%w: %s: %w", errCorruptRecord, bucket, err)
 	}
 	return true, nil
+}
+
+// has reports whether bucket holds key. A record that does not verify is an
+// error, never "absent".
+func has(tx *journal.Tx, bucket string, key []byte) (bool, error) {
+	b, err := tx.Get(bucket, key)
+	if err != nil {
+		return false, fmt.Errorf("read %s record: %w", bucket, err)
+	}
+	return b != nil, nil
 }
 
 // unmarshalRecord decodes one record value.

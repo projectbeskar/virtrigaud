@@ -17,6 +17,7 @@ limitations under the License.
 package daemon_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -168,10 +169,10 @@ func TestStoreNeedsNewerAgent(t *testing.T) {
 	if err := r0.stop(); err != nil {
 		t.Fatal(err)
 	}
-	// A newer agent migrates the store to a schema that needs readers of
-	// version 2.
+	// A newer agent migrates the store to a schema that needs readers newer
+	// than this binary.
 	st, err := opstore.Open(context.Background(), opstore.Options{Executor: none.Executor{}, Journal: journal.Options{
-		Dir: h.stateDir, SchemaVersion: 3, Migrations: []journal.Migration{{ToVersion: 3, MinReader: 2}}}})
+		Dir: h.stateDir, SchemaVersion: journal.SchemaVersion + 1, Migrations: []journal.Migration{{ToVersion: journal.SchemaVersion + 1, MinReader: journal.ReaderMax + 1}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +183,7 @@ func TestStoreNeedsNewerAgent(t *testing.T) {
 	r := h.start()
 	select {
 	case err := <-r.done:
-		if !errors.Is(err, journal.ErrSchemaTooNew) || !strings.Contains(err.Error(), "2") {
+		if !errors.Is(err, journal.ErrSchemaTooNew) || !strings.Contains(err.Error(), fmt.Sprint(journal.ReaderMax+1)) {
 			t.Fatalf("Run = %v", err)
 		}
 	case <-time.After(10 * time.Second):
@@ -304,7 +305,7 @@ func TestQuarantinedStoreServesReads(t *testing.T) {
 }
 
 // TestMissingClockFloorQuarantines: an enrolled store whose clock floor is
-// gone is quarantined (journal_corrupt), never given a new floor.
+// gone is quarantined (inconsistent_store), never given a new floor.
 func TestMissingClockFloorQuarantines(t *testing.T) {
 	h := newHost(t)
 	r, _ := h.run()
@@ -318,7 +319,7 @@ func TestMissingClockFloorQuarantines(t *testing.T) {
 	if state != providerv1.AgentState_AGENT_STATE_QUARANTINED {
 		t.Fatalf("state = %v", state)
 	}
-	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostJournalCorrupt) {
+	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostInconsistentStore) {
 		t.Fatalf("answer = %v", a)
 	}
 }
@@ -434,5 +435,63 @@ func TestReloadKeepsQuarantineInStatus(t *testing.T) {
 			t.Fatalf("no %q in %v", want, h.notes.snapshot())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestScrubFindsDamageAndReflectsItInStatus: the agent scrubs its store
+// periodically; damage to a record nothing reads is found, the store is
+// quarantined, and the service status says so.
+func TestScrubFindsDamageAndReflectsItInStatus(t *testing.T) {
+	h := newHost(t)
+	h.cfg.ScrubInterval = 20 * time.Millisecond
+	r, state := h.run()
+	if state == providerv1.AgentState_AGENT_STATE_QUARANTINED {
+		t.Fatalf("quarantined at start\n%s", h.logs.text())
+	}
+	waitLog(t, h, "journal scrub passed")
+
+	// Flip a byte of the recorded live-state digest in every page that holds
+	// it (a bbolt leaf stores a value right after its key), in the store
+	// file under bbolt's mapping.
+	path := filepath.Join(h.stateDir, journal.StoreFile)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	needle := []byte("state_digest")
+	hits := 0
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for off := 0; ; {
+		i := bytes.Index(raw[off:], needle)
+		if i < 0 {
+			break
+		}
+		hits++
+		at := off + i + len(needle)
+		if _, err := f.WriteAt([]byte{raw[at] ^ 1}, int64(at)); err != nil {
+			t.Fatal(err)
+		}
+		off += i + len(needle)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if hits == 0 {
+		t.Fatal("the live-state digest is not in the store file")
+	}
+	want := systemd.NotifyReady + "\nSTATUS=AGENT_STATE_QUARANTINED (journal_corrupt)"
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.notes.has(want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q in %v\n%s", want, h.notes.snapshot(), h.logs.text())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	waitLog(t, h, "journal scrub failed")
+	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostJournalCorrupt) {
+		t.Fatalf("answer = %v", a)
 	}
 }

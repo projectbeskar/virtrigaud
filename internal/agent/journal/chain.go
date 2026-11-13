@@ -23,7 +23,7 @@ import (
 )
 
 // chainDomain separates the chain-head hash from every other SHA-256 use.
-const chainDomain = "vrtg-journal-v1"
+const chainDomain = "vrtg-journal-v2"
 
 // Write operations recorded in a transaction digest.
 const (
@@ -81,8 +81,14 @@ func txDigest(writes []write) [32]byte {
 	return out
 }
 
-// nextHead is SHA-256("vrtg-journal-v1" || prev || be64(seq) || digest).
-func nextHead(prev [32]byte, seq uint64, digest [32]byte) [32]byte {
+// chainEntrySize is the size of a stored chain entry: digest || state || head.
+const chainEntrySize = 96
+
+// nextHead is SHA-256("vrtg-journal-v2" || prev || be64(seq) || digest ||
+// state), where digest is the transaction digest and state the live-state
+// digest after the commit. The head therefore commits to the state: a store
+// whose recorded state digest was edited no longer verifies.
+func nextHead(prev [32]byte, seq uint64, digest, state [32]byte) [32]byte {
 	h := sha256.New()
 	h.Write([]byte(chainDomain))
 	h.Write(prev[:])
@@ -90,6 +96,7 @@ func nextHead(prev [32]byte, seq uint64, digest [32]byte) [32]byte {
 	binary.BigEndian.PutUint64(s[:], seq)
 	h.Write(s[:])
 	h.Write(digest[:])
+	h.Write(state[:])
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out
@@ -102,10 +109,11 @@ func seqKey(seq uint64) []byte {
 	return k[:]
 }
 
-// chainEntry is the value stored per chain position: digest || head.
-func chainEntry(digest, head [32]byte) []byte {
-	v := make([]byte, 64)
+// chainEntry is the value stored per chain position: digest || state || head.
+func chainEntry(digest, state, head [32]byte) []byte {
+	v := make([]byte, chainEntrySize)
 	copy(v[:32], digest[:])
-	copy(v[32:], head[:])
+	copy(v[32:64], state[:])
+	copy(v[64:], head[:])
 	return v
 }

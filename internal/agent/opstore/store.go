@@ -313,7 +313,11 @@ func activate(tx *journal.Tx, e Enrolment, storeID []byte) error {
 	if err != nil {
 		return err
 	}
-	if retired || tx.Get(bucketEnrolments, e.ID) != nil {
+	used, err := has(tx, bucketEnrolments, e.ID)
+	if err != nil {
+		return err
+	}
+	if retired || used {
 		return fmt.Errorf("%w: enrolment id already used", ErrEnrolment)
 	}
 	rec := &pb.Enrolment{EnrolmentId: e.ID, ProviderUid: e.ProviderUID, InstallId: e.InstallID,
@@ -332,7 +336,11 @@ func activate(tx *journal.Tx, e Enrolment, storeID []byte) error {
 		if len(p) != idLen || sameBytes(p, e.ID) {
 			return fmt.Errorf("%w: invalid predecessor enrolment id", ErrEnrolment)
 		}
-		if tx.Get(bucketEnrolments, p) == nil {
+		known, err := has(tx, bucketEnrolments, p)
+		if err != nil {
+			return err
+		}
+		if !known {
 			m.RetiredEnrolmentIds = append(m.RetiredEnrolmentIds, append([]byte(nil), p...))
 		}
 	}
@@ -472,8 +480,9 @@ func (s *Store) Lookup(ctx context.Context, ref OpRef) (OpView, bool, error) {
 func (s *Store) HasTombstone(ctx context.Context, ref OpRef) (bool, error) {
 	var ok bool
 	err := s.j.View(ctx, func(tx *journal.Tx) error {
-		ok = tx.Get(bucketTombstones, opKey(ref.EnrolmentID, ref.OpID)) != nil
-		return nil
+		var err error
+		ok, err = has(tx, bucketTombstones, opKey(ref.EnrolmentID, ref.OpID))
+		return err
 	})
 	return ok, err
 }

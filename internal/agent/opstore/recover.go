@@ -161,8 +161,10 @@ func (s *Store) scanWitnesses(ctx context.Context) error {
 		}
 		var known, retired bool
 		if err := s.j.View(ctx, func(tx *journal.Tx) error {
-			known = tx.Get(bucketEnrolments, enrol) != nil
 			var err error
+			if known, err = has(tx, bucketEnrolments, enrol); err != nil {
+				return err
+			}
 			retired, err = isRetired(tx, enrol)
 			return err
 		}); err != nil {
@@ -192,7 +194,16 @@ func (s *Store) scanWitnesses(ctx context.Context) error {
 			var found bool
 			if err := s.j.View(ctx, func(tx *journal.Tx) error {
 				k := opKey(enrol, op)
-				found = tx.Get(bucketOps, k) != nil || tx.Get(bucketTombstones, k) != nil
+				for _, b := range []string{bucketOps, bucketTombstones} {
+					ok, err := has(tx, b, k)
+					if err != nil {
+						return err
+					}
+					if ok {
+						found = true
+						break
+					}
+				}
 				return nil
 			}); err != nil {
 				return err
