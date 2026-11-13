@@ -201,12 +201,15 @@ func elfPackageVersion(f io.ReaderAt, size int64) (version string, ok bool) {
 			version, ok = "", false
 		}
 	}()
+	if size <= 0 {
+		return "", false
+	}
 	ef, err := elf.NewFile(io.NewSectionReader(f, 0, size))
 	if err != nil {
 		return "", false
 	}
 	sec := ef.Section(".note.package")
-	if sec == nil || sec.Type != elf.SHT_NOTE || sec.Size == 0 || sec.Offset > uint64(size) {
+	if sec == nil || sec.Type != elf.SHT_NOTE || sec.Size == 0 || sec.Offset > uint64(size) { // #nosec G115 -- size > 0 checked above
 		return "", false
 	}
 	n := min(sec.Size, maxELFNoteBytes)
