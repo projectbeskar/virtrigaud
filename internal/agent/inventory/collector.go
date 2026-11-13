@@ -78,6 +78,9 @@ type Options struct {
 	AllowShortTimings bool
 	// MaxInventoryBytes replaces MaxInventoryBytes (tests); zero uses it.
 	MaxInventoryBytes int
+	// WatchRoot is the directory the watched paths are taken relative to, as
+	// OSFS.Root is for reads; empty for the host's own root.
+	WatchRoot string
 	// Notify replaces the directory watch with a channel of change
 	// notifications (tests).
 	Notify <-chan struct{}
@@ -298,9 +301,10 @@ func (c *Collector) logChange(s *snapshot, cause error) {
 // debounce period, but not sooner than the minimum gap after the last
 // collection began. It returns when ctx is done.
 func (c *Collector) Run(ctx context.Context) {
-	notify, closeWatch := c.watch()
+	notify, rearm, closeWatch := c.watch()
 	defer closeWatch()
 	c.begin(ctx)
+	rearm()
 	interval := time.NewTicker(c.o.Interval)
 	defer interval.Stop()
 	due := time.NewTimer(time.Hour)
@@ -318,6 +322,7 @@ func (c *Collector) Run(ctx context.Context) {
 				stopTimer(due)
 			}
 			c.begin(ctx)
+			rearm()
 		case <-notify:
 			pending = true
 			wait := c.o.Debounce
@@ -330,6 +335,7 @@ func (c *Collector) Run(ctx context.Context) {
 			if pending {
 				pending = false
 				c.begin(ctx)
+				rearm()
 			}
 		}
 	}
@@ -360,27 +366,26 @@ func (c *Collector) watchedDirs() []string {
 
 // watch returns the channel of change notifications and a function that
 // stops watching. With Options.Notify it is that channel. Otherwise it is a
-// file system watch on the directories that exist under the file system's
-// root; a directory that does not exist is picked up by the periodic
-// collection.
-func (c *Collector) watch() (<-chan struct{}, func()) {
+// file system watch on the directories that exist under WatchRoot; a
+// directory that does not exist is picked up by the periodic collection.
+func (c *Collector) watch() (events <-chan struct{}, rearm, closeWatch func()) {
 	if c.o.Notify != nil {
-		return c.o.Notify, func() {}
+		return c.o.Notify, func() {}, func() {}
 	}
-	osfs, ok := c.o.FS.(OSFS)
-	if !ok {
-		return nil, func() {}
-	}
+	osfs := OSFS{Root: c.o.WatchRoot}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		c.o.Log.V(1).Info("no directory watch; the periodic collection still runs")
-		return nil, func() {}
+		return nil, func() {}, func() {}
 	}
-	for _, d := range c.watchedDirs() {
-		if p, rerr := osfs.resolve(d); rerr == nil {
-			_ = w.Add(p) // a directory that does not exist yet is covered by the interval
+	add := func() {
+		for _, d := range c.watchedDirs() {
+			if p, rerr := osfs.resolve(d); rerr == nil {
+				_ = w.Add(p) // a directory that does not exist yet is added again after the next collection
+			}
 		}
 	}
+	add()
 	out := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	finished := make(chan struct{})
@@ -405,7 +410,7 @@ func (c *Collector) watch() (<-chan struct{}, func()) {
 			}
 		}
 	}()
-	return out, func() {
+	return out, add, func() {
 		close(stop)
 		_ = w.Close()
 		<-finished
