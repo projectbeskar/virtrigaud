@@ -475,9 +475,12 @@ older manual pages list only the first three directories.
 agent's own descriptors: `pidfd_open`; a file handle taken from its own process
 descriptor and opened again (`name_to_handle_at`, `open_by_handle_at`), which
 must give the same process; `statfs` of the cgroup root; the namespace links;
-`/dev/kvm` (character device 10:232, opened read-write and closed, with
-`KVM_GET_API_VERSION` asked of that descriptor) and `/dev/net/tun` (10:200,
-opened and closed); and the firmware's Secure Boot variable. A missing Secure
+whether the host exposes `/dev/kvm` and `/dev/net/tun`, read from sysfs
+(`/sys/class/misc/kvm/dev` must read `10:232` and `/sys/class/misc/tun/dev`
+`10:200`); the agent never opens either device, and the sysfs files stay
+readable when the service hides device nodes. A `tun` module that is not loaded
+yet (it is often loaded on first use) has registered nothing and reads
+`ABSENT`; and the firmware's Secure Boot variable. A missing Secure
 Boot variable means `ABSENT` only when the host has no EFI firmware, or
 efivarfs is mounted and does not hold it; EFI firmware with efivarfs not
 mounted is `ERROR`. `measured_boot` says whether a TPM firmware event log is
@@ -487,9 +490,7 @@ feature a distribution backported, so they err towards `ABSENT`. Two probes
 cannot be decided without running something and are reported `ERROR` with
 `not_evaluated`: `hypervisor_pause_resume` (it needs a self-test of the
 hypervisor in a sandbox) and `extension_image_policy_signed` (the policy is not
-in a file the agent can read). A service unit that hides devices from the agent
-(`PrivateDevices=`) makes `kvm` and `tun` read `ABSENT`; the reference unit
-must expose them before those probes mean anything.
+in a file the agent can read).
 
 **Process identity tier.** The strongest mechanism this host supports for
 identifying a process the agent starts, as the probes show: `PIDFS_HANDLE` when
