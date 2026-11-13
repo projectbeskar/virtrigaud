@@ -22,6 +22,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
 	"net/url"
@@ -152,6 +153,30 @@ func TestLoadIdentityRefusals(t *testing.T) {
 		{"no server authentication usage", func(t *testing.T, dir string, p *trusttest.PKI) {
 			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, hostidentity.RequestURIs(p.HostURI, p.Record),
 				hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})))
+		}, time.Time{}},
+		{"client and server authentication", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, hostidentity.RequestURIs(p.HostURI, p.Record),
+				hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}})))
+		}, time.Time{}},
+		{"lifetime above the profile", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, hostidentity.RequestURIs(p.HostURI, p.Record),
+				hostidentitytest.IssueOptions{Lifetime: 40 * 24 * time.Hour})))
+		}, time.Time{}},
+		{"another subject", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, hostidentity.RequestURIs(p.HostURI, p.Record),
+				hostidentitytest.IssueOptions{Subject: &pkix.Name{CommonName: "someone-else"}})))
+		}, time.Time{}},
+		{"no digital signature usage", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, hostidentity.RequestURIs(p.HostURI, p.Record),
+				hostidentitytest.IssueOptions{KeyUsage: x509.KeyUsageKeyEncipherment})))
+		}, time.Time{}},
+		{"certificate signing usage", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, hostidentity.RequestURIs(p.HostURI, p.Record),
+				hostidentitytest.IssueOptions{KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign})))
+		}, time.Time{}},
+		{"a CA certificate", func(t *testing.T, dir string, p *trusttest.PKI) {
+			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, hostidentity.RequestURIs(p.HostURI, p.Record),
+				hostidentitytest.IssueOptions{IsCA: true})))
 		}, time.Time{}},
 		{"no enrolment record", func(t *testing.T, dir string, p *trusttest.PKI) {
 			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, []string{p.HostURI}, hostidentitytest.IssueOptions{})))
