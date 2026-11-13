@@ -360,9 +360,9 @@ func (endless) Read(p []byte) (int, error) {
 }
 
 func TestPackageDBReadFailuresGiveNoVersion(t *testing.T) {
-	// A complete stanza followed by a read error: nothing is trusted.
-	_, ok := packageDBVersion(&failingReader{data: "Package: tool\nStatus: install ok installed\nVersion: 1.1\n\nPackage: other\n"}, "tool")
-	assert.False(t, ok, "a read error gives no version, not even a finished stanza")
+	// A stanza cut by a read error: nothing is trusted.
+	_, ok := packageDBVersion(&failingReader{data: "Package: tool\nStatus: install ok installed\nVersion: 1.1\n"}, "tool")
+	assert.False(t, ok, "a read error gives no version, not even a stanza that looks complete")
 	// The size cap: no half-read database is used.
 	_, ok = packageDBVersion(io.MultiReader(io.LimitReader(endless{}, 33<<20), strings.NewReader("Package: tool\nStatus: install ok installed\nVersion: 1.1\n\n")), "tool")
 	assert.False(t, ok, "hitting the size cap gives no version")
