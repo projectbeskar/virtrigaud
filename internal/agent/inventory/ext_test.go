@@ -37,7 +37,7 @@ import (
 
 var (
 	imageBytes = []byte("system extension image")
-	releaseOK  = "ID=_any\nSYSEXT_VERSION_ID=1.5.0\nVERSION_ID=9.9.9\n"
+	releaseOK  = "ID=_any\nSYSEXT_VERSION_ID=1.5.0\nVERSION_ID=9.9.9\n" // VERSION_ID is the host release, never the version
 )
 
 // sysextTree is a host whose hypervisor is delivered as a system extension.
@@ -62,7 +62,7 @@ func TestSysextArtifact(t *testing.T) {
 		c := component(t, inv, "cloud-hypervisor")
 		assert.Equal(t, stReady, c.GetState())
 		assert.Equal(t, rawDigest(imageBytes), c.GetArtifactSha256())
-		assert.Equal(t, "1.5.0", c.GetObservedVersion(), "SYSEXT_VERSION_ID of the extension-release file, before VERSION_ID")
+		assert.Equal(t, "1.5.0", c.GetObservedVersion(), "SYSEXT_VERSION_ID of the extension-release file, never VERSION_ID, the host release the extension fits")
 		assert.Equal(t, "sysext", c.GetSource())
 		assert.Empty(t, inv.GetUnexpectedExtensions(), "a declared extension is not unexpected")
 	})
@@ -113,7 +113,8 @@ func TestUnexpectedExtensions(t *testing.T) {
 	for _, e := range inv.GetUnexpectedExtensions() {
 		byName[e.GetName()] = e
 	}
-	require.Len(t, byName, 4, "%v", inv.GetUnexpectedExtensions())
+	require.Len(t, byName, 5, "%v", inv.GetUnexpectedExtensions())
+	assert.Equal(t, providerv1.ExtensionKind_EXTENSION_KIND_DIRECTORY, byName["notes.txt"].GetKind(), "an entry that is nothing known is listed, not hidden")
 	assert.Equal(t, providerv1.ExtensionKind_EXTENSION_KIND_DIRECTORY, byName["rogue-dir"].GetKind())
 	assert.Empty(t, byName["rogue-dir"].GetImageSha256())
 	assert.Equal(t, providerv1.ExtensionKind_EXTENSION_KIND_DIRECTORY, byName["linked"].GetKind(), "a symbolic link is listed, never followed to read")
@@ -153,13 +154,14 @@ func TestHashLimits(t *testing.T) {
 		}
 		assert.Equal(t, 1, unhealthy, "the second file no longer fits")
 	})
-	t.Run("an undeclared image above the limit cannot be listed", func(t *testing.T) {
+	t.Run("an undeclared image above the limit is listed without a digest", func(t *testing.T) {
 		tr := healthyTree(t)
 		tr.write("/etc/extensions/huge.raw", bytes.Repeat([]byte{1}, 100))
 		inv := collectInventory(t, tr, func(o *Options) { o.hashFile = 50 })
-		assert.Equal(t, providerv1.InventoryState_INVENTORY_STATE_UNREADABLE, inv.GetState())
-		assert.Equal(t, ReasonProbeFailed, inv.GetStateReason())
-		assert.Empty(t, inv.GetComponents())
+		assert.Equal(t, providerv1.InventoryState_INVENTORY_STATE_COMPLETE, inv.GetState(), "one entry never makes the snapshot an error")
+		require.Len(t, inv.GetUnexpectedExtensions(), 1)
+		assert.Equal(t, providerv1.ExtensionKind_EXTENSION_KIND_DIRECTORY, inv.GetUnexpectedExtensions()[0].GetKind())
+		assert.Empty(t, inv.GetUnexpectedExtensions()[0].GetImageSha256())
 	})
 }
 
@@ -331,24 +333,25 @@ func TestFeaturesAndTier(t *testing.T) {
 		f := features(inv)
 		require.Len(t, f, len(valueSets[1].features))
 		for _, name := range []string{FeatureCgroupV2, FeatureCloneIntoCgroup, FeaturePidfd, FeaturePidfsHandle, FeaturePidfdInfoExit,
-			FeatureInitialPIDNamespace, FeatureInitialCgroupNamespace, FeatureInitialTimeNamespace, FeatureSecureBoot, FeatureMeasuredBoot} {
+			FeatureInitialPIDNamespace, FeatureInitialCgroupNamespace, FeatureInitialTimeNamespace, FeatureKVM, FeatureTun, FeatureSecureBoot, FeatureMeasuredBoot} {
 			assert.Equal(t, providerv1.FeatureResult_FEATURE_RESULT_PRESENT, f[name].GetResult(), name)
 		}
 		for _, name := range []string{FeatureHypervisorPauseResume, FeatureExtensionImagePolicySigned} {
 			assert.Equal(t, providerv1.FeatureResult_FEATURE_RESULT_ERROR, f[name].GetResult(), "%s cannot be decided as a data read", name)
-			assert.Equal(t, FeatureReasonProbeFailed, f[name].GetReason(), name)
+			assert.Equal(t, FeatureReasonNotEvaluated, f[name].GetReason(), name)
 		}
 		assert.Equal(t, providerv1.ProcessIdentityTier_PROCESS_IDENTITY_TIER_PIDFS_HANDLE, inv.GetProcessIdentityTier())
 	})
 	t.Run("old host", func(t *testing.T) {
 		h := healthyHost()
 		h.kernel, h.cgroup2, h.handle, h.pidfdErr = "5.4.0-1", false, false, syscall.ENOSYS
+		h.onPidfs, h.kvm, h.tun = false, false, false
 		h.ns["pid"] = 4026532000
 		delete(h.ns, "time")
 		inv := collectInventory(t, healthyTree(t), func(o *Options) { o.Host = h })
 		f := features(inv)
 		for _, name := range []string{FeatureCgroupV2, FeatureCloneIntoCgroup, FeaturePidfd, FeaturePidfsHandle, FeaturePidfdInfoExit,
-			FeatureInitialPIDNamespace, FeatureInitialTimeNamespace, FeatureSecureBoot, FeatureMeasuredBoot} {
+			FeatureInitialPIDNamespace, FeatureInitialTimeNamespace, FeatureKVM, FeatureTun, FeatureSecureBoot, FeatureMeasuredBoot} {
 			assert.Equal(t, providerv1.FeatureResult_FEATURE_RESULT_ABSENT, f[name].GetResult(), name)
 			assert.Empty(t, f[name].GetReason(), name)
 		}
@@ -509,17 +512,20 @@ func TestPackageDBParsers(t *testing.T) {
 	assert.False(t, ok)
 	_, ok = packageDBVersion(strings.NewReader("Package: tool\nVersion: "+strings.Repeat("9", 100)+"\n\n"), "tool")
 	assert.False(t, ok, "a version above 64 bytes is refused")
-	_, ok = packageDBVersion(strings.NewReader("Package: tool\nVersion: 1\n"+strings.Repeat("x", maxPackageDBLine+10)+"\n"), "tool")
-	assert.False(t, ok, "a line above the bound stops the parser")
+	v, ok = packageDBVersion(strings.NewReader("Package: tool\nDescription: "+strings.Repeat("x", maxPackageDBLine*3)+"\nVersion: 1.1\nStatus: install ok installed\n\n"), "tool")
+	assert.True(t, ok, "a line above the bound is skipped, not fatal")
+	assert.Equal(t, "1.1", v)
 }
 
 func TestExtensionReleaseParser(t *testing.T) {
 	for in, want := range map[string]string{
-		"SYSEXT_VERSION_ID=1.0\nVERSION_ID=2.0\n": "1.0",
-		"VERSION_ID=\"2.0\"\n":                    "2.0",
-		"# c\nVERSION_ID='3.1'":                   "3.1",
-		"VERSION_ID=bad value\n":                  "",
-		"":                                        "",
+		"SYSEXT_VERSION_ID=1.0\nVERSION_ID=2.0\n":  "1.0",
+		"SYSEXT_IMAGE_VERSION=\"2.0\"\n":           "2.0",
+		"VERSION_ID=2.0\nSYSEXT_IMAGE_VERSION=2.1": "2.1",
+		"VERSION_ID=2.0\n":                         "",
+		"# c\nSYSEXT_IMAGE_VERSION='3.1'":          "3.1",
+		"SYSEXT_VERSION_ID=bad value\n":            "",
+		"":                                         "",
 	} {
 		v, ok := extensionReleaseVersion([]byte(in))
 		assert.Equal(t, want != "", ok, in)

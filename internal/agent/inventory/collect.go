@@ -105,9 +105,10 @@ type claim struct {
 
 // extension is one system extension found in an extension directory.
 type extension struct {
-	name  string // as listed
+	name  string // as listed in the directory
+	key   string // the extension's name as the system extension tool takes it: without ".raw"
 	path  string
-	image bool
+	image bool // a regular file to hash; everything else is listed without a digest
 }
 
 // hasher hashes files within the per-file and per-collection limits.
@@ -147,11 +148,13 @@ func (h *hasher) sum(ctx context.Context, p string, follow bool) ([]byte, hashRe
 	var n int64
 	for {
 		if err := ctx.Err(); err != nil {
+			h.remaining -= n
 			return nil, hashOK, err
 		}
 		k, rerr := f.Read(buf)
 		n += int64(k)
 		if n > limit {
+			h.remaining -= n // what was read counts, whatever came of it
 			return nil, hashLimit, nil
 		}
 		_, _ = d.Write(buf[:k])
@@ -159,6 +162,7 @@ func (h *hasher) sum(ctx context.Context, p string, follow bool) ([]byte, hashRe
 			break
 		}
 		if rerr != nil {
+			h.remaining -= n
 			return nil, hashOK, rerr
 		}
 	}
@@ -182,7 +186,7 @@ func (e *env) collect(ctx context.Context) (*collected, error) {
 		groups[keyOf(c)] = append(groups[keyOf(c)], c)
 	}
 	h := &hasher{fs: e.fs, perFile: e.hashFile, remaining: e.hashTotal}
-	declared := map[string]bool{}
+	declared := map[string]string{}
 	var comps []*providerv1.HostComponent
 	for i := range e.catalog {
 		entry := &e.catalog[i]
@@ -327,6 +331,44 @@ func (e *env) readManifests(ctx context.Context) ([]claim, error) {
 	return claims, nil
 }
 
+// extensionKey is the name the system extension tool gives an extension: the
+// entry's name without the ".raw" suffix, so "x" and "x.raw" are one extension.
+func extensionKey(name string) string { return strings.TrimSuffix(name, imageSuffix) }
+
+// masked reports whether a symbolic link entry masks an extension: the tool
+// treats a link to /dev/null as not merged.
+func (e *env) masked(p string) bool {
+	target, err := e.fs.Readlink(p)
+	return err == nil && target == "/dev/null"
+}
+
+// classify makes the extension of one directory entry, or reports that the
+// entry is not an extension (a hidden entry, or a masked one). Nothing else is
+// left out: an entry that cannot be told apart from a plain extension (a
+// dangling link, a device node, a socket, a versioned directory, a file
+// without the image suffix) is listed as a directory extension, which carries
+// no digest and is valid under the field rules. The report errs towards
+// showing a stray entry rather than hiding it; one bad entry never turns the
+// whole snapshot into an error.
+func (e *env) classify(dir string, ent DirEntry) (extension, bool) {
+	if ent.Name == "" || strings.HasPrefix(ent.Name, ".") {
+		return extension{}, false
+	}
+	x := extension{name: ent.Name, key: extensionKey(ent.Name), path: path.Join(dir, ent.Name)}
+	isImage := strings.HasSuffix(ent.Name, imageSuffix)
+	switch {
+	case ent.Mode&fs.ModeSymlink != 0:
+		if e.masked(x.path) {
+			return extension{}, false
+		}
+		mode, _, err := e.fs.Stat(x.path)
+		x.image = err == nil && mode.IsRegular() && isImage
+	case ent.Mode.IsRegular():
+		x.image = isImage
+	}
+	return x, true
+}
+
 // readExtensions indexes the system extensions of every extension directory;
 // an earlier directory wins over a later one for the same name.
 func (e *env) readExtensions(ctx context.Context) (map[string]extension, error) {
@@ -346,22 +388,12 @@ func (e *env) readExtensions(ctx context.Context) (map[string]extension, error) 
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			if strings.HasPrefix(ent.Name, ".") || ent.Name == "" {
+			x, ok := e.classify(dir, ent)
+			if !ok {
 				continue
 			}
-			var ext extension
-			switch {
-			case ent.Mode.IsDir():
-				ext = extension{name: ent.Name, path: path.Join(dir, ent.Name)}
-			case (ent.Mode.IsRegular() || ent.Mode&fs.ModeSymlink != 0) && strings.HasSuffix(ent.Name, imageSuffix):
-				ext = extension{name: ent.Name, path: path.Join(dir, ent.Name), image: true}
-			case ent.Mode&fs.ModeSymlink != 0:
-				ext = extension{name: ent.Name, path: path.Join(dir, ent.Name)}
-			default:
-				continue
-			}
-			if _, seen := out[ent.Name]; !seen {
-				out[ent.Name] = ext
+			if _, seen := out[x.key]; !seen {
+				out[x.key] = x
 			}
 		}
 	}
@@ -492,7 +524,7 @@ func (e *env) observedVersion(entry *CatalogEntry, artifactName string) string {
 
 // declaredComponent evaluates a component some manifest claims.
 func (e *env) declaredComponent(ctx context.Context, h *hasher, entry *CatalogEntry, g []claim,
-	exts map[string]extension, declared map[string]bool) (*providerv1.HostComponent, error) {
+	exts map[string]extension, declared map[string]string) (*providerv1.HostComponent, error) {
 	if len(g) > 1 || g[0].p.reason != "" {
 		return resolveInvalid(entry.Name, g), nil
 	}
@@ -502,8 +534,9 @@ func (e *env) declaredComponent(ctx context.Context, h *hasher, entry *CatalogEn
 	}
 	var ext *extension
 	if decl.artifactName != "" {
-		declared[decl.artifactName] = true
-		if x, ok := exts[decl.artifactName]; ok {
+		key := extensionKey(decl.artifactName)
+		declared[key] = entry.Name
+		if x, ok := exts[key]; ok {
 			ext = &x
 		}
 	}
@@ -538,8 +571,9 @@ func (e *env) declaredComponent(ctx context.Context, h *hasher, entry *CatalogEn
 	if err != nil {
 		return nil, unreadable(ReasonProbeFailed, err)
 	}
+	_, numeric := parseNumeric(c.ObservedVersion)
 	switch {
-	case c.ObservedVersion == "":
+	case c.ObservedVersion == "" || !numeric:
 		c.State, c.StateReason, c.RequiredRange = providerv1.ComponentState_COMPONENT_STATE_INCOMPATIBLE, ReasonVersionUnreadable, entry.Range
 	case !rng.contains(c.ObservedVersion):
 		c.State, c.StateReason, c.RequiredRange = providerv1.ComponentState_COMPONENT_STATE_INCOMPATIBLE, ReasonVersionOutOfRange, entry.Range
@@ -598,7 +632,7 @@ func (e *env) undeclaredComponent(ctx context.Context, h *hasher, entry *Catalog
 // when an undeclared directory extension holds one of its files; that reason
 // comes first in the UNHEALTHY set, so it replaces another. A component in an
 // earlier state of the precedence keeps its state.
-func (e *env) markOverlays(ctx context.Context, comps []*providerv1.HostComponent, exts map[string]extension, declared map[string]bool) {
+func (e *env) markOverlays(ctx context.Context, comps []*providerv1.HostComponent, exts map[string]extension, declared map[string]string) {
 	for _, c := range comps {
 		if c.State != providerv1.ComponentState_COMPONENT_STATE_READY && c.State != providerv1.ComponentState_COMPONENT_STATE_UNHEALTHY {
 			continue
@@ -608,11 +642,14 @@ func (e *env) markOverlays(ctx context.Context, comps []*providerv1.HostComponen
 			continue
 		}
 		for _, x := range exts {
-			if x.image || declared[x.name] || ctx.Err() != nil {
+			// An extension the component declares itself is not an overlay of it;
+			// one another component declares is.
+			if x.image || declared[x.key] == c.Name || ctx.Err() != nil {
 				continue
 			}
 			for _, rel := range entry.OverlayPaths {
-				if _, _, err := e.fs.Lstat(path.Join(x.path, rel)); err == nil {
+				if _, _, err := e.fs.Lstat(path.Join(x.path, rel)); !isNotExist(err) {
+					// Present, or unreadable: an overlay that cannot be ruled out is one.
 					c.State, c.StateReason = providerv1.ComponentState_COMPONENT_STATE_UNHEALTHY, ReasonUnexpectedExtension
 				}
 			}
@@ -620,42 +657,41 @@ func (e *env) markOverlays(ctx context.Context, comps []*providerv1.HostComponen
 	}
 }
 
-// unexpectedExtensions lists the extensions no manifest declares.
-func (e *env) unexpectedExtensions(ctx context.Context, h *hasher, exts map[string]extension, declared map[string]bool) ([]*providerv1.HostExtension, error) {
-	names := make([]string, 0, len(exts))
-	for n := range exts {
-		if !declared[n] {
-			names = append(names, n)
+// unexpectedExtensions lists the extensions no manifest declares. An image
+// that cannot be hashed (a limit, a read error) is listed without a digest, as
+// a directory extension, instead of being hidden.
+func (e *env) unexpectedExtensions(ctx context.Context, h *hasher, exts map[string]extension, declared map[string]string) ([]*providerv1.HostExtension, error) {
+	keys := make([]string, 0, len(exts))
+	for k := range exts {
+		if _, ok := declared[k]; !ok {
+			keys = append(keys, k)
 		}
 	}
-	sort.Strings(names)
+	sort.Strings(keys)
 	seen := map[string]bool{}
 	var out []*providerv1.HostExtension
-	for _, n := range names {
-		x := exts[n]
-		display := n
-		if !fileNameRE.MatchString(n) {
-			sum := sha256.Sum256([]byte(n))
+	for _, k := range keys {
+		x := exts[k]
+		display := x.name
+		if !fileNameRE.MatchString(display) {
+			sum := sha256.Sum256([]byte(display))
 			display = invalidExtensionPrefix + hex.EncodeToString(sum[:8])
 		}
 		if seen[display] {
-			continue
+			// A literal name equal to a hashed one: two entries cannot share a
+			// name, and neither may be dropped.
+			return nil, unreadable(ReasonProbeFailed, errors.New("two extensions have the same reported name"))
 		}
 		seen[display] = true
 		he := &providerv1.HostExtension{Name: display, Kind: providerv1.ExtensionKind_EXTENSION_KIND_DIRECTORY}
 		if x.image {
 			sum, res, err := h.sum(ctx, x.path, true)
-			switch {
-			case err != nil:
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				return nil, unreadable(ReasonIOError, err)
-			case res != hashOK:
-				// An image that cannot be hashed cannot be reported as one.
-				return nil, unreadable(ReasonProbeFailed, errors.New("an undeclared extension image cannot be hashed"))
+			if err != nil && ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
-			he.Kind, he.ImageSha256 = providerv1.ExtensionKind_EXTENSION_KIND_UNDECLARED_IMAGE, sum
+			if err == nil && res == hashOK {
+				he.Kind, he.ImageSha256 = providerv1.ExtensionKind_EXTENSION_KIND_UNDECLARED_IMAGE, sum
+			}
 		}
 		out = append(out, he)
 	}

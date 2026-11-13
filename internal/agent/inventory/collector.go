@@ -20,8 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
+	"strconv"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -117,7 +120,9 @@ func New(o Options) (*Collector, error) {
 	}
 	if o.Layout.ReadOnlyDir == "" {
 		l := DefaultLayout()
-		l.AgentExecutable = o.Layout.AgentExecutable
+		if o.Layout.AgentExecutable != "" {
+			l.AgentExecutable = o.Layout.AgentExecutable
+		}
 		o.Layout = l
 	}
 	if o.Catalog == nil {
@@ -293,7 +298,7 @@ func (c *Collector) logChange(s *snapshot, cause error) {
 		c.o.Log.Info("host inventory collected", "components", len(s.core.components), "unexpectedExtensions", len(s.core.extensions))
 		return
 	}
-	c.o.Log.Info("host inventory is not complete", "state", s.state.String(), "reason", s.reason, "cause", fmt.Sprint(cause))
+	c.o.Log.Info("host inventory is not complete", "state", s.state.String(), "reason", s.reason, "cause", ErrorClass(cause))
 }
 
 // Run collects until ctx ends: at once, then every interval, and after a
@@ -415,4 +420,27 @@ func (c *Collector) watch() (events <-chan struct{}, rearm, closeWatch func()) {
 		_ = w.Close()
 		<-finished
 	}
+}
+
+// ErrorClass names the kind of an error for a log line: a fixed word, never
+// the error's text, which can carry paths and file names.
+func ErrorClass(err error) string {
+	var errno syscall.Errno
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return "context"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission"
+	case errors.Is(err, fs.ErrNotExist):
+		return "not_exist"
+	case errors.Is(err, ErrNotRegular):
+		return "not_regular"
+	case errors.Is(err, ErrInvalid):
+		return "invalid_inventory"
+	case errors.As(err, &errno):
+		return "errno_" + strconv.Itoa(int(errno))
+	}
+	return "other"
 }

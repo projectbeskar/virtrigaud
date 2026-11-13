@@ -58,13 +58,13 @@ type Layout struct {
 	ExtensionReleaseDir string
 	// PackageDBs are the readable package databases.
 	PackageDBs []string
-	// AgentExecutable is the path of the agent's own executable; empty when
-	// unknown (the agent component is then missing).
+	// AgentExecutable is the path of the agent's own executable: the running
+	// image, /proc/self/exe, by default; empty means the agent component is
+	// missing.
 	AgentExecutable string
 }
 
-// DefaultLayout returns the layout of a host. The agent's own executable is
-// set by the caller.
+// DefaultLayout returns the layout of a host.
 func DefaultLayout() Layout {
 	return Layout{
 		ReadOnlyDir:         ReadOnlyManifestDir,
@@ -72,6 +72,7 @@ func DefaultLayout() Layout {
 		ExtensionDirs:       slices.Clone(ExtensionDirs),
 		ExtensionReleaseDir: ExtensionReleaseDir,
 		PackageDBs:          slices.Clone(PackageDBs),
+		AgentExecutable:     "/proc/self/exe",
 	}
 }
 

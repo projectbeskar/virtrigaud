@@ -44,9 +44,9 @@ func TestValueSetsArePinned(t *testing.T) {
 		stInvalid:      {"parse_error", "unsupported_digest", "duplicate_declaration", "version_too_long", "invalid_name", "too_large", "unknown_component"},
 	}, vs.component)
 	assert.Equal(t, []string{"cgroup_v2", "clone_into_cgroup", "pidfd", "pidfs_handle", "pidfd_info_exit", "initial_pid_namespace",
-		"initial_cgroup_namespace", "initial_time_namespace", "hypervisor_pause_resume", "secure_boot", "measured_boot",
+		"initial_cgroup_namespace", "initial_time_namespace", "hypervisor_pause_resume", "kvm", "tun", "secure_boot", "measured_boot",
 		"extension_image_policy_signed"}, vs.features)
-	assert.Equal(t, []string{"probe_failed", "probe_timeout", "permission_denied"}, vs.featReasons)
+	assert.Equal(t, []string{"probe_failed", "probe_timeout", "permission_denied", "not_evaluated"}, vs.featReasons)
 	assert.Equal(t, [6]int32{4, 6, 3, 3, 4, 3}, [6]int32{vs.maxState, vs.maxComponentState, vs.maxOrigin, vs.maxResult, vs.maxTier, vs.maxKind})
 	assert.EqualValues(t, 1, SupportedVersion)
 	// The probes the collector runs are exactly the set.

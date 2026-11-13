@@ -61,12 +61,19 @@ type fakeHost struct {
 	pidfdErr  error
 	handle    bool
 	handleErr error
+	onPidfs   bool
+	kvm, tun  bool
+	kvmErr    error
+	tunErr    error
+	magic     map[string]uint64
+	magicErr  error
 }
 
 func healthyHost() *fakeHost {
 	return &fakeHost{
 		ns:      map[string]uint64{"pid": initPIDNSInode, "cgroup": initCgroupNSInode, "time": initTimeNSInode},
-		cgroup2: true, kernel: "6.15.2-test", handle: true,
+		cgroup2: true, kernel: "6.15.2-test", handle: true, onPidfs: true, kvm: true, tun: true,
+		magic: map[string]uint64{efivarsDir: magicEfivarfs, securityfsDir: magicSecurityf},
 	}
 }
 
@@ -81,6 +88,15 @@ func (h *fakeHost) Cgroup2Mounted() (bool, error)  { return h.cgroup2, nil }
 func (h *fakeHost) KernelRelease() (string, error) { return h.kernel, nil }
 func (h *fakeHost) PidfdOpenSelf() error           { return h.pidfdErr }
 func (h *fakeHost) PidfsHandle() (bool, error)     { return h.handle, h.handleErr }
+func (h *fakeHost) PidfdOnPidfs() (bool, error)    { return h.onPidfs, nil }
+func (h *fakeHost) KVMUsable() (bool, error)       { return h.kvm, h.kvmErr }
+func (h *fakeHost) TunUsable() (bool, error)       { return h.tun, h.tunErr }
+func (h *fakeHost) FSMagic(p string) (uint64, error) {
+	if h.magicErr != nil {
+		return 0, h.magicErr
+	}
+	return h.magic[p], nil
+}
 
 // tree is a fixture root directory.
 type tree struct {

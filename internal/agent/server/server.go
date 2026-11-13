@@ -488,13 +488,13 @@ func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, cont
 	return s.signHostAnswer(c, h)
 }
 
-// signHostAnswer builds and signs the answer for h. An inventory that breaks
-// a field rule is never signed: the answer is made without an inventory (a
-// manager treats that as no inventory, and the host stays not schedulable),
-// or, when only the size is the problem, with an OVER_LIMIT inventory that
-// lists nothing, so the rest of the answer is still delivered.
+// signHostAnswer builds and signs the answer for h. An inventory that cannot
+// be signed is replaced, never signed as it is: by an OVER_LIMIT inventory that
+// lists nothing when the size is the problem, by an UNREADABLE (probe_failed)
+// one when it breaks a field rule, and by none when that replacement fails too,
+// so the rest of the answer is still delivered.
 func (s *Server) signHostAnswer(c *Credentials, h answer.Host) *providerv1.SignedBlob {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		body, err := answer.HostAnswer(h)
 		if err == nil {
 			var blob *providerv1.SignedBlob
@@ -506,12 +506,15 @@ func (s *Server) signHostAnswer(c *Credentials, h answer.Host) *providerv1.Signe
 		case errors.Is(err, answer.ErrNoAnswer):
 			s.opts.Log.V(1).Info("no signed answer", "why", err.Error())
 			return nil
-		case h.Inventory != nil && attempt == 0 && (errors.Is(err, answer.ErrInvalidInventory) || errors.Is(err, inventory.ErrTooLarge)):
-			s.logNoAnswer(err, "the host inventory cannot be signed; answering without it")
-			if errors.Is(err, inventory.ErrTooLarge) {
-				h.Inventory = inventory.OverLimit(h.InventoryRequested, inventory.ReasonInventoryTooLarge)
-			} else {
+		case h.Inventory != nil && (errors.Is(err, answer.ErrInvalidInventory) || errors.Is(err, inventory.ErrTooLarge)):
+			s.logNoAnswer(err, "the host inventory cannot be signed; replacing it")
+			switch {
+			case attempt >= 1:
 				h.Inventory = nil
+			case errors.Is(err, inventory.ErrTooLarge):
+				h.Inventory = inventory.OverLimit(h.InventoryRequested, inventory.ReasonInventoryTooLarge)
+			default:
+				h.Inventory = inventory.Unreadable(h.InventoryRequested, inventory.ReasonProbeFailed)
 			}
 		default:
 			// A signer that is away or refusing fails every answer.
@@ -546,7 +549,9 @@ func peerIdentity(ctx context.Context) string {
 // log line per request would let any caller fill the journal.
 func (s *Server) logNoAnswer(err error, msg string) {
 	if ok, n := s.noAnswer.allow(s.opts.Now()); ok {
-		s.opts.Log.Error(err, msg, "suppressedSinceLast", n)
+		// A class, never the error's text: it can name a certificate subject, a
+		// component or a path.
+		s.opts.Log.Error(nil, msg, "class", errorClass(err), "suppressedSinceLast", n)
 	}
 }
 
@@ -559,4 +564,21 @@ func checkNonce(nonce []byte, required bool) error {
 		return status.Errorf(codes.InvalidArgument, "answer_nonce must be exactly %d bytes", answer.NonceLen)
 	}
 	return nil
+}
+
+// errorClass names the kind of an answer failure for a log line.
+func errorClass(err error) string {
+	switch {
+	case errors.Is(err, answer.ErrNoAnswer):
+		return "no_answer"
+	case errors.Is(err, inventory.ErrTooLarge):
+		return "inventory_too_large"
+	case errors.Is(err, answer.ErrInvalidInventory):
+		return "invalid_inventory"
+	case errors.Is(err, answer.ErrSign):
+		return "sign"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "context"
+	}
+	return inventory.ErrorClass(err)
 }

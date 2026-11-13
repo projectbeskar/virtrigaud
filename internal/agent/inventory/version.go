@@ -157,8 +157,10 @@ func (r versionRange) contains(version string) bool {
 }
 
 // extensionReleaseVersion reads the version out of the content of an
-// extension-release file: SYSEXT_VERSION_ID, else VERSION_ID. The content is
-// data; nothing in it is interpreted beyond KEY=value lines.
+// extension-release file: SYSEXT_VERSION_ID, else SYSEXT_IMAGE_VERSION. The
+// unprefixed VERSION_ID is never used: it is the host release the extension
+// is compatible with, not the extension's own version. The content is data;
+// nothing in it is interpreted beyond KEY=value lines.
 func extensionReleaseVersion(content []byte) (string, bool) {
 	if len(content) > maxExtensionReleaseBytes {
 		return "", false
@@ -179,7 +181,7 @@ func extensionReleaseVersion(content []byte) (string, bool) {
 		}
 		found[strings.TrimSpace(k)] = v
 	}
-	for _, key := range []string{"SYSEXT_VERSION_ID", "VERSION_ID"} {
+	for _, key := range []string{"SYSEXT_VERSION_ID", "SYSEXT_IMAGE_VERSION"} {
 		if v := found[key]; versionRE.MatchString(v) {
 			return v, true
 		}
@@ -247,10 +249,9 @@ func parsePackageNotes(buf []byte, bo byteOrder) (string, bool) {
 
 // packageDBVersion reads r (at most maxPackageDBBytes of it) as a Debian
 // status file or an Alpine installed database and returns the installed
-// version of pkg.
+// version of pkg. A line longer than maxPackageDBLine is skipped, not fatal.
 func packageDBVersion(r io.Reader, pkg string) (string, bool) {
-	sc := bufio.NewScanner(io.LimitReader(r, maxPackageDBBytes))
-	sc.Buffer(make([]byte, 0, 4096), maxPackageDBLine)
+	br := bufio.NewReaderSize(io.LimitReader(r, maxPackageDBBytes), 4096)
 	var name, version string
 	installed := true
 	flush := func() (string, bool) {
@@ -259,9 +260,28 @@ func packageDBVersion(r io.Reader, pkg string) (string, bool) {
 		}
 		return "", false
 	}
-	for sc.Scan() {
-		line := sc.Text()
-		if line == "" {
+	var line []byte
+	skipping := false
+	for {
+		chunk, isPrefix, err := br.ReadLine()
+		if err != nil {
+			break
+		}
+		if skipping {
+			skipping = isPrefix
+			continue
+		}
+		line = append(line, chunk...)
+		if len(line) > maxPackageDBLine || isPrefix && len(line) >= maxPackageDBLine {
+			line, skipping = line[:0], isPrefix
+			continue
+		}
+		if isPrefix {
+			continue
+		}
+		text := string(line)
+		line = line[:0]
+		if text == "" {
 			if v, ok := flush(); ok {
 				return v, true
 			}
@@ -269,20 +289,17 @@ func packageDBVersion(r io.Reader, pkg string) (string, bool) {
 			continue
 		}
 		switch {
-		case strings.HasPrefix(line, "Package: "):
-			name = strings.TrimSpace(line[len("Package: "):])
-		case strings.HasPrefix(line, "Version: "):
-			version = strings.TrimSpace(line[len("Version: "):])
-		case strings.HasPrefix(line, "Status: "):
-			installed = strings.HasSuffix(strings.TrimSpace(line), " installed") && !strings.Contains(line, "not-installed")
-		case strings.HasPrefix(line, "P:"):
-			name = strings.TrimSpace(line[2:])
-		case strings.HasPrefix(line, "V:"):
-			version = strings.TrimSpace(line[2:])
+		case strings.HasPrefix(text, "Package: "):
+			name = strings.TrimSpace(text[len("Package: "):])
+		case strings.HasPrefix(text, "Version: "):
+			version = strings.TrimSpace(text[len("Version: "):])
+		case strings.HasPrefix(text, "Status: "):
+			installed = strings.HasSuffix(strings.TrimSpace(text), " installed") && !strings.Contains(text, "not-installed")
+		case strings.HasPrefix(text, "P:"):
+			name = strings.TrimSpace(text[2:])
+		case strings.HasPrefix(text, "V:"):
+			version = strings.TrimSpace(text[2:])
 		}
-	}
-	if sc.Err() != nil {
-		return "", false
 	}
 	return flush()
 }

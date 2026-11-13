@@ -41,18 +41,31 @@ const (
 	// secureBootVariable is the firmware's SecureBoot variable; its content
 	// is four attribute bytes and one value byte.
 	secureBootVariable = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+	// efiDir exists only on a host booted through EFI firmware.
+	efiDir = "/sys/firmware/efi"
+	// efivarsDir is where efivarfs is mounted.
+	efivarsDir = "/sys/firmware/efi/efivars"
+	// securityfsDir is where securityfs is mounted.
+	securityfsDir = "/sys/kernel/security"
 	// measuredBootLog is the firmware's measured-boot event log.
 	measuredBootLog = "/sys/kernel/security/tpm0/binary_bios_measurements"
 	// maxVariableBytes bounds the firmware variable read.
 	maxVariableBytes = 16
 )
 
+// File system magic numbers the boot probes check before they trust what a
+// missing file means.
+const (
+	magicEfivarfs  uint64 = 0xde5e81e4
+	magicSecurityf uint64 = 0x73636673
+)
+
 // Kernel releases that introduced a feature the agent infers from the kernel
-// release (major, minor).
+// release (major, minor). The inference cannot see a feature a distribution
+// backported, so it errs on the side of ABSENT.
 var (
 	kernelCloneIntoCgroup = [2]int{5, 7}
 	kernelPidfdInfoExit   = [2]int{6, 15}
-	kernelPidfsInode      = [2]int{6, 9}
 )
 
 // Host is what the feature probes read of the running kernel. Every method is
@@ -70,9 +83,23 @@ type Host interface {
 	// PidfdOpenSelf opens and closes a process file descriptor of the agent
 	// itself; an error matching syscall.ENOSYS means the call is absent.
 	PidfdOpenSelf() error
-	// PidfsHandle reports whether file handles of a process file descriptor
-	// can be taken.
+	// PidfsHandle reports whether a file handle taken from a process file
+	// descriptor of the agent itself opens the same process again. An
+	// absent pidfd_open is false, not an error.
 	PidfsHandle() (bool, error)
+	// PidfdOnPidfs reports whether the agent's own process file descriptor
+	// lives on the process file system (pidfs), which numbers processes
+	// uniquely. An absent pidfd_open is false, not an error.
+	PidfdOnPidfs() (bool, error)
+	// KVMUsable reports whether /dev/kvm is the KVM character device and the
+	// agent can open it; false when there is no such device.
+	KVMUsable() (bool, error)
+	// TunUsable reports whether /dev/net/tun is the TUN character device and
+	// the agent can open it; false when there is no such device.
+	TunUsable() (bool, error)
+	// FSMagic returns the file system type magic of the file system holding
+	// path.
+	FSMagic(path string) (uint64, error)
 }
 
 // probe is one feature probe.
@@ -153,9 +180,82 @@ func namespaceProbe(name, kind string, initial uint64) probe {
 	}}
 }
 
+// notEvaluated is the result of a probe the agent cannot decide as a data
+// read: ERROR with the reason that says it was not tried.
+func notEvaluated(context.Context, *env) (providerv1.FeatureResult, string) {
+	return errored, FeatureReasonNotEvaluated
+}
+
+// boolProbe maps a yes/no answer or an error to a result.
+func boolProbe(ok bool, err error) (providerv1.FeatureResult, string) {
+	switch {
+	case err != nil:
+		return failure(err)
+	case ok:
+		return present, ""
+	}
+	return absent, ""
+}
+
+// secureBoot reads the firmware's SecureBoot variable. A missing variable
+// means "not booted with Secure Boot" only where it can be told: there is no
+// EFI firmware at all (ABSENT), or efivarfs is mounted and does not hold it.
+// EFI firmware with efivarfs not mounted cannot be told (ERROR).
+func secureBoot(_ context.Context, e *env) (providerv1.FeatureResult, string) {
+	f, err := e.fs.Open(secureBootVariable, false)
+	if err != nil {
+		if !isNotExist(err) {
+			return failure(err)
+		}
+		if _, _, derr := e.fs.Lstat(efiDir); derr != nil {
+			if isNotExist(derr) {
+				return absent, ""
+			}
+			return failure(derr)
+		}
+		magic, merr := e.host.FSMagic(efivarsDir)
+		if merr != nil {
+			return failure(merr)
+		}
+		if magic != magicEfivarfs {
+			return errored, FeatureReasonProbeFailed
+		}
+		return absent, ""
+	}
+	defer func() { _ = f.Close() }()
+	b, tooLarge, err := readLimited(f, maxVariableBytes)
+	if err != nil || tooLarge || len(b) != 5 {
+		return errored, FeatureReasonProbeFailed
+	}
+	if b[4] == 1 {
+		return present, ""
+	}
+	return absent, ""
+}
+
+// measuredBoot reports whether a TPM firmware event log is present. It trusts
+// a missing log only on a mounted securityfs.
+func measuredBoot(_ context.Context, e *env) (providerv1.FeatureResult, string) {
+	magic, err := e.host.FSMagic(securityfsDir)
+	if err != nil {
+		return failure(err)
+	}
+	if magic != magicSecurityf {
+		return errored, FeatureReasonProbeFailed
+	}
+	_, _, err = e.fs.Lstat(measuredBootLog)
+	switch {
+	case err == nil:
+		return present, ""
+	case isNotExist(err):
+		return absent, ""
+	}
+	return failure(err)
+}
+
 // defaultProbes returns the feature probes of inventory version 1. Two of
 // them cannot be decided as a data read and are reported as ERROR with
-// probe_failed, never by running anything: the hypervisor pause and resume
+// not_evaluated, never by running anything: the hypervisor pause and resume
 // check needs a self-test in a sandbox, and the system extension image policy
 // is not stored in a file the agent can read.
 func defaultProbes() []probe {
@@ -199,40 +299,16 @@ func defaultProbes() []probe {
 		namespaceProbe(FeatureInitialPIDNamespace, "pid", initPIDNSInode),
 		namespaceProbe(FeatureInitialCgroupNamespace, "cgroup", initCgroupNSInode),
 		namespaceProbe(FeatureInitialTimeNamespace, "time", initTimeNSInode),
-		{name: FeatureHypervisorPauseResume, run: func(context.Context, *env) (providerv1.FeatureResult, string) {
-			return errored, FeatureReasonProbeFailed
+		{name: FeatureHypervisorPauseResume, run: notEvaluated},
+		{name: FeatureKVM, run: func(_ context.Context, e *env) (providerv1.FeatureResult, string) {
+			return boolProbe(e.host.KVMUsable())
 		}},
-		{name: FeatureSecureBoot, run: func(_ context.Context, e *env) (providerv1.FeatureResult, string) {
-			f, err := e.fs.Open(secureBootVariable, false)
-			if err != nil {
-				if isNotExist(err) {
-					return absent, "" // no firmware variable: not booted with Secure Boot
-				}
-				return failure(err)
-			}
-			defer func() { _ = f.Close() }()
-			b, tooLarge, err := readLimited(f, maxVariableBytes)
-			if err != nil || tooLarge || len(b) != 5 {
-				return errored, FeatureReasonProbeFailed
-			}
-			if b[4] == 1 {
-				return present, ""
-			}
-			return absent, ""
+		{name: FeatureTun, run: func(_ context.Context, e *env) (providerv1.FeatureResult, string) {
+			return boolProbe(e.host.TunUsable())
 		}},
-		{name: FeatureMeasuredBoot, run: func(_ context.Context, e *env) (providerv1.FeatureResult, string) {
-			_, _, err := e.fs.Lstat(measuredBootLog)
-			switch {
-			case err == nil:
-				return present, ""
-			case isNotExist(err):
-				return absent, ""
-			}
-			return failure(err)
-		}},
-		{name: FeatureExtensionImagePolicySigned, run: func(context.Context, *env) (providerv1.FeatureResult, string) {
-			return errored, FeatureReasonProbeFailed
-		}},
+		{name: FeatureSecureBoot, run: secureBoot},
+		{name: FeatureMeasuredBoot, run: measuredBoot},
+		{name: FeatureExtensionImagePolicySigned, run: notEvaluated},
 	}
 	sort.Slice(ps, func(i, j int) bool { return ps[i].name < ps[j].name })
 	return ps
@@ -251,18 +327,16 @@ func (e *env) runProbes(ctx context.Context) []*providerv1.HostFeature {
 	return out
 }
 
-// tier is the strongest process identity mechanism the probes show the agent
-// can use. The service manager's descriptor store is not used by this agent
-// yet, so the strongest tier reported is the persistent file handle.
+// tier is the strongest process identity mechanism this host supports, as the
+// probes show. The service manager's descriptor store is not used by this
+// agent yet, so the strongest tier reported is the persistent file handle.
 func (e *env) tier(features []*providerv1.HostFeature) providerv1.ProcessIdentityTier {
-	results := map[string]providerv1.FeatureResult{}
 	for _, f := range features {
-		results[f.Name] = f.Result
+		if f.Name == FeaturePidfsHandle && f.Result == present {
+			return providerv1.ProcessIdentityTier_PROCESS_IDENTITY_TIER_PIDFS_HANDLE
+		}
 	}
-	if results[FeaturePidfsHandle] == present {
-		return providerv1.ProcessIdentityTier_PROCESS_IDENTITY_TIER_PIDFS_HANDLE
-	}
-	if res, _ := kernelAtLeast(e.host, kernelPidfsInode); res == present && results[FeaturePidfd] == present {
+	if ok, err := e.host.PidfdOnPidfs(); err == nil && ok {
 		return providerv1.ProcessIdentityTier_PROCESS_IDENTITY_TIER_PIDFS_INODE
 	}
 	return providerv1.ProcessIdentityTier_PROCESS_IDENTITY_TIER_START_TIME

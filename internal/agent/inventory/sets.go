@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -158,15 +159,19 @@ const (
 	FeatureInitialTimeNamespace = "initial_time_namespace"
 	// FeatureHypervisorPauseResume: the hypervisor can pause and resume a
 	// guest. It needs a self-test the agent does not run, so it is reported
-	// as ERROR.
+	// as ERROR with not_evaluated.
 	FeatureHypervisorPauseResume = "hypervisor_pause_resume"
+	// FeatureKVM: /dev/kvm is the KVM device and the agent can open it.
+	FeatureKVM = "kvm"
+	// FeatureTun: /dev/net/tun is the TUN device and the agent can open it.
+	FeatureTun = "tun"
 	// FeatureSecureBoot: the firmware booted with Secure Boot enabled.
 	FeatureSecureBoot = "secure_boot"
-	// FeatureMeasuredBoot: the firmware recorded a measured-boot event log.
+	// FeatureMeasuredBoot: a TPM firmware event log is present.
 	FeatureMeasuredBoot = "measured_boot"
 	// FeatureExtensionImagePolicySigned: system extension images must be
 	// signed. The agent cannot read the policy as data, so it is reported as
-	// ERROR.
+	// ERROR with not_evaluated.
 	FeatureExtensionImagePolicySigned = "extension_image_policy_signed"
 
 	// FeatureReasonProbeFailed: the probe could not decide.
@@ -175,6 +180,9 @@ const (
 	FeatureReasonProbeTimeout = "probe_timeout"
 	// FeatureReasonPermissionDenied: the probe was refused by permission.
 	FeatureReasonPermissionDenied = "permission_denied"
+	// FeatureReasonNotEvaluated: the agent does not evaluate the probe (it
+	// cannot be decided as a data read).
+	FeatureReasonNotEvaluated = "not_evaluated"
 )
 
 // valueSet is the closed value sets of one inventory version (the verifier's
@@ -206,8 +214,8 @@ var valueSets = map[uint32]*valueSet{
 		},
 		features: []string{FeatureCgroupV2, FeatureCloneIntoCgroup, FeaturePidfd, FeaturePidfsHandle, FeaturePidfdInfoExit,
 			FeatureInitialPIDNamespace, FeatureInitialCgroupNamespace, FeatureInitialTimeNamespace, FeatureHypervisorPauseResume,
-			FeatureSecureBoot, FeatureMeasuredBoot, FeatureExtensionImagePolicySigned},
-		featReasons:       []string{FeatureReasonProbeFailed, FeatureReasonProbeTimeout, FeatureReasonPermissionDenied},
+			FeatureKVM, FeatureTun, FeatureSecureBoot, FeatureMeasuredBoot, FeatureExtensionImagePolicySigned},
+		featReasons:       []string{FeatureReasonProbeFailed, FeatureReasonProbeTimeout, FeatureReasonPermissionDenied, FeatureReasonNotEvaluated},
 		maxState:          4,
 		maxComponentState: 6,
 		maxOrigin:         3,
@@ -217,7 +225,8 @@ var valueSets = map[uint32]*valueSet{
 	},
 }
 
-// Field shapes (the bounds IB-5 to IB-10).
+// Field shapes: the length and character rules of names, versions, ranges and
+// sources.
 var (
 	componentNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 	fileNameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
@@ -229,6 +238,11 @@ var (
 // invalidManifestPrefix starts the name of a component whose manifest cannot
 // be used and does not name a catalog component.
 const invalidManifestPrefix = "manifest-"
+
+// encodedLimit is the size bound Validate applies; only tests lower it.
+var encodedLimit atomic.Int64
+
+func init() { encodedLimit.Store(MaxInventoryBytes) }
 
 // ErrInvalid is wrapped by every violation of an inventory field rule.
 var ErrInvalid = errors.New("invalid host inventory")
@@ -281,8 +295,8 @@ func Validate(inv *providerv1.HostInventory, requested uint32) error {
 	if err := validateExtensions(inv.GetUnexpectedExtensions(), vs); err != nil {
 		return err
 	}
-	if proto.Size(inv) > MaxInventoryBytes {
-		return fmt.Errorf("%w: %w: %d bytes encoded", ErrInvalid, ErrTooLarge, proto.Size(inv))
+	if n := proto.Size(inv); n > int(encodedLimit.Load()) {
+		return fmt.Errorf("%w: %w: %d bytes encoded", ErrInvalid, ErrTooLarge, n)
 	}
 	return nil
 }
@@ -515,6 +529,15 @@ func emptyInventory(state providerv1.InventoryState, reason string) *providerv1.
 // report cannot be signed because of its size.
 func OverLimit(requested uint32, reason string) *providerv1.HostInventory {
 	inv := emptyInventory(providerv1.InventoryState_INVENTORY_STATE_OVER_LIMIT, reason)
+	bind(inv, requested)
+	return inv
+}
+
+// Unreadable returns the inventory that answers a request for version
+// requested with UNREADABLE and reason, listing nothing: what an answer carries
+// when the report it had would break a field rule.
+func Unreadable(requested uint32, reason string) *providerv1.HostInventory {
+	inv := emptyInventory(providerv1.InventoryState_INVENTORY_STATE_UNREADABLE, reason)
 	bind(inv, requested)
 	return inv
 }

@@ -40,7 +40,7 @@ func TestCollectorExecutesNothing(t *testing.T) {
 	forbiddenCalls := map[string]bool{
 		"os.StartProcess": true, "os.FindProcess": true, "syscall.Exec": true, "syscall.ForkExec": true, "syscall.StartProcess": true,
 		"unix.Exec": true, "unix.Execve": true, "unix.Fexecve": true, "unix.Execveat": true, "unix.Syscall": true, "unix.RawSyscall": true,
-		"unix.Syscall6": true, "unix.RawSyscall6": true, "unix.ForkExec": true, "unix.Clone3": true,
+		"unix.Syscall6": true, "syscall.Syscall": true, "syscall.RawSyscall": true, "syscall.Syscall6": true, "syscall.RawSyscall6": true, "unix.RawSyscall6": true, "unix.ForkExec": true, "unix.Clone3": true,
 	}
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
@@ -163,7 +163,7 @@ func FuzzPackageDB(f *testing.F) {
 
 func FuzzExtensionRelease(f *testing.F) {
 	f.Add([]byte("SYSEXT_VERSION_ID=1.0\n"))
-	f.Add([]byte("VERSION_ID=\"x\"\n=\n=="))
+	f.Add([]byte("SYSEXT_IMAGE_VERSION=\"x\"\n=\n=="))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		v, ok := extensionReleaseVersion(data)
 		if ok && !versionRE.MatchString(v) {

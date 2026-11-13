@@ -614,10 +614,8 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 // extensions and kernel, or the tree under Options.InventoryRoot.
 func (d *daemon) newInventory() (*inventory.Collector, error) {
 	layout := inventory.DefaultLayout()
-	if d.o.InventoryRoot == "" {
-		if exe, err := os.Executable(); err == nil {
-			layout.AgentExecutable = exe
-		}
+	if d.o.InventoryRoot != "" {
+		layout.AgentExecutable = "" // the running image is not under a test root
 	}
 	var boot clockfloor.BootClock = clockfloor.SystemBootClock{}
 	if d.o.Floor.Boot != nil {

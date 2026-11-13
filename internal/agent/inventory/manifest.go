@@ -25,6 +25,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // Collection-side bounds on manifests.
@@ -93,6 +94,9 @@ func hashedName(base string) string {
 func parseManifest(data []byte, catalog map[string]*CatalogEntry) parsed {
 	if len(data) > MaxManifestBytes {
 		return parsed{reason: ReasonTooLarge}
+	}
+	if !strictJSON(data) {
+		return parsed{reason: ReasonParseError}
 	}
 	var doc manifestDoc
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -179,4 +183,86 @@ func catalogHasFile(e *CatalogEntry, name string) bool {
 		}
 	}
 	return false
+}
+
+// maxManifestDepth bounds the nesting of a manifest.
+const maxManifestDepth = 4
+
+// Exact key sets of the manifest's objects.
+var (
+	topKeys      = map[string]bool{"schemaVersion": true, "component": true, "version": true, "source": true, "artifact": true, "files": true}
+	artifactKeys = map[string]bool{"name": true, "sha256": true}
+)
+
+// strictJSON checks what the decoder of encoding/json would let through: the
+// document must be valid UTF-8, no object may repeat a key, and every key must
+// match its field exactly (the decoder matches case-insensitively and keeps
+// the last duplicate, so two parsers could read the same file differently).
+// The keys of "files" are free names, checked later against the catalog.
+func strictJSON(data []byte) bool {
+	if !utf8.Valid(data) {
+		return false
+	}
+	type frame struct {
+		object    bool
+		allowed   map[string]bool // nil: any key
+		keys      map[string]bool
+		expectKey bool
+		lastKey   string
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var stack []frame
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return len(stack) == 0
+		}
+		if err != nil {
+			return false
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				if len(stack) >= maxManifestDepth {
+					return false
+				}
+				f := frame{object: d == '{', keys: map[string]bool{}, expectKey: d == '{'}
+				if f.object {
+					switch {
+					case len(stack) == 0:
+						f.allowed = topKeys
+					case stack[len(stack)-1].lastKey == "artifact" && len(stack) == 1:
+						f.allowed = artifactKeys
+					case stack[len(stack)-1].lastKey == "files" && len(stack) == 1:
+						f.allowed = nil
+					default:
+						f.allowed = map[string]bool{}
+					}
+				}
+				stack = append(stack, f)
+			default:
+				stack = stack[:len(stack)-1]
+				if n := len(stack); n > 0 && stack[n-1].object {
+					stack[n-1].expectKey = true
+				}
+			}
+			continue
+		}
+		if len(stack) == 0 {
+			continue
+		}
+		top := &stack[len(stack)-1]
+		if !top.object {
+			continue
+		}
+		if top.expectKey {
+			key, _ := tok.(string)
+			if top.keys[key] || (top.allowed != nil && !top.allowed[key]) {
+				return false
+			}
+			top.keys[key], top.lastKey, top.expectKey = true, key, false
+		} else {
+			top.expectKey = true
+		}
+	}
 }

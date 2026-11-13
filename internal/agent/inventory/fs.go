@@ -56,6 +56,10 @@ type FS interface {
 	// Lstat returns the type bits and size of path without following a
 	// symbolic link.
 	Lstat(path string) (mode fs.FileMode, size int64, err error)
+	// Stat is Lstat that follows a symbolic link.
+	Stat(path string) (mode fs.FileMode, size int64, err error)
+	// Readlink returns the target of a symbolic link.
+	Readlink(path string) (string, error)
 	// Open opens a regular file for reading. It follows a symbolic link only
 	// when follow is set, and returns ErrNotRegular for anything else than a
 	// regular file.
@@ -123,6 +127,28 @@ func (o OSFS) Lstat(path string) (fs.FileMode, int64, error) {
 	return fi.Mode(), fi.Size(), nil
 }
 
+// Stat implements FS.
+func (o OSFS) Stat(path string) (fs.FileMode, int64, error) {
+	p, err := o.resolve(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return 0, 0, err
+	}
+	return fi.Mode(), fi.Size(), nil
+}
+
+// Readlink implements FS.
+func (o OSFS) Readlink(path string) (string, error) {
+	p, err := o.resolve(path)
+	if err != nil {
+		return "", err
+	}
+	return os.Readlink(p)
+}
+
 // osFile is a regular file opened by OSFS.
 type osFile struct {
 	*os.File
@@ -137,6 +163,19 @@ func (o OSFS) Open(path string, follow bool) (File, error) {
 	p, err := o.resolve(path)
 	if err != nil {
 		return nil, err
+	}
+	// Look before opening: a device node or FIFO is never opened, whatever
+	// the open flags would do with it.
+	stat := os.Lstat
+	if follow {
+		stat = os.Stat
+	}
+	pre, err := stat(p)
+	if err != nil {
+		return nil, err
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, fmt.Errorf("open %s: %w", filepath.Base(p), ErrNotRegular)
 	}
 	f, err := os.OpenFile(p, openFlags(follow), 0) // #nosec G304 -- a path of the agent's own catalog
 	if err != nil {
