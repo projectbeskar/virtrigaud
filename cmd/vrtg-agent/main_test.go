@@ -71,7 +71,7 @@ func TestCommands(t *testing.T) {
 		args []string
 		code int
 	}{
-		{nil, 2}, {[]string{"nope"}, 2}, {[]string{"version"}, 0}, {[]string{"help"}, 0}, {[]string{"enroll"}, 1},
+		{nil, 2}, {[]string{"nope"}, 2}, {[]string{"version"}, 0}, {[]string{"help"}, 0}, {[]string{"enroll"}, 2},
 		{[]string{"run", "--state-dir=relative"}, 2}, {[]string{"run", "--no-such-flag"}, 2},
 		{[]string{"shutdown-vms", "--executor=other"}, 2},
 	} {
