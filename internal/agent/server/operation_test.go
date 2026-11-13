@@ -547,3 +547,40 @@ func TestOperation_FloorLostAfterTheGateIsNotDefinite(t *testing.T) {
 		}
 	}
 }
+
+// TestOperation_KnownOpIDBeforeDefiniteRefusals: a known op_id that arrives
+// with a request the new-op checks would refuse definitely (no owner, a VM
+// UID that is not a UID) is answered from the store's record instead: other
+// identity fields are OP_ID_CONFLICT, never a definite refusal.
+func TestOperation_KnownOpIDBeforeDefiniteRefusals(t *testing.T) {
+	e := newOpsEnv(t)
+	b := randID()
+	create := e.newOp(kCreate, "vm-1", b, 1, createReq("vm-1", nil))
+	task, err := e.send(create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitDone(task)
+	before := e.exec.total()
+	noOwner := createReq("vm-1", nil)
+	noOwner.Owner = nil
+	badUID := createReq("VM/1", nil)
+	for name, req := range map[string]*providerv1.CreateRequest{"no owner": noOwner, "VM UID not a UID": badUID} {
+		vm := "vm-1"
+		if req.GetOwner() != nil {
+			vm = req.GetOwner().GetUid()
+		}
+		o := e.newOp(kCreate, vm, b, 1, req)
+		o.id.OpID = create.id.OpID
+		_, err := e.send(o)
+		if status.Code(err) != codes.FailedPrecondition || reasonOf(err) != contracts.OpIDConflictReason {
+			t.Fatalf("%s: %v (%s), want OP_ID_CONFLICT", name, err, reasonOf(err))
+		}
+		if contracts.IsDefiniteNotPerformedReason(reasonOf(err)) {
+			t.Fatalf("%s: a known op_id got a definite refusal", name)
+		}
+	}
+	if e.exec.total() != before {
+		t.Fatal("a conflicting delivery had an effect")
+	}
+}

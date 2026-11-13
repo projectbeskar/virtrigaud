@@ -157,21 +157,19 @@ func (s *Server) floorRefusal() error {
 // operate is the operation path of one mutating call, after the peer check
 // and the readiness gate, in this order:
 //
-//  1. the grant is verified (signature, chain and validity at the clock
+//  1. a clock floor that stopped being healthy since the gate refuses the
+//     call as the gate would (UNATTESTED, never definite);
+//  2. the grant is verified (signature, chain and validity at the clock
 //     floor, body rules, kind against the method and request type, request
 //     decoding, intent digest, installation and host);
-//  2. the grant's VM and Provider UIDs have the shape of a UID, and the
-//     decoded request names this host and, as its owner, the grant's VM
-//     (GRANT_MISMATCH:
-//     nothing is recorded, so the refusal is definite);
-//  3. a kind the executor does not implement is Unimplemented;
-//  4. a new op_id (one the store has no trace of) needs the store's active
-//     enrolment to be the one the host certificate names (UNATTESTED
-//     otherwise, never definite);
-//  5. the operation store decides: a known op_id is answered from its record
-//     or tombstone before the grant's Provider and enrolment are compared
-//     with the active enrolment; an enrolment the store has no record of is
-//     UNKNOWN_TO_AGENT, never a definite refusal;
+//  3. the store is read for the op_id: an op_id it knows (record or
+//     tombstone) goes straight to the store, which answers it from its
+//     record (the same identity) or refuses it OP_ID_CONFLICT;
+//  4. an op_id it does not know passes checkNew (UIDs, the request's host
+//     and owner, the kind, the certificate's enrolment);
+//  5. the operation store decides: an enrolment the store holds no record
+//     of is UNKNOWN_TO_AGENT, never a definite refusal; a grant naming
+//     another Provider is GRANT_MISMATCH;
 //  6. an accepted operation gets a runner, and the call is answered with its
 //     task reference once its record is durable.
 //
@@ -217,19 +215,19 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 			"op", opHex, "enrolment", hex.EncodeToString(body.GetEnrolmentId()), "vm", body.GetVmUid(),
 			"kind", body.GetKind().String(), "attempt", body.GetAttempt(), "actor", actor)
 	}
-	if !uidRE.MatchString(body.GetVmUid()) || !uidRE.MatchString(body.GetProviderUid()) {
-		// A grant whose UIDs the host could never name in an answer is
-		// refused before admission; nothing was recorded or performed.
-		audit("refused", grantverify.ReasonGrantMismatch)
-		return nil, refusal(codes.FailedPrecondition, grantverify.ReasonGrantMismatch, "the grant's VM or Provider UID is not a UID")
+	ref := opstore.OpRef{EnrolmentID: body.GetEnrolmentId(), OpID: body.GetOpId()}
+	seen, err := s.opts.Operations.AnswerOp(ctx, ref, 0)
+	if err != nil {
+		audit("error", "store")
+		s.opts.Log.Error(err, "the operation store could not be read", "op", opHex)
+		return nil, status.Error(codes.Unavailable, "the host's operation store could not decide; ask again with the same op_id")
 	}
-	if err := checkInner(verified, s.opts.Credentials.Load().Identity.HostID()); err != nil {
-		audit("refused", grantverify.ReasonGrantMismatch)
-		return nil, refusal(codes.FailedPrecondition, grantverify.ReasonGrantMismatch, err.Error())
-	}
-	if !s.opts.Operations.Supports(verified.Kind) {
-		audit("refused", "unimplemented")
-		return nil, status.Errorf(codes.Unimplemented, "this agent does not perform %s", verified.Kind)
+	if !seen.Found {
+		// Definite refusals are made only for an op_id the store has no
+		// trace of; a known op_id is answered from its record by the store.
+		if err := s.checkNew(verified, seen.Host, audit); err != nil {
+			return nil, err
+		}
 	}
 	r := opstore.Request{
 		ProviderUID: body.GetProviderUid(), EnrolmentID: body.GetEnrolmentId(), OpID: body.GetOpId(),
@@ -238,13 +236,14 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		MintEpoch:    opstore.Epoch{Counter: body.GetMintEpoch().GetCounter(), Holder: body.GetMintEpoch().GetHolder()},
 		Actor:        truncate(actor, actorMax),
 	}
-	ref := opstore.OpRef{EnrolmentID: r.EnrolmentID, OpID: r.OpID}
-	if err := s.checkNewAdmission(ctx, ref); err != nil {
-		audit("refused", opstore.ReasonUnattested)
-		return nil, err
-	}
 	d, err := s.opts.Operations.Admit(ctx, r)
 	if errors.Is(err, opstore.ErrInvalidRequest) {
+		if seen.Found {
+			// A known op_id with a field its record cannot hold has other
+			// identity fields than its record: not definite.
+			audit("refused", opstore.ReasonOpIDConflict)
+			return nil, admissionRefusal(opstore.RefusalOpIDConflict)
+		}
 		// The store refused a malformed field before reading or writing
 		// anything: the request was not, and will never be, performed.
 		audit("refused", grantverify.ReasonGrantMismatch)
@@ -277,26 +276,37 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 	return &providerv1.TaskResponse{Task: task}, nil
 }
 
-// checkNewAdmission refuses a new operation while the store's active
-// enrolment is not the one the host certificate names (UNATTESTED with the
-// cause CauseEnrolmentMismatch, never definite): such a host signs no answer,
-// so it must not take on operations it could not answer for. An op_id the
-// store already knows is answered from its record or tombstone as always.
-func (s *Server) checkNewAdmission(ctx context.Context, ref opstore.OpRef) error {
-	v, err := s.opts.Operations.AnswerOp(ctx, ref, 0)
-	if err != nil {
-		s.opts.Log.Error(err, "the operation store could not be read", "op", ref.String())
-		return status.Error(codes.Unavailable, "the host's operation store could not decide; ask again with the same op_id")
-	}
-	if v.Found {
-		return nil
+// checkNew applies the checks made only to an op_id the store has no trace
+// of, before the store admits it:
+//   - the grant's VM and Provider UIDs have the shape of a UID, and the
+//     request names this host and, as its owner, the grant's VM
+//     (GRANT_MISMATCH: nothing is recorded, so the refusal is definite);
+//   - the executor implements the kind (Unimplemented);
+//   - the store's active enrolment is the one the host certificate names
+//     (UNATTESTED with the cause CauseEnrolmentMismatch, never definite):
+//     such a host signs no answer, so it must not take on operations it
+//     could not answer for.
+func (s *Server) checkNew(verified *grantverify.Verified, view opstore.HostView, audit func(decision, reason string)) error {
+	body := verified.Body
+	if !uidRE.MatchString(body.GetVmUid()) || !uidRE.MatchString(body.GetProviderUid()) {
+		audit("refused", grantverify.ReasonGrantMismatch)
+		return refusal(codes.FailedPrecondition, grantverify.ReasonGrantMismatch, "the grant's VM or Provider UID is not a UID")
 	}
 	c := s.opts.Credentials.Load()
-	e := v.Host.Enrolment
+	if err := checkInner(verified, c.Identity.HostID()); err != nil {
+		audit("refused", grantverify.ReasonGrantMismatch)
+		return refusal(codes.FailedPrecondition, grantverify.ReasonGrantMismatch, err.Error())
+	}
+	if !s.opts.Operations.Supports(verified.Kind) {
+		audit("refused", "unimplemented")
+		return status.Errorf(codes.Unimplemented, "this agent does not perform %s", verified.Kind)
+	}
+	e := view.Enrolment
 	if e != nil && bytes.Equal(e.ID, c.Identity.Record.EnrolmentID) && e.ProviderUID == c.Identity.Record.ProviderUID &&
 		bytes.Equal(e.InstallID, c.Identity.Record.InstallID) && e.HostID == c.Identity.HostID() {
 		return nil
 	}
+	audit("refused", opstore.ReasonUnattested)
 	return refusalWith(codes.Unavailable, opstore.ReasonUnattested,
 		"the host refuses operations: "+CauseEnrolmentMismatch, map[string]string{MetadataCause: CauseEnrolmentMismatch})
 }
