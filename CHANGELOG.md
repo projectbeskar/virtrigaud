@@ -5,6 +5,37 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-13 15:10] - Per-host agent: the host key moves into a separate signer process (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/signer/`: the signer. `vrtg-agent signer` runs as its own user, loads the host private key and serves a Unix socket; the agent holds a `signer.Client`, a `crypto.Signer` whose `Public()` is the key the signer reports (it must be the host certificate's key) and whose `Sign` sends the digest to the signer. The protocol is one framed request and response per connection (frames of at most 256 bytes), with two operations: public key, and sign over exactly 32 bytes with SHA-256 (what `crypto/tls` signs for an ECDSA P-256 key in TLS 1.3, and what host answers use); every other operation, hash, size or version is refused, and the client also refuses locally and verifies each returned signature. Both ends check the peer's uid with `SO_PEERCRED` on every connection; every call has a deadline; the signer bounds its connections (32) and starts no unbounded goroutine; the client connects per call, so a restarted signer is reached again without action. The signer is a digest oracle: it prevents exfiltration and later offline use of the key, not online forgery by a compromised TLS-facing process (documented in the package, in `docs/per-host-agent-development.md` and in `docs/operation-grants-wire-shape.md`); a separate answer key held by a process that never terminates TLS is a later requirement for the regulated profile.
+- `internal/agent/signer/ratelimit.go`, `server.go`: a token-bucket rate limit (default 50 signatures per second, burst 100) and a counter log (signatures, rate-limited and malformed requests, refused peers, once per interval and only while they change; never a digest, a signature or key material).
+- `cmd/vrtg-agent/signer.go`: the `signer` subcommand (flags `--socket`, `--key-file`, `--agent-user`, `--max-signs-per-second`, `--sign-burst`, `--log-interval`); it refuses to run as root, requires a private key file and socket directory, notifies `READY=1`, reloads the key on SIGHUP and stops on SIGTERM. It has no development-only setting and is the same in a release and a development build.
+- `packaging/systemd/vrtg-agent-signer.service`: reference unit for the signer, hardened like the agent's (no capability, `NoNewPrivileges`, `ProtectSystem=strict`, syscall filter) and additionally with a private network namespace, `RestrictAddressFamilies=AF_UNIX`, its own user, group and state directory, `Type=notify` and `Restart=always`.
+- `internal/agent/hostcheck/`: `CheckHostKeyUnreadable` (`HostKeyReadable`: the agent refuses to start when it can read the key file, or when its own `pki/` holds a `host.key` at all) and `CheckSignerSocketDir` (`SignerSocketInsecure`); `Probe.Readable`.
+- `internal/agent/internal/guard/guard.go`: six mutation guards (`signer-peer-check`, `signer-client-peer-check`, `signer-digest-check`, `signer-rate-limit`, `signer-verify`, `host-key-unreadable`), each killed by a test.
+- Tests: `internal/agent/signer/*_test.go` (protocol refusals, oversized and truncated frames, peer checks over a real socket, restart, re-keyed signer, rate limit, connection bound, log content, key file and socket directory checks, the run loop, a fuzz test), `internal/agent/server/server_test.go` (every TLS 1.3 handshake and signed answer goes through a real signer socket; signer down fails closed), `internal/agent/daemon/` (start-up refusals, restart, reload), `cmd/vrtg-agent/signer_test.go` and `units_test.go` (the new unit, the dependency choice, sysusers and tmpfiles).
+
+### Changed
+- `internal/agent/trust/identity.go`: `LoadIdentity` takes the host key as a `crypto.Signer` instead of reading a key file; `Identity.TLS` and `Identity.Signer` hold the signer client, never the private key. `trust.ParseHostKey` is exported for the signer.
+- `internal/agent/daemon/daemon.go`, `config/config.go`: the agent reaches the signer at start-up (retried for 15 seconds) and on reload; new flags `--signer-socket`, `--signer-user`, `--signer-key-file`; new start refusal reason `SignerUnavailable`.
+- `packaging/systemd/vrtg-agent.service`: `Wants=` and `After=vrtg-agent-signer.service`. It is `Wants=`, not `Requires=`: with `Requires=` a restart of the signer would restart the agent, which already fails closed while the signer is away.
+- `packaging/systemd/virtrigaud-agent.sysusers.conf`, `virtrigaud-agent.tmpfiles.conf`: the signer's user, its state directory and the socket directory (owned by the signer, group the agent's, setgid `2750`).
+- `internal/agent/trust/trusttest`: `WritePKI` writes the certificate only; `WriteKey` writes the key for the signer.
+- `docs/per-host-agent-development.md`: layout, users, units, start-up, host checks, the signer's protocol, authentication, bounds, failure behaviour and rate limit; the "key held in the agent process" limit is replaced by the digest-oracle limit.
+
+### Why
+Before the agent's answers become authoritative, the process that terminates TLS and parses Provider input must never hold the host private key bytes, so that its compromise cannot copy the key out or use it later.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Development builds only: no release artefact ships the agent or the signer. A development host needs the signer's user, state directory and socket directory (see `packaging/systemd/`) and the key file moved out of the agent's `pki/`.
+
 ## [2026-11-13 00:19] - Operation store journal: verify every record, scrub, and harder open (development builds only)
 **Author:** @wrkode (William Rizzo)
 

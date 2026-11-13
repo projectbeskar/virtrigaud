@@ -6,7 +6,9 @@ that Provider over mutually authenticated TLS. This page describes the agent
 as it is today: a process skeleton that starts, checks its host, opens and
 recovers its operation store, answers reads with host-signed answers and
 **refuses every mutating call**. It executes no operation, creates no VM,
-scope, cgroup or process, and holds no Linux capability.
+scope, cgroup or process, and holds no Linux capability. It does not hold
+its host private key either: a separate signer process, run as its own user,
+does (see [Host key signer](#host-key-signer)).
 
 Nothing here is part of a release. No release workflow, container image or
 make target builds `vrtg-agent` (a test in `cmd/vrtg-agent` checks the
@@ -32,6 +34,7 @@ the VirtRigaud API packages.
 | Command | What it does |
 |---------|--------------|
 | `vrtg-agent run` | Runs the agent until SIGTERM or SIGINT. |
+| `vrtg-agent signer` | Runs the host key signer until SIGTERM or SIGINT: a separate process and user that holds the host private key and signs for the agent over a Unix socket (see [Host key signer](#host-key-signer)). The same in a release and a development build; it has no development-only setting. |
 | `vrtg-agent shutdown-vms` | Stops every VM of the executor, only while the host is shutting down (see [Units](#systemd-units)). |
 | `vrtg-agent enroll` | Not available yet; exits 1. A development build enrols at start-up instead (see [Enrolment](#development-enrolment)). |
 | `vrtg-agent version` | Prints the version. |
@@ -44,11 +47,27 @@ the VirtRigaud API packages.
 | `--listen-address` | `:9460` | Address served to the Provider. |
 | `--drain-timeout` | `30s` | How long a stop waits for running calls. |
 | `--scrub-interval` | `1h` | How often the operation store reads every record and verifies it against its live-state digest. Must be positive; the scrub cannot be switched off. A scrub that finds damage quarantines the store (`journal_corrupt`), and the service status shows it. |
+| `--signer-socket` | `/run/virtrigaud-signer/signer.sock` | The signer's Unix socket: clean absolute path. The agent signs only through it. |
+| `--signer-user` | `virtrigaud-signer` | The signer's user, a name or a uid. The agent talks to no other peer on the socket. |
+| `--signer-key-file` | `/var/lib/virtrigaud-signer/host.key` | The host key file the signer reads. The agent never opens it; it checks that it cannot read it (see [Host checks](#host-checks)). |
 | `--executor` | `none` | `none`, or `fake` in a development build. |
 | `--dev-trust-dir` | (empty: `/usr/share/virtrigaud/trust`) | Development builds only: another trust configuration directory. The start-up checks still apply to it. |
 | `--dev-enrolment-file` | (empty) | Development builds only: the development enrolment file. |
 
 `shutdown-vms` also takes `--timeout` (default `5m`).
+
+`signer` takes its own flags:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--socket` | `/run/virtrigaud-signer/signer.sock` | The Unix socket to serve: clean absolute path. Its directory must be owned by the signer's user and grant nothing to others and no write to its group. |
+| `--key-file` | `/var/lib/virtrigaud-signer/host.key` | The host private key: a regular file (not a symbolic link) owned by the signer's user with no permission for group or others, ECDSA P-256, PEM. |
+| `--agent-user` | `virtrigaud-agent` | The only user served, a name or a uid. It must not be the signer's own user. |
+| `--max-signs-per-second` | `50` | The sustained signature rate limit. |
+| `--sign-burst` | `100` | The rate limit's burst size. |
+| `--log-interval` | `1m` | How often the signature counters are logged (only while they change). |
+
+The signer refuses to run as root.
 
 ## Host layout
 
@@ -57,7 +76,9 @@ the VirtRigaud API packages.
 | `/var/lib/virtrigaud-agent/` | agent user, `0700` | State directory, on persistent block-device-backed storage. |
 | `…/state.db`, `anchor.log`, `store.marker`, `state.db.lock`, `quarantine`, `witness/` | agent user | The operation store (journal, anchor log, markers, witness files). |
 | `…/host-id` | agent user, `0600` | Provisioning marker: the host's URI identity, `spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>`, written when the host is provisioned. |
-| `…/pki/` | agent user, `0700` | `host.key` (ECDSA P-256 private key, PEM, PKCS #8 or SEC 1, `0600`) and `host.crt` (the host identity certificate, PEM, the leaf only, `0600`). Never put it in a backup. |
+| `…/pki/` | agent user, `0700` | `host.crt` only: the host identity certificate, PEM, the leaf only, `0600`. The host private key is **not** here, and the agent refuses to start when a file of that name is. |
+| `/var/lib/virtrigaud-signer/` | signer user, `0700` | The signer's state directory. `host.key`: the host private key, ECDSA P-256, PEM, PKCS #8 or SEC 1, `0600`, owned by the signer's user. The agent's user cannot read it. Never put it in a backup. |
+| `/run/virtrigaud-signer/` | signer user, group agent, `2750` | The socket directory; `signer.sock` (`0660`) takes the agent's group from the setgid directory. No access for others, and the agent's group cannot write the directory, so it cannot replace the socket. |
 | `…/clock.floor` | agent user, `0600` | The clock floor (see [Start-up](#start-up-order)). |
 | `…/fake-executor/` | agent user, `0700` | Fake VMs (development builds with `--executor=fake`). |
 | `/usr/share/virtrigaud/trust/` | root, not writable by the agent | Trust configuration, meant to come from the host's signed, read-only system image (see [Limits](#limits): today the agent checks only that it cannot write it). |
@@ -78,13 +99,14 @@ signed, or chains to, the other. Whoever holds the key of one of them must
 not be able to issue a credential of another role (for example, the host
 identity CA's key holder must not be able to issue a grant signer).
 
-Every file of the trust configuration and of `pki/` is opened without
+Every file of the trust configuration and of `pki/` (and the signer's key file) is opened without
 following a symbolic link and checked on the open descriptor before it is
 read: a regular file of at most 1 MiB, owned by root (trust configuration,
 not writable by group or others) or by the agent's user (`pki/`, no
 permission for group or others).
 
-The host certificate must chain to `host-ca.pem`, certify the host key, carry
+The host certificate must chain to `host-ca.pem`, certify the host key (the
+public key the signer reports), carry
 the server-authentication usage, not be a CA, be valid now, and carry exactly
 these URI subject alternative names (see
 [`host-agent-enrolment.md`](host-agent-enrolment.md#the-enrolment-record)):
@@ -96,7 +118,7 @@ the host's URI identity, `urn:virtrigaud:enrolment:<32 hex>`,
 
 | Step | What happens | On failure |
 |------|--------------|------------|
-| 0 | Host checks (below), then the trust configuration and the host identity are loaded, then the provisioning marker must name the host. | The start is refused (exit 1) with a reason; nothing on the host changes. |
+| 0 | Host checks (below); the signer is reached (retried for up to 15 seconds, since it may still be starting) and its public key fetched; then the trust configuration and the host identity are loaded, the host certificate must certify the signer's key, and the provisioning marker must name the host. | The start is refused (exit 1) with a reason; nothing on the host changes. |
 | 1 | The store's single-writer lock. | A second agent on the same state directory exits. |
 | 2 | The store opens with full fsync and checks its schema. | A store written for a newer agent refuses the start, naming the schema version it needs. |
 | 3 | Local continuity checks: chain, anchor log, store marker, quarantine record. | The store is quarantined: reads still answer, every mutation is refused. |
@@ -125,8 +147,11 @@ restore of the state directory restores it too.
 | The state directory is on ext4, ext3, XFS, Btrfs, F2FS (mounted from a `/dev/` device that is not a loop device) or ZFS; never tmpfs, ramfs, overlay, a loop device or a network file system. | `StateNotPersistent` |
 | `host-id` exists, is a regular file owned by the agent's user that group and others cannot write, and names the host of the certificate. | `StateNotPersistent` |
 | `pki/` and every file in it are owned by the agent's user, grant nothing to group or others, and are not symbolic links. | `PKIInsecure` |
+| The agent cannot read the host private key: `--signer-key-file` is not readable by the agent's user (`access(2)`; a file that does not exist or that the agent cannot reach passes), and `pki/` holds no file named `host.key` at all, readable or not. | `HostKeyReadable` |
+| The signer's socket directory is a directory (not a symbolic link), owned by the signer's user, with nothing for others and no write permission for its group. | `SignerSocketInsecure` |
 | Every directory from `/` to the trust directory, and every file in it, is owned by root, not writable by group or others, not a symbolic link; and the agent's process cannot write the directory or its files. | `TrustConfigInsecure` |
-| The trust configuration and the host identity load, including the checks on the open files (see above). | `IdentityInvalid` |
+| The trust configuration and the host identity load, including the checks on the open files (see above), and the host certificate certifies the signer's key. | `IdentityInvalid` |
+| The signer answers on its socket, run by the signer's user (checked with `SO_PEERCRED`), with an ECDSA P-256 key. | `SignerUnavailable` |
 
 A release build also refuses to start when a caller of the agent's Go
 packages sets one of the daemon's test overrides (another trust directory,
@@ -135,7 +160,9 @@ hooks); the agent binary never sets them.
 
 ## Peer authentication
 
-The agent speaks TLS 1.3 only, with its host key and certificate. A
+The agent speaks TLS 1.3 only, with its host certificate; the signature of
+each handshake is made by the signer process (see
+[Host key signer](#host-key-signer)). A
 connection is accepted only from a client certificate that chains to
 `provider-ca.pem`, carries exactly one URI subject alternative name, and
 whose name is `spiffe://<trust domain>/virtrigaud/provider/<namespace>/<name>/<Provider UID>`
@@ -169,18 +196,101 @@ store's active enrolment is the one the host certificate names; otherwise the
 read answers without `host_answer`. Its body carries the nonce, the enrolment,
 the store's chain position, newest checkpoint and trust state (read together),
 the agent's API version (1), grant versions (`[1]`), mode (`identity`), store
-schema version and clock floor. It is signed with the host key over
+schema version and clock floor. It is signed with the host key, by the signer process, over
 `"virtrigaud.host-signed.v1" 0x00 ‖ be16(len(body_type)) ‖ body_type ‖ be32(len(body)) ‖ body`
 (ECDSA P-256, SHA-256, low-S), as defined in
 [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#the-signature-input); a test
 reproduces the published test vector.
+
+## Host key signer
+
+The host private key lives in a separate process, `vrtg-agent signer`, that
+runs as its own user (`virtrigaud-signer`) from its own unit. The agent, which
+terminates TLS and parses everything a Provider sends, holds a
+`crypto.Signer` (`signer.Client`) whose `Public()` is the key the signer
+reports, which must be the host certificate's key, and whose `Sign` sends the
+digest to the signer. The agent never reads or holds the private key bytes
+(the host check `HostKeyReadable` refuses a host where it could), so a
+compromise of the agent process cannot copy the key out, and cannot use it
+after that process is gone.
+
+**What it does not do.** The signer is a *digest oracle*. Go's `crypto/tls`
+hands `Sign` a digest, not the message, so the signer cannot tell a TLS 1.3
+handshake transcript from a host answer, or from any other 32 bytes. A
+compromised agent process can therefore still obtain a signature over any
+digest, online, for as long as it can reach the signer, and so can still make
+host answers that verify. The separation prevents exfiltration of the key and
+its later, offline use; it does not prevent online forgery by the TLS-facing
+process. A separate answer key, held by a process that never terminates TLS
+and so sees the whole message it signs, is a later requirement for the
+regulated profile; until it exists, a signed host answer is no stronger than
+the agent process that relays it.
+
+**Protocol** (package `internal/agent/signer`). One request and one response
+per connection, each a frame of a 2-byte big-endian length (at most 256 bytes;
+a longer announcement closes the connection unread) and that many payload
+bytes. A request is the version byte (1), an operation byte and its body:
+
+| Operation | Body | Response body |
+|-----------|------|---------------|
+| `1` public key | none | the public key, PKIX DER |
+| `2` sign | hash byte `1` (SHA-256), then exactly 32 digest bytes | the signature, ASN.1 DER |
+
+A response is the version byte, a status byte (`0` ok, `1` bad request,
+`2` rate limited, `3` internal error) and the body. The only hash is SHA-256
+and the only digest size 32 bytes, which is what `crypto/tls` signs for an
+ECDSA P-256 key in TLS 1.3 and what the host answer signing uses; any other
+operation, hash, size or version is refused. The agent also refuses locally
+any `Sign` whose options are not `crypto.SHA256` or whose digest is not 32
+bytes, and verifies every signature it gets back against the public key before
+using it, so a wrong or stale signer yields an error, never a bad signature.
+
+**Authentication.** Both ends read the peer's uid with `SO_PEERCRED` on every
+connection: the signer serves only `--agent-user`'s uid and closes any other
+connection without a response; the agent talks only to `--signer-user`'s uid.
+The socket is in a directory that only the signer's user and the agent's
+group can enter, and the signer refuses to start when that directory is
+wrong. There is no network socket: the signer's unit has no network namespace
+and allows `AF_UNIX` only.
+
+**Bounds.** At most 32 connections are served at once (more are closed at
+once); each has a 5-second deadline for the whole exchange; every client call
+has a 5-second deadline for connect, request and response. The client opens a
+connection per call, pools nothing and starts no goroutine; the signer starts
+one goroutine per connection, bounded by the connection limit, plus one for
+its log, and all end with the process's context.
+
+**Restart and failure.** Because each call connects afresh, a signer that
+restarts is reached again by the next call with no action by the agent. While
+the signer is down or refuses, every `Sign` fails: new TLS handshakes fail,
+and a read with a nonce is answered without `host_answer` (no answer, which a
+manager treats as no evidence). The agent never signs for itself. At start-up
+the agent retries the signer for up to 15 seconds, then refuses the start
+(`SignerUnavailable`). SIGHUP on the agent fetches the signer's key again
+(a failed fetch keeps the running credentials); SIGHUP on the signer loads a
+replaced key file (a key that does not load keeps the old one), which is how a
+renewed certificate with a new key is brought in: replace the key file, signal
+the signer, replace the certificate, signal the agent.
+
+**Rate limit and logging.** The signer limits signatures with a token bucket,
+50 per second sustained with a burst of 100 (flags above). A limit cannot
+stop a compromised agent process from asking, since the signer cannot tell
+what it signs; it bounds how fast, keeps a stolen oracle from working as a bulk
+signing service, caps the signer's CPU and shows an abuse as a rate in the
+log. The agent needs about one signature per TLS handshake and per signed
+answer, a few per second at most on a host with a few Providers, so the
+default leaves a wide margin. The signer logs, at most once per
+`--log-interval` and only while something changed, the counts of signatures,
+rate-limited requests, malformed requests, refused peers and refused
+connections, and its totals when it stops; it never logs a digest, a
+signature or key material.
 
 ## Signals
 
 | Signal | Effect |
 |--------|--------|
 | SIGTERM, SIGINT | `STOPPING=1`; the server stops accepting calls and waits up to `--drain-timeout`; the clock floor is saved; the store is closed; exit 0. During recovery, recovery is cancelled and resumes at the next start. |
-| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/` and trust checks above) and loaded again. A reload that fails, or whose certificate names another host or enrolment, is refused and the running credentials stay. New handshakes and every later call use the new credentials. `READY=1` follows, with a status that starts with the trust state, then the result: for example `STATUS=AGENT_STATE_QUARANTINED (rolled_back); credentials reloaded` or `STATUS=AGENT_STATE_READY; reload refused: <reason>` (`IdentityInvalid`, `EnrolmentChanged`, or a host-check reason such as `PKIInsecure`), never a path or a secret. |
+| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/`, host key and trust checks above), the signer is asked for its public key again and the host certificate is loaded again. A reload that fails, or whose certificate names another host or enrolment, is refused and the running credentials stay. New handshakes and every later call use the new credentials. `READY=1` follows, with a status that starts with the trust state, then the result: for example `STATUS=AGENT_STATE_QUARANTINED (rolled_back); credentials reloaded` or `STATUS=AGENT_STATE_READY; reload refused: <reason>` (`IdentityInvalid`, `EnrolmentChanged`, or a host-check reason such as `PKIInsecure`; a signer that cannot be reached is `IdentityInvalid` with the signer named in the log), never a path or a secret. |
 
 ## systemd units
 
@@ -196,6 +306,27 @@ fragments; they are not installed by anything.
 `MemoryMax=256M` and further sandboxing. It sets no `Delegate=` and creates no
 scope. No other unit upholds it, so it can be stopped for maintenance.
 
+`vrtg-agent-signer.service`: the host key signer. `Type=notify` (`READY=1`
+once it serves), `Restart=always`, the same start-rate limit and sandboxing as
+the agent, and its own user and group (`virtrigaud-signer`), state directory
+(`/var/lib/virtrigaud-signer`, `0700`) and, beyond the agent's, a private
+network namespace with `RestrictAddressFamilies=AF_UNIX`, a `MemoryMax` of
+`64M` and read-write access to `/run/virtrigaud-signer` only. It sets no
+`PrivateUsers=`, which would hide the agent's uid from `SO_PEERCRED`.
+`ExecReload` sends SIGHUP (reload the key file). The `sysusers.d` fragment
+declares both users, and the `tmpfiles.d` fragment the signer's state
+directory and the socket directory.
+
+The agent's unit has `Wants=` and `After=vrtg-agent-signer.service`: starting
+the agent starts the signer first, and as the signer is `Type=notify`,
+`After=` waits until it serves. It is `Wants=`, not `Requires=`, on purpose.
+With `Requires=`, every restart of the signer (a crash, or a key reload done
+as a restart) would restart the agent too and take down its store and its
+Provider connections, while the agent already fails closed on its own while the
+signer is away (see [Host key signer](#host-key-signer)) and signs again when
+the signer returns. A test asserts that the agent's unit does not bind to,
+require or part-of the signer.
+
 `vrtg-vm-shutdown.service`: a `oneshot` unit with `RemainAfterExit=yes` whose
 stop action is `vrtg-agent shutdown-vms`. That command stops the VMs only
 when `/usr/bin/systemctl is-system-running` reports `stopping` or a start job
@@ -208,7 +339,7 @@ ordered against the agent's unit either (`After=` would only order the two,
 never pull the agent in). That ordering is decided when the agent runs real
 VMs.
 
-`hack/verify-systemd-units.sh` runs `systemd-analyze verify` on both units
+`hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
 (with the binary path replaced, since it does not exist on a build machine);
 the CI lint job runs it.
 
@@ -235,9 +366,17 @@ is not the one the certificate names, reads answer unsigned.
 ## Limits
 
 - The agent executes no operation; every mutating call is refused.
-- The host key is used in the agent's own process, behind Go's
-  `crypto.Signer`. A later slice moves the key behind a separate signer
-  process before answers are relied on.
+- The host key is held by a separate signer process, but the signer is a
+  digest oracle: `crypto/tls` hands it a digest, so it cannot check what it
+  signs. A compromised agent process cannot exfiltrate the key or use it later,
+  offline, but can still obtain signatures over digests of its choosing, online,
+  and so can make host answers that verify. A separate answer key, held by a
+  process that never terminates TLS, is a later requirement for the regulated
+  profile; until then a signed host answer is no stronger than the agent
+  process that relays it. The signer's rate limit bounds how fast, not whether.
+- The agent's checks that it cannot read the key file (`access(2)`) are made
+  at start-up and on reload, not continuously; a later change of the file's
+  permissions is not noticed until then.
 - The trust configuration's provenance is not proved: the agent checks only
   that the trust path is owned by root and that it cannot write it. Positive
   provenance (a verity-protected system extension or a signed bundle) is
