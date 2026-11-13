@@ -36,7 +36,7 @@ the VirtRigaud API packages.
 | `vrtg-agent run` | Runs the agent until SIGTERM or SIGINT. |
 | `vrtg-agent signer` | Runs the host key signer until SIGTERM or SIGINT: a separate process and user that holds the host private key and signs for the agent over a Unix socket (see [Host key signer](#host-key-signer)). The same in a release and a development build; it has no development-only setting. |
 | `vrtg-agent shutdown-vms` | Stops every VM of the executor, only while the host is shutting down (see [Units](#systemd-units)). |
-| `vrtg-agent enroll csr` / `enroll install` | The two steps of host enrolment: `csr`, run as the signer's user, creates the host key and writes the certificate signing request; `install`, run as the agent's user, checks and installs the issued certificate (see [Enrolment](#enrolment)). |
+| `vrtg-agent enroll csr` / `enroll install` | Development builds only (a release build prints that it is not available and exits 1). The two steps of host enrolment: `csr`, run as the signer's user, creates the host key and writes the certificate signing request; `install`, run as the agent's user, checks and installs the issued certificate (see [Enrolment](#enrolment)). |
 | `vrtg-agent version` | Prints the version. |
 
 `run` and `shutdown-vms` take the same flags:
@@ -125,7 +125,7 @@ the host's URI identity, `urn:virtrigaud:enrolment:<32 hex>`,
 | 3 | Local continuity checks: chain, anchor log, store marker, quarantine record. | The store is quarantined: reads still answer, every mutation is refused. |
 | 4 | The clock floor record is read from the store and raised in memory from the host's own clocks. Nothing is written. | A missing floor for an enrolled store, or an unreadable one, quarantines the store (`inconsistent_store`); clocks the floor cannot use refuse the start. |
 | 5 | The server starts serving, unattested. Nothing is committed before step 6. | |
-| 6 | Continuity is established. The clock floor is committed as the first write. The store's active enrolment is brought to the one the host certificate carries: a store that was never enrolled is enrolled, a store with another (or no) active enrolment is re-enrolled with the [freeze](#re-enrolment-freeze) (see [Enrolment](#enrolment)). | A floor that cannot be committed quarantines the store (`io_error`). |
+| 6 | Continuity is established. The clock floor is committed as the first write. The store's active enrolment is brought to the one the host certificate carries: in a development build a store that was never enrolled is enrolled, and a store with another (or no) active enrolment is re-enrolled with the [freeze](#re-enrolment-freeze) (see [Enrolment](#enrolment)); a release build does neither. | A floor that cannot be committed quarantines the store (`io_error`). |
 | 7 | Recovery of interrupted operations. An operation left runnable stays as it is: this agent starts no runner. | |
 | 8 | systemd is notified `READY=1`; the agent's trust state is READY. | |
 
@@ -459,7 +459,7 @@ signature or key material.
 | Signal | Effect |
 |--------|--------|
 | SIGTERM, SIGINT | `STOPPING=1`; the server stops accepting calls and waits up to `--drain-timeout`; the clock floor is saved; the store is closed; exit 0. During recovery, recovery is cancelled and resumes at the next start. |
-| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/`, host key and trust checks above), the signer is asked for its public key again and the host certificate is loaded again. A reload that fails, or whose certificate names another host, is refused and the running credentials stay. A certificate that names a new enrolment of this host re-enrols the store first (with the freeze) and then replaces the credentials; a new enrolment id the store has used before is refused (`ReenrolmentRefused`) and the running credentials stay. New handshakes and every later call use the new credentials. `READY=1` follows, with a status that starts with the trust state, then the result: for example `STATUS=AGENT_STATE_QUARANTINED (rolled_back); credentials reloaded` or `STATUS=AGENT_STATE_READY; reload refused: <reason>` (`IdentityInvalid`, `EnrolmentChanged`, `ReenrolmentRefused`, or a host-check reason such as `PKIInsecure`; a signer that cannot be reached is `IdentityInvalid` with the signer named in the log), never a path or a secret. |
+| SIGHUP | `RELOADING=1`; the key material and trust configuration are checked (the `pki/`, host key and trust checks above), the signer is asked for its public key again and the host certificate is loaded again. A reload that fails, or whose certificate names another host, is refused and the running credentials stay. In a development build, a certificate that names a new enrolment of this host re-enrols the store first (with the freeze) and then replaces the credentials (a release build refuses it as `EnrolmentChanged`); a new enrolment id the store has used before is refused (`ReenrolmentRefused`) and the running credentials stay. New handshakes and every later call use the new credentials. `READY=1` follows, with a status that starts with the trust state, then the result: for example `STATUS=AGENT_STATE_QUARANTINED (rolled_back); credentials reloaded` or `STATUS=AGENT_STATE_READY; reload refused: <reason>` (`IdentityInvalid`, `EnrolmentChanged`, `ReenrolmentRefused`, or a host-check reason such as `PKIInsecure`; a signer that cannot be reached is `IdentityInvalid` with the signer named in the log), never a path or a secret. |
 
 ## systemd units
 
@@ -521,7 +521,13 @@ the CI lint job runs it.
 ## Enrolment
 
 Enrolment gives the host its certificate and the agent its enrolment record.
-It needs two users, because the host private key belongs to the signer's user
+**This is for development builds only** (`virtrigaud_dev` build tag): until the
+manager's re-enrolment flow lands, a release build has no `enroll` steps (it
+exits 1), derives no enrolment from the host certificate, never re-enrols (a
+reload with another enrolment is refused as `EnrolmentChanged`), and leaves a
+store that was never enrolled unenrolled, so its answers stay unsigned.
+
+Enrolment needs two users, because the host private key belongs to the signer's user
 and the agent's user must never read it, and it needs an administrator of the
 manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
 
@@ -536,8 +542,12 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
    sudo -u virtrigaud-signer vrtg-agent enroll csr \
        --uri spiffe://<td>/virtrigaud/host/<ns>/<name> --uri urn:virtrigaud:enrolment:<hex> \
        --uri urn:virtrigaud:provider:<uid> --uri urn:virtrigaud:install:<hex> \
-       --uri urn:virtrigaud:mode:identity --out host.csr
+       --uri urn:virtrigaud:mode:identity --out - > host.csr
    ```
+
+   `--out -` writes the request to standard output, so the shell redirection
+   (run as you, not as the signer's user) decides where it lands; a path given
+   to `--out` is created by the signer's user, who must be able to write there.
 
    (`--uris-file` reads the same URIs one per line.) The key is ECDSA P-256,
    written as PKCS #8 PEM with mode `0600` through a private temporary file and
@@ -557,14 +567,23 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
 3. **The request goes to an administrator, with files only.** `vrtg host
    enroll --host <name> --csr host.csr` (see the manager page) has it
    approved and signed by the host-agent sub-CA; the issued certificate is
-   copied back to the host.
+   copied back to the host. Put `host.csr` and the certificate where the
+   agent's user can read them (for example a directory under `/var/tmp` that is
+   readable by it); the agent's step reads both, and neither is secret.
 4. **The signer is (re)started**, so it loads the key (`systemctl restart
    vrtg-agent-signer`); the signer serves only a key that exists.
 5. **`vrtg-agent enroll install`, as the agent's user:**
 
    ```
-   sudo -u virtrigaud-agent vrtg-agent enroll install --csr host.csr --certificate host-cert.pem
+   sudo -u virtrigaud-agent vrtg-agent enroll install --csr /var/tmp/enrol/host.csr \
+       --certificate /var/tmp/enrol/host-cert.pem --uris-file /var/tmp/enrol/request-uris
    ```
+
+   The Host's **current** request URIs are required (`--uri`, repeatable, or
+   `--uris-file`, one per line): its `status.agent.requestURIs` as the manager
+   publishes them now. The request file must carry exactly these, so a request
+   made before the manager drew another enrolment record is refused instead of
+   being installed for a record the manager no longer expects.
 
    It takes the run flags that name places (`--state-dir`, `--signer-socket`,
    `--signer-user`, `--signer-key-file`, `--dev-trust-dir`). It refuses to run
@@ -575,11 +594,12 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
    all of these hold:
 
    - the request file is one PEM request with a valid signature, whose URIs are
-     exactly the host URI and one enrolment record, and whose key is the
-     signer's key;
+     exactly the host URI and one enrolment record and exactly the Host's
+     current request URIs, and whose key is the signer's key;
    - the certificate chains directly to a pinned host identity issuer
      (`host-ca.pem` of the trust configuration) for server authentication,
-     is valid now, is not a CA, has server authentication as its only usage,
+     is valid now, is not a CA, has no certificate or CRL signing usage and the
+     digital signature usage, has server authentication as its only usage,
      lives at most 30 days, has an empty subject or the Host's name, carries no
      DNS, address or e-mail name, carries exactly the request's URIs (so the
      enrolment record the manager drew) and certifies the signer's key;
@@ -595,7 +615,12 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
 
 ### The enrolment record
 
-The agent keeps no separate enrolment file. At start (step 6) and on reload it
+(Development builds only; see above for what a release build does.) The agent
+loads the host certificate with the same certificate profile the manager
+enforces before it pins the key (no CA bit, no certificate or CRL signing
+usage, digital signature, server authentication only, at most 30 days, empty
+subject or the Host's name, no DNS, address or e-mail name). The agent keeps no
+separate enrolment file. At start (step 6) and on reload it
 derives its enrolment record from the host certificate: the enrolment id, the
 Provider UID, the install id and the mode are in the URI subject alternative
 names the sub-CA signed, so they are as authentic as the certificate. The
@@ -612,7 +637,10 @@ store's active enrolment is then brought to it:
   activated at the next start epoch (the highest so far plus one). An enrolment
   id the store has used before (active, frozen or retired) is refused: the
   store keeps its state, the error is logged and answers stay unsigned. A store
-  whose active enrolment is for another host is never touched.
+  that belongs to another host is never touched: the active enrolment's host,
+  or with none active the store marker's and the newest enrolment record's
+  host, must be the certificate's (otherwise the log says `StoreOfOtherHost`
+  and answers stay unsigned).
 
 On reload, a certificate of the same host with a new enrolment re-enrols the
 store first and only then replaces the running credentials, so no answer names
