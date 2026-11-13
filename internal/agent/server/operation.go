@@ -23,11 +23,13 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
@@ -111,13 +113,27 @@ func (s *Server) verifier() (*grantverify.Verifier, error) {
 		ProviderUID: c.Identity.Record.ProviderUID,
 		HostID:      c.Identity.HostID(),
 		EnrolmentID: c.Identity.Record.EnrolmentID,
-		Clock:       grantverify.ClockFunc(s.verifyNow),
+		Clock:       grantverify.ClockFunc(s.grantNow),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("grant verifier: %w", err)
 	}
 	s.vc.creds, s.vc.v = c, v
 	return v, nil
+}
+
+// grantNow is the time grants are judged at: the later of the host clock and
+// the clock floor while the floor is healthy, and otherwise the zero time,
+// which the verifier refuses as untrustworthy (GRANT_UNAUTHENTICATED). Unlike
+// the client certificate check (verifyNow), which falls back to the host
+// clock so that reads keep answering, the operation path never judges a
+// grant at a clock the floor does not vouch for, even if the floor's state
+// changes between the readiness gate and the verification.
+func (s *Server) grantNow() time.Time {
+	if s.opts.Agent.ClockFloorState() != clockfloor.StateOK {
+		return time.Time{}
+	}
+	return s.verifyNow()
 }
 
 // operate is the operation path of one mutating call, after the peer check
