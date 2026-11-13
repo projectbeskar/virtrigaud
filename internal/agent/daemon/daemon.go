@@ -883,7 +883,7 @@ func (d *daemon) enrol(ctx context.Context, st *opstore.Store) {
 	switch err := d.syncEnrolment(ctx, st, id); {
 	case err == nil:
 	case errors.Is(err, errStoreOfOtherHost):
-		d.log.Error(err, "answers stay unsigned until the host is enrolled again")
+		d.log.Error(err, "enrolment refused; answers stay unsigned until the host is enrolled again", "reason", "StoreOfOtherHost")
 	default:
 		d.log.Error(err, "enrolment from the host certificate failed; answers stay unsigned until the host is enrolled again",
 			"enrolment", hex.EncodeToString(id.Record.EnrolmentID))
@@ -892,7 +892,7 @@ func (d *daemon) enrol(ctx context.Context, st *opstore.Store) {
 
 // errStoreOfOtherHost refuses to enrol a store whose active enrolment is for
 // another host.
-var errStoreOfOtherHost = errors.New("the store's active enrolment is for another host")
+var errStoreOfOtherHost = errors.New("the store belongs to another host")
 
 // syncEnrolment derives the host's active enrolment from its certificate and
 // makes the store's agree. The enrolment record (enrolment id, Provider uid,
@@ -912,7 +912,9 @@ var errStoreOfOtherHost = errors.New("the store's active enrolment is for anothe
 //     activates the new one; an enrolment id the store has used before is
 //     refused and the store keeps its state.
 //
-// A store whose active enrolment is for another host is never touched.
+// A store that belongs to another host is never touched: the active
+// enrolment's host, or with none active the store marker's and the newest
+// held enrolment record's, must be the certificate's.
 func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust.Identity) error {
 	v, err := st.HostView(ctx, 0)
 	if err != nil {
@@ -921,10 +923,21 @@ func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust
 	e := opstore.Enrolment{
 		ID: id.Record.EnrolmentID, ProviderUID: id.Record.ProviderUID, HostID: id.HostID(), InstallID: id.Record.InstallID,
 	}
+	// Whose store is it? The active enrolment names its host; with none
+	// active, the store marker and the newest enrolment record still held
+	// (the frozen predecessor) do.
+	owners := []string{st.Journal().Marker().HostID, v.LatestHostID}
+	if v.Enrolment != nil {
+		owners = []string{v.Enrolment.HostID}
+	}
+	for _, owner := range owners {
+		if owner != "" && owner != id.HostID() {
+			return errStoreOfOtherHost
+		}
+	}
 	switch {
-	case v.Enrolment != nil && v.Enrolment.HostID != id.HostID():
-		return errStoreOfOtherHost
-	case v.Enrolment != nil && bytes.Equal(v.Enrolment.ID, e.ID) && v.Enrolment.ProviderUID == e.ProviderUID:
+	case v.Enrolment != nil && bytes.Equal(v.Enrolment.ID, e.ID) && v.Enrolment.ProviderUID == e.ProviderUID &&
+		bytes.Equal(v.Enrolment.InstallID, e.InstallID):
 		return nil
 	case v.Enrolment == nil && v.LastStartEpoch == 0:
 		e.StartEpoch = 1

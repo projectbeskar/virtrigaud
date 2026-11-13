@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
+	pb "github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb"
 )
 
 // ActiveEnrolment is the active enrolment as the store records it.
@@ -56,6 +57,11 @@ type HostView struct {
 	// LastStartEpoch is the highest start epoch of any enrolment so far; 0
 	// for a store that was never enrolled.
 	LastStartEpoch uint64
+	// LatestHostID is the host identity of the enrolment with the highest
+	// start epoch among the records the store still holds (active or frozen);
+	// empty when it holds none (never enrolled, or every record was discarded
+	// after a confirmed freeze).
+	LatestHostID string
 }
 
 // HostView reads the active enrolment, the committed chain position, the
@@ -64,6 +70,7 @@ type HostView struct {
 // state in which the journal could be opened.
 func (s *Store) HostView(ctx context.Context, continuitySeq uint64) (HostView, error) {
 	var v HostView
+	var latestEpoch uint64
 	err := s.j.View(ctx, func(tx *journal.Tx) error {
 		pos, ok := tx.CommittedPosition()
 		if !ok {
@@ -83,6 +90,18 @@ func (s *Store) HostView(ctx context.Context, continuitySeq uint64) (HostView, e
 			return err
 		}
 		v.LastStartEpoch = m.GetLastStartEpoch()
+		if err := tx.ForEach(bucketEnrolments, nil, func(_, raw []byte) error {
+			rec := &pb.Enrolment{}
+			if err := unmarshalRecord(raw, rec); err != nil {
+				return err
+			}
+			if rec.GetStartEpoch() >= latestEpoch {
+				latestEpoch, v.LatestHostID = rec.GetStartEpoch(), rec.GetHostId()
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 		e, err := activeEnrolment(tx)
 		if err != nil {
 			return err

@@ -17,6 +17,8 @@ limitations under the License.
 package daemon_test
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -24,8 +26,15 @@ import (
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
+	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
+	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
+	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck/hostchecktest"
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal/journaltest"
+	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/systemd"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
+	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
 )
@@ -120,4 +129,68 @@ func TestRestartWithANewCertificateReenrols(t *testing.T) {
 		t.Fatalf("an answer under a used enrolment: %x", got)
 	}
 	waitLog(t, h, "enrolment from the host certificate failed")
+}
+
+// TestStoreOfAnotherHostIsNotReenrolled: a store that was cut short between
+// the freeze and the activation of a re-enrolment has no active enrolment. A
+// certificate of a different host must not be enrolled into it, whether the
+// store marker or the frozen predecessor names the old host.
+func TestStoreOfAnotherHostIsNotReenrolled(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leave the store between freeze and activation, for this host.
+	ctx := context.Background()
+	crash := &journaltest.Crasher{Point: opstore.PointMidReenrolment, N: 1}
+	st, err := opstore.Open(ctx, opstore.Options{
+		Journal:  journal.Options{Dir: h.stateDir, Hooks: journal.Hooks{Crash: crash.At}},
+		Executor: none.Executor{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EstablishContinuity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hv, err := st.HostView(ctx, 0)
+	if err != nil || hv.Enrolment == nil || hv.LatestHostID != trusttest.HostName {
+		t.Fatalf("host view: %+v %v", hv, err)
+	}
+	next := opstore.Enrolment{ID: make([]byte, 16), ProviderUID: trusttest.ProviderUID, HostID: trusttest.HostName, StartEpoch: hv.LastStartEpoch + 1}
+	next.ID[0] = 9
+	if err := st.Reenrol(ctx, next); !errors.Is(err, journal.ErrCrashed) {
+		t.Fatalf("reenrol: %v", err)
+	}
+	_ = st.Close()
+
+	// The same disk is given another host's identity.
+	otherURI, err := hostidentity.HostURI(trusttest.TrustDomain, trusttest.HostNS, "another-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.installCert(h.pki.IssueHost(t, h.pki.HostKey, hostidentity.RequestURIs(otherURI, h.pki.Record), hostidentitytest.IssueOptions{}))
+	marker := filepath.Join(h.stateDir, hostcheck.HostMarkerFile)
+	if err := os.WriteFile(marker, []byte(otherURI+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.probe.Edit(func(f *hostchecktest.Fake) { f.Content[marker] = []byte(otherURI + "\n") })
+	r, _ = h.run()
+	waitLog(t, h, "StoreOfOtherHost")
+	if got := answerEnrolment(r); got != nil {
+		t.Fatalf("an answer from a store of another host: %x", got)
+	}
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = opstore.Open(ctx, opstore.Options{Journal: journal.Options{Dir: h.stateDir}, Executor: none.Executor{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	if hv, err := st.HostView(ctx, 0); err != nil || hv.Enrolment != nil {
+		t.Fatalf("the store was enrolled for another host: %+v %v", hv, err)
+	}
 }
