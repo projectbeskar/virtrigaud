@@ -19,7 +19,9 @@ package opstore_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 )
@@ -155,4 +157,84 @@ func TestPanicCountIsDurable(t *testing.T) {
 		t.Fatalf("resolve: %+v %v", v, err)
 	}
 	wantRefusal(t, h.admit(h.req("vm", rid(), kCreate, 2)), opstore.RefusalVMBusy)
+}
+
+// TestPanicCountIsPruned: the panic count of an operation is removed with
+// its terminal write, and the counts of a frozen enrolment's operations with
+// its records when the freeze is confirmed.
+func TestPanicCountIsPruned(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	ctx := context.Background()
+	count := func(r opstore.Request) int {
+		t.Helper()
+		n, err := h.s.Panics(ctx, ref(r))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	b := rid()
+	create := h.req("vm", b, kCreate, 1)
+	h.mustAccept(create)
+	if _, err := h.s.RecordPanic(ctx, ref(create)); err != nil {
+		t.Fatal(err)
+	}
+	h.run(create)
+	if n := count(create); n != 0 {
+		t.Fatalf("after the terminal write: %d", n)
+	}
+	open := h.req("vm", b, kPowerOn, 1)
+	h.mustAccept(open)
+	if _, err := h.s.RecordPanic(ctx, ref(open)); err != nil {
+		t.Fatal(err)
+	}
+	old := h.enrol
+	next := opstore.Enrolment{HostID: "host-1", ID: rid(), ProviderUID: h.provider, InstallID: rid(), StartEpoch: h.start + 1}
+	if err := h.s.Reenrol(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	// The freeze retired the operation (no step intent): a terminal write.
+	if n := count(open); n != 0 {
+		t.Fatalf("after the freeze: %d", n)
+	}
+	held := h.req("vm2", rid(), kCreate, 1)
+	held.EnrolmentID = next.ID
+	held.MintEpoch.Counter = next.StartEpoch
+	h.mustAccept(held)
+	if _, err := h.s.RecordPanic(ctx, ref(held)); err != nil {
+		t.Fatal(err)
+	}
+	// A count left for an operation of the frozen enrolment (one whose
+	// outcome stayed unknown, for example).
+	frozen := opstore.OpRef{EnrolmentID: old, OpID: rid()}
+	if _, err := h.s.RecordPanic(ctx, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.s.ConfirmFreeze(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := h.s.Panics(ctx, frozen); err != nil || n != 0 {
+		t.Fatalf("a count of the discarded enrolment survived: %d %v", n, err)
+	}
+	if n := count(held); n != 1 {
+		t.Fatalf("a count of the active enrolment was pruned: %d", n)
+	}
+}
+
+// TestRecordPanicNeverBlocksOnAHeldLock: RecordPanic gives up, counting
+// nothing, when the store lock stays held (a panic may have unwound a method
+// that held it).
+func TestRecordPanicNeverBlocksOnAHeldLock(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	r := h.req("vm", rid(), kCreate, 1)
+	h.mustAccept(r)
+	opstore.HoldLock(h.s)
+	defer opstore.ReleaseLock(h.s)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := h.s.RecordPanic(ctx, ref(r)); !errors.Is(err, opstore.ErrStoreBusy) {
+		t.Fatalf("RecordPanic with the lock held: %v, want ErrStoreBusy", err)
+	}
 }

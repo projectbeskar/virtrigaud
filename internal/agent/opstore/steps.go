@@ -77,12 +77,29 @@ func panicKey(ref OpRef) []byte {
 	return append([]byte(panicKeyPrefix), opKey(ref.EnrolmentID, ref.OpID)...)
 }
 
+// ErrStoreBusy is returned by RecordPanic when the store lock was not free
+// within its bound.
+var ErrStoreBusy = errors.New("operation store busy")
+
+// recordPanicLockWait bounds RecordPanic's wait for the store lock.
+const recordPanicLockWait = 5 * time.Second
+
 // RecordPanic durably adds one to the number of runs of ref that panicked and
 // returns the new count. The agent calls it from the run that panicked,
 // before it stops, so that a run that always panics is given up after a few
-// restarts instead of stopping the host's agent forever.
+// restarts instead of stopping the host's agent forever. The count is
+// removed with the operation's terminal write, and with its enrolment's
+// records when a freeze is confirmed.
+//
+// It is called from a recovered panic, which may have unwound a store method
+// that held the store lock without releasing it. It therefore never blocks
+// on the lock: it tries it for at most a few seconds and otherwise returns
+// ErrStoreBusy, counting nothing (the agent then stops all the same; the
+// count only bounds how often).
 func (s *Store) RecordPanic(ctx context.Context, ref OpRef) (int, error) {
-	s.mu.Lock()
+	if !s.tryLock(ctx, recordPanicLockWait) {
+		return 0, fmt.Errorf("record panic of %s: %w", ref, ErrStoreBusy)
+	}
 	defer s.mu.Unlock()
 	n := 0
 	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
@@ -100,6 +117,38 @@ func (s *Store) RecordPanic(ctx context.Context, ref OpRef) (int, error) {
 		return 0, fmt.Errorf("record panic of %s: %w", ref, err)
 	}
 	return n, nil
+}
+
+// tryLock takes the store lock, waiting at most wait.
+func (s *Store) tryLock(ctx context.Context, wait time.Duration) bool {
+	if s.mu.TryLock() {
+		return true
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-tick.C:
+			if s.mu.TryLock() {
+				return true
+			}
+		}
+	}
+}
+
+// deletePanicCount removes ref's panic count, if any, in tx.
+func deletePanicCount(tx *journal.Tx, ref OpRef) error {
+	b, err := tx.Get(bucketMeta, panicKey(ref))
+	if err != nil || b == nil {
+		return err
+	}
+	return tx.Delete(bucketMeta, panicKey(ref))
 }
 
 // Panics returns the number of runs of ref that panicked (RecordPanic).
@@ -472,6 +521,9 @@ func (s *Store) finish(ctx context.Context, rec *pb.OpRecord, state OpState, rea
 func terminalWrites(tx *journal.Tx, rec *pb.OpRecord, buf *auditBuf) error {
 	id := rec.GetIdentity()
 	key := opKey(id.GetEnrolmentId(), id.GetOpId())
+	if err := deletePanicCount(tx, OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()}); err != nil {
+		return err
+	}
 	if err := put(tx, bucketTombstones, key, &pb.Tombstone{Identity: id, State: rec.GetState(), Irrev: rec.GetIrrev(),
 		Reason: rec.GetReason()}); err != nil {
 		return err

@@ -323,8 +323,8 @@ func anyIntent(rec *pb.OpRecord) bool {
 
 // ConfirmFreeze discards a frozen enrolment's records, once the manager has
 // confirmed that it holds every operation of that enrolment: the operation
-// records, op_id tombstones, attempt marks, the enrolment record and the
-// witness directory. VM tombstones are kept. VM records that the discarded
+// records, op_id tombstones, attempt marks, panic counts, the enrolment record
+// and the witness directory. VM tombstones are kept. VM records that the discarded
 // operations held are released (the manager now holds those operations). The
 // enrolment id is remembered as retired: it is never activated again, and a
 // grant naming it is refused UNKNOWN_TO_AGENT, never as definitely not
@@ -351,16 +351,20 @@ func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 		if act == nil {
 			return fmt.Errorf("%w: no successor enrolment is active", ErrEnrolment)
 		}
-		for _, b := range []string{bucketOps, bucketTombstones, bucketAttempts} {
+		for _, b := range []struct {
+			bucket string
+			prefix []byte
+		}{{bucketOps, prev}, {bucketTombstones, prev}, {bucketAttempts, prev},
+			{bucketMeta, append([]byte(panicKeyPrefix), prev...)}} {
 			var keys [][]byte
-			if err := tx.ForEach(b, prev, func(k, _ []byte) error {
+			if err := tx.ForEach(b.bucket, b.prefix, func(k, _ []byte) error {
 				keys = append(keys, k)
 				return nil
 			}); err != nil {
 				return err
 			}
 			for _, k := range keys {
-				if err := tx.Delete(b, k); err != nil {
+				if err := tx.Delete(b.bucket, k); err != nil {
 					return err
 				}
 			}
