@@ -67,6 +67,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
@@ -166,7 +167,21 @@ type Agent interface {
 	TrustState() (providerv1.AgentState, string)
 	// ClockFloor returns the host's clock floor; zero when it has none.
 	ClockFloor() time.Time
+	// ClockFloorState returns the clock floor's health; the empty state when
+	// the agent has no floor (its store could not give it one).
+	ClockFloorState() clockfloor.StateKind
 }
+
+// The refusal reasons of a mutating call while the clock floor is not usable.
+const (
+	// ReasonClockFloorAhead: the clock floor is ahead of the host clock by
+	// more than its bound (the clock was rolled back or jumped and was
+	// corrected). Mutating calls are refused until the clock catches up.
+	ReasonClockFloorAhead = answer.ReasonClockFloorAhead
+	// ReasonClockFloorUnavailable: the clock floor failed (a clock source
+	// failed or it could not be saved) or does not exist.
+	ReasonClockFloorUnavailable = answer.ReasonClockFloorUnavailable
+)
 
 // Options configures New.
 type Options struct {
@@ -264,24 +279,28 @@ func refusal(code codes.Code, reason, msg string) error {
 	return st.Err()
 }
 
-// checkPeer authenticates the caller of one call: an allowed Provider
-// identity (checked again against the current trust configuration) whose UID
-// is the Provider the host is enrolled with.
 // verifyNow is the time a client certificate's validity is judged at: the
-// later of the host clock and the agent's clock floor, so that rolling the
-// host clock back does not make an expired certificate valid again, as it
-// does not for an expired grant key. A floor ahead of the clock (a clock
-// rolled back) therefore refuses certificates that the clock alone would
-// accept, which is the safe direction; a failed floor reads as zero and
-// leaves the host clock.
+// later of the host clock and the agent's clock floor while the floor is
+// healthy, so that rolling the host clock back does not make an expired
+// certificate valid again, as it does not for an expired grant key. While the
+// floor is ahead of the clock beyond its bound, failed or missing, the floor
+// is not used (a floor far ahead would refuse every call, GetHostInfo
+// included, and the manager could no longer see why); certificates are
+// judged at the host clock, and gate refuses every mutating call instead.
 func (s *Server) verifyNow() time.Time {
 	now := s.opts.Now()
+	if s.opts.Agent.ClockFloorState() != clockfloor.StateOK {
+		return now
+	}
 	if floor := s.opts.Agent.ClockFloor(); floor.After(now) {
 		return floor
 	}
 	return now
 }
 
+// checkPeer authenticates the caller of one call: an allowed Provider
+// identity (checked again against the current trust configuration) whose UID
+// is the Provider the host is enrolled with.
 func (s *Server) checkPeer(ctx context.Context) error {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
@@ -326,11 +345,23 @@ func (s *Server) gate(ctx context.Context, method string) error {
 	}
 	state, reason := s.opts.Agent.TrustState()
 	var err error
+	floor := s.opts.Agent.ClockFloorState()
+	switch {
+	case state == providerv1.AgentState_AGENT_STATE_QUARANTINED:
+		err = refusal(codes.FailedPrecondition, opstore.ReasonQuarantined, "the host's operation store is quarantined ("+reason+")")
+	case floor == clockfloor.StateClockFloorAhead:
+		err = refusal(codes.FailedPrecondition, ReasonClockFloorAhead,
+			"the host's clock floor is ahead of its clock; correct the clock, or the host stays refused until the clock reaches the floor")
+	case floor != clockfloor.StateOK:
+		err = refusal(codes.Unavailable, ReasonClockFloorUnavailable, "the host's clock floor is not available")
+	}
+	if err != nil {
+		s.opts.Log.Info("mutation refused", "method", method, "state", state.String(), "clockFloor", string(floor))
+		return err
+	}
 	switch state {
 	case providerv1.AgentState_AGENT_STATE_READY:
 		err = status.Error(codes.Unimplemented, "this agent executes no operations")
-	case providerv1.AgentState_AGENT_STATE_QUARANTINED:
-		err = refusal(codes.FailedPrecondition, opstore.ReasonQuarantined, "the host's operation store is quarantined ("+reason+")")
 	default:
 		err = refusal(codes.Unavailable, opstore.ReasonUnattested, "the host's operation store has not established its continuity")
 	}

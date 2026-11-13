@@ -24,6 +24,7 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 )
 
@@ -94,6 +95,11 @@ func (f floorStore) Save(ctx context.Context, s clockfloor.State) error {
 		return rec, nil
 	})
 	if err != nil {
+		if st, _ := f.st.Journal().State(); st == journal.StateLost {
+			// The store was quarantined (before this call or by it): it cannot
+			// commit, and the floor goes on in memory.
+			return fmt.Errorf("%w: %w", clockfloor.ErrStoreLost, err)
+		}
 		return fmt.Errorf("%w: %w", errFloorWrite, err)
 	}
 	return nil

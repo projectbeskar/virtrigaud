@@ -81,6 +81,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync/atomic"
 	"syscall"
@@ -196,10 +197,54 @@ func (a *agentState) HostView(ctx context.Context, continuitySeq uint64) (opstor
 	return a.store.HostView(ctx, continuitySeq)
 }
 
-// TrustState implements server.Agent.
+// The state reasons the agent adds to its store's trust state while the
+// store is ready but the host must not run operations (see package answer).
+const (
+	// ReasonFreezeIncomplete: a re-enrolment's freeze stopped partway; the
+	// host refuses every operation until it is finished.
+	ReasonFreezeIncomplete = answer.ReasonFreezeIncomplete
+	// ReasonClockFloorAhead is the state reason while the clock floor is ahead
+	// of the host clock beyond its bound.
+	ReasonClockFloorAhead = answer.ReasonClockFloorAhead
+	// ReasonClockFloorUnavailable is the state reason while the clock floor
+	// has failed or does not exist.
+	ReasonClockFloorUnavailable = answer.ReasonClockFloorUnavailable
+)
+
+// TrustState implements server.Agent. A store that is ready and recovered
+// reports READY only while no freeze is incomplete and the clock floor is
+// healthy; otherwise it reports UNATTESTED with the reason, so that the
+// reported state matches what the host admits.
 func (a *agentState) TrustState() (providerv1.AgentState, string) {
 	st, lost := a.store.Journal().State()
-	return answer.StoreState(st, lost, a.store.Recovered())
+	recovered := a.store.Recovered()
+	state, reason := answer.StoreState(st, lost, recovered)
+	if state != providerv1.AgentState_AGENT_STATE_READY {
+		if st == journal.StateReady && recovered && a.store.Freezing() {
+			return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonFreezeIncomplete
+		}
+		return state, reason
+	}
+	if a.store.Freezing() {
+		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonFreezeIncomplete
+	}
+	switch a.ClockFloorState() {
+	case clockfloor.StateOK:
+	case clockfloor.StateClockFloorAhead:
+		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonClockFloorAhead
+	default:
+		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonClockFloorUnavailable
+	}
+	return state, reason
+}
+
+// ClockFloorState implements server.Agent.
+func (a *agentState) ClockFloorState() clockfloor.StateKind {
+	f := a.floor.Load()
+	if f == nil {
+		return ""
+	}
+	return f.Status().State
 }
 
 // ClockFloor implements server.Agent.
@@ -603,13 +648,17 @@ func reloadRefusalReason(err error) string {
 // quarantines the store; a clock source the floor cannot use refuses the
 // start.
 func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
+	if left, err := d.o.JournalFS.Exists(filepath.Join(d.o.Config.StateDir, "clock.floor")); err == nil && left {
+		d.log.Info("ignoring a clock.floor file in the state directory: the clock floor is kept in the operation store")
+	}
 	firstUse := false
 	if v, err := agent.store.HostView(ctx, 0); err == nil {
 		firstUse = v.LastStartEpoch == 0
 	}
 	f, err := clockfloor.Open(ctx, clockfloor.Config{
 		Store: floorStore{st: agent.store}, FirstUse: firstUse, PersistInterval: FloorPersistInterval,
-		Wall: d.o.Floor.Wall, Boot: d.o.Floor.Boot, BootID: d.o.Floor.BootID, TimeNS: d.o.Floor.TimeNS,
+		NewBootSlack: FloorPersistInterval + d.o.ObserveEvery,
+		Wall:         d.o.Floor.Wall, Boot: d.o.Floor.Boot, BootID: d.o.Floor.BootID, TimeNS: d.o.Floor.TimeNS,
 	})
 	switch {
 	case err == nil:
@@ -673,6 +722,10 @@ func (d *daemon) startFloor(ctx context.Context, st *opstore.Store, floor *clock
 	}
 	if err := floor.StartPersisting(ctx); err != nil {
 		if ctx.Err() != nil {
+			return false
+		}
+		if errors.Is(err, clockfloor.ErrStoreLost) {
+			d.log.Error(err, "the store cannot commit the clock floor; it is quarantined")
 			return false
 		}
 		d.log.Error(err, "the clock floor cannot be written; the store is quarantined")

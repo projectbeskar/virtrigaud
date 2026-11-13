@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -93,9 +94,9 @@ func (n *notifications) has(prefix string) bool {
 }
 
 // fixed clock sources for the clock floor.
-type wall struct{}
+type wall struct{ off *atomic.Int64 }
 
-func (wall) Now() time.Time { return time.Now() }
+func (w wall) Now() time.Time { return time.Now().Add(time.Duration(w.off.Load())) }
 
 type bootClock struct{ start time.Time }
 
@@ -144,6 +145,8 @@ type host struct {
 	logs     *logBuffer
 	hooks    daemon.Hooks
 	boot     bootClock
+	// wallOff is added to the host clock the clock floor reads, to roll it back.
+	wallOff atomic.Int64
 }
 
 func newHost(t *testing.T) *host {
@@ -192,7 +195,7 @@ func (h *host) start() *running {
 	opts := daemon.Options{
 		Config: h.cfg, Probe: h.probe, UID: &uid, Executor: h.exec, DevEnrolment: h.dev, Notifier: h.notes,
 		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, TrustFileOwner: &uid, Hooks: hooks,
-		Floor: daemon.FloorSources{Wall: wall{}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
+		Floor: daemon.FloorSources{Wall: wall{off: &h.wallOff}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
 	}
 	go func() {
 		r.done <- daemon.Run(context.Background(), opts, r.signals)

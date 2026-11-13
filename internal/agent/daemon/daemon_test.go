@@ -374,7 +374,7 @@ func TestClockFloorRollbackIsStoreRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Another run raises and commits the floor again.
-	h.boot.start = h.boot.start.Add(-time.Hour)
+	h.boot.start = h.boot.start.Add(-2 * time.Minute) // within the floor's ahead bound
 	r, state := h.run()
 	if state != providerv1.AgentState_AGENT_STATE_READY {
 		t.Fatalf("state = %v", state)
@@ -596,5 +596,33 @@ func TestScrubFindsDamageAndReflectsItInStatus(t *testing.T) {
 	waitLog(t, h, "journal scrub failed")
 	if a := r.hello(); a.GetContext().GetStateReason() != string(journal.LostJournalCorrupt) {
 		t.Fatalf("answer = %v", a)
+	}
+}
+
+// TestClockFloorAheadReportsAndRefusesMutations: the host clock is rolled back
+// far beyond the floor's bound (and beyond a certificate's lifetime). The
+// floor is then ahead: reads still answer, and the answer reports it; mutating
+// calls are refused with the clock-floor reason.
+func TestClockFloorAheadReportsAndRefusesMutations(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if a := r.hello(); a == nil || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_READY {
+		t.Fatalf("answer before the rollback = %v", a)
+	}
+	h.wallOff.Store(int64(-400 * 24 * time.Hour))
+	a := r.hello()
+	if a == nil {
+		t.Fatalf("no answer while the floor is ahead\n%s", h.logs.text())
+	}
+	if a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_UNATTESTED || a.GetContext().GetStateReason() != "clock_floor_ahead" {
+		t.Fatalf("answer = %v %q", a.GetContext().GetAgentState(), a.GetContext().GetStateReason())
+	}
+	if code, reason := r.create(); code != "FailedPrecondition" || reason != "clock_floor_ahead" {
+		t.Fatalf("Create = %s %s", code, reason)
+	}
+	// The clock is corrected: the host is READY again.
+	h.wallOff.Store(0)
+	if a := r.hello(); a == nil || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_READY {
+		t.Fatalf("answer after the correction = %v", a)
 	}
 }

@@ -181,6 +181,21 @@ var lostReasons = []journal.LostReason{
 	journal.LostAnchorCorrupt, journal.LostJournalMissing, journal.LostIOError,
 }
 
+// The state reasons an UNATTESTED host may report besides none: the store is
+// ready but the host must not run operations.
+const (
+	// ReasonFreezeIncomplete: a re-enrolment's freeze stopped partway.
+	ReasonFreezeIncomplete = "freeze_incomplete"
+	// ReasonClockFloorAhead: the clock floor is ahead of the host clock beyond
+	// its bound.
+	ReasonClockFloorAhead = "clock_floor_ahead"
+	// ReasonClockFloorUnavailable: the clock floor failed or does not exist.
+	ReasonClockFloorUnavailable = "clock_floor_unavailable"
+)
+
+// UnattestedReasons lists the state reasons an UNATTESTED answer may carry.
+var UnattestedReasons = []string{ReasonFreezeIncomplete, ReasonClockFloorAhead, ReasonClockFloorUnavailable}
+
 // StoreState maps the journal's state and the operation store's recovery to
 // an answer's agent state and state reason: READY only when the journal is
 // ready and recovery has run; QUARANTINED, with the loss reason, when the
@@ -277,7 +292,11 @@ func answerContext(h Host) (*providerv1.AnswerContext, error) {
 		if !slices.Contains(lostReasons, journal.LostReason(h.StateReason)) {
 			return nil, fmt.Errorf("%w: quarantine reason %q is not a store loss reason", ErrSign, h.StateReason)
 		}
-	case providerv1.AgentState_AGENT_STATE_READY, providerv1.AgentState_AGENT_STATE_UNATTESTED:
+	case providerv1.AgentState_AGENT_STATE_UNATTESTED:
+		if h.StateReason != "" && !slices.Contains(UnattestedReasons, h.StateReason) {
+			return nil, fmt.Errorf("%w: state reason %q is not one an unattested host reports", ErrSign, h.StateReason)
+		}
+	case providerv1.AgentState_AGENT_STATE_READY:
 		if h.StateReason != "" {
 			return nil, fmt.Errorf("%w: a state reason without a quarantine", ErrSign)
 		}

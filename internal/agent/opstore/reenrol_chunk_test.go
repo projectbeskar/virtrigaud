@@ -254,6 +254,7 @@ func TestReenrol_FailedFreezeRefusesEverything(t *testing.T) {
 
 	// The store is ready, yet the freeze is incomplete: nothing runs, nothing
 	// is confirmed, and nothing is admitted.
+	assert.True(t, h.s.Freezing(), "the store reports the incomplete freeze")
 	d := h.admit(h.req("vm-new", rid(), kCreate, 1))
 	assert.True(t, d.IsRefusal(opstore.RefusalUnattested), "%+v", d)
 	_, err = h.s.Execute(context.Background(), ref(ops.plain[len(ops.plain)-1]), nil)
@@ -261,6 +262,7 @@ func TestReenrol_FailedFreezeRefusesEverything(t *testing.T) {
 	require.ErrorIs(t, h.s.ConfirmFreeze(context.Background(), h.enrol), opstore.ErrEnrolment)
 
 	require.NoError(t, h.s.Reenrol(context.Background(), next))
+	assert.False(t, h.s.Freezing())
 	wantFrozenOnce(t, h, ops, true)
 }
 

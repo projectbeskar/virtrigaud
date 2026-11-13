@@ -219,6 +219,10 @@ func TestHostAnswer(t *testing.T) {
 		},
 		"reason without a quarantine": func(h *answer.Host) { h.StateReason = string(journal.LostIOError) },
 		"unspecified state":           func(h *answer.Host) { h.State = providerv1.AgentState_AGENT_STATE_UNSPECIFIED },
+		"unattested with a loss reason": func(h *answer.Host) {
+			h.State, h.StateReason = providerv1.AgentState_AGENT_STATE_UNATTESTED, string(journal.LostIOError)
+		},
+		"ready with an unattested reason": func(h *answer.Host) { h.StateReason = answer.ReasonClockFloorAhead },
 	} {
 		h := testHost(p)
 		edit(&h)
@@ -230,6 +234,13 @@ func TestHostAnswer(t *testing.T) {
 	h.State, h.StateReason = providerv1.AgentState_AGENT_STATE_QUARANTINED, string(journal.LostRolledBack)
 	if a, err := answer.HostAnswer(h); err != nil || a.GetContext().GetStateReason() != "rolled_back" {
 		t.Fatalf("quarantined answer: %v, %v", a, err)
+	}
+	for _, reason := range answer.UnattestedReasons {
+		h = testHost(p)
+		h.State, h.StateReason = providerv1.AgentState_AGENT_STATE_UNATTESTED, reason
+		if a, err := answer.HostAnswer(h); err != nil || a.GetContext().GetStateReason() != reason {
+			t.Fatalf("unattested answer with %q: %v, %v", reason, a, err)
+		}
 	}
 	h = testHost(p)
 	h.View.CheckpointSeq, h.View.CheckpointHead[0] = 4, 3
