@@ -40,8 +40,10 @@ limitations under the License.
 //     GetHostInfo answer; every mutation is refused UNATTESTED. Nothing is
 //     committed before step 6.
 //  6. Continuity is established (with the local store, the checks of step
-//     3). A development build enrols a fresh store here from the host
-//     certificate's enrolment record and the development enrolment file.
+//     3). The store's active enrolment is brought to the one the host
+//     certificate carries (syncEnrolment): a fresh store is enrolled, and a
+//     store with another or no active enrolment is re-enrolled, which
+//     freezes the previous enrolment's open operations first.
 //  7. Recovery resolves every interrupted operation by the store's recovery
 //     table. This agent starts no runner for an operation left runnable.
 //  8. Ready: systemd is notified (READY=1), and the trust state turns
@@ -70,7 +72,10 @@ limitations under the License.
 // is closed, and the process exits 0. A stop during recovery cancels it; the
 // next start resumes it. SIGHUP reloads the key material and the trust
 // configuration after checking them again; a reload that fails, or that
-// would change the host's enrolment, keeps the running credentials.
+// names another host, or a new enrolment of this host that the store refuses
+// (an enrolment id it has used before), keeps the running credentials. A
+// certificate that names a new enrolment of this host re-enrols the store
+// first, then replaces the credentials.
 package daemon
 
 import (
@@ -180,7 +185,10 @@ type Options struct {
 	Config *config.Config
 	// Executor runs operations. Required.
 	Executor config.Executor
-	// DevEnrolment is the development enrolment stand-in; nil for none.
+	// DevEnrolment is the development enrolment stand-in: the start epoch
+	// and the predecessors of a store's first enrolment. Nil: epoch 1, no
+	// predecessors. The enrolment record itself always comes from the host
+	// certificate.
 	DevEnrolment *config.DevEnrolment
 	// Notifier receives systemd notifications; nil sends none.
 	Notifier systemd.Notifier
@@ -552,7 +560,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			return err
 		case <-reload:
 			_ = d.notifier.Notify(systemd.NotifyReloading)
-			if err := d.reload(ctx); err != nil {
+			if err := d.reload(ctx, st); err != nil {
 				reason := reloadRefusalReason(err)
 				d.log.Error(err, "reload refused; the running credentials stay in use", "reason", reason)
 				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent) + "; reload refused: " + reason)
@@ -686,7 +694,7 @@ func (d *daemon) signerOptions(run context.Context) signer.ClientOptions {
 
 // reload checks and loads the key material and trust configuration again,
 // and replaces the running credentials when they name the same enrolment.
-func (d *daemon) reload(ctx context.Context) error {
+func (d *daemon) reload(ctx context.Context, st *opstore.Store) error {
 	cfg := d.o.Config
 	hc := d.hostcheckConfig()
 	if err := hostcheck.CheckPKI(d.o.Probe, cfg.PKIDir(), d.uid); err != nil {
@@ -712,8 +720,16 @@ func (d *daemon) reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !id.SameEnrolment(d.creds.Load().Identity) {
-		return errEnrolmentChanged
+	if cur := d.creds.Load().Identity; !id.SameEnrolment(cur) {
+		if id.HostURI != cur.HostURI {
+			return errEnrolmentChanged
+		}
+		// A new enrolment of this host (vrtg-agent enroll install --replace):
+		// the store is re-enrolled first, then the credentials are swapped, so
+		// an answer never names an enrolment the store has not activated.
+		if err := d.syncEnrolment(ctx, st, id); err != nil {
+			return fmt.Errorf("%w: %w", errReenrolmentRefused, err)
+		}
 	}
 	d.creds.Store(&server.Credentials{Identity: id, Trust: tc})
 	return nil
@@ -734,11 +750,21 @@ func trustStatus(a *agentState) string {
 }
 
 // ReasonEnrolmentChanged is the reload refusal reason for a certificate that
-// names another host or enrolment.
+// names another host.
 const ReasonEnrolmentChanged = "EnrolmentChanged"
 
-// errEnrolmentChanged refuses a reload that would change the enrolment.
-var errEnrolmentChanged = errors.New("the reloaded certificate names another host or enrolment; enrolling again is not a reload")
+// ReasonReenrolmentRefused is the reload refusal reason for a certificate that
+// names a new enrolment of this host which the store refused: an enrolment
+// id it has used before, a store that cannot commit, or a freeze that could
+// not finish. The running credentials stay, and a freeze that was cut short
+// resumes at the next reload or start.
+const ReasonReenrolmentRefused = "ReenrolmentRefused"
+
+// errEnrolmentChanged refuses a reload that would change the host.
+var errEnrolmentChanged = errors.New("the reloaded certificate names another host")
+
+// errReenrolmentRefused marks a reload whose re-enrolment the store refused.
+var errReenrolmentRefused = errors.New("the store refused the new enrolment")
 
 // reloadRefusalReason is the one-word reason of a refused reload, for the
 // service status: never a path or a secret.
@@ -748,6 +774,9 @@ func reloadRefusalReason(err error) string {
 	}
 	if errors.Is(err, errEnrolmentChanged) {
 		return ReasonEnrolmentChanged
+	}
+	if errors.Is(err, errReenrolmentRefused) {
+		return ReasonReenrolmentRefused
 	}
 	return ReasonIdentityInvalid
 }
@@ -846,39 +875,75 @@ func (d *daemon) startFloor(ctx context.Context, st *opstore.Store, floor *clock
 	return true
 }
 
-// enrol is the development enrolment stand-in: a fresh store is enrolled with
-// the host certificate's enrolment record and the development enrolment
-// file's start epoch. A store with an enrolment is never changed; when its
-// active enrolment is not the certificate's, answers stay unsigned.
+// enrol brings the store's active enrolment to the one the host certificate
+// carries (syncEnrolment) and logs what it did. A refusal leaves answers
+// unsigned: the store keeps what it has and nothing is made up.
 func (d *daemon) enrol(ctx context.Context, st *opstore.Store) {
 	id := d.creds.Load().Identity
+	switch err := d.syncEnrolment(ctx, st, id); {
+	case err == nil:
+	case errors.Is(err, errStoreOfOtherHost):
+		d.log.Error(err, "answers stay unsigned until the host is enrolled again")
+	default:
+		d.log.Error(err, "enrolment from the host certificate failed; answers stay unsigned until the host is enrolled again",
+			"enrolment", hex.EncodeToString(id.Record.EnrolmentID))
+	}
+}
+
+// errStoreOfOtherHost refuses to enrol a store whose active enrolment is for
+// another host.
+var errStoreOfOtherHost = errors.New("the store's active enrolment is for another host")
+
+// syncEnrolment derives the host's active enrolment from its certificate and
+// makes the store's agree. The enrolment record (enrolment id, Provider uid,
+// install id) is read from the URI subject alternative names the
+// subordinate CA signed, so it is authentic without any further message.
+//
+//   - The store's active enrolment already is the certificate's: nothing to
+//     do.
+//   - The store was never enrolled: it is enrolled with the certificate's
+//     record. The start epoch is 1, or the development enrolment file's (a
+//     development-only stand-in, which also supplies predecessors that this
+//     store never held) when one is given.
+//   - Any other case (another enrolment is active, or none is because a
+//     freeze was cut short or the host was re-provisioned): a re-enrolment
+//     (opstore.Store.Reenrol) with the next start epoch. It freezes every
+//     open operation of the previous enrolment in bounded chunks, then
+//     activates the new one; an enrolment id the store has used before is
+//     refused and the store keeps its state.
+//
+// A store whose active enrolment is for another host is never touched.
+func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust.Identity) error {
 	v, err := st.HostView(ctx, 0)
 	if err != nil {
-		d.log.Error(err, "read the store's enrolment")
-		return
+		return fmt.Errorf("read the store's enrolment: %w", err)
+	}
+	e := opstore.Enrolment{
+		ID: id.Record.EnrolmentID, ProviderUID: id.Record.ProviderUID, HostID: id.HostID(), InstallID: id.Record.InstallID,
 	}
 	switch {
-	case v.Enrolment != nil:
-		if !bytes.Equal(v.Enrolment.ID, id.Record.EnrolmentID) ||
-			v.Enrolment.ProviderUID != id.Record.ProviderUID || v.Enrolment.HostID != id.HostID() {
-			d.log.Error(nil, "the store's active enrolment is not the one the host certificate names; answers stay unsigned until the host is enrolled again")
+	case v.Enrolment != nil && v.Enrolment.HostID != id.HostID():
+		return errStoreOfOtherHost
+	case v.Enrolment != nil && bytes.Equal(v.Enrolment.ID, e.ID) && v.Enrolment.ProviderUID == e.ProviderUID:
+		return nil
+	case v.Enrolment == nil && v.LastStartEpoch == 0:
+		e.StartEpoch = 1
+		if dev := d.o.DevEnrolment; dev != nil {
+			e.StartEpoch, e.Predecessors = dev.StartEpoch, dev.Predecessors
 		}
-	case v.LastStartEpoch != 0:
-		d.log.Error(nil, "the store has no active enrolment; answers stay unsigned until the host is enrolled again")
-	case d.o.DevEnrolment == nil:
-		d.log.Info("the store is not enrolled; answers stay unsigned")
-	default:
-		err := st.Enrol(ctx, opstore.Enrolment{
-			ID: id.Record.EnrolmentID, ProviderUID: id.Record.ProviderUID, HostID: id.HostID(),
-			InstallID: id.Record.InstallID, StartEpoch: d.o.DevEnrolment.StartEpoch, Predecessors: d.o.DevEnrolment.Predecessors,
-		})
-		if err != nil {
-			d.log.Error(err, "development enrolment failed")
-			return
+		if err := st.Enrol(ctx, e); err != nil {
+			return fmt.Errorf("enrol: %w", err)
 		}
-		d.log.Info("enrolled from the host certificate (development stand-in)",
-			"enrolment", hex.EncodeToString(id.Record.EnrolmentID), "startEpoch", d.o.DevEnrolment.StartEpoch)
+		d.log.Info("enrolled from the host certificate", "enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
+		return nil
 	}
+	e.StartEpoch = v.LastStartEpoch + 1
+	if err := st.Reenrol(ctx, e); err != nil {
+		return fmt.Errorf("re-enrol: %w", err)
+	}
+	d.log.Info("re-enrolled from the host certificate; the previous enrolment's operations are frozen",
+		"enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
+	return nil
 }
 
 // journalEvent logs a journal event.
