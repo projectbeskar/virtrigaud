@@ -59,3 +59,17 @@ func TestRead(t *testing.T) {
 		t.Error("no bound accepted")
 	}
 }
+
+func TestReadOwnersAny(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	me := uint32(os.Geteuid()) // #nosec G115 -- a uid is 32 bits
+	if _, err := safefile.Read(path, safefile.Policy{Owners: []uint32{me + 1, me}, Max: 10}); err != nil {
+		t.Fatalf("an owner in the list: %v", err)
+	}
+	if _, err := safefile.Read(path, safefile.Policy{Owners: []uint32{me + 1, me + 2}, Max: 10}); !errors.Is(err, safefile.ErrRefused) {
+		t.Fatalf("an owner not in the list: %v", err)
+	}
+}

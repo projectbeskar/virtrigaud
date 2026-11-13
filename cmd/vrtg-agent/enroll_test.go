@@ -146,7 +146,7 @@ func (e *enrollEnv) issue(t *testing.T, csrFile string, o hostidentitytest.Issue
 	csr, err := os.ReadFile(csrFile)
 	require.NoError(t, err)
 	_, err = hostidentity.Authorise(hostidentity.Policy{AdminGroup: "admins", HostName: trusttest.HostName, HostURI: e.pki.HostURI, Record: e.rec},
-		hostidentity.Request{CSRPEM: csr, Usages: []string{hostidentity.UsageServerAuth}, Duration: hostidentity.MaxLifetime, Groups: []string{"admins"}})
+		hostidentity.Request{CSRPEM: csr, Usages: []string{hostidentity.UsageServerAuth, hostidentity.UsageDigitalSignature}, Duration: hostidentity.MaxLifetime, Groups: []string{"admins"}})
 	require.NoError(t, err, "the manager authorises the request the agent wrote")
 	out := filepath.Join(e.workDir, "issued-"+strconv.Itoa(len(o.URIs))+".pem")
 	require.NoError(t, os.WriteFile(out, e.pki.HostCA.Issue(t, csr, o), 0o600))
@@ -327,4 +327,53 @@ func TestEnrollUsage(t *testing.T) {
 	assert.Contains(t, stderr.String(), "usage: vrtg-agent enroll")
 	assert.Equal(t, 2, enrollWith([]string{"nope"}, logr.Discard(), &stdout, &stderr, enrollDeps{}))
 	assert.Equal(t, 0, enrollWith([]string{"help"}, logr.Discard(), &stdout, &stderr, enrollDeps{}))
+}
+
+// TestEnrollRefusesHandoffFilesOthersCouldWrite: the request, the certificate
+// and the URI list are read only when they are owned by root or the caller and
+// not writable by group or others, so a file planted or replaced in a shared
+// directory is refused.
+func TestEnrollRefusesHandoffFilesOthersCouldWrite(t *testing.T) {
+	e := newEnrollEnv(t)
+	csr := filepath.Join(e.workDir, "host.csr")
+	code, msg := e.run(e.csrArgs(csr))
+	require.Equal(t, 0, code, msg)
+	e.serveSigner(t)
+	cert := e.issue(t, csr, hostidentitytest.IssueOptions{})
+	crt := filepath.Join(e.stateDir, config.PKIDirName, trust.FileHostCert)
+	list := filepath.Join(e.workDir, "uris")
+	require.NoError(t, os.WriteFile(list, []byte(strings.Join(e.uris, "\n")+"\n"), 0o600))
+
+	for name, path := range map[string]string{"request": csr, "certificate": cert, "uri list": list} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, os.Chmod(path, 0o666)) // #nosec G302 -- the point of the test
+			t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+			args := e.installArgs(csr, cert)
+			args = args[:len(args)-len(e.uris)]
+			args = append(args, "--uris-file="+list)
+			code, msg := e.run(args)
+			assert.Equal(t, 1+boolInt(path == list), code, msg)
+			_, err := os.Lstat(crt)
+			assert.True(t, os.IsNotExist(err), "nothing is installed")
+		})
+	}
+	// The list for the csr step is held to the same rule.
+	require.NoError(t, os.Chmod(list, 0o666)) // #nosec G302 -- the point of the test
+	code, _ = e.run([]string{"csr", "--key-file=" + e.keyFile, "--out=" + filepath.Join(e.workDir, "other.csr"), "--uris-file=" + list,
+		"--signer-user=" + strconv.Itoa(os.Getuid()), "--agent-user=" + strconv.Itoa(os.Getuid()+1)})
+	assert.Equal(t, 2, code)
+
+	// With sane modes the same arguments work.
+	require.NoError(t, os.Chmod(list, 0o600))
+	args := e.installArgs(csr, cert)
+	args = append(args[:len(args)-len(e.uris)], "--uris-file="+list)
+	code, msg = e.run(args)
+	require.Equal(t, 0, code, msg)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

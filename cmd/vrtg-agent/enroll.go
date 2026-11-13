@@ -117,10 +117,10 @@ func (u *uriList) Set(v string) error {
 	return nil
 }
 
-// readLines reads a file of one URI per line (blank lines and lines that
-// start with '#' are ignored).
-func readLines(path string) ([]string, error) {
-	b, err := trust.ReadFile(path)
+// readLines reads a file of one URI per line with read (blank lines and lines
+// that start with '#' are ignored).
+func readLines(path string, read func(string) ([]byte, error)) ([]string, error) {
+	b, err := read(path)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *urisFile != "" {
-		more, err := readLines(*urisFile)
+		more, err := readLines(*urisFile, trust.HandoffFileReader(signer.EUID()))
 		if err != nil {
 			log.Error(err, "read --uris-file")
 			return 2
@@ -252,7 +252,7 @@ func enrollInstall(args []string, log logr.Logger, stdout, stderr io.Writer, dep
 		return 2
 	}
 	if *urisFile != "" {
-		more, err := readLines(*urisFile)
+		more, err := readLines(*urisFile, trust.HandoffFileReader(deps.probe.EUID()))
 		if err != nil {
 			log.Error(err, "read --uris-file")
 			return 2
@@ -311,11 +311,11 @@ func installCertificate(cfg *config.Config, csrFile, certFile string, uris []str
 	if err := hostcheck.CheckTrustDir(probe, trustDir); err != nil {
 		return enrol.Result{}, err
 	}
-	csr, err := readEnrolFile(csrFile)
+	csr, err := readEnrolFile(csrFile, uid)
 	if err != nil {
 		return enrol.Result{}, fmt.Errorf("read --csr: %w", err)
 	}
-	cert, err := readEnrolFile(certFile)
+	cert, err := readEnrolFile(certFile, uid)
 	if err != nil {
 		return enrol.Result{}, fmt.Errorf("read --certificate: %w", err)
 	}
@@ -334,10 +334,12 @@ func installCertificate(cfg *config.Config, csrFile, certFile string, uris []str
 	})
 }
 
-// readEnrolFile reads a regular file of at most maxEnrolFileBytes, not
-// reached through a symbolic link.
-func readEnrolFile(path string) ([]byte, error) {
-	b, err := trust.ReadFile(path)
+// readEnrolFile reads a file handed over by an administrator (see
+// trust.HandoffFileReader: a regular file owned by root or uid, not writable
+// by group or others, not reached through a symbolic link) of at most
+// maxEnrolFileBytes.
+func readEnrolFile(path string, uid uint32) ([]byte, error) {
+	b, err := trust.HandoffFileReader(uid)(path)
 	if err != nil {
 		return nil, err
 	}
