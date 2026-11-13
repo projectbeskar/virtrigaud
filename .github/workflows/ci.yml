@@ -130,6 +130,9 @@ jobs:
       - name: Verify the reference systemd units
         run: ./hack/verify-systemd-units.sh
 
+      - name: Verify no executables are tracked
+        run: ./hack/verify-no-binaries.sh
+
   security:
     name: Security Scan
     runs-on: ubuntu-22.04

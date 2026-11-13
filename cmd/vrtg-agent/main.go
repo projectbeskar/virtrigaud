@@ -26,8 +26,11 @@ limitations under the License.
 //	              holds the host private key (vrtg-agent-signer.service)
 //	shutdown-vms  stop every VM, only while the host is shutting down
 //	              (systemd unit vrtg-vm-shutdown.service)
-//	enroll        not available yet: hosts are enrolled with the development
-//	              enrolment stand-in
+//	enroll        development builds only: enrol the host in two steps: csr (as
+//	              the signer's user: make the host key and the certificate
+//	              request) and install (as the agent's user: check and install
+//	              the issued certificate). A release build prints that it is
+//	              not available and exits 1.
 //	version       print the version
 package main
 
@@ -48,7 +51,7 @@ commands:
   run           run the per-host agent
   signer        run the host key signer (holds the host private key)
   shutdown-vms  stop every VM, only while the host is shutting down
-  enroll        enrol the host (not available yet)
+  enroll        enrol the host (development builds only): enroll csr, enroll install
   version       print the version
 `
 
@@ -71,7 +74,7 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 	case "shutdown-vms":
 		return shutdownCommand(args[1:], log, stderr)
 	case "enroll":
-		return enrollCommand(args[1:], stderr)
+		return enrollCommand(args[1:], log, stdout, stderr)
 	case "version":
 		_, _ = fmt.Fprintln(stdout, version.String())
 		return 0

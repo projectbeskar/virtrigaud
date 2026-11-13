@@ -280,6 +280,9 @@ func TestHostEnrolAndRevokeAgainstAPIServer(t *testing.T) {
 	assert.ElementsMatch(t, hostB.Status.Agent.RequestURIs, bundle.SubjectAltNameURIs)
 	assert.Equal(t, "720h0m0s", bundle.MaxLifetime)
 	assert.False(t, bundle.CA)
+	assert.Equal(t, []string{hostidentity.UsageServerAuth}, bundle.ExtendedKeyUsages)
+	assert.Equal(t, []string{hostidentity.UsageDigitalSignature}, bundle.KeyUsages)
+	assert.ElementsMatch(t, []string{hostidentity.UsageCertSign, hostidentity.UsageCRLSign}, bundle.ForbiddenKeyUsages)
 
 	certFile := filepath.Join(dir, "host-b.pem")
 	require.NoError(t, os.WriteFile(certFile, ca.Issue(t, csrB, hostidentitytest.IssueOptions{}), 0o600))

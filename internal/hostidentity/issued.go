@@ -21,7 +21,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 )
 
@@ -84,11 +83,9 @@ func RootPool(caBundlePEM []byte) (*x509.CertPool, error) {
 
 // ValidateIssued checks an issued certificate (chainPEM: the leaf first, then
 // any intermediates) against the authorisation before its key is pinned: it
-// chains to roots for client and server authentication at now; it is not a
-// CA; its lifetime is at most MaxLifetime; its subject is empty or the host
-// name; its subject alternative names are
-// exactly the authorised host URI and record; and its key is the authorised
-// key.
+// chains to roots for server authentication at now; it meets the certificate
+// profile (CheckLeafProfile); its subject alternative names are exactly the
+// authorised host URI and record; and its key is the authorised key.
 func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, now time.Time) (Issued, error) {
 	if roots == nil {
 		return Issued{}, fmt.Errorf("%w: no CA bundle", ErrIssued)
@@ -107,23 +104,8 @@ func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, n
 	}); err != nil {
 		return Issued{}, fmt.Errorf("%w: it does not chain to the CA bundle for server authentication", ErrIssued)
 	}
-	if leaf.IsCA {
-		return Issued{}, fmt.Errorf("%w: it is a CA certificate", ErrIssued)
-	}
-	if !slices.Contains(leaf.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
-		return Issued{}, fmt.Errorf("%w: it lacks server authentication", ErrIssued)
-	}
-	if len(leaf.ExtKeyUsage) != 1 || len(leaf.UnknownExtKeyUsage) > 0 {
-		return Issued{}, fmt.Errorf("%w: its extended key usage is not server authentication only", ErrIssued)
-	}
-	if leaf.NotAfter.Sub(leaf.NotBefore) > MaxLifetime {
-		return Issued{}, fmt.Errorf("%w: its lifetime exceeds %s", ErrIssued, MaxLifetime)
-	}
-	if !subjectAllowed(leaf.Subject.Names, auth.HostName) {
-		return Issued{}, fmt.Errorf("%w: its subject is not empty or the host name", ErrIssued)
-	}
-	if len(leaf.DNSNames) > 0 || len(leaf.IPAddresses) > 0 || len(leaf.EmailAddresses) > 0 {
-		return Issued{}, fmt.Errorf("%w: it carries non-URI subject alternative names", ErrIssued)
+	if err := CheckLeafProfile(leaf, auth.HostName); err != nil {
+		return Issued{}, fmt.Errorf("%w: %v", ErrIssued, err)
 	}
 	rec, err := RecordFromURIs(leaf.URIs, auth.HostURI)
 	if err != nil {

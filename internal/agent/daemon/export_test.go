@@ -43,3 +43,6 @@ func SetSignerPoll(t testing.TB, d time.Duration) {
 	signerPollEvery = d
 	t.Cleanup(func() { signerPollEvery = old })
 }
+
+// StoreOwnerMismatch exposes storeOwnerMismatch.
+var StoreOwnerMismatch = storeOwnerMismatch
