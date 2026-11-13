@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-13 12:00] - Operation store: clock floor inside the store, bounded re-enrolment freeze (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/opstore/floor.go`: `LoadClockFloor` (a read, allowed before continuity) and `UpdateClockFloor` (a commit whose transaction hands the stored record to the caller, so a check of it is atomic with the write). The clock floor is a record in the chain-anchored store, covered by the record trailers and the live-state digest.
+- `internal/agent/clockfloor/floor.go`: `Floor.StartPersisting` and `Floor.StopPersisting`. `Open` now only reads and raises the floor in memory, starting from the stored one, so the in-memory floor is never lower than the stored one; the first write is `StartPersisting`, after the store's continuity is established.
+- `internal/agent/daemon/floorstore.go`: the clock floor's `Store` over the store record. Its commit refuses a floor below the stored one. The floor is committed again only after it advanced by `FloorPersistInterval` (one minute), at most once per observe period, and at drain.
+- `internal/agent/opstore/reenrol.go`: the freeze of a re-enrolment commits in chunks of at most `DefaultFreezeChunk` (128) operations (`Options.FreezeChunk` overrides it), with a freeze-in-progress marker in the store that each chunk advances and the last removes. A crash between chunks (new crash point `PointMidFreeze`) leaves the marker; `Recover`, or the next `Reenrol`, finishes the freeze before the new enrolment is activated. While a freeze is incomplete the host refuses every operation and `ConfirmFreeze` is refused.
+- `internal/agent/journal/tx.go`: `Tx.ForEachAfter`, a prefix scan that continues after a key.
+- `internal/agent/internal/guard/guard.go`: four mutation guards (`freeze-resume-recover`, `freeze-resume-reenrol`, `clock-floor-never-lower`, `clock-floor-read-only-open`).
+- Tests in `internal/agent/opstore/` (chunked freeze with more operations than several chunks, crashes between and inside chunks, resume at recovery and at `Reenrol`, no operation frozen twice, activation only after completion, refusal while incomplete; the reference model now freezes in random chunk sizes and crashes between chunks), `internal/agent/clockfloor/persist_test.go`, `internal/agent/daemon/daemon_test.go` (floor rollback is store rollback, missing floor, leftover file ignored, floor never goes down) and `internal/agent/server/server_test.go`.
+
+### Changed
+- `internal/agent/daemon/daemon.go`: step 4 reads and raises the floor without writing; step 6 commits it as the first write after continuity, before the enrolment and recovery. A floor that cannot be committed quarantines the store (`io_error`). A `clock.floor` file in the state directory is no longer read or written (it is ignored; nothing is deployed outside development builds). A missing floor record for an enrolled store still quarantines the store (`inconsistent_store`).
+- `internal/agent/server/server.go`: the per-call check of the Provider's client certificate judges validity at the later of the host clock and the clock floor.
+- `internal/agent/clockfloor/`, `internal/agent/opstore/doc.go`, `docs/per-host-agent-development.md`: documentation of the two-phase floor, its write-rate and crash-loss bounds, the freeze, and the limits (the floor-file limit and the certificate-clock limit are replaced).
+
+### Why
+The floor was a file beside the store, so rolling it back alone was not detected, and the grant-expiry checks rest on it. The re-enrolment freeze wrote every open operation in one transaction, with size and latency unbounded in the number of operations.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only: no deployed agent exists yet; an existing development state directory with a `clock.floor` file but no floor record in the store is quarantined (`inconsistent_store`) once enrolled and must be enrolled again.
+
 ## [2026-11-13 00:19] - Operation store journal: verify every record, scrub, and harder open (development builds only)
 **Author:** @wrkode (William Rizzo)
 
