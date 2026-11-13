@@ -221,7 +221,9 @@ plain serialised body).
 
 ### The signing key
 
-These are requirements on a per-host agent; no agent implements them yet.
+These are requirements on a per-host agent. The development-build agent
+([`per-host-agent-development.md`](per-host-agent-development.md)) follows them,
+with the separate signer process described there.
 
 - The signing key must be the host's enrolled identity key, generated on the host and
   never leaving it (after a renewal is put in use, the renewed key of the same
@@ -242,6 +244,28 @@ keeping the key in a separate signer process (see
 key exfiltration, not this online forgery. A separate answer key, held by a process that
 never terminates TLS, is required before a regulated deployment relies on signed host
 answers.
+
+### How the development-build agent answers
+
+The development-build per-host agent makes `OperationAnswer` and `VMAnswer` as
+follows (see [`per-host-agent-development.md`](per-host-agent-development.md#operations)).
+No manager verifies them yet.
+
+- It signs only for a request with a 16-byte `answer_nonce`, and only while its
+  store's active enrolment is the one its certificate names; otherwise the read is
+  answered without `host_answer`. Refusals of mutating calls carry no signed answer.
+- `TaskStatus` with `answer_nonce` names the operation by `op_id`, `op_enrolment_id` and
+  `target_host_id` (the agent's own host) and carries no `task`; anything else is
+  `InvalidArgument`. The body, the chain position and the checkpoint come from one read
+  of the store. A held operation is answered with its state, number for number, and its
+  identity fields, `tombstoned` once it is over; an operation the store has no record
+  of is `NO_RECORD` when the store holds the enrolment named and `UNKNOWN_TO_AGENT`
+  when it does not, both as `NotFound` with the `UNKNOWN_TO_AGENT` reason and the signed
+  answer as a status detail.
+- `Describe` with `answer_nonce` needs `binding_id` and the owner's UID. `DELETED`, with
+  the Delete's `op_id`, enrolment and sequence number, comes only from the VM tombstone
+  the Delete's terminal transaction wrote for exactly that placement; the absence of a
+  record is `NO_RECORD`. `exists` is true for `CREATING`, `PRESENT` and `OTHER_BINDING`.
 
 ### What a manager will verify
 

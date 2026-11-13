@@ -5,6 +5,40 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-13 19:50] - Per-host agent executes signed operations at most once and answers status with signed, request-bound answers (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/server/operation.go`: the agent's operation path behind the readiness gate. A mutating call is verified with the shared grant verifier (clock judged at the later of the host clock and the clock floor), its decoded request must name this host and the grant's VM, a kind the executor does not implement is `Unimplemented`, and the operation store then decides: a known `op_id` is answered from its record or tombstone before the grant's Provider and enrolment are compared, an enrolment the store holds no record of is `UNKNOWN_TO_AGENT` (never definite), and a grant naming another Provider is `GRANT_MISMATCH`. An accepted operation is answered with its task reference once durable and gets a runner. Every decision is one structured audit line with identity fields only. Only a development build wires the path (`server.Options.Operations`); a release build refuses every mutating call as before.
+- `internal/agent/server/reads.go`: `TaskStatus` (by task reference, or by `op_id` with a signed `OperationAnswer` made from the same store read; an unknown operation is `NotFound` with `UNKNOWN_TO_AGENT` and the signed answer as a status detail) and `Describe` (with a signed `VMAnswer`; `DELETED` only from the VM tombstone of the placement's completed Delete), with the request rules of the published answer shape.
+- `internal/agent/runner/`: one runner per accepted operation over the store's step journal; a drain stops runners between steps and leaves the operation to recovery.
+- `internal/agent/opstore/answers.go`: `AnswerOp` and `AnswerVM`, single-read views of an operation or VM placement together with the host view (position, checkpoint, continuity head).
+- `internal/agent/answer/operation.go`: `OperationAnswer` and `VMAnswer` bodies with their field rules (no answer rather than a malformed one).
+- `internal/operation/grantverify/verify.go`: `Verifier.VerifyHostBound`, the verification without the Provider and enrolment comparison, for a caller that answers a known `op_id` from its durable record first and compares both itself. `Verify` is unchanged.
+- `internal/agent/executor/fake/script.go`: scriptable faults (definitely not performed, stall until the step deadline, inspection failure, effect then error), a hold file, an effects log and `CreateStopped`; `executor.Describer` and the fake's VM state.
+- `internal/agent/daemon/devhooks*.go`: development-only crash hook (`VRTG_AGENT_DEV_CRASH_AT`, `VRTG_AGENT_DEV_ANCHOR_ROTATE_BYTES`) that kills the agent process with SIGKILL at named crash points; ignored by release builds.
+- `internal/agent/internal/guard/guard.go`: mutation guards `deleted-only-from-vm-tombstone`, `lookup-before-enrolment` and `recovered-ops-run`.
+- `test/conformance/clustered/cases_identity_agent.go`: eight `identity.*` cases about host answers (`tombstone-after-restart`, `taskstatus-bound`, `deleted-answer`, `answer-fresh`, `attempt-regression`, `inner-unknown-field`, `store-quarantined`, `no-running-forever`) for targets with the new `host-answers` feature (`HostAnswerTarget`), each guarded by a new fake violation in the mutation test; `PlacementTracker` and `Placements` so that signed operations use a VM's placement binding and increasing attempts; `answers.go` verifies signed answers as a manager would.
+- `test/conformance/clustered/agenttarget/`: a test-only Target of real per-host agent processes (the test binary re-executed) behind a thin in-test router; every `identity.*` case runs against it, and crash-point tests kill the agent process with SIGKILL at each crash point of the operation path (admission, commit before anchor, anchor before reply, step intent, witness, effect, last done, terminal, anchor rotation), plus twelve concurrent duplicate deliveries and a redaction canary across the store, anchor log, witnesses, logs, errors and answers.
+- Tests: `internal/agent/server/operation_test.go` (adversarial grants: forged, rogue-signed, other host, other Provider, other enrolment, expired at the clock floor, wrong kind, outer field, digest altered, inner owner, unsigned, replay after terminal; concurrent duplicates; reordered attempts; deleted answers; step deadline; request rules; redaction canary), `internal/agent/server/fuzz_test.go` (fuzzed request decoders), `internal/agent/opstore/answers_test.go`, `internal/agent/answer/operation_test.go`, `internal/agent/executor/fake/script_test.go`, `internal/agent/daemon/devhooks_internal_test.go`, `internal/operation/verify_hostbound_test.go`.
+
+### Changed
+- `internal/agent/daemon/daemon.go`: a development build starts a runner for every operation recovery left runnable and serves the operation path once ready; drain stops runners before the store closes. `Options.StepDeadlines` (test override).
+- `internal/agent/server/server.go`: signed answers share one signing path (`signAnswer`); a ready server with an operation path passes mutating calls to it instead of answering `Unimplemented`.
+- `test/conformance/clustered/cases_identity.go`: `identity.binding-refused` also accepts `UNKNOWN_TO_AGENT` for a grant naming an enrolment the host holds no record of (it is never definite; a host cannot tell another host's enrolment from a lost predecessor of its own). The identity fake tracks placements, checks increasing attempts and signs answers.
+- `hack/agent-mutation.sh`: runs the agent tests in release and development builds.
+- `docs/per-host-agent-development.md`, `docs/operation-grants-wire-shape.md`, `test/conformance/README.md`: the operation path, its check order, runners and step deadlines, the signed answers, the crash hook, the new cases and the agent target.
+
+### Why
+The per-host agent could only refuse mutations. It now executes a signed operation at most once, survives a crash at any point of the operation path without a second effect, never claims "not performed" where an operation may have run, and answers status with host-signed answers bound to the request and the operation, which a manager can later rely on instead of unsigned outcomes.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only: release builds keep the no-op executor and refuse every mutating call; no Provider routes to the agent yet. The wire contract is unchanged.
+
 ## [2026-11-13 12:00] - Operation store: clock floor inside the store, bounded re-enrolment freeze (development builds only)
 **Author:** @wrkode (William Rizzo)
 
