@@ -180,8 +180,12 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		}
 		t.Cleanup(func() {
 			_ = h.Stop()
-			// No scripted fault outlives its case.
-			_ = fake.WriteScript(h.FakeDir(), fake.Script{CreateStopped: true})
+			// No scripted fault outlives its case, on disk or in memory.
+			clean := fake.Script{CreateStopped: true}
+			tg.mu.Lock()
+			tg.scripts[name] = clean
+			tg.mu.Unlock()
+			_ = fake.WriteScript(h.FakeDir(), clean)
 		})
 		if err := h.Start(); err != nil {
 			return nil, err
