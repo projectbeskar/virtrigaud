@@ -257,6 +257,6 @@ func agentIdentityCases() []Case {
 					providerv1.OperationRecordState_OPERATION_RECORD_STATE_OUTCOME_UNKNOWN,
 				}, last, "a stalled operation ends or its outcome is unknown by the step deadline, never running past it nor completed")
 			},
-		}),
+		}, FeatureAsyncTasks),
 	}
 }

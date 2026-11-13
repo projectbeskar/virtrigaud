@@ -287,7 +287,7 @@ elsewhere or paired with other request bytes.
 | `identity.attempt-regression` | Required | a new op_id whose attempt is not above an attempt the host already accepted for the VM and kind is refused with OP_ID_CONFLICT, and nothing is performed | `operation-identity`, `host-answers` | pass | pass |
 | `identity.inner-unknown-field` | Required | an authentic grant over request bytes that carry a field the host does not know is refused with GRANT_MISMATCH, and nothing is performed | `operation-identity`, `host-answers` | pass | pass |
 | `identity.store-quarantined` | Required | a host whose operation store was rolled back refuses every mutation with QUARANTINED, never as definitely not performed, performs nothing, and still answers signed reads with its quarantine | `operation-identity`, `host-answers` | pass | pass |
-| `identity.no-running-forever` | Required | an operation whose step never ends on its own leaves the running state by the host's step deadline: it ends, or its outcome is unknown, and it is never reported running past it | `operation-identity`, `host-answers` | pass | pass |
+| `identity.no-running-forever` | Required | an operation whose step never ends on its own leaves the running state by the host's step deadline: it ends, or its outcome is unknown, and it is never reported running past it | `operation-identity`, `host-answers`, `async-tasks` | pass | pass |
 
 The identity fake is the instrumented fake made with `fake.NewIdentity`, with a test-only signer
 that exists only in the suite's test binary. It is run three ways: accepting unsigned calls too,
