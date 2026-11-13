@@ -65,41 +65,49 @@ type HostView struct {
 func (s *Store) HostView(ctx context.Context, continuitySeq uint64) (HostView, error) {
 	var v HostView
 	err := s.j.View(ctx, func(tx *journal.Tx) error {
-		pos, ok := tx.CommittedPosition()
-		if !ok {
-			return fmt.Errorf("store position unreadable")
-		}
-		v.Position = pos
-		if cp, head, ok := tx.LastCheckpoint(pos.Seq); ok {
-			v.CheckpointSeq, v.CheckpointHead = cp, head
-		}
-		if continuitySeq != 0 && continuitySeq <= pos.Seq {
-			if h, ok := tx.HeadAt(continuitySeq); ok {
-				v.ContinuityHead = append([]byte(nil), h[:]...)
-			}
-		}
-		m, err := readAgentMeta(tx)
-		if err != nil {
-			return err
-		}
-		v.LastStartEpoch = m.GetLastStartEpoch()
-		e, err := activeEnrolment(tx)
-		if err != nil {
-			return err
-		}
-		if e != nil {
-			v.Enrolment = &ActiveEnrolment{
-				ID:          append([]byte(nil), e.GetEnrolmentId()...),
-				ProviderUID: e.GetProviderUid(),
-				HostID:      e.GetHostId(),
-				InstallID:   append([]byte(nil), e.GetInstallId()...),
-				StartEpoch:  e.GetStartEpoch(),
-			}
-		}
-		return nil
+		var err error
+		v, err = hostViewTx(tx, continuitySeq)
+		return err
 	})
 	if err != nil {
 		return HostView{}, fmt.Errorf("read host view: %w", err)
+	}
+	return v, nil
+}
+
+// hostViewTx reads a HostView in tx.
+func hostViewTx(tx *journal.Tx, continuitySeq uint64) (HostView, error) {
+	var v HostView
+	pos, ok := tx.CommittedPosition()
+	if !ok {
+		return HostView{}, fmt.Errorf("store position unreadable")
+	}
+	v.Position = pos
+	if cp, head, ok := tx.LastCheckpoint(pos.Seq); ok {
+		v.CheckpointSeq, v.CheckpointHead = cp, head
+	}
+	if continuitySeq != 0 && continuitySeq <= pos.Seq {
+		if h, ok := tx.HeadAt(continuitySeq); ok {
+			v.ContinuityHead = append([]byte(nil), h[:]...)
+		}
+	}
+	m, err := readAgentMeta(tx)
+	if err != nil {
+		return HostView{}, err
+	}
+	v.LastStartEpoch = m.GetLastStartEpoch()
+	e, err := activeEnrolment(tx)
+	if err != nil {
+		return HostView{}, err
+	}
+	if e != nil {
+		v.Enrolment = &ActiveEnrolment{
+			ID:          append([]byte(nil), e.GetEnrolmentId()...),
+			ProviderUID: e.GetProviderUid(),
+			HostID:      e.GetHostId(),
+			InstallID:   append([]byte(nil), e.GetInstallId()...),
+			StartEpoch:  e.GetStartEpoch(),
+		}
 	}
 	return v, nil
 }
