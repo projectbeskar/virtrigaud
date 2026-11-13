@@ -120,7 +120,7 @@ the host's URI identity, `urn:virtrigaud:enrolment:<32 hex>`,
 
 | Step | What happens | On failure |
 |------|--------------|------------|
-| 0 | Host checks (below); the signer is reached and its public key fetched (if the signer is not there yet, the agent waits for it without a time limit, not ready, with `STATUS=waiting for the host key signer` and a start timeout extension for systemd, so that a signer that is down for minutes at boot does not use up the agent's start rate limit; a stop during the wait exits 0); then the trust configuration and the host identity are loaded, the host certificate must certify the signer's key, and the provisioning marker must name the host. | The start is refused (exit 1) with a reason; nothing on the host changes. |
+| 0 | Host checks (below); the signer is reached and its public key fetched (if the signer is not there yet, the agent waits for it without a time limit, serving nothing (no listener, no store opened), and sends `READY=1` with `STATUS=waiting for the host key signer`, so that a signer that is down for minutes neither holds up the boot (`multi-user.target`) nor `systemctl start`, nor uses up the agent's start rate limit; here "ready" means started and waiting, and every call fails until the signer arrives; `READY=1` follows again, with the trust state, when start-up ends; a stop during the wait exits 0); then the trust configuration and the host identity are loaded, the host certificate must certify the signer's key, and the provisioning marker must name the host. | The start is refused (exit 1) with a reason; nothing on the host changes. |
 | 1 | The store's single-writer lock. | A second agent on the same state directory exits. |
 | 2 | The store opens with full fsync and checks its schema. | A store written for a newer agent refuses the start, naming the schema version it needs. |
 | 3 | Local continuity checks: chain, anchor log, store marker, quarantine record. | The store is quarantined: reads still answer, every mutation is refused. |
@@ -153,7 +153,7 @@ restore of the state directory restores it too.
 | The signer's socket directory is a directory (not a symbolic link), owned by the signer's user, with nothing for others and no write permission for its group. | `SignerSocketInsecure` |
 | Every directory from `/` to the trust directory, and every file in it, is owned by root, not writable by group or others, not a symbolic link; and the agent's process cannot write the directory or its files. | `TrustConfigInsecure` |
 | The trust configuration and the host identity load, including the checks on the open files (see above), and the host certificate certifies the signer's key. | `IdentityInvalid` |
-| The signer's user (`--signer-user`) is neither root nor the agent's own user, and the signer answers on its socket, run by that user (checked with `SO_PEERCRED`), with an ECDSA P-256 key. A signer that is not there yet is waited for (see [Start-up order](#start-up-order)); a signer of the wrong user or with an unusable key is refused at once. | `SignerUnavailable` |
+| The signer's user (`--signer-user`) is neither root nor the agent's own user, and the signer answers on its socket, run by that user (checked with `SO_PEERCRED`), with an ECDSA P-256 key. A signer that is not there yet is waited for (see [Start-up order](#start-up-order)); a signer of the wrong user or with an unusable key is refused at once: the agent exits 1, and `Restart=always` starts it again every 2 seconds until the unit's start limit is reached and it stays failed, which is intended (a configuration that waiting cannot cure fails closed and is visible, not retried for ever). | `SignerUnavailable` |
 
 A release build also refuses to start when a caller of the agent's Go
 packages sets one of the daemon's test overrides (another trust directory,
@@ -177,19 +177,40 @@ compares the Provider UID with the Provider the host certificate is enrolled
 with, and refuses another one with `FailedPrecondition` and the ErrorInfo
 reason `PROVIDER_MISMATCH` before any other check.
 
-Before the TLS handshake, a throttle closes connections that exceed a limit:
-at most 16 handshakes run at once, and a source address may open 2 new
-connections per second with a burst of 10 (a table of 4096 addresses; when it
-is full of active ones a new address is refused). This matters because in
-TLS 1.3 the server signs its CertificateVerify before it looks at the client
-certificate: every ClientHello from any peer that can reach the port would
-otherwise cost the host key one signature. A refused connection never
-reaches the signer; the refusals are logged once per 30 seconds with the count
-held back, as is the "no signed answer" error. **The agent's port must be
-firewalled to the Provider's address ranges.** The throttle bounds what a
-peer that can connect costs; it authenticates nobody, and the handshake
-signature budget of the signer (below) is shared with every peer that gets
-through it.
+Before the TLS handshake, a throttle limits what a peer that can reach the
+port can cost. This matters because in TLS 1.3 the server signs its
+CertificateVerify before it looks at the client certificate: every
+ClientHello from any peer that can connect would otherwise cost the host key
+one signature.
+
+- A source address may open 2 new connections per second, with a burst of 10
+  (IPv6 sources are counted per /64). The table of sources keeps the most
+  recently seen ones (up to 8192) and forgets the others in constant time; a
+  forgotten source starts again with a full bucket.
+- A new connection must send its ClientHello within 2 seconds or it is closed;
+  until then it holds nothing. When the ClientHello arrives, the connection
+  takes a handshake slot, before anything is signed: at most 16 handshakes run
+  at once and at most 2 from one source. The slot is given back when the
+  handshake ends. A source that opens connections and stays silent therefore
+  cannot use the slots up, and one source cannot hold more than 2 of them.
+- A refused connection or handshake never reaches the signer. Refusals are
+  logged once per 30 seconds with the count held back, as is the "no signed
+  answer" error.
+- Signed answers are limited per Provider identity (the verified client
+  certificate's URI): 10 per second, burst 20; a read above that is answered
+  without a signed answer, and the signer is not asked.
+
+This bounds what a peer that can connect costs; it authenticates nobody, and
+the signer's handshake budget (below) is shared with every peer that gets
+through it, so a determined set of sources can still use that budget up and
+make the Provider's reconnects fail until they stop. **Only the Provider's
+pods may reach the agent's port.** A host firewall on the agent's address is
+not enough when the Provider runs in a cluster: traffic from other pods on
+the Provider's node can leave that node with the node's address, which is
+inside the firewall. A Kubernetes NetworkPolicy (or an equivalent control)
+that lets only the Provider's pods reach the agent's address and port is a
+requirement, in addition to firewalling the port to the Provider's node
+address ranges.
 
 Connections are closed after 30 minutes (and a minute of grace for running
 calls), so each is authenticated again with a new handshake. A handshake must
@@ -297,9 +318,11 @@ after the other.
 
 **Memory.** The signer overwrites the buffer the key file was read into and
 the decoded key bytes right after parsing, and its unit forbids core dumps and
-swap. Go gives no zeroization guarantee for the parsed key it keeps, nor for
-the old key after a reload (it stays in memory until the garbage collector
-frees it, and copies the runtime made are not tracked), so none is claimed.
+swap (`MemorySwapMax=0` does not cover hibernation: a host that hibernates
+writes all memory, the key included, to disk). Go gives no zeroization
+guarantee for the parsed key it keeps, nor for the old key after a reload (it
+stays in memory until the garbage collector frees it), nor for copies made
+by `crypto/x509`, `encoding/asn1` and the runtime, so none is claimed.
 
 **Installing.** On a development host, create the users and directories before
 starting any unit: `systemd-sysusers` and `systemd-tmpfiles --create` with the
@@ -363,7 +386,7 @@ once it serves), `Restart=always`, the same start-rate limit and sandboxing as
 the agent, and its own user and group (`virtrigaud-signer`) and, beyond the
 agent's, a private network namespace with `RestrictAddressFamilies=AF_UNIX`,
 a `MemoryMax` of `64M`, `MemorySwapMax=0` and `LimitCORE=0` (the key is never
-swapped out or dumped), its state directory (`/var/lib/virtrigaud-signer`,
+never dumped, and swapped out neither, hibernation aside), its state directory (`/var/lib/virtrigaud-signer`,
 `0700`, made by `tmpfiles.d`) read-only (`ReadOnlyPaths=`; the signer never
 writes there, so the unit has no `StateDirectory=`) and read-write access to
 `/run/virtrigaud-signer` only. It sets no
@@ -375,8 +398,8 @@ directory and the socket directory.
 The agent's unit has `Wants=` and `After=vrtg-agent-signer.service`: starting
 the agent starts the signer first, and as the signer is `Type=notify`,
 `After=` waits until it serves. If the signer is still not up, the agent waits
-(not ready, with a status line and `EXTEND_TIMEOUT_USEC` so that systemd does
-not time the start out) instead of exiting, so it recovers when the signer
+(serving nothing, with `READY=1` and a status line, so that the boot and
+`systemctl start` are not held up) instead of exiting, so it recovers when the signer
 does, with no `systemctl reset-failed`. It is `Wants=`, not `Requires=`, on purpose.
 With `Requires=`, every restart of the signer (a crash, or a key reload done
 as a restart) would restart the agent too and take down its store and its
@@ -435,10 +458,11 @@ is not the one the certificate names, reads answer unsigned.
   whether, and the handshake/answer split is declared by the agent, so it
   protects against outside floods only. The key's protection also assumes the
   attacker has not reached root or the signer's uid.
-- The agent's port must be firewalled to the Provider's address ranges: the
-  pre-handshake throttle bounds the cost of a peer that can connect (one host
-  key signature per allowed connection) but authenticates nobody, and the
-  signer's handshake budget is shared with every peer the throttle lets
+- Only the Provider's pods may reach the agent's port (a NetworkPolicy, and
+  the port firewalled to the Provider's node address ranges: other pods on
+  those nodes appear with the node's address). The pre-handshake throttle
+  bounds the cost of a peer that can connect but authenticates nobody, and
+  the signer's handshake budget is shared with every peer the throttle lets
   through.
 - The agent's checks that it cannot read the key file (`access(2)`) are made
   at start-up and on reload, not continuously; a later change of the file's

@@ -41,8 +41,8 @@ Group=virtrigaud-signer
 # read-only to it (ProtectSystem=strict also makes it so).
 ReadOnlyPaths=/var/lib/virtrigaud-signer
 ReadWritePaths=/run/virtrigaud-signer
-# No core dump (it would hold the key) and no swap (the key is never written
-# to disk).
+# No core dump (it would hold the key) and no swap. (Hibernation still
+# writes all memory to disk; that is not covered.)
 LimitCORE=0
 MemorySwapMax=0
 UMask=0077
