@@ -213,17 +213,6 @@ func notEvaluated(context.Context, *env) (providerv1.FeatureResult, string) {
 	return errored, FeatureReasonNotEvaluated
 }
 
-// boolProbe maps a yes/no answer or an error to a result.
-func boolProbe(ok bool, err error) (providerv1.FeatureResult, string) {
-	switch {
-	case err != nil:
-		return failure(err)
-	case ok:
-		return present, ""
-	}
-	return absent, ""
-}
-
 // secureBoot reads the firmware's SecureBoot variable. A missing variable
 // means "not booted with Secure Boot" only where it can be told: there is no
 // EFI firmware at all (ABSENT), or efivarfs is mounted and does not hold it.
