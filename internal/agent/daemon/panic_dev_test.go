@@ -29,6 +29,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/agent/runner"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -48,9 +49,12 @@ func (panicExec) Goal(context.Context, executor.Operation, executor.Step) (bool,
 }
 func (panicExec) StopAll(context.Context) error { return nil }
 
-// TestRunPanicStopsTheAgent: a run that panics is recovered, and the agent
-// drains and stops with ErrRunPanicked, leaving the operation to the next
-// start's recovery (its record is still runnable, never a guessed outcome).
+// TestRunPanicStopsTheAgent: a run that panics is recovered and counted, and
+// the agent drains and stops with ErrRunPanicked, leaving the operation to the
+// next start's recovery. After the limit of panicked runs the next start
+// records the operation's outcome as unknown (run_panicked) without running
+// it, and the agent stays up: an operation that always panics cannot keep
+// the host's agent restarting.
 func TestRunPanicStopsTheAgent(t *testing.T) {
 	h := newHost(t)
 	h.exec = panicExec{}
@@ -78,22 +82,37 @@ func TestRunPanicStopsTheAgent(t *testing.T) {
 	}
 	_ = st.Close()
 
-	r = h.start()
-	select {
-	case err := <-r.done:
-		if !errors.Is(err, daemon.ErrRunPanicked) {
-			t.Fatalf("Run returned %v, want ErrRunPanicked\n%s", err, h.logs.text())
+	// Each start runs the operation, which panics: the agent stops. The
+	// panic is counted durably each time.
+	for i := range runner.DefaultMaxPanics {
+		r = h.start()
+		select {
+		case err := <-r.done:
+			if !errors.Is(err, daemon.ErrRunPanicked) {
+				t.Fatalf("start %d: Run returned %v, want ErrRunPanicked\n%s", i+1, err, h.logs.text())
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("start %d: the agent did not stop after a run panicked\n%s", i+1, h.logs.text())
 		}
-	case <-time.After(20 * time.Second):
-		t.Fatalf("the agent did not stop after a run panicked\n%s", h.logs.text())
+	}
+	ref := opstore.OpRef{EnrolmentID: req.EnrolmentID, OpID: req.OpID}
+	// The next start gives the operation up without running it, and the
+	// agent stays up.
+	r, state := h.run()
+	if state != providerv1.AgentState_AGENT_STATE_READY {
+		t.Fatalf("state %v", state)
+	}
+	waitLog(t, h, "the operation's runs panicked repeatedly")
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
 	}
 	st, err = opstore.Open(ctx, opstore.Options{Journal: journal.Options{Dir: h.stateDir}, Executor: panicExec{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = st.Close() }()
-	v, ok, err := st.Lookup(ctx, opstore.OpRef{EnrolmentID: req.EnrolmentID, OpID: req.OpID})
-	if err != nil || !ok || (v.State != opstore.StateAccepted && v.State != opstore.StateExecuting) {
-		t.Fatalf("the operation after the panic: %+v %v %v", v, ok, err)
+	v, ok, err := st.Lookup(ctx, ref)
+	if err != nil || !ok || v.State != opstore.StateOutcomeUnknown || v.Reason != opstore.ReasonRunPanicked {
+		t.Fatalf("the operation after %d panics: %+v %v %v", runner.DefaultMaxPanics, v, ok, err)
 	}
 }

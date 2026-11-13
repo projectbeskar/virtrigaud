@@ -39,13 +39,14 @@ import (
 
 // stubStore fails Execute a set number of times.
 type stubStore struct {
-	mu       sync.Mutex
-	fails    int
-	calls    int
-	resolved string
-	lost     bool
-	panics   bool
-	block    chan struct{}
+	mu         sync.Mutex
+	fails      int
+	calls      int
+	resolved   string
+	lost       bool
+	panics     bool
+	block      chan struct{}
+	panicCount int
 }
 
 func (s *stubStore) Execute(ctx context.Context, _ opstore.OpRef, _ []byte) (opstore.OpView, error) {
@@ -70,6 +71,19 @@ func (s *stubStore) ResolveUnknown(_ context.Context, _ opstore.OpRef, reason st
 	defer s.mu.Unlock()
 	s.resolved = reason
 	return opstore.OpView{State: opstore.StateOutcomeUnknown, Reason: reason}, nil
+}
+
+func (s *stubStore) RecordPanic(context.Context, opstore.OpRef) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.panicCount++
+	return s.panicCount, nil
+}
+
+func (s *stubStore) Panics(context.Context, opstore.OpRef) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.panicCount, nil
 }
 
 func (s *stubStore) Lost() bool {
@@ -149,6 +163,34 @@ func TestPanicIsRecoveredAndReported(t *testing.T) {
 	if reported.Load() != 1 {
 		t.Fatalf("panics reported %d", reported.Load())
 	}
+	if _, n := s.snapshot(); n != "" {
+		t.Fatalf("resolved %q after one panic", n)
+	}
+	// Two more panics reach the limit; the next start gives the operation
+	// up without running it.
+	for range 2 {
+		q := p2(t, s)
+		if err := q.Start(opstore.OpRef{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		drain(t, q)
+	}
+	calls, _ := s.snapshot()
+	q := p2(t, s)
+	if err := q.Start(opstore.OpRef{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, q)
+	after, resolved := s.snapshot()
+	if resolved != opstore.ReasonRunPanicked || after != calls {
+		t.Fatalf("after %d panics: resolved %q, runs %d then %d", s.panicCount, resolved, calls, after)
+	}
+}
+
+// p2 is a new pool over s.
+func p2(_ *testing.T, s *stubStore) *runner.Pool {
+	p := runner.New(context.Background(), s, logr.Discard(), runner.Options{})
+	return p
 }
 
 // TestDrainRefusesStartsAndIsBounded: once draining the pool refuses runs,

@@ -123,3 +123,36 @@ func TestAnswerVM_DeletedOnlyFromTheVMTombstone(t *testing.T) {
 		t.Fatalf("a placement that never existed, after the VM's Delete: %v, want no record", got)
 	}
 }
+
+// TestPanicCountIsDurable: the count of an operation's panicked runs
+// survives a restart, and ResolveUnknown then records the outcome unknown
+// with the given reason and frees nothing (the VM stays held).
+func TestPanicCountIsDurable(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	ctx := context.Background()
+	r := h.req("vm", rid(), kCreate, 1)
+	h.mustAccept(r)
+	for want := 1; want <= 2; want++ {
+		n, err := h.s.RecordPanic(ctx, ref(r))
+		if err != nil || n != want {
+			t.Fatalf("record: %d %v, want %d", n, err, want)
+		}
+	}
+	_ = h.s.Close()
+	s := h.open()
+	if err := s.EstablishContinuity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.Panics(ctx, ref(r)); err != nil || n != 2 {
+		t.Fatalf("after a restart: %d %v", n, err)
+	}
+	v, err := s.ResolveUnknown(ctx, ref(r), opstore.ReasonRunPanicked)
+	if err != nil || v.State != opstore.StateOutcomeUnknown || v.Reason != opstore.ReasonRunPanicked {
+		t.Fatalf("resolve: %+v %v", v, err)
+	}
+	wantRefusal(t, h.admit(h.req("vm", rid(), kCreate, 2)), opstore.RefusalVMBusy)
+}

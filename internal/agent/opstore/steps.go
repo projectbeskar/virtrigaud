@@ -18,6 +18,7 @@ package opstore
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -61,7 +62,64 @@ const (
 	// ReasonRunFailed: the operation's run failed repeatedly on errors that
 	// are neither a quarantine nor a stop, and was given up (ResolveUnknown).
 	ReasonRunFailed = "run_failed"
+	// ReasonRunPanicked: the operation's runs panicked repeatedly, each one
+	// stopping the agent, and the operation was given up without running it
+	// again (ResolveUnknown).
+	ReasonRunPanicked = "run_panicked"
 )
+
+// panicKeyPrefix starts the key of an operation's panic count in the meta
+// bucket.
+const panicKeyPrefix = "panic/"
+
+// panicKey is the key of ref's panic count.
+func panicKey(ref OpRef) []byte {
+	return append([]byte(panicKeyPrefix), opKey(ref.EnrolmentID, ref.OpID)...)
+}
+
+// RecordPanic durably adds one to the number of runs of ref that panicked and
+// returns the new count. The agent calls it from the run that panicked,
+// before it stops, so that a run that always panics is given up after a few
+// restarts instead of stopping the host's agent forever.
+func (s *Store) RecordPanic(ctx context.Context, ref OpRef) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+		b, err := tx.Get(bucketMeta, panicKey(ref))
+		if err != nil {
+			return err
+		}
+		if len(b) == 4 {
+			n = int(binary.BigEndian.Uint32(b))
+		}
+		n++
+		return tx.Put(bucketMeta, panicKey(ref), binary.BigEndian.AppendUint32(nil, uint32(n))) // #nosec G115 -- a small count
+	})
+	if err != nil {
+		return 0, fmt.Errorf("record panic of %s: %w", ref, err)
+	}
+	return n, nil
+}
+
+// Panics returns the number of runs of ref that panicked (RecordPanic).
+func (s *Store) Panics(ctx context.Context, ref OpRef) (int, error) {
+	n := 0
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		b, err := tx.Get(bucketMeta, panicKey(ref))
+		if err != nil {
+			return err
+		}
+		if len(b) == 4 {
+			n = int(binary.BigEndian.Uint32(b))
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("panics of %s: %w", ref, err)
+	}
+	return n, nil
+}
 
 // ResolveUnknown records a runnable operation's outcome as unknown with
 // reason, for a run that cannot be completed: the operation keeps holding its

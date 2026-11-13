@@ -33,8 +33,12 @@ limitations under the License.
 // operation's VM busy: clearing it is an operator path that a later change
 // adds.
 //
-// A panic in a run (for example in an executor) is recovered, logged and
-// reported to Options.OnPanic; the operation is left to recovery. The agent
+// A panic in a run (for example in an executor) is recovered, logged,
+// counted durably for its operation (opstore.Store.RecordPanic) and reported
+// to Options.OnPanic; the operation is left to recovery. An operation whose
+// runs panicked Options.MaxPanics times is not run again: its outcome is
+// recorded as unknown (opstore.ReasonRunPanicked), so that an operation that
+// always panics cannot keep the agent restarting. The agent
 // treats it as fatal: it drains and exits, and its next start's recovery
 // resolves the interrupted step by its evidence. Quarantining instead would
 // end the host's service until it is enrolled again for what may be a
@@ -63,6 +67,9 @@ const (
 	DefaultGiveUpAfter = opstore.DefaultStepDeadline
 	// DefaultInitialBackoff is the pause before the first resumption.
 	DefaultInitialBackoff = 200 * time.Millisecond
+	// DefaultMaxPanics is the number of panicked runs after which an
+	// operation is given up.
+	DefaultMaxPanics = 3
 	// DefaultMaxBackoff bounds the pause between resumptions.
 	DefaultMaxBackoff = 10 * time.Second
 )
@@ -76,6 +83,11 @@ type Store interface {
 	ResolveUnknown(ctx context.Context, ref opstore.OpRef, reason string) (opstore.OpView, error)
 	// Lost reports whether the store is quarantined (opstore.Store.Lost).
 	Lost() bool
+	// RecordPanic durably counts a run of ref that panicked
+	// (opstore.Store.RecordPanic).
+	RecordPanic(ctx context.Context, ref opstore.OpRef) (int, error)
+	// Panics returns how many runs of ref panicked (opstore.Store.Panics).
+	Panics(ctx context.Context, ref opstore.OpRef) (int, error)
 }
 
 // Options configures New. Zero fields take their defaults.
@@ -92,9 +104,13 @@ type Options struct {
 	InitialBackoff time.Duration
 	// MaxBackoff bounds the pause between resumptions.
 	MaxBackoff time.Duration
-	// OnPanic is called, once per panic, after a run panicked; nil ignores
-	// it.
+	// OnPanic is called, once per panic, after a run panicked and the panic
+	// was counted; nil ignores it.
 	OnPanic func(recovered any)
+	// MaxPanics is the number of panicked runs after which an operation is
+	// given up without running it again: its outcome is recorded unknown
+	// (opstore.ReasonRunPanicked).
+	MaxPanics int
 }
 
 // ErrDraining is returned by Start once the pool drains.
@@ -122,6 +138,9 @@ func New(ctx context.Context, store Store, log logr.Logger, opts Options) *Pool 
 	}
 	if opts.MaxBackoff <= 0 {
 		opts.MaxBackoff = DefaultMaxBackoff
+	}
+	if opts.MaxPanics <= 0 {
+		opts.MaxPanics = DefaultMaxPanics
 	}
 	if opts.GiveUpAfter <= 0 {
 		opts.GiveUpAfter = DefaultGiveUpAfter
@@ -151,11 +170,28 @@ func (p *Pool) run(ref opstore.OpRef, payload []byte) {
 	defer func() {
 		if r := recover(); r != nil {
 			p.log.Error(fmt.Errorf("panic: %v", r), "an operation run panicked; the operation is left to recovery", "op", ref.String())
+			// Counted durably before the agent stops: a run that always
+			// panics is given up after MaxPanics restarts.
+			if n, err := p.store.RecordPanic(context.WithoutCancel(p.ctx), ref); err != nil {
+				p.log.Error(err, "the panic could not be counted", "op", ref.String())
+			} else {
+				p.log.Info("panicked runs of the operation", "op", ref.String(), "count", n, "limit", p.opts.MaxPanics)
+			}
 			if p.opts.OnPanic != nil {
 				p.opts.OnPanic(r)
 			}
 		}
 	}()
+	if n, err := p.store.Panics(p.ctx, ref); err == nil && n >= p.opts.MaxPanics {
+		v, err := p.store.ResolveUnknown(p.ctx, ref, opstore.ReasonRunPanicked)
+		if err != nil {
+			p.log.Error(err, "an operation whose runs panicked could not be given up", "op", ref.String(), "panics", n)
+			return
+		}
+		p.log.Error(nil, "the operation's runs panicked repeatedly; it is not run again and its outcome is recorded as unknown",
+			"op", ref.String(), "panics", n, "state", v.State.String())
+		return
+	}
 	backoff := p.opts.InitialBackoff
 	var firstFailure time.Time
 	for failures := 0; ; failures++ {
