@@ -58,7 +58,53 @@ const (
 	// ReasonNotPerformed: the executor reported the step definitely not
 	// performed.
 	ReasonNotPerformed = "not_performed"
+	// ReasonRunFailed: the operation's run failed repeatedly on errors that
+	// are neither a quarantine nor a stop, and was given up (ResolveUnknown).
+	ReasonRunFailed = "run_failed"
 )
+
+// ResolveUnknown records a runnable operation's outcome as unknown with
+// reason, for a run that cannot be completed: the operation keeps holding its
+// VM and is never reported running again, and nothing is said about whether
+// its effect happened. An operation that already left the runnable states is
+// returned as it is. It refuses while the operation has a runner.
+func (s *Store) ResolveUnknown(ctx context.Context, ref OpRef, reason string) (OpView, error) {
+	s.mu.Lock()
+	if !s.ready || s.freezing.Load() {
+		s.mu.Unlock()
+		return OpView{}, ErrNotReady
+	}
+	k := runKey(ref)
+	if s.running[k] {
+		s.mu.Unlock()
+		return OpView{}, ErrRunning
+	}
+	s.running[k] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.running, k)
+		s.mu.Unlock()
+	}()
+	rec, err := s.loadOp(ctx, ref)
+	if err != nil {
+		return OpView{}, fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	if rec.GetState() != StateAccepted && rec.GetState() != StateExecuting {
+		return viewOfRecord(rec), nil
+	}
+	if err := s.outcomeUnknown(ctx, rec, reason); err != nil {
+		return OpView{}, fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	return viewOfRecord(rec), nil
+}
+
+// Lost reports whether the store lost its persistence guarantee
+// (quarantined): nothing more is committed until the host is enrolled again.
+func (s *Store) Lost() bool {
+	st, _ := s.j.State()
+	return st == journal.StateLost
+}
 
 func operationOf(id *pb.OpIdentity, payload []byte) executor.Operation {
 	return executor.Operation{

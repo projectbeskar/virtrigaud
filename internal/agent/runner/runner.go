@@ -20,64 +20,187 @@ limitations under the License.
 // runs of one operation, and admits at most one operation per VM at a time,
 // so the runs of one VM are serialised too.
 //
-// Every run ends when the operation reaches a final state or when the pool's
-// context ends (the agent drains); a run stopped by the drain leaves its
-// operation to the next start's recovery, which never guesses. It imports no
-// Kubernetes package.
+// A run ends when the operation reaches a final state, when the pool's
+// context ends (the agent drains; the operation is left to the next start's
+// recovery, which never guesses), or when the store is quarantined (nothing
+// more is committed; every answer carries the quarantine). A run that fails
+// on any other store error is resumed with a bounded backoff; after
+// Options.Resumes failed resumptions the operation's outcome is recorded as
+// unknown (opstore.ReasonRunFailed), never as a definite outcome, so that no
+// operation stays running without a runner.
+//
+// A panic in a run (for example in an executor) is recovered, logged and
+// reported to Options.OnPanic; the operation is left to recovery. The agent
+// treats it as fatal: it drains and exits, and its next start's recovery
+// resolves the interrupted step by its evidence. Quarantining instead would
+// end the host's service until it is enrolled again for what may be a
+// transient fault, and carrying on would leave a run whose state nothing
+// knows. It imports no Kubernetes package.
 package runner
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 )
 
+// Defaults of Options.
+const (
+	// DefaultResumes is how many times a failed run is resumed.
+	DefaultResumes = 5
+	// DefaultInitialBackoff is the pause before the first resumption.
+	DefaultInitialBackoff = 200 * time.Millisecond
+	// DefaultMaxBackoff bounds the pause between resumptions.
+	DefaultMaxBackoff = 10 * time.Second
+)
+
 // Store is what the pool needs from the operation store.
 type Store interface {
 	// Execute runs an admitted operation to its end (opstore.Store.Execute).
 	Execute(ctx context.Context, ref opstore.OpRef, payload []byte) (opstore.OpView, error)
+	// ResolveUnknown records a runnable operation's outcome as unknown
+	// (opstore.Store.ResolveUnknown).
+	ResolveUnknown(ctx context.Context, ref opstore.OpRef, reason string) (opstore.OpView, error)
+	// Lost reports whether the store is quarantined (opstore.Store.Lost).
+	Lost() bool
 }
+
+// Options configures New. Zero fields take their defaults.
+type Options struct {
+	// Resumes is how many times a run that failed is resumed before the
+	// operation's outcome is recorded as unknown.
+	Resumes int
+	// InitialBackoff is the pause before the first resumption; it doubles
+	// up to MaxBackoff.
+	InitialBackoff time.Duration
+	// MaxBackoff bounds the pause between resumptions.
+	MaxBackoff time.Duration
+	// OnPanic is called, once per panic, after a run panicked; nil ignores
+	// it.
+	OnPanic func(recovered any)
+}
+
+// ErrDraining is returned by Start once the pool drains.
+var ErrDraining = errors.New("the runner pool is draining")
 
 // Pool runs operations. It is safe for concurrent use.
 type Pool struct {
 	ctx   context.Context
 	store Store
 	log   logr.Logger
-	wg    sync.WaitGroup
+	opts  Options
+
+	mu       sync.Mutex
+	draining bool
+	wg       sync.WaitGroup
 }
 
-// New returns a pool whose runs end when ctx ends.
-func New(ctx context.Context, store Store, log logr.Logger) *Pool {
-	return &Pool{ctx: ctx, store: store, log: log}
+// New returns a pool whose runs stop when ctx ends.
+func New(ctx context.Context, store Store, log logr.Logger, opts Options) *Pool {
+	if opts.Resumes <= 0 {
+		opts.Resumes = DefaultResumes
+	}
+	if opts.InitialBackoff <= 0 {
+		opts.InitialBackoff = DefaultInitialBackoff
+	}
+	if opts.MaxBackoff <= 0 {
+		opts.MaxBackoff = DefaultMaxBackoff
+	}
+	return &Pool{ctx: ctx, store: store, log: log, opts: opts}
 }
 
 // Start runs the operation ref in a new goroutine. payload is the verified
 // request, held in memory for the run only (nil when the operation is resumed
 // after a restart). Starting an operation that already has a run is
-// harmless: the store refuses the second run.
-func (p *Pool) Start(ref opstore.OpRef, payload []byte) {
-	if p.ctx.Err() != nil {
-		return
+// harmless: the store refuses the second run. It returns ErrDraining once the
+// pool drains or its context ended.
+func (p *Pool) Start(ref opstore.OpRef, payload []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.draining || p.ctx.Err() != nil {
+		return ErrDraining
 	}
 	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	go p.run(ref, payload)
+	return nil
+}
+
+// run drives one operation, resuming it on store errors.
+func (p *Pool) run(ref opstore.OpRef, payload []byte) {
+	defer p.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			p.log.Error(fmt.Errorf("panic: %v", r), "an operation run panicked; the operation is left to recovery", "op", ref.String())
+			if p.opts.OnPanic != nil {
+				p.opts.OnPanic(r)
+			}
+		}
+	}()
+	backoff := p.opts.InitialBackoff
+	for failures := 0; ; failures++ {
 		v, err := p.store.Execute(p.ctx, ref, payload)
 		switch {
 		case err == nil:
 			p.log.V(1).Info("operation run ended", "op", ref.String(), "state", v.State.String(), "reason", v.Reason)
+			return
 		case errors.Is(err, opstore.ErrRunning):
+			return
 		case p.ctx.Err() != nil:
 			p.log.Info("operation run stopped by the drain; the next start's recovery resumes it", "op", ref.String())
-		default:
-			p.log.Error(err, "operation run failed; the operation is left to the store's recovery", "op", ref.String())
+			return
+		case p.store.Lost():
+			p.log.Error(err, "operation run stopped: the store is quarantined", "op", ref.String())
+			return
+		case failures >= p.opts.Resumes:
+			p.giveUp(ref, err)
+			return
 		}
-	}()
+		p.log.Error(err, "operation run failed; resuming it", "op", ref.String(), "failures", failures+1, "in", backoff.String())
+		t := time.NewTimer(backoff)
+		select {
+		case <-p.ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		backoff = min(2*backoff, p.opts.MaxBackoff)
+	}
 }
 
-// Wait waits for every run to end. Call it after the pool's context ended.
-func (p *Pool) Wait() { p.wg.Wait() }
+// giveUp records the operation's outcome as unknown after its last failed
+// resumption.
+func (p *Pool) giveUp(ref opstore.OpRef, last error) {
+	v, err := p.store.ResolveUnknown(p.ctx, ref, opstore.ReasonRunFailed)
+	if err != nil {
+		p.log.Error(errors.Join(last, err), "operation run failed and its outcome could not be recorded; the operation is left to recovery", "op", ref.String())
+		return
+	}
+	p.log.Error(last, "operation run failed repeatedly; its outcome is recorded as unknown", "op", ref.String(), "state", v.State.String())
+}
+
+// Drain refuses further runs and waits for the running ones until ctx ends.
+// Cancel the pool's context first, so that runs stop between steps. It
+// reports whether every run ended; a run still going at ctx's end is
+// abandoned (the next start's recovery resolves its operation).
+func (p *Pool) Drain(ctx context.Context) bool {
+	p.mu.Lock()
+	p.draining = true
+	p.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}

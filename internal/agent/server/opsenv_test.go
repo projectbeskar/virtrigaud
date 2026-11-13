@@ -169,7 +169,7 @@ func (o *opsProxy) Supports(k providerv1.OperationKind) bool {
 
 func (o *opsProxy) Start(ref opstore.OpRef, payload []byte) {
 	_, p := o.get()
-	p.Start(ref, payload)
+	_ = p.Start(ref, payload)
 }
 
 func (o *opsProxy) Describe(_ context.Context, uid string) (executor.VMState, bool, error) {
@@ -335,10 +335,10 @@ func newOpsEnvEnrolled(t testing.TB, enrolment []byte, mods ...withOptions) *ops
 		t.Fatal(err)
 	}
 	poolCtx, stop := context.WithCancel(ctx)
-	pool := runner.New(poolCtx, st, logr.Discard())
+	pool := runner.New(poolCtx, st, logr.Discard(), runner.Options{})
 	t.Cleanup(func() {
 		stop()
-		pool.Wait()
+		pool.Drain(context.Background())
 		_ = st.Close()
 	})
 	proxy.mu.Lock()

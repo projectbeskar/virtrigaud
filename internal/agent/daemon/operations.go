@@ -58,7 +58,9 @@ func (o *operations) Supports(kind providerv1.OperationKind) bool {
 }
 
 // Start implements server.Operations.
-func (o *operations) Start(ref opstore.OpRef, payload []byte) { o.pool.Start(ref, payload) }
+// A start refused because the pool drains leaves the operation to the next
+// start's recovery.
+func (o *operations) Start(ref opstore.OpRef, payload []byte) { _ = o.pool.Start(ref, payload) }
 
 // Describe implements server.Operations.
 func (o *operations) Describe(ctx context.Context, vmUID string) (executor.VMState, bool, error) {

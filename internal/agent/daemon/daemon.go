@@ -152,6 +152,11 @@ const (
 	signerWaitMessage    = "waiting for the host key signer"
 )
 
+// ErrRunPanicked is returned by Run after an operation run panicked: the
+// agent drained and stopped, and its next start's recovery resolves the
+// interrupted operation.
+var ErrRunPanicked = errors.New("an operation run panicked")
+
 // ErrStartRefused is wrapped by every refused start.
 var ErrStartRefused = errors.New("the agent refused to start")
 
@@ -488,7 +493,16 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	// operation path.
 	poolCtx, stopPool := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopPool()
-	pool := runner.New(poolCtx, st, d.log.WithName("runner"))
+	// A run that panicked leaves its executor's state unknown: the agent
+	// drains and exits, and the next start's recovery resolves the step by
+	// its evidence (see package runner).
+	fatal := make(chan any, 1)
+	pool := runner.New(poolCtx, st, d.log.WithName("runner"), runner.Options{OnPanic: func(r any) {
+		select {
+		case fatal <- r:
+		default:
+		}
+	}})
 	var ops server.Operations
 	if config.DevBuild {
 		ops = &operations{store: st, exec: d.o.Executor, pool: pool}
@@ -533,7 +547,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		// Runs stop between steps; an interrupted step is left to the next
 		// start's recovery.
 		stopPool()
-		pool.Wait()
+		if !pool.Drain(dctx) {
+			d.log.Error(dctx.Err(), "operation runs did not stop within the drain timeout; abandoned to the next start's recovery")
+		}
 		if f := agent.floor.Load(); f != nil {
 			if js, _ := st.Journal().State(); js == journal.StateLost {
 				f.StopPersisting()
@@ -549,7 +565,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	// Steps 6 to 8.
 	for _, ref := range d.establish(ctx, st, agent.floor.Load()) {
 		if ops != nil && !guard.Off(guard.RecoveredOpsRun) {
-			pool.Start(ref, nil)
+			_ = pool.Start(ref, nil)
 		}
 	}
 	if ctx.Err() == nil {
@@ -581,6 +597,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		case err := <-serveErr:
 			drain()
 			return err
+		case r := <-fatal:
+			d.log.Error(fmt.Errorf("%v", r), "an operation run panicked; the agent stops so that recovery resolves it")
+			drain()
+			return fmt.Errorf("%w: %v", ErrRunPanicked, r)
 		case <-reload:
 			_ = d.notifier.Notify(systemd.NotifyReloading)
 			if err := d.reload(ctx); err != nil {
