@@ -27,6 +27,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 )
 
 // ErrRefused is wrapped by every refusal of a file.
@@ -36,6 +37,9 @@ var ErrRefused = errors.New("file refused")
 type Policy struct {
 	// Owner, when set, is the uid the file must be owned by.
 	Owner *uint32
+	// Owners, when set, are the uids the file may be owned by (any one of
+	// them); Owner, when also set, must match too.
+	Owners []uint32
 	// DenyMode are permission bits the file must not have (for example
 	// 0o022: not writable by group or others).
 	DenyMode fs.FileMode
@@ -68,6 +72,12 @@ func Read(path string, p Policy) ([]byte, error) {
 		uid, ok := ownerOf(fi)
 		if !ok || uid != *p.Owner {
 			return nil, fmt.Errorf("%w: %s is not owned by uid %d", ErrRefused, path, *p.Owner)
+		}
+	}
+	if len(p.Owners) > 0 {
+		uid, ok := ownerOf(fi)
+		if !ok || !slices.Contains(p.Owners, uid) {
+			return nil, fmt.Errorf("%w: %s is not owned by an allowed user", ErrRefused, path)
 		}
 	}
 	if fi.Size() > p.Max {

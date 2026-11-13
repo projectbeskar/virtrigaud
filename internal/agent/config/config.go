@@ -209,9 +209,11 @@ func (c *Config) NewExecutor() (Executor, error) {
 	return newExecutor(c.Executor, filepath.Join(c.StateDir, FakeExecutorDirName))
 }
 
-// DevEnrolment is the development enrolment stand-in: what a real enrolment
-// will deliver beside the host certificate's enrolment record. A fresh store
-// is enrolled with the certificate's record and these values.
+// DevEnrolment is the development enrolment stand-in for what the host
+// certificate does not carry: the first enrolment's start epoch and any
+// predecessors the store never held. The enrolment record itself (enrolment
+// id, Provider uid, install id) is always derived from the host certificate;
+// without this file a fresh store starts at epoch 1.
 type DevEnrolment struct {
 	// StartEpoch is the epoch counter the enrolment starts at: the counter
 	// of the manager's development enrolment file. At least 1.

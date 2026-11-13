@@ -1,0 +1,4 @@
+# Tracked files that verify-no-binaries.sh accepts although they start with the
+# magic bytes of an executable, an archive or a module: one repository-relative
+# path per line, listed explicitly (no patterns), for example a binary test
+# fixture under testdata/. Blank lines and lines starting with '#' are ignored.
