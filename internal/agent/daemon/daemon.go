@@ -101,6 +101,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
+	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
@@ -233,6 +234,10 @@ type Options struct {
 	Floor FloorSources
 	// Hooks are test hooks (test override).
 	Hooks Hooks
+	// InventoryRoot is a directory the host inventory reads its manifests,
+	// extensions and components under, in place of the host's root (test
+	// override).
+	InventoryRoot string
 	// Now is the clock for certificate validity at load and reload (test
 	// override); nil uses time.Now.
 	Now func() time.Time
@@ -313,7 +318,7 @@ func (o Options) testOverrides() []string {
 	var set []string
 	for name, on := range map[string]bool{
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
-		"TrustFileOwner": o.TrustFileOwner != nil, "Listener": o.Listener != nil, "Now": o.Now != nil,
+		"TrustFileOwner": o.TrustFileOwner != nil, "InventoryRoot": o.InventoryRoot != "", "Listener": o.Listener != nil, "Now": o.Now != nil,
 		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
 	} {
 		if on {
@@ -481,8 +486,13 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	if info, err := st.Journal().Schema(ctx); err == nil {
 		schema = info.SchemaVersion
 	}
+	coll, err := d.newInventory()
+	if err != nil {
+		closeStore()
+		return err
+	}
 	srv, err := server.New(server.Options{Agent: agent, Credentials: d.creds, Version: d.o.Version,
-		JournalSchemaVersion: schema, Log: d.log.WithName("server")})
+		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Inventory: coll})
 	if err != nil {
 		closeStore()
 		return err
@@ -507,8 +517,18 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		d.scrubLoop(scrubCtx, agent)
 	}()
 
+	// The host inventory is collected in the background until the agent
+	// drains; the answers read its latest snapshot.
+	invCtx, stopInv := context.WithCancel(ctx)
+	invDone := make(chan struct{})
+	go func() {
+		defer close(invDone)
+		coll.Run(invCtx)
+	}()
+
 	drain := func() {
 		stopScrub()
+		stopInv()
 		_ = d.notifier.Notify(systemd.NotifyStopping)
 		dctx, cancel := context.WithTimeout(context.Background(), d.o.Config.DrainTimeout)
 		defer cancel()
@@ -516,6 +536,11 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		case <-scrubDone:
 		case <-dctx.Done():
 			d.log.Error(dctx.Err(), "the store scrub did not stop within the drain timeout; abandoned")
+		}
+		select {
+		case <-invDone:
+		case <-dctx.Done():
+			d.log.Error(dctx.Err(), "the host inventory collector did not stop within the drain timeout; abandoned")
 		}
 		srv.Shutdown(dctx)
 		if f := agent.floor.Load(); f != nil {
@@ -594,6 +619,29 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			}
 		}
 	}
+}
+
+// newInventory returns the host inventory collector: the host's own manifests,
+// extensions and kernel, or the tree under Options.InventoryRoot.
+func (d *daemon) newInventory() (*inventory.Collector, error) {
+	layout := inventory.DefaultLayout()
+	if d.o.InventoryRoot != "" {
+		layout.AgentExecutable = "" // the running image is not under a test root
+	}
+	var boot clockfloor.BootClock = clockfloor.SystemBootClock{}
+	if d.o.Floor.Boot != nil {
+		boot = d.o.Floor.Boot
+	}
+	interval := d.o.Config.InventoryInterval
+	c, err := inventory.New(inventory.Options{
+		FS: inventory.OSFS{Root: d.o.InventoryRoot}, Host: inventory.SystemHost{}, Boot: boot, Layout: layout,
+		AgentVersion: d.o.Version, Log: d.log.WithName("inventory"), Interval: interval,
+		AllowShortTimings: d.o.InventoryRoot != "", WatchRoot: d.o.InventoryRoot,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("host inventory: %w", err)
+	}
+	return c, nil
 }
 
 // scrubInterval is the period of the store scrub.

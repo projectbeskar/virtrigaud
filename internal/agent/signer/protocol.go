@@ -148,6 +148,16 @@ var (
 	ErrPeer = errors.New("peer credential refused")
 	// ErrFrameTooLarge is returned for a frame longer than MaxFrameBytes.
 	ErrFrameTooLarge = errors.New("frame too large")
+	// ErrUnavailable is wrapped, with ErrSigner, when the signer cannot be
+	// reached or does not answer: it is away, its socket is gone, or the peer
+	// is not the signer's user.
+	ErrUnavailable = errors.New("host key signer unavailable")
+	// ErrRefused is wrapped, with ErrSigner, when the signer answered and
+	// refused: a bad request, or it could not sign.
+	ErrRefused = errors.New("host key signer refused")
+	// ErrRateLimited is wrapped, with ErrSigner, when the signer's rate limit
+	// refused the request.
+	ErrRateLimited = errors.New("host key signer rate limited")
 )
 
 // signHashes maps the accepted hash identifier to its crypto.Hash and the

@@ -155,6 +155,8 @@ type host struct {
 	signerUID uint32
 	// refuseSameUser makes the agent refuse a signer that is its own user.
 	refuseSameUser bool
+	// invRoot is the directory the host inventory reads under.
+	invRoot string
 }
 
 // testSigner is a real signer process stand-in: the signer's server on a
@@ -198,7 +200,7 @@ func newHost(t *testing.T) *host {
 	root := t.TempDir()
 	h := &host{t: t, pki: trusttest.New(t), stateDir: filepath.Join(root, "state"), trustDir: filepath.Join(root, "trust"),
 		dev: &config.DevEnrolment{StartEpoch: 2}, exec: none.Executor{}, notes: &notifications{}, logs: &logBuffer{},
-		boot: bootClock{start: time.Now()}, signerUID: testUID}
+		boot: bootClock{start: time.Now()}, signerUID: testUID, invRoot: filepath.Join(root, "inventory")}
 	if err := os.MkdirAll(h.stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +249,7 @@ func (h *host) start() *running {
 	opts := daemon.Options{
 		Config: h.cfg, Probe: h.probe, UID: &uid, Executor: h.exec, DevEnrolment: h.dev, Notifier: h.notes,
 		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, TrustFileOwner: &uid, Hooks: hooks, ObserveEvery: 20 * time.Millisecond,
-		SignerUID: &signerUID, AllowSignerSameUser: !h.refuseSameUser, Floor: daemon.FloorSources{Wall: wall{off: &h.wallOff}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
+		SignerUID: &signerUID, AllowSignerSameUser: !h.refuseSameUser, InventoryRoot: h.invRoot, Floor: daemon.FloorSources{Wall: wall{off: &h.wallOff}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
 	}
 	go func() {
 		r.done <- daemon.Run(context.Background(), opts, r.signals)

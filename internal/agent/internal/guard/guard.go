@@ -113,6 +113,13 @@ const (
 	// HostKeyUnreadable: the agent refuses to start when it can read the
 	// host key file.
 	HostKeyUnreadable Name = "host-key-unreadable"
+	// InventoryValidate: a host inventory is checked against the inventory
+	// field rules before it is put in an answer and again before it is
+	// signed.
+	InventoryValidate Name = "inventory-validate"
+	// InventoryOnlyWhenAsked: an inventory is never put in the answer to a
+	// request that did not ask for one.
+	InventoryOnlyWhenAsked Name = "inventory-only-when-asked"
 	// EnrolKeyNeverReplaced: enrolment never replaces an existing host key.
 	EnrolKeyNeverReplaced Name = "enrol-key-never-replaced"
 	// EnrolCSRKeyType: the enrolment request is built only for an ECDSA
@@ -144,6 +151,7 @@ func All() []Name {
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
 		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
+		InventoryValidate, InventoryOnlyWhenAsked,
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
 		EnrolLoaderCheck,
 	}

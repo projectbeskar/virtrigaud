@@ -68,7 +68,9 @@ import (
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
+	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
@@ -218,6 +220,12 @@ type Options struct {
 	Log logr.Logger
 	// Now is the clock for answers; nil uses time.Now.
 	Now func() time.Time
+	// Inventory supplies the host inventory for a GetHostInfo that asks for
+	// one; nil answers without an inventory.
+	Inventory InventorySource
+	// InventoryMaxBytes lowers the encoded size bound of an inventory in an
+	// answer; zero uses the standard bound. Only tests set it.
+	InventoryMaxBytes int
 	// Throttle sets the pre-handshake limits (see Throttle); zero fields
 	// take their defaults.
 	Throttle Throttle
@@ -229,6 +237,14 @@ type Options struct {
 	AnswersPerSecond float64
 	// AnswerBurst is the burst of the per-identity answer limit.
 	AnswerBurst int
+}
+
+// InventorySource gives the host inventory a signed answer carries.
+type InventorySource interface {
+	// Inventory returns the inventory for a request that asked for inventory
+	// version requested (at least 1), from the latest snapshot; it does no
+	// file system access.
+	Inventory(requested uint32) *providerv1.HostInventory
 }
 
 // Defaults of the per-identity answer limit, below the signer's answer budget
@@ -437,8 +453,16 @@ func (s *Server) streamGate(srv any, ss grpc.ServerStream, info *grpc.StreamServ
 }
 
 // hostAnswer signs a HostAnswer for nonce, or returns nil when none can be
-// made (no nonce, no matching enrolment, a store that cannot be read).
+// made (no nonce, no matching enrolment, a store that cannot be read). It
+// carries no inventory.
 func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uint64) *providerv1.SignedBlob {
+	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0)
+}
+
+// hostAnswerWithInventory is hostAnswer for a request that asked for the host
+// inventory in version inventoryVersion (0: it asked for none). See
+// signHostAnswer for what happens when the inventory cannot be signed.
+func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, continuitySeq uint64, inventoryVersion uint32) *providerv1.SignedBlob {
 	if len(nonce) == 0 {
 		return nil
 	}
@@ -456,26 +480,53 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 		return nil
 	}
 	state, reason := s.opts.Agent.TrustState()
-	body, err := answer.HostAnswer(answer.Host{
+	h := answer.Host{
 		Nonce: nonce, View: view, HostID: c.Identity.HostID(), Record: c.Identity.Record,
 		State: state, StateReason: reason, AgentVersion: s.opts.Version,
 		JournalSchemaVersion: s.opts.JournalSchemaVersion, ClockFloor: s.opts.Agent.ClockFloor(), Now: s.opts.Now(),
-	})
-	if err != nil {
-		if errors.Is(err, answer.ErrNoAnswer) {
-			s.opts.Log.V(1).Info("no signed answer", "why", err.Error())
-		} else {
-			s.logNoAnswer(err, "no signed answer")
+		InventoryRequested: inventoryVersion, InventoryMaxBytes: s.opts.InventoryMaxBytes,
+	}
+	if inventoryVersion != 0 && s.opts.Inventory != nil {
+		h.Inventory = s.opts.Inventory.Inventory(inventoryVersion)
+	}
+	return s.signHostAnswer(c, h)
+}
+
+// signHostAnswer builds and signs the answer for h. An inventory that cannot
+// be signed is replaced, never signed as it is: by an OVER_LIMIT inventory that
+// lists nothing when the size is the problem, by an UNREADABLE (probe_failed)
+// one when it breaks a field rule, and by none when that replacement fails too,
+// so the rest of the answer is still delivered.
+func (s *Server) signHostAnswer(c *Credentials, h answer.Host) *providerv1.SignedBlob {
+	for attempt := 0; attempt < 3; attempt++ {
+		body, err := answer.HostAnswer(h)
+		if err == nil {
+			var blob *providerv1.SignedBlob
+			if blob, err = answer.Sign(c.Identity.Signer, c.Identity.Leaf.Raw, body); err == nil {
+				return blob
+			}
 		}
-		return nil
+		switch {
+		case errors.Is(err, answer.ErrNoAnswer):
+			s.opts.Log.V(1).Info("no signed answer", "why", err.Error())
+			return nil
+		case h.Inventory != nil && (errors.Is(err, answer.ErrInvalidInventory) || errors.Is(err, inventory.ErrTooLarge)):
+			s.logNoAnswer(err, "the host inventory cannot be signed; replacing it")
+			switch {
+			case attempt >= 1:
+				h.Inventory = nil
+			case errors.Is(err, inventory.ErrTooLarge):
+				h.Inventory = inventory.OverLimit(h.InventoryRequested, inventory.ReasonInventoryTooLarge)
+			default:
+				h.Inventory = inventory.Unreadable(h.InventoryRequested, inventory.ReasonProbeFailed)
+			}
+		default:
+			// A signer that is away or refusing fails every answer.
+			s.logNoAnswer(err, "no signed answer")
+			return nil
+		}
 	}
-	blob, err := answer.Sign(c.Identity.Signer, c.Identity.Leaf.Raw, body)
-	if err != nil {
-		// A signer that is away or refusing fails every answer.
-		s.logNoAnswer(err, "no signed answer")
-		return nil
-	}
-	return blob
+	return nil
 }
 
 // peerIdentity is the key of the verified caller for the answer limit: the
@@ -502,7 +553,9 @@ func peerIdentity(ctx context.Context) string {
 // log line per request would let any caller fill the journal.
 func (s *Server) logNoAnswer(err error, msg string) {
 	if ok, n := s.noAnswer.allow(s.opts.Now()); ok {
-		s.opts.Log.Error(err, msg, "suppressedSinceLast", n)
+		// A class, never the error's text: it can name a certificate subject, a
+		// component or a path.
+		s.opts.Log.Error(nil, msg, "class", errorClass(err), "suppressedSinceLast", n)
 	}
 }
 
@@ -515,4 +568,29 @@ func checkNonce(nonce []byte, required bool) error {
 		return status.Errorf(codes.InvalidArgument, "answer_nonce must be exactly %d bytes", answer.NonceLen)
 	}
 	return nil
+}
+
+// errorClass names the kind of an answer failure for a log line.
+func errorClass(err error) string {
+	switch {
+	case errors.Is(err, answer.ErrNoAnswer):
+		return "no_answer"
+	case errors.Is(err, inventory.ErrTooLarge):
+		return "inventory_too_large"
+	case errors.Is(err, answer.ErrInvalidInventory):
+		return "invalid_inventory"
+	case errors.Is(err, signer.ErrRateLimited):
+		return "signer_rate_limited"
+	case errors.Is(err, signer.ErrPeer):
+		return "signer_peer_refused"
+	case errors.Is(err, signer.ErrUnavailable):
+		return "signer_unavailable"
+	case errors.Is(err, signer.ErrRefused):
+		return "signer_refused"
+	case errors.Is(err, answer.ErrSign):
+		return "sign"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "context"
+	}
+	return inventory.ErrorClass(err)
 }

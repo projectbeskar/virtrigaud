@@ -164,7 +164,7 @@ func (c *Client) sign(_ io.Reader, digest []byte, opts crypto.SignerOpts, purpos
 		return nil, fmt.Errorf("%w: a SHA-256 digest is %d bytes, not %d", ErrSigner, DigestSize, len(digest))
 	}
 	if err := c.ctx.Err(); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrSigner, err)
+		return nil, fmt.Errorf("%w: %w: %v", ErrSigner, ErrUnavailable, err)
 	}
 	req := make([]byte, 0, 4+len(digest))
 	req = append(req, Version, OpSign, HashSHA256, purpose)
@@ -186,7 +186,7 @@ func (c *Client) call(ctx context.Context, req []byte) ([]byte, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", c.o.Socket)
 	if err != nil {
-		return nil, fmt.Errorf("%w: connect: %v", ErrSigner, err)
+		return nil, fmt.Errorf("%w: %w: connect: %v", ErrSigner, ErrUnavailable, err)
 	}
 	defer func() { _ = conn.Close() }()
 	if dl, ok := ctx.Deadline(); ok {
@@ -200,15 +200,15 @@ func (c *Client) call(ctx context.Context, req []byte) ([]byte, error) {
 			err = CheckPeer(uid, c.o.ServerUID)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrSigner, err)
+			return nil, fmt.Errorf("%w: %w: %w", ErrSigner, ErrUnavailable, err)
 		}
 	}
 	if err := writeFrame(conn, req); err != nil {
-		return nil, fmt.Errorf("%w: send: %v", ErrSigner, err)
+		return nil, fmt.Errorf("%w: %w: send: %v", ErrSigner, ErrUnavailable, err)
 	}
 	resp, err := readFrame(conn)
 	if err != nil {
-		return nil, fmt.Errorf("%w: receive: %v", ErrSigner, err)
+		return nil, fmt.Errorf("%w: %w: receive: %v", ErrSigner, ErrUnavailable, err)
 	}
 	return parseResponse(resp)
 }
@@ -220,7 +220,11 @@ func parseResponse(resp []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: malformed response", ErrSigner)
 	}
 	if st := Status(resp[1]); st != StatusOK {
-		return nil, fmt.Errorf("%w: the signer answered: %s", ErrSigner, st)
+		kind := ErrRefused
+		if st == StatusRateLimited {
+			kind = ErrRateLimited
+		}
+		return nil, fmt.Errorf("%w: %w: the signer answered: %s", ErrSigner, kind, st)
 	}
 	return resp[2:], nil
 }

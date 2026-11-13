@@ -53,6 +53,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
+	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
@@ -92,8 +94,9 @@ const (
 
 // Versions this agent reports.
 const (
-	// AgentAPIVersion is the version of the agent's RPC surface.
-	AgentAPIVersion uint32 = 1
+	// AgentAPIVersion is the version of the agent's RPC surface. Version 2
+	// adds the host inventory to the answer of GetHostInfo.
+	AgentAPIVersion uint32 = 2
 	// GrantVersion is the operation grant version the agent implements.
 	GrantVersion uint32 = 1
 )
@@ -107,13 +110,18 @@ var ErrNoAnswer = errors.New("no signed answer can be made")
 // ErrSign is wrapped by every signing failure.
 var ErrSign = errors.New("sign host answer")
 
+// ErrInvalidInventory is wrapped when an inventory breaks a field rule: the
+// answer is not made with it, and nothing that breaks a rule is signed. The
+// error also wraps inventory.ErrTooLarge when the cause is the size bound.
+var ErrInvalidInventory = errors.New("host inventory breaks a field rule")
+
 // SignatureInput returns the exact bytes a host signs for body of bodyType.
 func SignatureInput(bodyType string, body []byte) ([]byte, error) {
 	if len(bodyType) == 0 || len(bodyType) > MaxBodyTypeBytes {
 		return nil, fmt.Errorf("%w: body type length %d", ErrSign, len(bodyType))
 	}
 	if len(body) > MaxBodyBytes {
-		return nil, fmt.Errorf("%w: body of %d bytes exceeds %d", ErrSign, len(body), MaxBodyBytes)
+		return nil, fmt.Errorf("%w: %w: body of %d bytes exceeds %d", ErrSign, inventory.ErrTooLarge, len(body), MaxBodyBytes)
 	}
 	m := make([]byte, 0, len(DomainSeparator)+2+len(bodyType)+4+len(body))
 	m = append(m, DomainSeparator...)
@@ -146,6 +154,13 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	if !ok || pub.Curve != elliptic.P256() || !pub.Equal(cert.PublicKey) {
 		return nil, fmt.Errorf("%w: the signer is not the ECDSA P-256 key of the certificate", ErrSign)
 	}
+	if ha, ok := body.(*providerv1.HostAnswer); ok && ha.GetInventory() != nil && !guard.Off(guard.InventoryValidate) {
+		// Whatever built the answer, an inventory that breaks a field rule is
+		// never signed.
+		if err := inventory.Validate(ha.GetInventory(), ha.GetInventory().GetRequestedVersion()); err != nil {
+			return nil, fmt.Errorf("%w: %w: %w", ErrSign, ErrInvalidInventory, err)
+		}
+	}
 	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("%w: marshal body: %v", ErrSign, err)
@@ -157,7 +172,7 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	digest := sha256.Sum256(m)
 	sig, err := signer.Sign(rand.Reader, digest[:], crypto.SHA256)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrSign, err)
+		return nil, fmt.Errorf("%w: %w", ErrSign, err)
 	}
 	if sig, err = grantverify.NormalizeLowS(sig, elliptic.P256()); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrSign, err)
@@ -167,7 +182,7 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	}
 	blob := &providerv1.SignedBlob{Body: raw, Signature: sig, SignerCertificate: bytes.Clone(certDER), BodyType: bodyType}
 	if proto.Size(blob) > MaxBlobBytes {
-		return nil, fmt.Errorf("%w: signed answer exceeds %d bytes", ErrSign, MaxBlobBytes)
+		return nil, fmt.Errorf("%w: %w: signed answer exceeds %d bytes", ErrSign, inventory.ErrTooLarge, MaxBlobBytes)
 	}
 	return blob, nil
 }
@@ -219,12 +234,25 @@ type Host struct {
 	StagedCertificateSHA256 []byte
 	// Now is the host's clock, informational.
 	Now time.Time
+	// InventoryRequested is the request's inventory_version; 0 when it asked
+	// for none.
+	InventoryRequested uint32
+	// Inventory is the host inventory for a request that asked for one
+	// (Collector.Inventory); nil answers without one, which a manager treats
+	// as no inventory. It must be nil when InventoryRequested is 0.
+	Inventory *providerv1.HostInventory
+	// InventoryMaxBytes lowers the encoded size bound the inventory is
+	// checked against; zero uses inventory.MaxInventoryBytes. Only tests set
+	// it.
+	InventoryMaxBytes int
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no
 // 16-byte nonce, when the store has no active enrolment, or when the active
 // enrolment is not the one the host certificate names (enrolment, Provider,
-// installation and host all equal).
+// installation and host all equal). It returns ErrInvalidInventory when h
+// carries an inventory for a request that asked for none, or one that breaks
+// an inventory field rule.
 func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 	ctx, err := answerContext(h)
 	if err != nil {
@@ -244,6 +272,21 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 	}
 	if len(a.StagedCertificateSha256) != 0 && len(a.StagedCertificateSha256) != sha256.Size {
 		return nil, fmt.Errorf("%w: staged certificate digest is not %d bytes", ErrSign, sha256.Size)
+	}
+	if h.Inventory != nil {
+		if h.InventoryRequested == 0 && !guard.Off(guard.InventoryOnlyWhenAsked) {
+			return nil, fmt.Errorf("%w: an inventory for a request that asked for none", ErrInvalidInventory)
+		}
+		if h.InventoryRequested != 0 && !guard.Off(guard.InventoryValidate) {
+			limit := inventory.MaxInventoryBytes
+			if h.InventoryMaxBytes > 0 {
+				limit = min(limit, h.InventoryMaxBytes)
+			}
+			if err := inventory.ValidateWithLimit(h.Inventory, h.InventoryRequested, limit); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrInvalidInventory, err)
+			}
+		}
+		a.Inventory = proto.CloneOf(h.Inventory)
 	}
 	return a, nil
 }
