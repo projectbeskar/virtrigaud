@@ -239,7 +239,11 @@ func TestOperation_AdversarialGrants(t *testing.T) {
 		"outer field": {send: func() error {
 			o := on()
 			_, err := e.sendEnvelope(o.method, &providerv1.OperationEnvelope{Request: o.request, Grant: e.grant(o, time.Now(), 0)},
-				func(m proto.Message) { m.(*providerv1.PowerRequest).Id = "vm-1" })
+				func(m proto.Message) {
+					if r, ok := m.(*providerv1.PowerRequest); ok {
+						r.Id = "vm-1"
+					}
+				})
 			return err
 		}, code: codes.InvalidArgument, reason: contracts.GrantMismatchReason},
 		"digest altered": {send: func() error {
@@ -440,7 +444,11 @@ func TestOperation_RedactionCanary(t *testing.T) {
 	_, err = e.sendEnvelope(bad.method, &providerv1.OperationEnvelope{Request: bad.request, Grant: g}, nil)
 	seen = append(seen, []byte(err.Error()))
 	_, err = e.sendEnvelope(bad.method, &providerv1.OperationEnvelope{Request: bad.request, Grant: e.grant(bad, time.Now(), 0)},
-		func(m proto.Message) { m.(*providerv1.CreateRequest).UserData = canary })
+		func(m proto.Message) {
+			if r, ok := m.(*providerv1.CreateRequest); ok {
+				r.UserData = canary
+			}
+		})
 	seen = append(seen, []byte(err.Error()))
 	for _, l := range e.logs.all() {
 		seen = append(seen, []byte(l))

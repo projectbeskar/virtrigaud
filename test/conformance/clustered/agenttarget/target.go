@@ -417,7 +417,10 @@ func (t *Target) SendDirect(ctx context.Context, host string, kind providerv1.Op
 	if c, ok := resp.(*providerv1.CreateResponse); ok {
 		return c.GetTask().GetId(), nil
 	}
-	return resp.(*providerv1.TaskResponse).GetTask().GetId(), nil
+	if r, ok := resp.(*providerv1.TaskResponse); ok {
+		return r.GetTask().GetId(), nil
+	}
+	return "", errors.New("unexpected response type")
 }
 
 // runSigned runs one signed operation straight on host's agent, to its end.
