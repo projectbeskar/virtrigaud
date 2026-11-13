@@ -11,9 +11,11 @@
 # socket. The agent cannot sign a TLS handshake or an answer without it, so
 # starting the agent starts the signer first (Wants= with After=; the signer
 # is Type=notify, so After= waits until it serves). If the signer is still not
-# up (it is down, or being repaired), the agent does not exit: it waits, not
-# ready, with a status naming the wait, and asks systemd for more start time
-# (EXTEND_TIMEOUT_USEC) so that its start rate limit is not used up. The dependency is Wants=,
+# up (it is down, or being repaired), the agent does not exit, which would use
+# up its start rate limit: it waits, serving nothing, and sends READY=1 with
+# STATUS="waiting for the host key signer" so that the boot and systemctl
+# start are not held up. "Ready" then means started and waiting; calls fail
+# (connection refused) until the signer arrives. The dependency is Wants=,
 # not Requires=: with Requires= every restart of the signer (a crash, or a
 # key reload by restart) would also restart the agent and take down its
 # operation store and its Provider connections, while the agent already

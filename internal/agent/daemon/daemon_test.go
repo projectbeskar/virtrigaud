@@ -19,11 +19,13 @@ package daemon_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -579,8 +581,8 @@ func TestScrubFindsDamageAndReflectsItInStatus(t *testing.T) {
 
 // TestStartWaitsForTheSigner: with the signer down at start-up the agent
 // does not exit (it would exhaust its start rate limit and stay failed); it
-// stays not ready with a status naming the wait and asking systemd for more
-// start time, and starts when the signer comes up.
+// sends READY=1 with a status naming the wait (so the boot is not held up)
+// but serves nothing, and starts when the signer comes up.
 func TestStartWaitsForTheSigner(t *testing.T) {
 	h := newHost(t)
 	socket := h.signer.socket
@@ -594,11 +596,16 @@ func TestStartWaitsForTheSigner(t *testing.T) {
 		t.Fatalf("the agent exited while waiting for the signer: %v", err)
 	default:
 	}
-	if !h.notes.has("STATUS=waiting for the host key signer\nEXTEND_TIMEOUT_USEC=") {
+	// READY=1 with a status naming the wait, so that the boot and
+	// systemctl start are not held up; but nothing is served: a TLS
+	// handshake gets no answer.
+	if !h.notes.has(systemd.NotifyReady + "\nSTATUS=waiting for the host key signer") {
 		t.Fatalf("no wait status: %v", h.notes.snapshot())
 	}
-	if h.notes.has(systemd.NotifyReady) {
-		t.Fatal("READY=1 sent while waiting")
+	d := &net.Dialer{Timeout: 300 * time.Millisecond}
+	if c, err := tls.DialWithDialer(d, "tcp", r.addr, &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true}); err == nil { // #nosec G402 -- a probe that must not complete
+		_ = c.Close()
+		t.Fatal("the agent served a handshake while waiting for the signer")
 	}
 	h.signer = startSigner(t, socket, h.pki.HostKey)
 	select {

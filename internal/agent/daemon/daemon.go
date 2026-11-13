@@ -128,13 +128,17 @@ var signerPollEvery = 2 * time.Second
 // signer that is not there yet.
 const signerWaitLogEvery = 30 * time.Second
 
-// signerWaitStatus is the service status while the start waits for the
-// signer, and the extension of the start timeout that goes with each
-// attempt (EXTEND_TIMEOUT_USEC, 30 seconds), so that systemd does not fail
-// the start while the agent waits.
+// signerWaitStatus is the notification while the start waits for the
+// signer: READY=1 with a status line. The wait can last as long as the signer
+// is down, and an agent that sent nothing would hold up the boot
+// (multi-user.target) and `systemctl start` for as long. Nothing is served
+// while it waits: the agent has not opened its listener or its store, so
+// "ready" here means the unit has started and is waiting, never that it
+// answers; every call fails (connection refused) until the signer arrives,
+// which is failing closed. READY=1 is sent again, with the trust state, when
+// the start-up sequence ends.
 const (
-	signerWaitStatus  = "STATUS=waiting for the host key signer"
-	signerWaitExtend  = "EXTEND_TIMEOUT_USEC=30000000"
+	signerWaitStatus  = systemd.NotifyReady + "\nSTATUS=waiting for the host key signer"
 	signerWaitMessage = "waiting for the host key signer"
 )
 
@@ -576,7 +580,7 @@ func (d *daemon) loadCredentials(ctx context.Context) (*server.Credentials, erro
 	}
 	var lastLog time.Time
 	sg, err := signer.ConnectWithRetry(ctx, d.signerOptions(ctx), signerPollEvery, func(err error) {
-		_ = d.notifier.Notify(signerWaitStatus + "\n" + signerWaitExtend)
+		_ = d.notifier.Notify(signerWaitStatus)
 		if now := d.o.Now(); lastLog.IsZero() || now.Sub(lastLog) >= signerWaitLogEvery {
 			lastLog = now
 			d.log.Info(signerWaitMessage, "error", err.Error())
