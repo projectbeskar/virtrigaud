@@ -178,7 +178,11 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		if err := fake.SetHold(h.FakeDir(), true); err != nil {
 			return nil, err
 		}
-		t.Cleanup(func() { _ = h.Stop() })
+		t.Cleanup(func() {
+			_ = h.Stop()
+			// No scripted fault outlives its case.
+			_ = fake.WriteScript(h.FakeDir(), fake.Script{CreateStopped: true})
+		})
 		if err := h.Start(); err != nil {
 			return nil, err
 		}

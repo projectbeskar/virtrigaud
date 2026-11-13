@@ -412,6 +412,26 @@ operation the store holds no record of is `NotFound` with `UNKNOWN_TO_AGENT`,
 never done, with the signed answer (`NO_RECORD` when the store holds the
 enrolment, `UNKNOWN_TO_AGENT` when it does not) as a status detail.
 
+**Outcome reasons.** An operation's `outcome_reason` (in `TaskStatus` and in
+the signed `OperationAnswer`) names why it ended as it did. None is ever a
+secret, a path or an address.
+
+| Reason | State | Means |
+|--------|-------|-------|
+| `not_performed` | `FAILED_CLEAN`, or `FAILED_DIRTY` after an irreversible step | The executor reported a step definitely not performed. |
+| `step_deadline` | `FAILED_CLEAN`, `FAILED_DIRTY` or `OUTCOME_UNKNOWN` | A step ran past its deadline; inspection found its effect absent (a failure) or could not decide (unknown). |
+| `effect_error` | as `step_deadline` | A step failed in a way that left its effect in doubt, and inspection decided as above. |
+| `witness_no_effect` | `OUTCOME_UNKNOWN` | A once-only step's witness exists and inspection did not find its effect: it is never run again. |
+| `goal_not_observed` | `FAILED_DIRTY` or `OUTCOME_UNKNOWN` | An irreversible step's intent was durable and its goal state was not observed after a restart. |
+| `probe_error` | `OUTCOME_UNKNOWN` | An inspection or goal check failed. |
+| `inconsistent_store` | `OUTCOME_UNKNOWN` | A witness exists without its step intent; the store is quarantined. |
+| `provider_changed` | `RETIRED` or `OUTCOME_UNKNOWN` | A re-enrolment froze the operation. |
+| `run_failed` | `OUTCOME_UNKNOWN` | Its runs failed on store errors for longer than the longest step deadline. |
+| `run_panicked` | `OUTCOME_UNKNOWN` | Its runs panicked three times, each stopping the agent; it is not run again. |
+
+An `OUTCOME_UNKNOWN` operation keeps its VM busy. Clearing it, once an operator
+has established what happened, is an operator path that a later change adds.
+
 **Describe.** The owner's UID is required. Without a nonce, the VM exists
 while the store records a placement of it, and the executor reports its power
 state. With `answer_nonce` and `binding_id`, the signed `VMAnswer` says
