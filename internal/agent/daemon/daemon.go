@@ -138,8 +138,11 @@ const signerWaitLogEvery = 30 * time.Second
 // which is failing closed. READY=1 is sent again, with the trust state, when
 // the start-up sequence ends.
 const (
-	signerWaitStatus  = systemd.NotifyReady + "\nSTATUS=waiting for the host key signer"
-	signerWaitMessage = "waiting for the host key signer"
+	// signerStartingStatus replaces the waiting status once the signer is
+	// reached.
+	signerStartingStatus = "STATUS=starting"
+	signerWaitStatus     = systemd.NotifyReady + "\nSTATUS=waiting for the host key signer"
+	signerWaitMessage    = "waiting for the host key signer"
 )
 
 // ErrStartRefused is wrapped by every refused start.
@@ -589,6 +592,9 @@ func (d *daemon) loadCredentials(ctx context.Context) (*server.Credentials, erro
 	if err != nil {
 		return nil, fmt.Errorf("reach the signer: %w", err)
 	}
+	// The wait is over: do not leave the waiting status standing through the
+	// rest of the start-up.
+	_ = d.notifier.Notify(signerStartingStatus)
 	tc, err := trust.LoadConfig(d.trustDir, trust.TrustFileReader(d.trustOwner))
 	if err != nil {
 		return nil, err

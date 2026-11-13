@@ -388,7 +388,8 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 	if len(nonce) == 0 {
 		return nil
 	}
-	if !s.answers.allow(peerIdentity(ctx), s.opts.Now()) {
+	id := peerIdentity(ctx)
+	if id == "" || !s.answers.allow(id, s.opts.Now()) {
 		if ok, n := s.limited.allow(s.opts.Now()); ok {
 			s.opts.Log.Info("no signed answer: the Provider is above its answer rate", "suppressedSinceLast", n)
 		}
@@ -424,8 +425,8 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 }
 
 // peerIdentity is the key of the verified caller for the answer limit: the
-// URI names of its client certificate (the Provider identity), or its serial
-// number.
+// URI names of its client certificate (the Provider identity); empty when it
+// has none, which fails closed (no signed answer).
 func peerIdentity(ctx context.Context) string {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
@@ -435,13 +436,9 @@ func peerIdentity(ctx context.Context) string {
 	if !ok || len(info.State.PeerCertificates) == 0 {
 		return ""
 	}
-	leaf := info.State.PeerCertificates[0]
 	key := ""
-	for _, u := range leaf.URIs {
+	for _, u := range info.State.PeerCertificates[0].URIs {
 		key += u.String() + " "
-	}
-	if key == "" {
-		key = leaf.SerialNumber.String()
 	}
 	return key
 }

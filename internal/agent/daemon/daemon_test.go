@@ -610,6 +610,10 @@ func TestStartWaitsForTheSigner(t *testing.T) {
 	h.signer = startSigner(t, socket, h.pki.HostKey)
 	select {
 	case s := <-r.started:
+		// The waiting status does not stand through the rest of the start-up.
+		if !h.notes.has("STATUS=starting") {
+			t.Fatalf("no STATUS=starting after the signer arrived: %v", h.notes.snapshot())
+		}
 		if s != providerv1.AgentState_AGENT_STATE_READY {
 			t.Fatalf("state = %v", s)
 		}

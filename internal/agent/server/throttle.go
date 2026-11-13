@@ -58,6 +58,11 @@ const (
 	// must send its ClientHello within this time or it is closed, and until
 	// then it holds no handshake slot.
 	DefaultHelloTimeout = 2 * time.Second
+	// DefaultHandshakeStall bounds how long a client that has sent its
+	// ClientHello may keep its handshake slot without sending the rest of its
+	// handshake: with a slot held for the whole connection timeout, a few
+	// sources could keep every slot busy.
+	DefaultHandshakeStall = 2500 * time.Millisecond
 	// maxTrackedSources bounds each generation of the table of source
 	// addresses the throttle remembers (see sourceLimiter).
 	maxTrackedSources = 4096
@@ -81,6 +86,10 @@ type Throttle struct {
 	// HelloTimeout is how long a connection may stay silent before its
 	// ClientHello.
 	HelloTimeout time.Duration
+	// HandshakeStall is how long a client that has sent its ClientHello may
+	// take to send the next flight (its certificate and Finished) while it
+	// holds a handshake slot.
+	HandshakeStall time.Duration
 }
 
 func (t Throttle) withDefaults() Throttle {
@@ -98,6 +107,9 @@ func (t Throttle) withDefaults() Throttle {
 	}
 	if t.HelloTimeout <= 0 {
 		t.HelloTimeout = DefaultHelloTimeout
+	}
+	if t.HandshakeStall <= 0 {
+		t.HandshakeStall = DefaultHandshakeStall
 	}
 	return t
 }
@@ -276,9 +288,8 @@ var errTooManyHandshakes = errors.New("too many handshakes in progress")
 // once it has.
 type conn struct {
 	net.Conn
-	t        *throttle
-	source   string
-	deadline time.Time
+	t      *throttle
+	source string
 
 	mu   sync.Mutex
 	held bool
@@ -288,8 +299,8 @@ type conn struct {
 // ClientHello has arrived, so a connection that stays silent holds nothing,
 // and before the server signs anything. At most MaxHandshakes handshakes run
 // at once and at most PerSourceHandshakes from one source; the rest fail
-// before the signer is asked. It also gives the connection the rest of the
-// handshake deadline back.
+// before the signer is asked. The client then has HandshakeStall to send its
+// next flight; gRPC resets the deadline itself when the handshake ends.
 func (c *conn) acquire() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -315,7 +326,7 @@ func (c *conn) acquire() error {
 		}
 	}
 	c.held = true
-	_ = c.SetReadDeadline(c.deadline)
+	_ = c.SetReadDeadline(t.now().Add(t.cfg.HandshakeStall))
 	return nil
 }
 
@@ -376,10 +387,9 @@ type cappedCreds struct {
 
 // ServerHandshake implements credentials.TransportCredentials.
 func (c *cappedCreds) ServerHandshake(raw net.Conn) (net.Conn, credentials.AuthInfo, error) {
-	// gRPC has set a deadline for the whole handshake; keep it to restore
-	// once the ClientHello is in, and meanwhile allow only HelloTimeout.
-	deadline := c.t.now().Add(ConnectionTimeout)
-	cn := &conn{Conn: raw, t: c.t, source: sourceOf(raw), deadline: deadline}
+	// gRPC has set a deadline for the whole handshake; until the ClientHello
+	// is in allow only HelloTimeout, and after it HandshakeStall per flight.
+	cn := &conn{Conn: raw, t: c.t, source: sourceOf(raw)}
 	defer cn.release()
 	_ = raw.SetReadDeadline(c.t.now().Add(c.t.cfg.HelloTimeout))
 	return c.TransportCredentials.ServerHandshake(cn)

@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -140,7 +141,7 @@ func TestHandshakeSlots(t *testing.T) {
 	mk := func(remote string) *conn {
 		c1, c2 := net.Pipe()
 		t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
-		return &conn{Conn: addrConn{c1, remote}, t: th, source: sourceOf(addrConn{c1, remote}), deadline: time.Now().Add(time.Minute)}
+		return &conn{Conn: addrConn{c1, remote}, t: th, source: sourceOf(addrConn{c1, remote})}
 	}
 	a1, a2, a3, b1, b2 := mk("10.0.0.1:1"), mk("10.0.0.1:2"), mk("10.0.0.1:3"), mk("10.0.0.2:1"), mk("10.0.0.2:2")
 	silent := mk("10.0.0.1:4")
@@ -155,4 +156,10 @@ func TestHandshakeSlots(t *testing.T) {
 	a1.release()
 	require.NoError(t, b2.acquire(), "a released slot is reusable, once")
 	require.ErrorIs(t, a3.acquire(), errTooManyHandshakes)
+}
+
+// TestPeerIdentityFailsClosed: a caller without a verified client
+// certificate URI has no identity, so no signed answer is made for it.
+func TestPeerIdentityFailsClosed(t *testing.T) {
+	assert.Equal(t, "", peerIdentity(context.Background()))
 }

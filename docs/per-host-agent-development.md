@@ -190,8 +190,9 @@ one signature.
 - A new connection must send its ClientHello within 2 seconds or it is closed;
   until then it holds nothing. When the ClientHello arrives, the connection
   takes a handshake slot, before anything is signed: at most 16 handshakes run
-  at once and at most 2 from one source. The slot is given back when the
-  handshake ends. A source that opens connections and stays silent therefore
+  at once and at most 2 from one source. After the hello the client has 2.5
+  seconds for each next flight (its certificate and Finished) or the
+  connection is closed. The slot is given back when the handshake ends. A source that opens connections and stays silent therefore
   cannot use the slots up, and one source cannot hold more than 2 of them.
 - A refused connection or handshake never reaches the signer. Refusals are
   logged once per 30 seconds with the count held back, as is the "no signed
@@ -210,7 +211,9 @@ the Provider's node can leave that node with the node's address, which is
 inside the firewall. A Kubernetes NetworkPolicy (or an equivalent control)
 that lets only the Provider's pods reach the agent's address and port is a
 requirement, in addition to firewalling the port to the Provider's node
-address ranges.
+address ranges. A pod NetworkPolicy does not cover pods that use the node's
+network (`hostNetwork`) or traffic from the node itself, so the host firewall
+is still what restricts those.
 
 Connections are closed after 30 minutes (and a minute of grace for running
 calls), so each is authenticated again with a new handshake. A handshake must
@@ -460,7 +463,8 @@ is not the one the certificate names, reads answer unsigned.
   attacker has not reached root or the signer's uid.
 - Only the Provider's pods may reach the agent's port (a NetworkPolicy, and
   the port firewalled to the Provider's node address ranges: other pods on
-  those nodes appear with the node's address). The pre-handshake throttle
+  those nodes appear with the node's address, and a NetworkPolicy does not
+  cover `hostNetwork` pods or the node itself). The pre-handshake throttle
   bounds the cost of a peer that can connect but authenticates nobody, and
   the signer's handshake budget is shared with every peer the throttle lets
   through.
