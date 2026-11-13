@@ -22,6 +22,8 @@ limitations under the License.
 // Subcommands:
 //
 //	run           run the agent (systemd unit vrtg-agent.service)
+//	signer        run the host key signer, a separate process and user that
+//	              holds the host private key (vrtg-agent-signer.service)
 //	shutdown-vms  stop every VM, only while the host is shutting down
 //	              (systemd unit vrtg-vm-shutdown.service)
 //	enroll        not available yet: hosts are enrolled with the development
@@ -44,6 +46,7 @@ const usage = `usage: vrtg-agent <command> [flags]
 
 commands:
   run           run the per-host agent
+  signer        run the host key signer (holds the host private key)
   shutdown-vms  stop every VM, only while the host is shutting down
   enroll        enrol the host (not available yet)
   version       print the version
@@ -63,6 +66,8 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "run":
 		return runCommand(args[1:], log, stderr)
+	case "signer":
+		return signerCommand(args[1:], log, stderr)
 	case "shutdown-vms":
 		return shutdownCommand(args[1:], log, stderr)
 	case "enroll":

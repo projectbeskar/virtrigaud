@@ -54,6 +54,14 @@ const (
 	DefaultScrubInterval = time.Hour
 	// PKIDirName is the key material directory inside the state directory.
 	PKIDirName = "pki"
+	// DefaultSignerSocket is the Unix socket of the signer process, which
+	// holds the host private key.
+	DefaultSignerSocket = "/run/virtrigaud-signer/signer.sock"
+	// DefaultSignerUser is the user the signer process runs as.
+	DefaultSignerUser = "virtrigaud-signer"
+	// DefaultSignerKeyFile is the host private key file. It belongs to the
+	// signer's user; the agent only checks that it cannot read it.
+	DefaultSignerKeyFile = "/var/lib/virtrigaud-signer/host.key"
 	// FakeExecutorDirName is the fake executor's directory inside the state
 	// directory (development builds).
 	FakeExecutorDirName = "fake-executor"
@@ -69,6 +77,12 @@ const (
 	FlagDrainTimeout = "drain-timeout"
 	// FlagScrubInterval names the scrub interval flag.
 	FlagScrubInterval = "scrub-interval"
+	// FlagSignerSocket names the signer socket flag.
+	FlagSignerSocket = "signer-socket"
+	// FlagSignerUser names the signer user flag.
+	FlagSignerUser = "signer-user"
+	// FlagSignerKeyFile names the signer key file flag.
+	FlagSignerKeyFile = "signer-key-file"
 	// FlagExecutor names the executor flag.
 	FlagExecutor = "executor"
 	// FlagDevTrustDir names the development-only trust directory flag.
@@ -99,6 +113,15 @@ type Config struct {
 	// positive: the scrub cannot be switched off, because it is what finds a
 	// damaged record that nothing reads.
 	ScrubInterval time.Duration
+	// SignerSocket is the Unix socket of the signer process; the agent signs
+	// only through it.
+	SignerSocket string
+	// SignerUser is the signer process's user (a name or a numeric uid): the
+	// only peer the agent talks to on SignerSocket.
+	SignerUser string
+	// SignerKeyFile is the host private key file the signer reads. The agent
+	// refuses to start when it can read it.
+	SignerKeyFile string
 	// Executor names the executor: ExecutorNone, or ExecutorFake in a
 	// development build.
 	Executor string
@@ -118,6 +141,9 @@ func Register(fs *flag.FlagSet) *Config {
 	fs.StringVar(&c.ListenAddress, FlagListenAddress, DefaultListenAddress, "the address the agent serves the Provider on")
 	fs.DurationVar(&c.DrainTimeout, FlagDrainTimeout, DefaultDrainTimeout, "how long a stop waits for running calls")
 	fs.DurationVar(&c.ScrubInterval, FlagScrubInterval, DefaultScrubInterval, "how often the operation store reads every record to verify it (cannot be disabled)")
+	fs.StringVar(&c.SignerSocket, FlagSignerSocket, DefaultSignerSocket, "the Unix socket of the signer process that holds the host key")
+	fs.StringVar(&c.SignerUser, FlagSignerUser, DefaultSignerUser, "the signer process's user (name or uid); the agent talks to no other peer")
+	fs.StringVar(&c.SignerKeyFile, FlagSignerKeyFile, DefaultSignerKeyFile, "the host key file the signer reads; the agent refuses to start when it can read it")
 	fs.StringVar(&c.Executor, FlagExecutor, ExecutorNone, "the executor: none (every build) or fake (development builds only)")
 	fs.StringVar(&c.DevTrustDir, FlagDevTrustDir, "", "development builds only: read the trust configuration from this directory")
 	fs.StringVar(&c.DevEnrolmentFile, FlagDevEnrolmentFile, "", "development builds only: enrol a fresh store from this file and the host certificate")
@@ -132,6 +158,15 @@ func (c *Config) Validate() error {
 	}
 	if c.ListenAddress == "" {
 		return fmt.Errorf("--%s is empty", FlagListenAddress)
+	}
+	if c.SignerSocket == "" || !filepath.IsAbs(c.SignerSocket) || filepath.Clean(c.SignerSocket) != c.SignerSocket {
+		return fmt.Errorf("--%s must be a clean absolute path", FlagSignerSocket)
+	}
+	if c.SignerUser == "" {
+		return fmt.Errorf("--%s is empty", FlagSignerUser)
+	}
+	if c.SignerKeyFile == "" || !filepath.IsAbs(c.SignerKeyFile) || filepath.Clean(c.SignerKeyFile) != c.SignerKeyFile {
+		return fmt.Errorf("--%s must be a clean absolute path", FlagSignerKeyFile)
 	}
 	if c.DrainTimeout <= 0 {
 		return fmt.Errorf("--%s must be positive", FlagDrainTimeout)

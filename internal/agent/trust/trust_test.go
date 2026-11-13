@@ -17,6 +17,10 @@ limitations under the License.
 package trust_test
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -51,7 +55,7 @@ func TestLoadConfigAndIdentity(t *testing.T) {
 	if len(cfg.Providers) != 1 || cfg.Providers[0] != trusttest.ProviderIdentity() {
 		t.Fatalf("providers = %+v", cfg.Providers)
 	}
-	id, err := trust.LoadIdentity(pkiDir, cfg, time.Now(), nil)
+	id, err := trust.LoadIdentity(pkiDir, cfg, time.Now(), nil, p.HostKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +139,7 @@ func TestLoadIdentityRefusals(t *testing.T) {
 		edit func(t *testing.T, dir string, p *trusttest.PKI)
 		now  time.Time
 	}{
-		{"missing key", func(t *testing.T, dir string, _ *trusttest.PKI) { rm(t, dir, trust.FileHostKey) }, time.Time{}},
+		{"no signer", func(*testing.T, string, *trusttest.PKI) {}, time.Time{}},
 		{"missing certificate", func(t *testing.T, dir string, _ *trusttest.PKI) { rm(t, dir, trust.FileHostCert) }, time.Time{}},
 		{"certificate for another key", func(t *testing.T, dir string, p *trusttest.PKI) {
 			other := hostidentitytest.NewKey(t)
@@ -159,9 +163,7 @@ func TestLoadIdentityRefusals(t *testing.T) {
 			write(t, dir, trust.FileHostCert, string(p.HostCertPEM)+string(p.HostCA.PEM))
 		}, time.Time{}},
 		{"expired", func(*testing.T, string, *trusttest.PKI) {}, time.Now().Add(60 * 24 * time.Hour)},
-		{"not a P-256 key", func(t *testing.T, dir string, _ *trusttest.PKI) {
-			write(t, dir, trust.FileHostKey, "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
-		}, time.Time{}},
+		{"signer is not P-256", func(*testing.T, string, *trusttest.PKI) {}, time.Time{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := trusttest.New(t)
@@ -175,7 +177,18 @@ func TestLoadIdentityRefusals(t *testing.T) {
 			if now.IsZero() {
 				now = time.Now()
 			}
-			if _, err := trust.LoadIdentity(pkiDir, cfg, now, nil); !errors.Is(err, trust.ErrIdentity) {
+			var signer crypto.Signer = p.HostKey
+			switch tc.name {
+			case "no signer":
+				signer = nil
+			case "signer is not P-256":
+				k, kerr := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+				if kerr != nil {
+					t.Fatal(kerr)
+				}
+				signer = k
+			}
+			if _, err := trust.LoadIdentity(pkiDir, cfg, now, nil, signer); !errors.Is(err, trust.ErrIdentity) {
 				t.Fatalf("err = %v, want ErrIdentity", err)
 			}
 		})
@@ -245,4 +258,69 @@ func write(t *testing.T, dir, name, data string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// answerSigner is a signer with a separate view for answers.
+type answerSigner struct {
+	crypto.Signer
+	answers crypto.Signer
+}
+
+func (a answerSigner) AnswerSigner() crypto.Signer { return a.answers }
+
+// TestIdentityUsesTheAnswerView: a signer that has a view for answers is used
+// for the handshake as itself and for answers through that view.
+func TestIdentityUsesTheAnswerView(t *testing.T) {
+	p := trusttest.New(t)
+	trustDir, pkiDir := writeAll(t, p)
+	cfg, err := trust.LoadConfig(trustDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answers, hand := &ecdsaView{p.HostKey}, &ecdsaView{p.HostKey}
+	id, err := trust.LoadIdentity(pkiDir, cfg, time.Now(), nil, answerSigner{Signer: hand, answers: answers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Signer != crypto.Signer(answers) || id.TLS.PrivateKey != crypto.Signer(answerSigner{Signer: hand, answers: answers}) {
+		t.Fatalf("signers: answers %v, TLS %v", id.Signer, id.TLS.PrivateKey)
+	}
+}
+
+// ecdsaView is a distinct signer value over a key.
+type ecdsaView struct{ *ecdsa.PrivateKey }
+
+// TestParseHostKeyZeroesItsInput: the buffer the PEM was in holds no key
+// material afterwards, on success and on failure.
+func TestParseHostKeyZeroesItsInput(t *testing.T) {
+	p := trusttest.New(t)
+	dir := t.TempDir()
+	path := p.WriteKey(t, dir)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := trust.ParseHostKey(b)
+	if err != nil || !k.Equal(p.HostKey) {
+		t.Fatalf("ParseHostKey = %v, %v", k, err)
+	}
+	if !allZero(b) {
+		t.Fatal("the PEM buffer was not zeroed")
+	}
+	bad := []byte("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n")
+	if _, err := trust.ParseHostKey(bad); err == nil {
+		t.Fatal("a bad key was accepted")
+	}
+	if !allZero(bad) {
+		t.Fatal("the buffer of a refused key was not zeroed")
+	}
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }

@@ -22,6 +22,8 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 )
 
 // Initial namespace inode numbers: the fixed inode numbers Linux gives the
@@ -45,6 +47,9 @@ const cgroup2FSType = "cgroup2"
 // directory is the host's provisioned persistent state rather than an empty
 // stand-in mounted in its place.
 const HostMarkerFile = "host-id"
+
+// hostKeyFileName is the host private key's file name.
+const hostKeyFileName = "host.key"
 
 // maxMarkerBytes bounds the provisioning marker.
 const maxMarkerBytes = 4096
@@ -76,11 +81,19 @@ type Config struct {
 	// UID is the agent user's id: the owner the state and key material
 	// directories must have.
 	UID uint32
+	// SignerKeyFile is the path of the host private key file, which belongs
+	// to the signer process; the agent must not be able to read it.
+	SignerKeyFile string
+	// SignerSocketDir is the directory of the signer's socket.
+	SignerSocketDir string
+	// SignerUID is the signer user's id: the owner of SignerSocketDir.
+	SignerUID uint32
 }
 
 // Run runs every start-up check that needs no certificate, in order: the
-// process is not root, the namespaces, cgroup v2, the state directory (owner, mode, persistence), the
-// key material and the trust configuration. It returns the first Failure.
+// process is not root, the namespaces, cgroup v2, the state directory (owner,
+// mode, persistence), the key material, that the agent cannot read the host
+// private key, the signer's socket directory and the trust configuration. It returns the first Failure.
 // The provisioning marker is checked separately (CheckHostMarker), once the
 // host's identity is known.
 func Run(p Probe, cfg Config) error {
@@ -91,6 +104,8 @@ func Run(p Probe, cfg Config) error {
 		func() error { return CheckStateDir(p, cfg.StateDir, cfg.UID) },
 		func() error { return CheckPersistent(p, cfg.StateDir) },
 		func() error { return CheckPKI(p, cfg.PKIDir, cfg.UID) },
+		func() error { return CheckHostKeyUnreadable(p, cfg.PKIDir, cfg.SignerKeyFile) },
+		func() error { return CheckSignerSocketDir(p, cfg.SignerSocketDir, cfg.SignerUID) },
 		func() error { return CheckTrustDir(p, cfg.TrustDir) },
 	} {
 		if err := check(); err != nil {
@@ -257,6 +272,64 @@ func CheckPKI(p Probe, dir string, uid uint32) error {
 		case fi.Mode.Perm()&0o077 != 0:
 			return refuse(ReasonPKIInsecure, check, "%s has mode %04o; it must grant nothing to group or others", path, fi.Mode.Perm())
 		}
+	}
+	return nil
+}
+
+// CheckHostKeyUnreadable refuses a host that lets the agent read the host
+// private key. The key is held by the separate signer process so that the
+// TLS-facing agent never has its bytes; a key file the agent can read (at
+// keyFile, the signer's file) defeats that, and so does a file of that name
+// in the agent's own key material directory, readable or not, which is a
+// stale copy in the wrong place. The agent must be shown to be refused by
+// permission: a keyFile that does not exist, or any other error, also
+// refuses the start, so that a misspelled path cannot pass for a protected
+// one.
+func CheckHostKeyUnreadable(p Probe, pkiDir, keyFile string) error {
+	const check = "host-key"
+	if keyFile == "" || !filepath.IsAbs(keyFile) {
+		return refuse(ReasonHostKeyReadable, check, "%q is not an absolute path to the signer's key file", keyFile)
+	}
+	own := filepath.Join(pkiDir, hostKeyFileName)
+	if _, err := p.Lstat(own); err == nil {
+		return refuse(ReasonHostKeyReadable, check, "%s exists: the host private key belongs to the signer process, not the agent", own)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return refuse(ReasonHostKeyReadable, check, "cannot tell whether %s exists: %v", own, err)
+	}
+	if guard.Off(guard.HostKeyUnreadable) {
+		return nil
+	}
+	ok, err := p.Readable(keyFile)
+	if err != nil {
+		return refuse(ReasonHostKeyReadable, check, "cannot confirm that the agent is refused the host private key file %s: %v", keyFile, err)
+	}
+	if ok {
+		return refuse(ReasonHostKeyReadable, check, "the agent can read the host private key file %s; only the signer's user may", keyFile)
+	}
+	return nil
+}
+
+// CheckSignerSocketDir refuses a signer socket directory that is a symbolic
+// link or not a directory, is not owned by the signer's user uid, grants
+// anything to others or grants write permission to its group: only the
+// signer's user and the group the directory names (the agent's) can reach the
+// socket, and that group cannot replace it.
+func CheckSignerSocketDir(p Probe, dir string, uid uint32) error {
+	const check = "signer-socket"
+	if dir == "" || !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return refuse(ReasonSignerSocketInsecure, check, "%q is not a clean absolute path", dir)
+	}
+	fi, err := p.Lstat(dir)
+	if err != nil {
+		return refuse(ReasonSignerSocketInsecure, check, "cannot stat %s: %v", dir, err)
+	}
+	switch {
+	case fi.Mode&fs.ModeSymlink != 0 || !fi.Mode.IsDir():
+		return refuse(ReasonSignerSocketInsecure, check, "%s is not a directory", dir)
+	case fi.UID != uid:
+		return refuse(ReasonSignerSocketInsecure, check, "%s is owned by uid %d, not the signer's uid %d", dir, fi.UID, uid)
+	case fi.Mode.Perm()&0o027 != 0:
+		return refuse(ReasonSignerSocketInsecure, check, "%s has mode %04o; it must grant nothing to others and no write to its group", dir, fi.Mode.Perm())
 	}
 	return nil
 }

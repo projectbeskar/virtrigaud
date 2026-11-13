@@ -47,5 +47,8 @@ func (System) NamespaceInode(string) (uint64, error) { return 0, errUnsupported 
 // Writable implements Probe.
 func (System) Writable(string) (bool, error) { return false, errUnsupported }
 
+// Readable implements Probe.
+func (System) Readable(string) (bool, error) { return false, errUnsupported }
+
 // EUID implements Probe.
 func (System) EUID() uint32 { return 0 }

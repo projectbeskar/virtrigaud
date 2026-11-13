@@ -151,8 +151,22 @@ func (p *PKI) WriteTrust(t testing.TB, dir string) {
 	}
 }
 
-// WritePKI writes the host key and certificate into dir.
+// WritePKI writes the host certificate into dir, the agent's key material
+// directory. The host key is not written there: the agent never holds it
+// (WriteKey writes it for the signer).
 func (p *PKI) WritePKI(t testing.TB, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, trust.FileHostCert), p.HostCertPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// WriteKey writes the host private key into dir as the signer's key file
+// (trust.FileHostKey, mode 0600) and returns its path.
+func (p *PKI) WriteKey(t testing.TB, dir string) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -161,10 +175,9 @@ func (p *PKI) WritePKI(t testing.TB, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, trust.FileHostKey), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+	path := filepath.Join(dir, trust.FileHostKey)
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, trust.FileHostCert), p.HostCertPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return path
 }

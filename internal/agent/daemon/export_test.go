@@ -18,6 +18,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
@@ -32,4 +33,13 @@ func AllowTestOverrides(t testing.TB) {
 	t.Helper()
 	allowTestOverrides = true
 	t.Cleanup(func() { allowTestOverrides = false })
+}
+
+// SetSignerPoll shortens the pause between attempts to reach the signer at
+// start-up until t ends.
+func SetSignerPoll(t testing.TB, d time.Duration) {
+	t.Helper()
+	old := signerPollEvery
+	signerPollEvery = d
+	t.Cleanup(func() { signerPollEvery = old })
 }
