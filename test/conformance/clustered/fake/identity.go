@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -103,6 +104,8 @@ type identityMode struct {
 	startEpoch uint64
 	// providerUID is the Provider uid the hosts are enrolled with.
 	providerUID string
+	// hostKeys sign the hosts' answers.
+	hostKeys *hostKeys
 }
 
 // newIdentityMode builds the verifier of each host from cfg.
@@ -143,6 +146,9 @@ func newIdentityMode(cfg IdentityConfig, hosts []string) (*identityMode, error) 
 			return nil, fmt.Errorf("fake: verifier for %s: %w", h, err)
 		}
 		m.verifiers[h], m.enrolments[h] = v, enrolment
+	}
+	if m.hostKeys, err = newHostKeys(hosts); err != nil {
+		return nil, fmt.Errorf("fake: host keys: %w", err)
 	}
 	return m, nil
 }
@@ -205,6 +211,8 @@ func (p *provider) ignored(rule operation.Rule) bool {
 		return p.v(AcceptsOuterFields)
 	case operation.RuleIntentDigest:
 		return p.v(IgnoresDigest)
+	case operation.RuleUnknownField:
+		return p.v(AcceptsInnerUnknownField)
 	case operation.RuleBinding:
 		return p.v(IgnoresBinding)
 	}
@@ -331,6 +339,10 @@ func (p *provider) agentStep(host string, hs *hostState, adm *admission) (resp p
 		return nil, false, nil
 	}
 	b := adm.body
+	if hs.answers != nil && hs.answers.quarantine != "" && !p.v(QuarantineAcceptsMutations) {
+		return nil, true, withInfo(codes.FailedPrecondition, "this host's operation store is quarantined",
+			contracts.QuarantinedReason, contracts.ErrorInfoDomain, nil)
+	}
 	ops := p.ops(host, hs)
 	if rec := ops[adm.opID]; rec != nil && !p.v(ExecutesDuplicateOpID) {
 		if !rec.sameIdentity(b) && !p.v(IgnoresOpIDConflict) {
@@ -350,8 +362,21 @@ func (p *provider) agentStep(host string, hs *hostState, adm *admission) (resp p
 			}
 		}
 	}
+	if hs.answers != nil && b.GetAttempt() <= hs.answers.attempts[attemptKey(b.GetVmUid(), b.GetKind())] && !p.v(AcceptsAttemptRegression) &&
+		!p.forgetsOps() {
+		return nil, true, withInfo(codes.FailedPrecondition, "the attempt does not increase",
+			contracts.OpIDConflictReason, contracts.ErrorInfoDomain, nil)
+	}
 	p.cur = adm
 	return nil, false, nil
+}
+
+// forgetsOps reports whether the fake commits a violation that makes a host
+// forget what it accepted: then it forgets the attempts too, so that the
+// re-delivery the violation lets through is not caught by the attempt check
+// instead.
+func (p *provider) forgetsOps() bool {
+	return p.v(ExecutesDuplicateOpID) || p.v(DropsTombstones) || p.v(TombstonesInProviderMemory) || p.v(ForgetsOpsOnHostCrash)
 }
 
 // remember records the operation adm on host with the answer resp, and ends
@@ -373,6 +398,12 @@ func (p *provider) remember(host string, hs *hostState, adm *admission, resp pro
 	if ref := task.GetId(); ref != "" {
 		rec.task = opTaskPrefix + adm.opID
 	}
+	if a := hs.answers; a != nil {
+		k := attemptKey(b.GetVmUid(), b.GetKind())
+		a.attempts[k] = max(a.attempts[k], b.GetAttempt())
+		a.lastOp = adm.opID
+		a.seq++
+	}
 	if rec.task == "" && p.v(DropsTombstones) {
 		return
 	}
@@ -386,6 +417,10 @@ func (p *provider) opTask(hs *hostState, t *task) (string, bool) {
 		return "", false
 	}
 	t.typed, t.outcome = true, providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED
+	if hs.answers != nil && hs.answers.stallNext {
+		hs.answers.stallNext = false
+		t.stalled, t.stallAt = true, time.Now()
+	}
 	if hs.script != nil {
 		t.outcome, t.reason = hs.script.outcome, hs.script.reason
 		hs.script = nil

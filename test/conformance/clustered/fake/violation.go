@@ -247,6 +247,31 @@ const (
 	UnknownAsDone Violation = "unknown-as-done"
 	// DirtyAsClean reports a dirty failure as a clean one.
 	DirtyAsClean Violation = "dirty-as-clean"
+
+	// ForgetsOpsOnHostCrash loses a host's operation records when the
+	// host's agent crashes and restarts.
+	ForgetsOpsOnHostCrash Violation = "forgets-ops-on-host-crash"
+	// AnswersAnotherOp answers a signed TaskStatus with the host's latest
+	// operation instead of the one asked about.
+	AnswersAnotherOp Violation = "answers-another-op"
+	// DeletedWithoutTombstone answers a signed Describe of a placement the
+	// host has no record of with DELETED.
+	DeletedWithoutTombstone Violation = "deleted-without-tombstone"
+	// StaleAnswerNonce echoes the nonce of the host's first signed answer in
+	// every later one.
+	StaleAnswerNonce Violation = "stale-answer-nonce"
+	// AcceptsAttemptRegression accepts a new op_id whose attempt is not above
+	// one already accepted for the VM and kind.
+	AcceptsAttemptRegression Violation = "accepts-attempt-regression"
+	// AcceptsInnerUnknownField acts on request bytes that carry a field it
+	// does not know.
+	AcceptsInnerUnknownField Violation = "accepts-inner-unknown-field"
+	// QuarantineAcceptsMutations lets a host whose store was rolled back
+	// accept mutations.
+	QuarantineAcceptsMutations Violation = "quarantine-accepts-mutations"
+	// StalledRunsForever reports an operation whose step stalled as running
+	// past the step deadline.
+	StalledRunsForever Violation = "stalled-runs-forever"
 )
 
 // All returns every violation, in declaration order.
@@ -270,6 +295,8 @@ func All() []Violation {
 		IdentityCapsHidden, AcceptsUnsigned, RoutesFromOuter, AcceptsForgedGrant, AcceptsWrongKindGrant, AcceptsOuterFields,
 		IgnoresDigest, IgnoresBinding, ExecutesDuplicateOpID, DropsTombstones, TombstonesInProviderMemory,
 		IgnoresOpIDConflict, IgnoresVMBusy, IgnoresMintEpoch, RetiredAsSucceeded, UnknownAsDone, DirtyAsClean,
+		ForgetsOpsOnHostCrash, AnswersAnotherOp, DeletedWithoutTombstone, StaleAnswerNonce, AcceptsAttemptRegression,
+		AcceptsInnerUnknownField, QuarantineAcceptsMutations, StalledRunsForever,
 	}
 }
 
@@ -280,5 +307,7 @@ func IdentityViolations() []Violation {
 		IdentityCapsHidden, AcceptsUnsigned, RoutesFromOuter, AcceptsForgedGrant, AcceptsWrongKindGrant, AcceptsOuterFields,
 		IgnoresDigest, IgnoresBinding, ExecutesDuplicateOpID, DropsTombstones, TombstonesInProviderMemory,
 		IgnoresOpIDConflict, IgnoresVMBusy, IgnoresMintEpoch, RetiredAsSucceeded, UnknownAsDone, DirtyAsClean,
+		ForgetsOpsOnHostCrash, AnswersAnotherOp, DeletedWithoutTombstone, StaleAnswerNonce, AcceptsAttemptRegression,
+		AcceptsInnerUnknownField, QuarantineAcceptsMutations, StalledRunsForever,
 	}
 }

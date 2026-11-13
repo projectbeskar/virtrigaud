@@ -60,6 +60,11 @@ type task struct {
 	typed   bool
 	outcome providerv1.TaskOutcome
 	reason  string
+	// stalled marks the task of an operation whose step stalled at stallAt
+	// (identity mode, StallNextStep): it never finishes on its own, and its
+	// outcome is unknown after the step deadline.
+	stalled bool
+	stallAt time.Time
 }
 
 type hostState struct {
@@ -76,6 +81,8 @@ type hostState struct {
 	ops map[string]*opRecord
 	// script is the outcome the next accepted operation ends with.
 	script *scripted
+	// answers is the host's state for its signed answers (identity mode).
+	answers *answerState
 }
 
 // world is the state that lives on the hosts: it survives a restart of the
@@ -113,6 +120,8 @@ type provider struct {
 	memOps map[string]map[string]*opRecord
 	// cur is the signed call being executed, while w.mu is held.
 	cur *admission
+	// placements are the hosts' placement bindings (identity mode).
+	placements interface{ Binding(host, vmUID string) []byte }
 }
 
 func (p *provider) v(x Violation) bool { return p.violations[x] }
@@ -356,6 +365,9 @@ func (p *provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	if err := p.gate(); err != nil {
 		return nil, err
 	}
+	if len(req.GetAnswerNonce()) != 0 && p.ident != nil {
+		return p.signedDescribe(req)
+	}
 	host, hs, err := p.route(req.TargetHostId, false)
 	if err != nil {
 		return nil, err
@@ -519,9 +531,16 @@ func (p *provider) Delete(ctx context.Context, outer *providerv1.DeleteRequest) 
 	}
 	id := req.Id
 	gone := *v
+	var tomb, delOp string
+	if adm != nil && adm.opID != "" && hs.answers != nil {
+		tomb, delOp = vmTombKey(adm.body.GetVmUid(), adm.body.GetBindingId()), adm.opID
+	}
 	resp := &providerv1.TaskResponse{Task: p.run(host, hs, func() {
 		p.w.deleted = append(p.w.deleted, deletedVM{host: host, v: gone})
 		delete(hs.vms, id)
+		if tomb != "" {
+			hs.answers.vmTombs[tomb] = delOp
+		}
 	})}
 	p.remember(host, hs, adm, resp, resp.Task)
 	return resp, nil
@@ -573,6 +592,9 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 	if err := p.gate(); err != nil {
 		return nil, err
 	}
+	if len(req.GetAnswerNonce()) != 0 && p.ident != nil {
+		return p.signedTaskStatus(req)
+	}
 	ref := req.GetTask().GetId()
 	rest, ok := strings.CutPrefix(ref, taskPrefix)
 	host, inner, ok2 := strings.Cut(rest, "/")
@@ -619,6 +641,7 @@ func (p *provider) TaskStatus(_ context.Context, req *providerv1.TaskStatusReque
 		}
 		return nil, withInfo(codes.NotFound, "no such task on the host", contracts.UnknownToAgentReason, contracts.ErrorInfoDomain, nil)
 	}
+	p.expire(t)
 	if t.typed {
 		return p.typedStatus(t), nil
 	}

@@ -242,7 +242,7 @@ Clustered libvirt: 41 Required cases pass and 5 are skipped, each with a reason 
 calls; no `VM_NOT_OWNED` reason, which the contract does not require of a clustered provider;
 Create runs through a seam, so the owner rebind is left to the real-pipeline tests; no safe way to
 make the Provider itself unready). 3 Recommended cases: 2 pass and 1 fails (recorded below).
-The 17 `identity.*` cases are skipped for clustered libvirt and for the default fake: neither
+The 25 `identity.*` cases are skipped for clustered libvirt and for the default fake: neither
 offers `operation-identity`.
 
 ## Operation identity cases
@@ -261,25 +261,33 @@ cases above do not change. The suite mints grants with `internal/operation` and 
 raw gRPC client, so it can also send grants that are forged, re-signed with other fields, bound
 elsewhere or paired with other request bytes.
 
-| Case | Level | Rule | Needs | identity fake |
-|------|-------|------|-------|---------------|
-| `identity.capabilities` | Required | a Provider whose hosts verify operation grants reports supports_operation_identity, and reports requires_operation_identity exactly when it refuses a mutating call that carries no grant | `operation-identity` | pass |
-| `identity.unsigned-refused` | Required | a Provider that reports requires_operation_identity refuses a mutating call with no operation_envelope with IDENTITY_REQUIRED, and the VM is untouched | `operation-identity`, `operation-identity-required` | pass |
-| `identity.signed-power` | Required | a correctly signed Power is routed by the request inside the envelope, performed on that host, and its task reports TASK_OUTCOME_SUCCEEDED once the host finished it | `operation-identity` | pass |
-| `identity.signed-create-delete` | Required | a correctly signed Create makes the VM on the host its request names, stamped with its owner, and a correctly signed Delete removes it | `operation-identity`, `create` | pass |
-| `identity.forged-grant-refused` | Required | a grant whose signature or certificate chain does not verify to the anchor the host pinned is refused with GRANT_UNAUTHENTICATED, and nothing is performed | `operation-identity` | pass |
-| `identity.wrong-kind-refused` | Required | an authentic grant whose operation kind does not fit the call (another PowerRequest.op, including REBOOT against SHUTDOWN_GRACEFUL, or another RPC) is refused with GRANT_MISMATCH, and nothing is performed | `operation-identity` | pass |
-| `identity.outer-fields-refused` | Required | a request that sets any field beside operation_envelope is refused with INVALID_ARGUMENT, and nothing is performed | `operation-identity` | pass |
-| `identity.digest-bound` | Required | request bytes that are not the ones the grant's intent_digest covers are refused with GRANT_MISMATCH, and neither request is performed | `operation-identity` | pass |
-| `identity.binding-refused` | Required | an authentic grant for another Provider, another enrolment or another host than the one the request names is refused with GRANT_MISMATCH, and nothing is performed | `operation-identity` | pass |
-| `identity.duplicate-op-id-once` | Required | a re-delivery of an op_id the host accepted, even after the operation is over, is answered as the first delivery was and never performed again: a re-sent Delete does not delete a VM made after it | `operation-identity` | pass |
-| `identity.duplicate-after-restart` | Required | the host's record of an accepted op_id survives a restart of the Provider: a re-delivery after the restart is never performed again | `operation-identity` | pass |
-| `identity.op-id-conflict` | Required | a known op_id that arrives with other identity fields (another attempt, another intent_digest, another VM) is refused with OP_ID_CONFLICT, and nothing is performed | `operation-identity` | pass |
-| `identity.vm-busy` | Required | while an operation on a VM is not over, a new operation (a new op_id) for the same VM is refused with VM_BUSY; once the first is over the same attempt is accepted | `operation-identity`, `async-tasks` | pass |
-| `identity.mint-epoch-first-delivery` | Recommended | the first delivery of an op_id minted before the host's enrolment started is refused, and nothing is performed: the host cannot know what an earlier enrolment did with it | `operation-identity` | pass |
-| `identity.outcome-retired` | Required | a task that never started reports TASK_OUTCOME_RETIRED with done=true and a "not performed" error, the manager reads it as not performed, and it had no effect | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass |
-| `identity.outcome-unknown` | Required | a task whose outcome the host cannot tell reports TASK_OUTCOME_UNKNOWN and is never done, and the VM stays busy for a new operation | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass |
-| `identity.outcome-failed-dirty` | Required | a task that failed after an irreversible step reports TASK_OUTCOME_FAILED_DIRTY with done=true and an error, and the manager reads it as a failure, never as not performed | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass |
+| Case | Level | Rule | Needs | identity fake | per-host agent |
+|------|-------|------|-------|---------------|----------------|
+| `identity.capabilities` | Required | a Provider whose hosts verify operation grants reports supports_operation_identity, and reports requires_operation_identity exactly when it refuses a mutating call that carries no grant | `operation-identity` | pass | pass |
+| `identity.unsigned-refused` | Required | a Provider that reports requires_operation_identity refuses a mutating call with no operation_envelope with IDENTITY_REQUIRED, and the VM is untouched | `operation-identity`, `operation-identity-required` | pass | pass |
+| `identity.signed-power` | Required | a correctly signed Power is routed by the request inside the envelope, performed on that host, and its task reports TASK_OUTCOME_SUCCEEDED once the host finished it | `operation-identity` | pass | pass |
+| `identity.signed-create-delete` | Required | a correctly signed Create makes the VM on the host its request names, stamped with its owner, and a correctly signed Delete removes it | `operation-identity`, `create` | pass | pass |
+| `identity.forged-grant-refused` | Required | a grant whose signature or certificate chain does not verify to the anchor the host pinned is refused with GRANT_UNAUTHENTICATED, and nothing is performed | `operation-identity` | pass | pass |
+| `identity.wrong-kind-refused` | Required | an authentic grant whose operation kind does not fit the call (another PowerRequest.op, including REBOOT against SHUTDOWN_GRACEFUL, or another RPC) is refused with GRANT_MISMATCH, and nothing is performed | `operation-identity` | pass | pass |
+| `identity.outer-fields-refused` | Required | a request that sets any field beside operation_envelope is refused with INVALID_ARGUMENT, and nothing is performed | `operation-identity` | pass | pass |
+| `identity.digest-bound` | Required | request bytes that are not the ones the grant's intent_digest covers are refused with GRANT_MISMATCH, and neither request is performed | `operation-identity` | pass | pass |
+| `identity.binding-refused` | Required | an authentic grant for another Provider, another enrolment or another host than the one the request names is refused, and nothing is performed: with GRANT_MISMATCH, except that a host that keeps durable operation records may refuse an enrolment it holds no record of with UNKNOWN_TO_AGENT, which is never definite | `operation-identity` | pass | pass |
+| `identity.duplicate-op-id-once` | Required | a re-delivery of an op_id the host accepted, even after the operation is over, is answered as the first delivery was and never performed again: a re-sent Delete does not delete a VM made after it | `operation-identity` | pass | pass |
+| `identity.duplicate-after-restart` | Required | the host's record of an accepted op_id survives a restart of the Provider: a re-delivery after the restart is never performed again | `operation-identity` | pass | pass |
+| `identity.op-id-conflict` | Required | a known op_id that arrives with other identity fields (another attempt, another intent_digest, another VM) is refused with OP_ID_CONFLICT, and nothing is performed | `operation-identity` | pass | pass |
+| `identity.vm-busy` | Required | while an operation on a VM is not over, a new operation (a new op_id) for the same VM is refused with VM_BUSY; once the first is over the same attempt is accepted | `operation-identity`, `async-tasks` | pass | pass |
+| `identity.mint-epoch-first-delivery` | Recommended | the first delivery of an op_id minted before the host's enrolment started is refused, and nothing is performed: the host cannot know what an earlier enrolment did with it | `operation-identity` | pass | pass |
+| `identity.outcome-retired` | Required | a task that never started reports TASK_OUTCOME_RETIRED with done=true and a "not performed" error, the manager reads it as not performed, and it had no effect | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass | expected failure |
+| `identity.outcome-unknown` | Required | a task whose outcome the host cannot tell reports TASK_OUTCOME_UNKNOWN and is never done, and the VM stays busy for a new operation | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass | pass |
+| `identity.outcome-failed-dirty` | Required | a task that failed after an irreversible step reports TASK_OUTCOME_FAILED_DIRTY with done=true and an error, and the manager reads it as a failure, never as not performed | `operation-identity`, `scripted-outcomes`, `async-tasks` | pass | expected failure |
+| `identity.tombstone-after-restart` | Required | a host's record of a finished op_id survives a crash of its agent: a re-delivery after the restart is answered as the first one was and never performed again, and a signed TaskStatus names it as tombstoned | `operation-identity`, `host-answers` | pass | pass |
+| `identity.taskstatus-bound` | Required | a signed TaskStatus answers for exactly the op_id asked about (its kind, attempt, VM and binding), and an op_id the host never saw is NO_RECORD, NotFound with UNKNOWN_TO_AGENT, never done | `operation-identity`, `host-answers` | pass | pass |
+| `identity.deleted-answer` | Required | a signed Describe answers DELETED, naming the Delete, only after that placement's Delete completed; a placement the host never had is NO_RECORD, never DELETED | `operation-identity`, `host-answers` | pass | pass |
+| `identity.answer-fresh` | Required | every signed answer echoes the nonce of the request it answers, so an answer replayed for another request is detected | `operation-identity`, `host-answers` | pass | pass |
+| `identity.attempt-regression` | Required | a new op_id whose attempt is not above an attempt the host already accepted for the VM and kind is refused with OP_ID_CONFLICT, and nothing is performed | `operation-identity`, `host-answers` | pass | pass |
+| `identity.inner-unknown-field` | Required | an authentic grant over request bytes that carry a field the host does not know is refused with GRANT_MISMATCH, and nothing is performed | `operation-identity`, `host-answers` | pass | pass |
+| `identity.store-quarantined` | Required | a host whose operation store was rolled back refuses every mutation with QUARANTINED, never as definitely not performed, performs nothing, and still answers signed reads with its quarantine | `operation-identity`, `host-answers` | pass | pass |
+| `identity.no-running-forever` | Required | an operation whose step never ends on its own leaves the running state by the host's step deadline: it ends, or its outcome is unknown, and it is never reported running past it | `operation-identity`, `host-answers` | pass | pass |
 
 The identity fake is the instrumented fake made with `fake.NewIdentity`, with a test-only signer
 that exists only in the suite's test binary. It is run three ways: accepting unsigned calls too,
@@ -294,8 +302,35 @@ Recommended.
 
 What the identity cases do not cover: the snapshot family, Clone, the disk calls and the other
 mutating RPCs under a grant; `expect_known`; epochs beyond the identity-only values (no ordering,
-no fencing); and anything host-signed (receipts, signed answers). The fake keeps its operation
-records in memory, on its hosts, so they survive a restart of the Provider but are not durable.
+no fencing); and host-signed receipts. The fake keeps its operation records in memory, on its
+hosts, so they survive a restart of the Provider but are not durable.
+
+### Host answers and the per-host agent target
+
+The eight cases that need `host-answers` check what a per-host agent answers about itself: signed
+`TaskStatus` and `Describe` answers (`OperationAnswer`, `VMAnswer` in
+`proto/provider/v1/host_answer.proto`) that name exactly what was asked, echo the request's nonce
+and verify against the issuer of the hosts' identity certificates (`HostAnswerTarget`); records
+that survive a crash of the agent; refusals of a rolled-back store; and the step deadline. They
+verify each answer as a manager would: body type, the signer's chain, the signature over the
+domain-separated body, no unknown field, the nonce and the host. A Target that tracks VM
+placements (`PlacementTracker`) makes `NewOp` use each VM's placement binding and the next attempt
+per VM and kind, as a manager does; the identity fake and the agent target both do. These cases
+run only on a Target that declares `host-answers`; for every other Target they are skipped and
+listed as not applicable.
+
+[`clustered/agenttarget`](clustered/agenttarget/) (development builds only:
+`go test -tags virtrigaud_dev ./test/conformance/clustered/agenttarget/`) runs every `identity.*`
+case against real per-host agent processes: two hosts, each a separate process of the test binary
+that runs the agent's start-up sequence, operation store, mutual TLS server and the development
+fake executor, behind a thin in-test router that routes and forwards only. The agent's results
+are the last column above. Two cases are recorded as expected failures of that target, not of the
+agent: a power operation cannot reach `RETIRED` (only a re-enrolment freeze produces it) or
+`FAILED_DIRTY` (only an irreversible step does) at the agent, so the target cannot script them. A
+per-host agent keys a VM by its owner's UID: two VMs of one owner on one host are one VM to it, and
+the target maps each seeded VM's name to that UID. The same package holds the crash-point tests:
+the agent process is killed with SIGKILL at each crash point of its operation path, restarted, and
+the operation is shown to end with its once-only effect performed exactly once.
 
 ## Optional features
 
@@ -314,12 +349,14 @@ records in memory, on its hosts, so they survive a restart of the Provider but a
 | `operation-identity` | The Provider reports `supports_operation_identity` and its hosts verify operation grants (`OperationIdentityTarget`). Needed by every `identity.*` case. |
 | `operation-identity-required` | The Provider also reports `requires_operation_identity` and refuses a mutating call with no grant. |
 | `scripted-outcomes` | The Target can make the next operation a host accepts end with a chosen typed outcome (`OutcomeScripter`). |
+| `host-answers` | The Target's hosts answer a `TaskStatus` or `Describe` that carries `answer_nonce` with a host-signed answer, keep their records across a crash of the agent, and can be crashed, rolled back and made to stall a step (`HostAnswerTarget`). |
 
 ## Writing an adapter for another clustered provider
 
 Implement `clustered.Target` (and, for the features you declare, `TaskController`,
 `DialObserver`, `CreateTemplater`, `HostBlackholer`, `HostFaulter`, `HostRemover`,
-`ProviderReadiness`, `OperationIdentityTarget` or `OutcomeScripter`) and run the suite from a test in your provider's package:
+`ProviderReadiness`, `OperationIdentityTarget`, `OutcomeScripter`, `PlacementTracker` or
+`HostAnswerTarget`) and run the suite from a test in your provider's package:
 
 ```go
 func TestMyProvider_Conformance(t *testing.T) {
@@ -337,10 +374,10 @@ that its coverage is reduced.
 ## The instrumented fake and the mutation test
 
 [`clustered/fake`](clustered/fake/) is an in-memory clustered Provider that obeys every rule above
-and can be told to break any one of them (`fake.WithViolations(...)`: 78 violations, such as
+and can be told to break any one of them (`fake.WithViolations(...)`: 86 violations, such as
 `AllowEmptyHost`, `IgnoreOwnerMutate`, `ListDropsUnreachable`, `TaskWrongHost`). In its
 asynchronous mode its effects happen when the host finishes the task, as a real asynchronous
-provider's do. 17 of the violations need its operation-identity mode (`fake.IdentityViolations()`),
+provider's do. 25 of the violations need its operation-identity mode (`fake.IdentityViolations()`),
 such as `AcceptsUnsigned`, `AcceptsWrongKindGrant`, `IgnoresDigest`, `ExecutesDuplicateOpID` and
 `DropsTombstones`; the mutation test runs them against the identity fake that requires a grant. In
 that mode the fake uses the shared verifier (`internal/operation`), the one a per-host agent is to

@@ -253,8 +253,8 @@ func identityCases() []Case {
 		}),
 		idCase(Case{
 			ID:     "identity.binding-refused",
-			Rule:   "an authentic grant for another Provider, another enrolment or another host than the one the request names is refused with GRANT_MISMATCH, and nothing is performed",
-			Source: srcGrantBody + " (provider_uid, host_id, enrolment_id); contracts.GrantMismatchReason",
+			Rule:   "an authentic grant for another Provider, another enrolment or another host than the one the request names is refused, and nothing is performed: with GRANT_MISMATCH, except that a host that keeps durable operation records may refuse an enrolment it holds no record of with UNKNOWN_TO_AGENT, which is never definite",
+			Source: srcGrantBody + " (provider_uid, host_id, enrolment_id); contracts.GrantMismatchReason; docs/task-status-outcomes.md (UNKNOWN_TO_AGENT)",
 			Run: func(e *Env) {
 				vm := seedStopped(e, e.HostA(), "id-binding")
 				op := e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON))
@@ -267,6 +267,14 @@ func identityCases() []Case {
 				} {
 					_, err := e.SendEnvelope(providerv1.Provider_Power_FullMethodName,
 						&providerv1.OperationEnvelope{Request: op.Request, Grant: e.Resign(op, mutate)}, nil)
+					if name == "another enrolment" {
+						// The host cannot tell another host's enrolment from a
+						// predecessor of its own whose records it lost: it may
+						// only refuse without claiming that the op_id never ran.
+						if _, unknown := WireOf(err).Reason(contracts.UnknownToAgentReason); unknown {
+							continue
+						}
+					}
 					requireRefusedWith(e, err, contracts.GrantMismatchReason, "a grant for "+name)
 				}
 				requireNotRunning(e, vm, "grants bound elsewhere")

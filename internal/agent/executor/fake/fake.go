@@ -127,38 +127,41 @@ func (e *Executor) Plan(kind providerv1.OperationKind) ([]executor.Step, error) 
 	return nil, fmt.Errorf("%s: %w", kind, executor.ErrUnsupportedKind)
 }
 
-// Run implements executor.Executor. A step first waits while the hold file
-// exists, then applies the first scripted fault that matches it (see
-// Script), if any, instead of or after its effect. Every effect performed is
-// appended to the effects log.
+// Run implements executor.Executor. A step first applies the first scripted
+// fault that matches it (see Script), if any, then, unless the fault ended
+// it, waits while the hold file exists, and performs its effect. Every
+// effect performed is appended to the effects log.
 func (e *Executor) Run(ctx context.Context, op executor.Operation, step executor.Step) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, err)
+	}
+	e.mu.Lock()
+	fault, _, err := e.takeFault(op, step)
+	if fault == FaultProbeError {
+		e.probeErr[probeKey(op, step)] = true
+	}
+	e.mu.Unlock()
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, err)
+	case fault == FaultNotPerformed:
+		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, errScripted)
+	case fault == FaultStall:
+		<-ctx.Done()
+		return fmt.Errorf("%w: stalled: %v", errScripted, ctx.Err())
+	case fault == FaultProbeError:
+		return fmt.Errorf("%w: effect in doubt", errScripted)
 	}
 	if err := e.waitHold(ctx); err != nil {
 		// Nothing was done while the step was held.
 		return fmt.Errorf("%w: held: %v", executor.ErrNotPerformed, err)
 	}
 	e.mu.Lock()
-	fault, script, err := e.takeFault(op, step)
+	defer e.mu.Unlock()
+	script, err := e.readScript()
 	if err != nil {
-		e.mu.Unlock()
 		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, err)
 	}
-	switch fault {
-	case FaultNotPerformed:
-		e.mu.Unlock()
-		return fmt.Errorf("%w: %v", executor.ErrNotPerformed, errScripted)
-	case FaultStall:
-		e.mu.Unlock()
-		<-ctx.Done()
-		return fmt.Errorf("%w: stalled: %v", errScripted, ctx.Err())
-	case FaultProbeError:
-		e.probeErr[probeKey(op, step)] = true
-		e.mu.Unlock()
-		return fmt.Errorf("%w: effect in doubt", errScripted)
-	}
-	defer e.mu.Unlock()
 	if err := e.runLocked(op, step, script); err != nil {
 		return err
 	}
