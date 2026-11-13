@@ -396,8 +396,9 @@ component was delivered (a short lower-case word such as `sysext` or
 directory, never a path) and may declare its digest; `files` may declare the
 digest of each file the agent hashes. Digests are written `sha256:` and 64
 lower-case hex digits; any other form makes the manifest invalid
-(`unsupported_digest`). Unknown fields, trailing data, a file larger than 16 KiB
-or one that is not a regular file make the manifest invalid. A declared digest
+(`unsupported_digest`). Unknown fields, trailing data, a repeated key, a key whose case differs from
+the field's, invalid UTF-8, nesting deeper than a manifest needs, a file larger
+than 16 KiB or one that is not a regular file make the manifest invalid. A declared digest
 is checked against the digest the agent computed; it is never copied into the
 report.
 
@@ -417,19 +418,22 @@ sensitive.
 
 The agent's built-in catalog names the components it knows, the files it
 executes or loads from each (hashed on every collection), and the version range
-it requires.
+it requires. The catalog's paths are the `/usr/bin` ones listed below: a
+component installed elsewhere is `MISSING` (or, without a manifest, not seen)
+until the catalog learns its path.
 
 | Component | Required | Files | Version read from |
 |-----------|----------|-------|-------------------|
 | `cloud-hypervisor` | yes | `cloud-hypervisor`, optional `ch-remote` | the extension's release file, then the executable's packaging note, then the package database |
 | `guest-kernel` | no | `vmlinux` | the same sources |
 | `hypervisor-firmware` | no | `hypervisor-fw` | the same sources |
-| `virtrigaud-agent` | yes | `vrtg-agent` (the agent's own executable) | the agent's own build |
+| `virtrigaud-agent` | yes | `vrtg-agent` (the running image, read through `/proc/self/exe`) | the agent's own build |
 
 Each reported component has one state, the first that applies:
 `MANIFEST_INVALID`, `MISSING` (declared but not installed, or required and
 neither declared nor present: `not_installed`, `not_declared`),
-`INCOMPATIBLE` (`version_out_of_range`, `version_unreadable`), `UNHEALTHY`
+`INCOMPATIBLE` (`version_out_of_range`; `version_unreadable` when no source gave a
+version or the version has no numeric part, such as `dev`), `UNHEALTHY`
 (`unexpected_extension`, `artifact_digest_mismatch`, `file_digest_mismatch`,
 `digest_limit_exceeded`), `UNMANIFESTED` (present, no manifest declares it),
 else `READY`. A component without a manifest is `UNMANIFESTED` when present and
@@ -445,33 +449,53 @@ collection; a file above a limit makes its component `UNHEALTHY`
 
 **Unexpected extensions.** Every entry of the system extension directories
 (`/etc/extensions`, `/run/extensions`, `/var/lib/extensions`,
-`/usr/lib/extensions`, `/usr/local/lib/extensions`; the first directory that
-holds a name wins) that no manifest declares is listed: a `.raw` image as an
-undeclared image with its digest, anything else as a directory extension. A
-directory extension that holds a component's file makes that component
-`UNHEALTHY` (`unexpected_extension`). Directory entries are listed whether or
-not the extension is merged; an image that overlays a component's files is not
-detected.
+`/usr/lib/extensions`, `/usr/local/lib/extensions`, in that order; the first
+directory that holds a name wins, and `x` and `x.raw` are one name, as for the
+system extension tool) that no manifest declares is listed. A `.raw` regular
+file (or a link to one) is an undeclared image with its digest. A link to
+`/dev/null` masks an extension and is not listed. Everything else is listed as
+a directory extension, without a digest, so that nothing unusual in these
+directories is hidden: a directory, a dangling link, a device node, a FIFO, a
+versioned (`.v`) directory, a file without the `.raw` suffix, and an image
+that cannot be hashed (over the limit, unreadable). One such entry never makes
+the whole report an error; the manager sees an unexpected extension and keeps
+the host out of service. Entries are listed whether or not the extension is
+merged. A directory extension that holds a catalog file of a component, and
+that the component does not declare itself, makes that component `UNHEALTHY`
+(`unexpected_extension`); an image that overlays a component's files is not
+detected. The search order follows the current system extension manual; the
+older manual pages list only the first three directories.
 
 **Feature probes.** `cgroup_v2`, `clone_into_cgroup`, `pidfd`, `pidfs_handle`,
 `pidfd_info_exit`, `initial_pid_namespace`, `initial_cgroup_namespace`,
 `initial_time_namespace`, `hypervisor_pause_resume`, `secure_boot`,
-`measured_boot` and `extension_image_policy_signed`, each `PRESENT`, `ABSENT`
-or `ERROR` with a reason (`probe_failed`, `probe_timeout`,
-`permission_denied`). They are data reads and system calls on the agent itself
-(`pidfd_open`, `name_to_handle_at` on its own process descriptor, `statfs` of
-the cgroup root, the namespace links, the kernel release, the firmware's
-Secure Boot variable and the event log's presence). `clone_into_cgroup` and
-`pidfd_info_exit` are inferred from the kernel release. Two probes cannot be
-decided without running something, and are reported `ERROR` with `probe_failed`
-rather than guessed: `hypervisor_pause_resume` (it needs a self-test of the
+`measured_boot`, `extension_image_policy_signed`, `kvm` and `tun`, each
+`PRESENT`, `ABSENT` or `ERROR` with a reason (`probe_failed`, `probe_timeout`,
+`permission_denied`, `not_evaluated`). They are data reads and calls on the
+agent's own descriptors: `pidfd_open`; a file handle taken from its own process
+descriptor and opened again (`name_to_handle_at`, `open_by_handle_at`), which
+must give the same process; `statfs` of the cgroup root; the namespace links;
+`/dev/kvm` (character device 10:232, opened read-write and closed, with
+`KVM_GET_API_VERSION` asked of that descriptor) and `/dev/net/tun` (10:200,
+opened and closed); and the firmware's Secure Boot variable. A missing Secure
+Boot variable means `ABSENT` only when the host has no EFI firmware, or
+efivarfs is mounted and does not hold it; EFI firmware with efivarfs not
+mounted is `ERROR`. `measured_boot` says whether a TPM firmware event log is
+present, and is `ERROR` unless securityfs is mounted. `clone_into_cgroup` and
+`pidfd_info_exit` are inferred from the kernel release: they cannot see a
+feature a distribution backported, so they err towards `ABSENT`. Two probes
+cannot be decided without running something and are reported `ERROR` with
+`not_evaluated`: `hypervisor_pause_resume` (it needs a self-test of the
 hypervisor in a sandbox) and `extension_image_policy_signed` (the policy is not
-in a file the agent can read).
+in a file the agent can read). A service unit that hides devices from the agent
+(`PrivateDevices=`) makes `kvm` and `tun` read `ABSENT`; the reference unit
+must expose them before those probes mean anything.
 
-**Process identity tier.** The strongest mechanism the agent can use to
-identify a process it starts: `PIDFS_HANDLE` when file handles of process
-descriptors work, `PIDFS_INODE` on a kernel that numbers processes uniquely,
-else `START_TIME`. The service manager's descriptor store is not used yet, so
+**Process identity tier.** The strongest mechanism this host supports for
+identifying a process the agent starts, as the probes show: `PIDFS_HANDLE` when
+a file handle of a process descriptor opens the same process again,
+`PIDFS_INODE` when the agent's own process descriptor lives on the process file
+system, else `START_TIME`. The service manager's descriptor store is not used yet, so
 `PIDFD_STORE` is not reported.
 
 ### Bounds
@@ -492,15 +516,24 @@ file content or environment value is ever copied into the report.
 
 It never runs a program found on the host: no component binary with a version
 flag, no package tool, no self-test. Versions are read as data: an
-`extension-release` file (`SYSEXT_VERSION_ID`, else `VERSION_ID`), the
-packaging metadata note of an ELF file (only the note section, at most 64 KiB),
-or a Debian or Alpine package database. A package database in a binary format
-is not read. Every parser is Go code with a bounded input and is fuzzed; the
-collector links no C code. A test checks that the collector's sources import
+`extension-release` file (`SYSEXT_VERSION_ID`, else `SYSEXT_IMAGE_VERSION`;
+the unprefixed `VERSION_ID` is the host release the extension fits and is never
+used), the packaging metadata note of an ELF file (only the note section, at
+most 64 KiB; the ELF header and section table are read to find it), or a Debian
+or Alpine package database (a line longer than 64 KiB is skipped). A package
+database in a binary format is not read. Every parser is Go code with a bounded
+input and is fuzzed; the collector links no C code. Files are looked at before
+they are opened, and a device node or FIFO is never opened. Logs carry a class
+(permission, not found, an errno number), never an error's text, a path or a
+file name. A test checks that the collector's sources import
 nothing that starts a process.
 
 ### Limits
 
+- A static binary, and firmware or a kernel image, usually carry no packaging
+  note and no package entry, so their version reads `version_unreadable` (the
+  component is `INCOMPATIBLE`) until the version a manifest declares can be
+  attested. The catalog's paths are the `/usr/bin` ones above.
 - The collector runs inside the agent process, which also holds the signer's
   interface. A compromised agent can report any inventory, and a hostile
   manifest or component file reaches the agent's own parsers. Moving the

@@ -101,6 +101,10 @@ func FuzzParseManifest(f *testing.F) {
 		manifestJSON("cloud-hypervisor", "1.2.3", `"artifact":{"name":"a.raw","sha256":"`+digestOf(nil)+`"},"files":{"cloud-hypervisor":"`+digestOf(nil)+`"}`),
 		`{}`, `[]`, `null`, `{"schemaVersion":1}`, `{"schemaVersion":1,"component":"x"`, "\x00\xff", strings.Repeat("[", 5000),
 		manifestJSON("cloud-hypervisor", strings.Repeat("9", 70), ""),
+		`{"schemaVersion":1,"component":"cloud-hypervisor","version":"1","version":"2"}`,
+		`{"schemaversion":1,"Component":"cloud-hypervisor","version":"1"}`,
+		"{\"schemaVersion\":1,\"component\":\"cloud-hypervisor\",\"version\":\"1\",\"source\":\"\xff\"}",
+		`{"schemaVersion":1,"component":"cloud-hypervisor","version":"1","artifact":{"name":"a","Name":"b"}}`,
 	} {
 		f.Add([]byte(seed))
 	}
