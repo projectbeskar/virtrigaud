@@ -82,6 +82,10 @@ type State struct {
 	BootID string
 	// BootTime is the CLOCK_BOOTTIME reading taken when Floor was anchored.
 	BootTime time.Duration
+	// Drained is set by the save at a clean drain (Floor.Drain): the floor
+	// saved is the last one the process held, so a later open in another boot
+	// has no unsaved advance to make up for.
+	Drained bool
 }
 
 // Store persists the floor. Implementations must be safe for use by one
@@ -111,16 +115,19 @@ type Store interface {
 
 const (
 	stateMagic   = "CFL1"
-	stateVersion = 1
+	stateVersion = 2
 	maxBootIDLen = 64
 	// stateFixed is the encoded size without the boot_id bytes: magic,
-	// version, floor, boot time, boot_id length and checksum.
-	stateFixed = len(stateMagic) + 1 + 8 + 8 + 1 + 4
+	// version, floor, boot time, flags, boot_id length and checksum.
+	stateFixed = len(stateMagic) + 1 + 8 + 8 + 1 + 1 + 4
+
+	// flagDrained is the flags bit of State.Drained.
+	flagDrained = 1
 )
 
 // MarshalBinary encodes s as a self-checking record for a Store to write:
-// magic, version, floor and boot time as big-endian nanosecond integers, the
-// boot_id, and a CRC-32 over everything before it.
+// magic, version, floor and boot time as big-endian nanosecond integers, a
+// flags byte, the boot_id, and a CRC-32 over everything before it.
 func (s State) MarshalBinary() ([]byte, error) {
 	if err := s.validate(); err != nil {
 		return nil, fmt.Errorf("encode clock floor: %w", err)
@@ -130,6 +137,11 @@ func (s State) MarshalBinary() ([]byte, error) {
 	buf = append(buf, stateVersion)
 	buf = binary.BigEndian.AppendUint64(buf, uint64(s.Floor.UnixNano())) // #nosec G115 -- validate: floor is after the epoch, so UnixNano is positive
 	buf = binary.BigEndian.AppendUint64(buf, uint64(s.BootTime))         // #nosec G115 -- validate: boot time is not negative
+	var flags byte
+	if s.Drained {
+		flags |= flagDrained
+	}
+	buf = append(buf, flags)
 	buf = append(buf, byte(len(s.BootID)))                               // #nosec G115 -- validate: boot_id is at most maxBootIDLen (64) bytes
 	buf = append(buf, s.BootID...)
 	buf = binary.BigEndian.AppendUint32(buf, crc32.ChecksumIEEE(buf))
@@ -146,7 +158,7 @@ func (s *State) UnmarshalBinary(b []byte) error {
 	if b[len(stateMagic)] != stateVersion {
 		return fmt.Errorf("%w: unknown version %d", ErrCorrupt, b[len(stateMagic)])
 	}
-	idLen := int(b[len(stateMagic)+1+16])
+	idLen := int(b[len(stateMagic)+1+16+1])
 	if len(b) != stateFixed+idLen {
 		return fmt.Errorf("%w: bad length", ErrCorrupt)
 	}
@@ -162,7 +174,11 @@ func (s *State) UnmarshalBinary(b []byte) error {
 	out := State{
 		Floor:    time.Unix(0, int64(floorNanos)).UTC(), // #nosec G115 -- checked against math.MaxInt64 above
 		BootTime: time.Duration(int64(bootNanos)),       // #nosec G115 -- checked against math.MaxInt64 above
-		BootID:   string(b[off+17 : off+17+idLen]),
+		Drained:  b[off+16]&flagDrained != 0,
+		BootID:   string(b[off+18 : off+18+idLen]),
+	}
+	if b[off+16]&^byte(flagDrained) != 0 {
+		return fmt.Errorf("%w: unknown flags", ErrCorrupt)
 	}
 	if err := out.validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrCorrupt, err)

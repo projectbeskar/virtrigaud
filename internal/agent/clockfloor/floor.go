@@ -94,8 +94,10 @@ type Config struct {
 	// floor may have advanced by up to the persist interval plus the observe
 	// period beyond the stored one without being saved, and no boot-time
 	// credit can restore it across boots. The agent sets it to that bound.
-	// The raise never takes the floor beyond the wall clock plus MaxAhead
-	// (an already-ahead stored floor is left as it is). Zero adds nothing.
+	// The raise never takes the floor beyond the wall clock plus this slack
+	// (a stored floor already beyond that is kept as it is), so the lead it
+	// gives is at most the slack however often the host reboots, and it is
+	// not applied after a clean drain (State.Drained). Zero adds nothing.
 	NewBootSlack time.Duration
 }
 
@@ -219,12 +221,18 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 				}
 				floor = credited
 			}
-		} else if cfg.NewBootSlack > 0 {
-			// Another boot: raise by the unsaved advance a crash may have lost,
-			// but never beyond wall + MaxAhead, so a correct clock is never
-			// pushed into the ahead state by this.
+		} else if cfg.NewBootSlack > 0 && !persisted.Drained {
+			// Another boot after a save that was not a clean drain: raise by
+			// the unsaved advance a crash may have lost. The raise stops at
+			// wall + slack (or at the stored floor, which is kept), so the
+			// floor's lead over the clock from this raise is at most the slack
+			// and fast repeated reboots cannot ratchet it up.
 			raised := persisted.Floor.Add(cfg.NewBootSlack)
-			if limit := wall.Add(cfg.MaxAhead); raised.After(limit) {
+			limit := wall.Add(cfg.NewBootSlack)
+			if limit.Before(persisted.Floor) {
+				limit = persisted.Floor
+			}
+			if raised.After(limit) {
 				raised = limit
 			}
 			if raised.After(floor) && !raised.After(maxFloor) {
@@ -253,7 +261,7 @@ func (f *Floor) StartPersisting(ctx context.Context) error {
 	f.mu.Lock()
 	f.persisting = true
 	f.mu.Unlock()
-	return f.observe(ctx, true)
+	return f.observe(ctx, true, false)
 }
 
 // StopPersisting makes Observe and Flush raise the floor in memory only. The
@@ -321,7 +329,7 @@ func (f *Floor) Now() time.Time {
 func (f *Floor) Observe(ctx context.Context) error {
 	f.saveMu.Lock()
 	defer f.saveMu.Unlock()
-	return f.observe(ctx, false)
+	return f.observe(ctx, false, false)
 }
 
 // Flush is Observe that always saves (while the Floor is persisting), for use
@@ -330,12 +338,21 @@ func (f *Floor) Observe(ctx context.Context) error {
 func (f *Floor) Flush(ctx context.Context) error {
 	f.saveMu.Lock()
 	defer f.saveMu.Unlock()
-	return f.observe(ctx, true)
+	return f.observe(ctx, true, false)
+}
+
+// Drain saves the floor at a clean shutdown, marked as drained: the next open
+// in another boot adds no NewBootSlack, because nothing is unsaved. Call it
+// once, after the last Observe.
+func (f *Floor) Drain(ctx context.Context) error {
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
+	return f.observe(ctx, true, true)
 }
 
 // observe raises the floor and, while persisting, saves it when force is set
 // or it advanced PersistInterval beyond the saved one. f.saveMu is held.
-func (f *Floor) observe(ctx context.Context, force bool) error {
+func (f *Floor) observe(ctx context.Context, force, drained bool) error {
 	f.mu.Lock()
 	if f.failed != nil {
 		err := f.failed
@@ -356,7 +373,7 @@ func (f *Floor) observe(ctx context.Context, force bool) error {
 		f.mu.Unlock()
 		return nil
 	}
-	next := State{Floor: f.floor, BootID: f.bootID, BootTime: boot}
+	next := State{Floor: f.floor, BootID: f.bootID, BootTime: boot, Drained: drained}
 	f.mu.Unlock()
 
 	err := f.cfg.Store.Save(ctx, next) // without f.mu: Now keeps answering

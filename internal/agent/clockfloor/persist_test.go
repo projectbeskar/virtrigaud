@@ -18,6 +18,7 @@ package clockfloor_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -139,8 +140,9 @@ func TestFloor_PersistRateAndCrashLoss(t *testing.T) {
 	assert.LessOrEqual(t, inMemory.Sub(lastSaved), step+period)
 }
 
-// After a reboot (another boot_id) the floor is raised by NewBootSlack, the
-// unsaved advance a crash may have lost, but never beyond wall + MaxAhead.
+// After an unclean end (another boot_id, last save not a clean drain) the
+// floor is raised by NewBootSlack, the unsaved advance a crash may have lost,
+// but its lead over the wall clock never exceeds the slack.
 func TestOpen_NewBootSlack(t *testing.T) {
 	ctx := context.Background()
 	const slack = 65 * time.Second
@@ -151,7 +153,6 @@ func TestOpen_NewBootSlack(t *testing.T) {
 	stored := f.Now()
 	cfg := cfgFor(c, s)
 	cfg.NewBootSlack = slack
-	cfg.MaxAhead = 5 * time.Minute
 
 	// Same boot: the boot-time credit restores the advance; no slack.
 	c.boot += 10 * time.Second
@@ -160,28 +161,100 @@ func TestOpen_NewBootSlack(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, stored.Add(10*time.Second), same.Status().Floor)
 
-	// A new boot with the wall clock just behind the stored floor.
+	// A new boot with the wall clock just behind the stored floor: the raise
+	// stops at wall + slack.
 	c.reboot("boot-b")
 	c.wall = stored.Add(-10 * time.Second)
 	f2, err := clockfloor.Open(ctx, cfg)
 	require.NoError(t, err)
-	assert.Equal(t, stored.Add(slack), f2.Status().Floor, "raised by the slack")
+	assert.Equal(t, c.wall.Add(slack), f2.Status().Floor)
 	assert.Equal(t, clockfloor.StateOK, f2.Status().State)
 
-	// A wall clock far behind: the raise stops at wall + MaxAhead, which is
-	// below the stored floor, so the floor stays as stored.
+	// With the wall clock at the stored floor, the full slack.
 	c.reboot("boot-c")
-	c.wall = stored.Add(-time.Hour)
+	c.wall = stored
 	f3, err := clockfloor.Open(ctx, cfg)
 	require.NoError(t, err)
-	assert.Equal(t, stored, f3.Status().Floor)
+	assert.Equal(t, stored.Add(slack), f3.Status().Floor)
 
-	// Without the setting nothing is added.
+	// A wall clock far behind: the stored floor is kept, nothing is added.
 	c.reboot("boot-d")
-	c.wall = stored.Add(-10 * time.Second)
-	f4, err := clockfloor.Open(ctx, cfgFor(c, s))
+	c.wall = stored.Add(-time.Hour)
+	f4, err := clockfloor.Open(ctx, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, stored, f4.Status().Floor)
+
+	// Without the setting nothing is added.
+	c.reboot("boot-e")
+	c.wall = stored.Add(-10 * time.Second)
+	f5, err := clockfloor.Open(ctx, cfgFor(c, s))
+	require.NoError(t, err)
+	assert.Equal(t, stored, f5.Status().Floor)
+}
+
+// After a clean drain the next boot adds nothing: no advance is unsaved.
+func TestOpen_NoSlackAfterCleanDrain(t *testing.T) {
+	ctx := context.Background()
+	c, s := newClocks(), &clockfloor.MemStore{}
+	f := open(t, c, s)
+	c.advance(time.Hour)
+	require.NoError(t, f.Drain(ctx))
+	st, err := s.Load(ctx)
+	require.NoError(t, err)
+	assert.True(t, st.Drained)
+	stored := st.Floor
+
+	c.reboot("boot-b")
+	c.wall = stored
+	cfg := cfgFor(c, s)
+	cfg.NewBootSlack = 65 * time.Second
+	f2, err := clockfloor.Open(ctx, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, stored, f2.Status().Floor, "no slack after a clean drain")
+
+	// The first write of the new run clears the flag, so a crash after it is
+	// unclean.
+	require.NoError(t, f2.StartPersisting(ctx))
+	st, err = s.Load(ctx)
+	require.NoError(t, err)
+	assert.False(t, st.Drained)
+}
+
+// Many fast reboots cannot ratchet the floor's lead over the clock: clean
+// ones add nothing, unclean ones leave a lead of at most the slack.
+func TestOpen_FastRebootsDoNotRatchet(t *testing.T) {
+	const (
+		slack   = 65 * time.Second
+		reboots = 50
+	)
+	for _, clean := range []bool{true, false} {
+		name := "unclean"
+		if clean {
+			name = "clean"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			c, s := newClocks(), &clockfloor.MemStore{}
+			f := open(t, c, s)
+			cfg := cfgFor(c, s)
+			cfg.NewBootSlack = slack
+			for i := 0; i < reboots; i++ {
+				if clean {
+					require.NoError(t, f.Drain(ctx))
+				} else {
+					require.NoError(t, f.Flush(ctx)) // saved, not drained: a crash follows
+				}
+				c.reboot(fmt.Sprintf("boot-%d", i))
+				c.wall = c.wall.Add(time.Second) // a fast reboot
+				var err error
+				f, err = clockfloor.Open(ctx, cfg)
+				require.NoError(t, err)
+				require.NoError(t, f.StartPersisting(ctx))
+				lead := f.Status().Floor.Sub(c.wall)
+				assert.LessOrEqual(t, lead, slack, "reboot %d lead %s", i, lead)
+			}
+		})
+	}
 }
 
 // A save that fails because the store can no longer commit stops persisting;
