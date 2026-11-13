@@ -125,7 +125,8 @@ func (s *Server) verifier() (*grantverify.Verifier, error) {
 
 // grantNow is the time grants are judged at: the later of the host clock and
 // the clock floor while the floor is healthy, and otherwise the zero time,
-// which the verifier refuses as untrustworthy (GRANT_UNAUTHENTICATED). Unlike
+// which the verifier refuses as untrustworthy (operate answers that refusal
+// as UNATTESTED, never definite, see floorRefusal). Unlike
 // the client certificate check (verifyNow), which falls back to the host
 // clock so that reads keep answering, the operation path never judges a
 // grant at a clock the floor does not vouch for, even if the floor's state
@@ -135,6 +136,22 @@ func (s *Server) grantNow() time.Time {
 		return time.Time{}
 	}
 	return s.verifyNow()
+}
+
+// floorRefusal is the non-definite refusal of the readiness gate while the
+// clock floor is not healthy (UNATTESTED with its cause), or nil.
+func (s *Server) floorRefusal() error {
+	cause := ""
+	switch s.opts.Agent.ClockFloorState() {
+	case clockfloor.StateOK:
+		return nil
+	case clockfloor.StateClockFloorAhead:
+		cause = CauseClockFloorAhead
+	default:
+		cause = CauseClockFloorUnavailable
+	}
+	return refusalWith(codes.Unavailable, opstore.ReasonUnattested, "the host refuses operations: "+cause,
+		map[string]string{MetadataCause: cause})
 }
 
 // operate is the operation path of one mutating call, after the peer check
@@ -174,8 +191,23 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 	if guard.Off(guard.LookupBeforeEnrolment) {
 		verify = v.Verify
 	}
+	// The clock floor may have left its healthy state since the readiness
+	// gate: refuse as the gate would (UNATTESTED, never definite) before the
+	// verifier judges the grant at an untrusted clock, which it would refuse
+	// as a definite GRANT_UNAUTHENTICATED, even for an op_id that may have
+	// run.
+	if err := s.floorRefusal(); err != nil {
+		s.opts.Log.Info("operation decision", "decision", "refused", "reason", opstore.ReasonUnattested, "method", method, "actor", actor)
+		return nil, err
+	}
 	verified, err := verify(method, outer)
 	if err != nil {
+		if r, ok := grantverify.AsRefusal(err); ok && r.Rule == grantverify.RuleValidity {
+			// The floor may have changed during the verification itself.
+			if ferr := s.floorRefusal(); ferr != nil {
+				return nil, ferr
+			}
+		}
 		return nil, s.verifyRefusal(method, actor, err)
 	}
 	body := verified.Body

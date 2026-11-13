@@ -35,6 +35,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
@@ -519,4 +520,30 @@ func canaryForms(c []byte) [][]byte {
 	return [][]byte{c, []byte(h), []byte(strings.ToUpper(h)),
 		[]byte(base64.StdEncoding.EncodeToString(c)), []byte(base64.RawStdEncoding.EncodeToString(c)),
 		[]byte(base64.URLEncoding.EncodeToString(c)), []byte(base64.RawURLEncoding.EncodeToString(c))}
+}
+
+// TestOperation_FloorLostAfterTheGateIsNotDefinite: when the clock floor
+// stops being healthy after the readiness gate let a call through, a
+// re-delivery of a known op_id is refused UNATTESTED with the floor's cause,
+// never with a definite reason.
+func TestOperation_FloorLostAfterTheGateIsNotDefinite(t *testing.T) {
+	e := newOpsEnv(t)
+	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
+	task, err := e.send(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitDone(task)
+	// The gate's cause stays empty (the gate already passed); only the
+	// floor's state has changed.
+	for _, st := range []clockfloor.StateKind{clockfloor.StateClockFloorAhead, noFloor} {
+		e.agent.setFloorState(st)
+		_, err = e.send(o)
+		if status.Code(err) != codes.Unavailable || reasonOf(err) != contracts.UnattestedReason {
+			t.Fatalf("floor %q: %v, want Unavailable UNATTESTED", st, err)
+		}
+		if contracts.IsDefiniteNotPerformedReason(reasonOf(err)) {
+			t.Fatal("a refusal for an untrusted clock must never be definite")
+		}
+	}
 }
