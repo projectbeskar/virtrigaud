@@ -233,13 +233,25 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 // compare both itself (Verified.Body carries them), because a grant naming an
 // enrolment whose records the caller no longer holds proves nothing about
 // whether its op_id ran. Every other caller uses Verify.
-func (v *Verifier) VerifyHostBound(fullMethod string, outer proto.Message) (*Verified, error) {
-	return v.verify(fullMethod, outer, false)
+//
+// clock, when not nil, replaces the verifier's Clock for this call, so that a
+// caller judges the grant at one reading of its own clock state.
+func (v *Verifier) VerifyHostBound(fullMethod string, outer proto.Message, clock Clock) (*Verified, error) {
+	return v.verifyAt(fullMethod, outer, false, clock)
 }
 
 // verify implements Verify; bindAll includes the Provider and enrolment in
 // the binding comparison.
 func (v *Verifier) verify(fullMethod string, outer proto.Message, bindAll bool) (*Verified, error) {
+	return v.verifyAt(fullMethod, outer, bindAll, nil)
+}
+
+// verifyAt is verify with clock in place of the verifier's Clock when not
+// nil.
+func (v *Verifier) verifyAt(fullMethod string, outer proto.Message, bindAll bool, clock Clock) (*Verified, error) {
+	if clock == nil {
+		clock = v.clock
+	}
 	env, refusal := envelopeOf(outer)
 	if refusal != nil {
 		return nil, refusal
@@ -251,9 +263,9 @@ func (v *Verifier) verify(fullMethod string, outer proto.Message, bindAll bool) 
 	if refusal := checkSizes(env); refusal != nil {
 		return nil, refusal
 	}
-	now := v.clock.Now()
+	now := clock.Now()
 	if now.IsZero() {
-		return nil, unauthenticated(RuleValidity, "the verifier's clock is not trustworthy")
+		return nil, unauthenticated(RuleUntrustedClock, "the verifier's clock is not trustworthy")
 	}
 	if refusal := v.authenticate(grant, now); refusal != nil {
 		return nil, refusal

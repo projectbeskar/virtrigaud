@@ -114,7 +114,7 @@ func (s *Server) verifier() (*grantverify.Verifier, error) {
 		ProviderUID: c.Identity.Record.ProviderUID,
 		HostID:      c.Identity.HostID(),
 		EnrolmentID: c.Identity.Record.EnrolmentID,
-		Clock:       grantverify.ClockFunc(s.grantNow),
+		Clock:       grantverify.ClockFunc(func() time.Time { c, _ := s.grantClock(); return c.Now() }),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("grant verifier: %w", err)
@@ -123,33 +123,35 @@ func (s *Server) verifier() (*grantverify.Verifier, error) {
 	return v, nil
 }
 
-// grantNow is the time grants are judged at: the later of the host clock and
-// the clock floor while the floor is healthy, and otherwise the zero time,
-// which the verifier refuses as untrustworthy (operate answers that refusal
-// as UNATTESTED, never definite, see floorRefusal). Unlike
-// the client certificate check (verifyNow), which falls back to the host
-// clock so that reads keep answering, the operation path never judges a
-// grant at a clock the floor does not vouch for, even if the floor's state
-// changes between the readiness gate and the verification.
-func (s *Server) grantNow() time.Time {
-	if s.opts.Agent.ClockFloorState() != clockfloor.StateOK {
-		return time.Time{}
-	}
-	return s.verifyNow()
-}
-
-// floorRefusal is the non-definite refusal of the readiness gate while the
-// clock floor is not healthy (UNATTESTED with its cause), or nil.
-func (s *Server) floorRefusal() error {
-	cause := ""
-	switch s.opts.Agent.ClockFloorState() {
+// grantClock reads the clock floor's state and value once and returns the
+// clock this call's grant is judged at: the later of the host clock and the
+// floor while the floor is healthy. When it is not, cause names why (as the
+// readiness gate does) and the clock returns the zero time, which the
+// verifier refuses as an untrusted clock (RuleUntrustedClock). Unlike the
+// client certificate check (verifyNow), which falls back to the host clock so
+// that reads keep answering, the operation path never judges a grant at a
+// clock the floor does not vouch for.
+func (s *Server) grantClock() (clock grantverify.Clock, cause string) {
+	state, floor := s.opts.Agent.ClockFloorState(), s.opts.Agent.ClockFloor()
+	switch state {
 	case clockfloor.StateOK:
-		return nil
+		return grantverify.ClockFunc(func() time.Time {
+			if now := s.opts.Now(); !floor.After(now) {
+				return now
+			}
+			return floor
+		}), ""
 	case clockfloor.StateClockFloorAhead:
 		cause = CauseClockFloorAhead
 	default:
 		cause = CauseClockFloorUnavailable
 	}
+	return grantverify.ClockFunc(func() time.Time { return time.Time{} }), cause
+}
+
+// untrustedClock is the gate's non-definite refusal for an untrusted clock:
+// UNATTESTED with cause.
+func untrustedClock(cause string) error {
 	return refusalWith(codes.Unavailable, opstore.ReasonUnattested, "the host refuses operations: "+cause,
 		map[string]string{MetadataCause: cause})
 }
@@ -185,27 +187,23 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		s.opts.Log.Error(err, "operation refused: no grant verifier", "method", method)
 		return nil, status.Error(codes.Unavailable, "the host cannot verify grants")
 	}
-	verify := v.VerifyHostBound
+	// One reading of the clock floor decides this call. A floor that left
+	// its healthy state since the readiness gate refuses the call as the
+	// gate would (UNATTESTED, never definite): judged at an untrusted clock
+	// the grant would be refused GRANT_UNAUTHENTICATED, a definite reason,
+	// even for an op_id that may have run.
+	clock, cause := s.grantClock()
+	if cause != "" {
+		s.opts.Log.Info("operation decision", "decision", "refused", "reason", opstore.ReasonUnattested, "cause", cause,
+			"method", method, "actor", actor)
+		return nil, untrustedClock(cause)
+	}
+	verify := func(m string, o proto.Message) (*grantverify.Verified, error) { return v.VerifyHostBound(m, o, clock) }
 	if guard.Off(guard.LookupBeforeEnrolment) {
 		verify = v.Verify
 	}
-	// The clock floor may have left its healthy state since the readiness
-	// gate: refuse as the gate would (UNATTESTED, never definite) before the
-	// verifier judges the grant at an untrusted clock, which it would refuse
-	// as a definite GRANT_UNAUTHENTICATED, even for an op_id that may have
-	// run.
-	if err := s.floorRefusal(); err != nil {
-		s.opts.Log.Info("operation decision", "decision", "refused", "reason", opstore.ReasonUnattested, "method", method, "actor", actor)
-		return nil, err
-	}
 	verified, err := verify(method, outer)
 	if err != nil {
-		if r, ok := grantverify.AsRefusal(err); ok && r.Rule == grantverify.RuleValidity {
-			// The floor may have changed during the verification itself.
-			if ferr := s.floorRefusal(); ferr != nil {
-				return nil, ferr
-			}
-		}
 		return nil, s.verifyRefusal(method, actor, err)
 	}
 	body := verified.Body
@@ -352,6 +350,10 @@ func (s *Server) verifyRefusal(method, actor string, err error) error {
 	}
 	s.opts.Log.Info("operation decision", "decision", "refused", "reason", r.Reason, "rule", string(r.Rule),
 		"method", method, "actor", actor)
+	if r.Rule == grantverify.RuleUntrustedClock {
+		// Nothing about the grant was judged: never definite.
+		return untrustedClock(CauseClockFloorUnavailable)
+	}
 	c := codes.FailedPrecondition
 	if r.InvalidArgument {
 		c = codes.InvalidArgument

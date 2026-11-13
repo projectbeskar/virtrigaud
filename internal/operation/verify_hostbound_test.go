@@ -53,7 +53,7 @@ func TestVerifyHostBound_LeavesProviderAndEnrolmentToTheCaller(t *testing.T) {
 			c := newCall(t, pki, kind)
 			tc.edit(c)
 			outer := c.outer(t, pki)
-			got, err := v.VerifyHostBound(c.method, outer)
+			got, err := v.VerifyHostBound(c.method, outer, nil)
 			if tc.hostBound {
 				require.NoError(t, err)
 				assert.Equal(t, c.request, got.RequestBytes)

@@ -18,11 +18,17 @@ package server
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -43,23 +49,35 @@ func (a *floorAgent) ClockFloorState() clockfloor.StateKind { return a.state }
 func (a *floorAgent) UnattestedCause() string               { return "" }
 
 // TestGrantClockFailsClosed: grants are judged at the later of the host
-// clock and a healthy floor, and at the zero time (refused as untrustworthy)
-// whenever the floor is not healthy, while the certificate check falls back
-// to the host clock.
+// clock and a healthy floor, read once per call; an unhealthy floor gives the
+// gate's cause and a clock the verifier refuses as untrusted, which the
+// operation path answers UNATTESTED (never definite), while the certificate
+// check falls back to the host clock.
 func TestGrantClockFailsClosed(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	a := &floorAgent{floor: now.Add(time.Hour), state: clockfloor.StateOK}
-	s := &Server{opts: Options{Agent: a, Now: func() time.Time { return now }}}
-	if got := s.grantNow(); !got.Equal(a.floor) {
-		t.Fatalf("healthy floor ahead: %v, want the floor", got)
+	s := &Server{opts: Options{Agent: a, Now: func() time.Time { return now }, Log: logr.Discard()}}
+	clock, cause := s.grantClock()
+	if cause != "" || !clock.Now().Equal(a.floor) {
+		t.Fatalf("healthy floor ahead: %v %q, want the floor", clock.Now(), cause)
 	}
-	for _, st := range []clockfloor.StateKind{clockfloor.StateClockFloorAhead, ""} {
+	// The call's clock keeps its one reading even if the floor changes.
+	a.state = clockfloor.StateClockFloorAhead
+	if !clock.Now().Equal(a.floor) {
+		t.Fatal("the clock of a call read the floor's state again")
+	}
+	for st, want := range map[clockfloor.StateKind]string{clockfloor.StateClockFloorAhead: CauseClockFloorAhead, "": CauseClockFloorUnavailable} {
 		a.state = st
-		if got := s.grantNow(); !got.IsZero() {
-			t.Fatalf("floor %q: grants judged at %v, want the zero time", st, got)
+		clock, cause := s.grantClock()
+		if cause != want || !clock.Now().IsZero() {
+			t.Fatalf("floor %q: %v %q, want the zero time and %q", st, clock.Now(), cause, want)
 		}
 		if got := s.verifyNow(); !got.Equal(now) {
 			t.Fatalf("floor %q: certificates judged at %v, want the host clock", st, got)
 		}
+	}
+	err := s.verifyRefusal("m", "actor", &grantverify.Refusal{Reason: grantverify.ReasonGrantUnauthenticated, Rule: grantverify.RuleUntrustedClock})
+	if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), CauseClockFloorUnavailable) {
+		t.Fatalf("an untrusted-clock refusal: %v, want UNATTESTED", err)
 	}
 }

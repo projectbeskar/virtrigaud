@@ -68,6 +68,8 @@ const (
 	RuleAuthorityGeneration = grantverify.RuleAuthorityGeneration
 	// RuleValidity is grantverify.RuleValidity.
 	RuleValidity = grantverify.RuleValidity
+	// RuleUntrustedClock is grantverify.RuleUntrustedClock.
+	RuleUntrustedClock = grantverify.RuleUntrustedClock
 	// RuleUnknownField is grantverify.RuleUnknownField.
 	RuleUnknownField = grantverify.RuleUnknownField
 	// RuleUnknownEnum is grantverify.RuleUnknownEnum.

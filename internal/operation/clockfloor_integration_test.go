@@ -115,6 +115,6 @@ func TestVerify_FloorAheadRefusesEveryGrant(t *testing.T) {
 	r, ok := AsRefusal(err)
 	require.True(t, ok, "%v", err)
 	assert.Equal(t, "GRANT_UNAUTHENTICATED", r.Reason)
-	assert.Equal(t, RuleValidity, r.Rule)
+	assert.Equal(t, RuleUntrustedClock, r.Rule)
 	assert.Equal(t, clockfloor.StateClockFloorAhead, f.Status().State)
 }
