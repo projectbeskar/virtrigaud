@@ -1035,6 +1035,13 @@ message GetHostInfoRequest {
   // chain head at that sequence number in AnswerContext.continuity_head. 0 asks
   // for nothing. Set only together with answer_nonce.
   uint64 continuity_seq = 3;
+  // inventory_version asks the host's per-host agent to put its host
+  // inventory in the signed answer (HostAnswer.inventory): the highest
+  // version of HostInventory the caller implements, or 0 for none. The
+  // agent echoes it in the signed inventory. Set only together with
+  // answer_nonce. No built-in provider reads it. Additive and
+  // backward-compatible.
+  uint32 inventory_version = 4;
 }
 
 // Capability check - what features does this provider support
