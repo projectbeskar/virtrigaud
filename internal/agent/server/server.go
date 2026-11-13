@@ -206,6 +206,10 @@ const (
 	CauseClockFloorUnavailable = "clock_floor_unavailable"
 	// CauseFreezeIncomplete: a re-enrolment's freeze stopped partway.
 	CauseFreezeIncomplete = "freeze_incomplete"
+	// CauseEnrolmentMismatch: the store's active enrolment is not the one the
+	// host certificate names; new operations are refused until the host is
+	// enrolled again.
+	CauseEnrolmentMismatch = "enrolment_mismatch"
 )
 
 // Options configures New.

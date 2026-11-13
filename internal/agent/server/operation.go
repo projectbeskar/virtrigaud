@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -147,11 +148,14 @@ func (s *Server) grantNow() time.Time {
 //     (GRANT_MISMATCH:
 //     nothing is recorded, so the refusal is definite);
 //  3. a kind the executor does not implement is Unimplemented;
-//  4. the operation store decides: a known op_id is answered from its record
+//  4. a new op_id (one the store has no trace of) needs the store's active
+//     enrolment to be the one the host certificate names (UNATTESTED
+//     otherwise, never definite);
+//  5. the operation store decides: a known op_id is answered from its record
 //     or tombstone before the grant's Provider and enrolment are compared
 //     with the active enrolment; an enrolment the store has no record of is
 //     UNKNOWN_TO_AGENT, never a definite refusal;
-//  5. an accepted operation gets a runner, and the call is answered with its
+//  6. an accepted operation gets a runner, and the call is answered with its
 //     task reference once its record is durable.
 //
 // Every decision is logged as one audit line with identity fields only.
@@ -202,6 +206,11 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		MintEpoch:    opstore.Epoch{Counter: body.GetMintEpoch().GetCounter(), Holder: body.GetMintEpoch().GetHolder()},
 		Actor:        truncate(actor, actorMax),
 	}
+	ref := opstore.OpRef{EnrolmentID: r.EnrolmentID, OpID: r.OpID}
+	if err := s.checkNewAdmission(ctx, ref); err != nil {
+		audit("refused", opstore.ReasonUnattested)
+		return nil, err
+	}
 	d, err := s.opts.Operations.Admit(ctx, r)
 	if errors.Is(err, opstore.ErrInvalidRequest) {
 		// The store refused a malformed field before reading or writing
@@ -215,7 +224,6 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		s.opts.Log.Error(err, "the operation store could not decide", "op", opHex)
 		return nil, status.Error(codes.Unavailable, "the host's operation store could not decide; ask again with the same op_id")
 	}
-	ref := opstore.OpRef{EnrolmentID: r.EnrolmentID, OpID: r.OpID}
 	switch d.Outcome {
 	case opstore.OutcomeAccepted:
 		s.opts.Operations.Start(ref, verified.RequestBytes)
@@ -235,6 +243,30 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		return &providerv1.CreateResponse{Id: r.VMUID, Task: task}, nil
 	}
 	return &providerv1.TaskResponse{Task: task}, nil
+}
+
+// checkNewAdmission refuses a new operation while the store's active
+// enrolment is not the one the host certificate names (UNATTESTED with the
+// cause CauseEnrolmentMismatch, never definite): such a host signs no answer,
+// so it must not take on operations it could not answer for. An op_id the
+// store already knows is answered from its record or tombstone as always.
+func (s *Server) checkNewAdmission(ctx context.Context, ref opstore.OpRef) error {
+	v, err := s.opts.Operations.AnswerOp(ctx, ref, 0)
+	if err != nil {
+		s.opts.Log.Error(err, "the operation store could not be read", "op", ref.String())
+		return status.Error(codes.Unavailable, "the host's operation store could not decide; ask again with the same op_id")
+	}
+	if v.Found {
+		return nil
+	}
+	c := s.opts.Credentials.Load()
+	e := v.Host.Enrolment
+	if e != nil && bytes.Equal(e.ID, c.Identity.Record.EnrolmentID) && e.ProviderUID == c.Identity.Record.ProviderUID &&
+		bytes.Equal(e.InstallID, c.Identity.Record.InstallID) && e.HostID == c.Identity.HostID() {
+		return nil
+	}
+	return refusalWith(codes.Unavailable, opstore.ReasonUnattested,
+		"the host refuses operations: "+CauseEnrolmentMismatch, map[string]string{MetadataCause: CauseEnrolmentMismatch})
 }
 
 // actorMax bounds the actor recorded for an operation.

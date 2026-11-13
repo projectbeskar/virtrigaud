@@ -33,6 +33,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
@@ -482,5 +483,28 @@ func TestOperation_RedactionCanary(t *testing.T) {
 	}
 	if len(e.logs.all()) == 0 {
 		t.Fatal("no audit line was logged")
+	}
+}
+
+// TestOperation_NewAdmissionNeedsTheCertificatesEnrolment: while the store's
+// active enrolment is not the one the host certificate names, a new op_id is
+// refused UNATTESTED (never definite) and nothing is recorded or performed.
+func TestOperation_NewAdmissionNeedsTheCertificatesEnrolment(t *testing.T) {
+	storeEnrolment := randID()
+	e := newOpsEnvEnrolled(t, storeEnrolment)
+	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
+	o.id.EnrolmentID = storeEnrolment
+	_, err := e.send(o)
+	if status.Code(err) != codes.Unavailable || reasonOf(err) != contracts.UnattestedReason {
+		t.Fatalf("got %v, want Unavailable UNATTESTED", err)
+	}
+	if contracts.IsDefiniteNotPerformedReason(reasonOf(err)) {
+		t.Fatal("an enrolment mismatch must not be a definite refusal")
+	}
+	if v, err := e.store.AnswerOp(ctx(t), opstore.OpRef{EnrolmentID: storeEnrolment, OpID: o.id.OpID}, 0); err != nil || v.Found {
+		t.Fatalf("recorded: %+v %v", v, err)
+	}
+	if n := e.exec.total(); n != 0 {
+		t.Fatalf("effects = %d", n)
 	}
 }

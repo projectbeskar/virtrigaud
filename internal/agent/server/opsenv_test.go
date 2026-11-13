@@ -296,6 +296,13 @@ const startEpoch = 2
 
 func newOpsEnv(t testing.TB, mods ...withOptions) *opsEnv {
 	t.Helper()
+	return newOpsEnvEnrolled(t, nil, mods...)
+}
+
+// newOpsEnvEnrolled is newOpsEnv with the store enrolled as enrolment (the
+// host certificate's enrolment when nil).
+func newOpsEnvEnrolled(t testing.TB, enrolment []byte, mods ...withOptions) *opsEnv {
+	t.Helper()
 	x := newTestExec()
 	proxy := &opsProxy{exec: x}
 	logs := &logLines{}
@@ -317,7 +324,10 @@ func newOpsEnv(t testing.TB, mods ...withOptions) *opsEnv {
 	if err := st.EstablishContinuity(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Enrol(ctx, opstore.Enrolment{ID: e.pki.Record.EnrolmentID, ProviderUID: e.pki.Record.ProviderUID,
+	if enrolment == nil {
+		enrolment = e.pki.Record.EnrolmentID
+	}
+	if err := st.Enrol(ctx, opstore.Enrolment{ID: enrolment, ProviderUID: e.pki.Record.ProviderUID,
 		HostID: trusttest.HostName, InstallID: e.pki.Record.InstallID, StartEpoch: startEpoch}); err != nil {
 		t.Fatal(err)
 	}
