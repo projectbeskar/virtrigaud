@@ -35,13 +35,18 @@ type providerService struct {
 }
 
 // GetHostInfo answers for this host only, with a signed HostAnswer when the
-// request carries answer_nonce. The inventory fields are not reported yet.
+// request carries answer_nonce. When the request also carries an
+// inventory_version of at least 1, the signed answer carries the host
+// inventory; the other RPCs of the agent never do.
 func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoRequest) (*providerv1.HostInfo, error) {
 	if err := checkNonce(req.GetAnswerNonce(), false); err != nil {
 		return nil, err
 	}
 	if req.GetContinuitySeq() != 0 && len(req.GetAnswerNonce()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "continuity_seq is set without answer_nonce")
+	}
+	if req.GetInventoryVersion() != 0 && len(req.GetAnswerNonce()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "inventory_version is set without answer_nonce")
 	}
 	hostID := p.s.opts.Credentials.Load().Identity.HostID()
 	if req.GetHostId() != "" && req.GetHostId() != hostID {
@@ -54,7 +59,7 @@ func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHo
 	return &providerv1.HostInfo{
 		Id:         hostID,
 		Health:     health,
-		HostAnswer: p.s.hostAnswer(ctx, req.GetAnswerNonce(), req.GetContinuitySeq()),
+		HostAnswer: p.s.hostAnswerWithInventory(ctx, req.GetAnswerNonce(), req.GetContinuitySeq(), req.GetInventoryVersion()),
 	}, nil
 }
 

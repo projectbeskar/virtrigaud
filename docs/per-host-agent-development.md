@@ -50,6 +50,7 @@ the VirtRigaud API packages.
 | `--listen-address` | `:9460` | Address served to the Provider. |
 | `--drain-timeout` | `30s` | How long a stop waits for running calls. |
 | `--scrub-interval` | `1h` | How often the operation store reads every record and verifies it against its live-state digest. Must be positive; the scrub cannot be switched off. A scrub that finds damage quarantines the store (`journal_corrupt`), and the service status shows it. |
+| `--inventory-interval` | `60s` | How often the agent collects its host inventory, from `30s` to `600s` (see [Host inventory](#host-inventory)); a change in a manifest or extension directory also triggers a collection. |
 | `--signer-socket` | `/run/virtrigaud-signer/signer.sock` | The signer's Unix socket: clean absolute path. The agent signs only through it. |
 | `--signer-user` | `virtrigaud-signer` | The signer's user, a name or a uid. The agent talks to no other peer on the socket. |
 | `--signer-key-file` | `/var/lib/virtrigaud-signer/host.key` | The host key file the signer reads. The agent never opens it; it checks that it cannot read it (see [Host checks](#host-checks)). |
@@ -318,7 +319,7 @@ and a client may not send keepalive pings more often than every 30 seconds.
 
 | Method | Answer |
 |--------|--------|
-| `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`. `host_id` naming another host, a nonce that is not 16 bytes, or `continuity_seq` without a nonce: `InvalidArgument`. No inventory fields yet. |
+| `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)). `host_id` naming another host, a nonce that is not 16 bytes, `continuity_seq` without a nonce, or `inventory_version` without a nonce: `InvalidArgument`. |
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
 | `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. |
 | `agent.v1.AgentService/InstallRenewedCertificate` | `Unimplemented`. |
@@ -331,7 +332,7 @@ A signed answer is made only for a request with a nonce, and only while the
 store's active enrolment is the one the host certificate names; otherwise the
 read answers without `host_answer`. Its body carries the nonce, the enrolment,
 the store's chain position, newest checkpoint and trust state (read together),
-the agent's API version (1), grant versions (`[1]`), mode (`identity`), store
+the agent's API version (2), grant versions (`[1]`), mode (`identity`), store
 schema version and clock floor. It is signed with the host key, by the signer process, over
 `"virtrigaud.host-signed.v1" 0x00 ‖ be16(len(body_type)) ‖ body_type ‖ be32(len(body)) ‖ body`
 (ECDSA P-256, SHA-256, low-S), as defined in
@@ -355,8 +356,10 @@ first check that fails answers it, and nothing after it runs:
 2. the store is ready: not quarantined (`QUARANTINED`), continuity
    established, recovery run, no incomplete re-enrolment freeze and a
    healthy clock floor (`UNATTESTED`, with the cause in the `ErrorInfo`
-   metadata);
-3. the grant, with the shared verifier: an envelope (`IDENTITY_REQUIRED`
+   metadata). The floor is read again, once, for the call: a floor that
+   stopped being healthy since the gate refuses the call the same way, never
+   with a definite reason;
+3. the grant, with the shared verifier, at that one reading of the floor: an envelope (`IDENTITY_REQUIRED`
    without one), no other field of the outer request (`INVALID_ARGUMENT`),
    the signature and certificate chain to a pinned grant anchor, the
    certificate and grant validity judged at the later of the host clock and
@@ -364,20 +367,26 @@ first check that fails answers it, and nothing after it runs:
    against the method and request type, the request decoded with no
    unknown field, the intent digest, and the installation and host
    (`GRANT_MISMATCH`);
-4. the decoded request names this host and the grant's VM (`GRANT_MISMATCH`);
-5. a kind the executor does not implement: `Unimplemented`;
-6. the operation store decides, under its lock. A known `op_id` is answered
-   from its record or tombstone first: the same identity fields give the same
-   task reference and nothing runs again; other fields give `OP_ID_CONFLICT`.
-   Only then are the grant's Provider and enrolment compared with the active
-   enrolment: another Provider is `GRANT_MISMATCH`; an enrolment the store
+4. the store is read for the `op_id`. A known `op_id` (record or tombstone)
+   goes straight to the store, which answers it from its record: the same
+   identity fields give the same task reference and nothing runs again; other
+   fields give `OP_ID_CONFLICT`. Only an `op_id` the store does not know is
+   checked further:
+   - the grant's VM and Provider UIDs have the shape of a UID, and the
+     decoded request names this host and, as its owner, the grant's VM
+     (`GRANT_MISMATCH`);
+   - a kind the executor does not implement: `Unimplemented`;
+   - the store's active enrolment is the one the host certificate names
+     (`UNATTESTED`, cause `enrolment_mismatch`, never definite);
+5. the operation store decides, under its lock. The grant's Provider and
+   enrolment are compared with the active enrolment: another Provider is `GRANT_MISMATCH`; an enrolment the store
    holds no record of is `UNKNOWN_TO_AGENT`, never a definite refusal,
    because it may be a predecessor whose records were lost. Then the
    first-delivery rule for `mint_epoch` (`GRANT_MISMATCH`), the VM's other
    open operation (`VM_BUSY`), the placement binding (`VM_BINDING_STALE`,
    `VM_NOT_OWNED`), an attempt that does not increase for the VM and kind
    (`OP_ID_CONFLICT`) and a full store (`RESOURCE_EXHAUSTED`);
-7. an accepted operation is answered with its task reference
+6. an accepted operation is answered with its task reference
    (`op-<enrolment id><op_id>` in hex) once its record is durable and
    anchored, and a runner drives its steps.
 
@@ -396,9 +405,12 @@ step that has not ended by then is resolved by inspection: its effect found
 is done, its definite absence a failure (dirty after an irreversible step),
 no evidence an unknown outcome, so a step that never returns ends the
 operation instead of leaving it running. A drain stops runners between
-steps; the next start's recovery resumes them. A runner that stops on a
-store error leaves its operation to the next start's recovery, or to a
-re-delivery of the same attempt, which starts a runner again.
+steps; the next start's recovery resumes them. A run that fails on a store
+error that neither quarantines nor stops it is resumed with a bounded
+backoff for at least the longest step deadline; only then is its outcome
+recorded unknown (`run_failed`). A run that panics is counted durably, and
+the agent stops so that its next start's recovery resolves the step; after
+three panicked runs the operation is not run again (`run_panicked`).
 
 **TaskStatus.** A request with a task reference is answered from the
 operation's record or tombstone: running while it is accepted or executing,
@@ -446,6 +458,224 @@ process with SIGKILL when the last point is reached after the earlier ones;
 `VRTG_AGENT_DEV_ANCHOR_ROTATE_BYTES` shrinks the anchor log's rotation size.
 They exist for the crash-point tests (`test/conformance/clustered/agenttarget`);
 a release build ignores both.
+
+## Host inventory
+
+The agent reports what it observes of the components the host runs virtual
+machines with, in the signed `HostAnswer` of `GetHostInfo`
+(`HostAnswer.inventory`; the field rules and the closed value sets are in
+[`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#host-inventory)).
+It is a **detective control**: signed so that the Provider cannot alter,
+replay or downgrade it, but a host whose agent is compromised can report
+anything.
+
+### When it is sent
+
+Only `GetHostInfo`, only when the request carries `answer_nonce` and an
+`inventory_version` of at least 1. `agent.v1` answers (`Hello`,
+`AgentStatus`) and reads without a nonce never carry it. The answer echoes the
+requested version in `requested_version`, states the highest version the agent
+implements in `supported_version` (1) and uses the lower of the two as
+`inventory_version`; a request for version 0 gets no inventory. An inventory
+that breaks a field rule is never signed: the agent answers without it (still a
+valid signed answer, for every other decision), or, when only its size is the
+problem, with an `OVER_LIMIT` inventory that lists nothing.
+
+### Collection
+
+A background collector builds one immutable snapshot at start, every
+`--inventory-interval`, and after a change in a manifest or extension
+directory once it has been quiet for 5 seconds (at least 30 seconds after the
+previous collection began). A collection that takes longer than 120 seconds is
+abandoned and the snapshot is `UNREADABLE` with `probe_failed`; no second
+collection starts while the abandoned one still holds the file system. Before
+the first collection has finished the inventory is `PENDING`. Answering reads
+the latest snapshot only: no file access, hashing or probing happens per
+request. `snapshot_age_seconds` is the time since the collection finished on
+`CLOCK_BOOTTIME`, which does not jump and counts suspended time.
+
+### Component manifests
+
+A component is declared by a JSON manifest, a file whose name ends in `.json`,
+in one of two directories:
+
+| Directory | Origin reported | Notes |
+|-----------|-----------------|-------|
+| `/usr/share/virtrigaud/host-components.d/` | `READ_ONLY` | Provided with the host image. |
+| `/etc/virtrigaud/host-components.d/` | `WRITABLE` | Host configuration. |
+
+```json
+{
+  "schemaVersion": 1,
+  "component": "cloud-hypervisor",
+  "version": "1.2.3",
+  "source": "sysext",
+  "artifact": {"name": "cloud-hypervisor.raw", "sha256": "sha256:<64 hex digits>"},
+  "files": {"cloud-hypervisor": "sha256:<64 hex digits>"}
+}
+```
+
+`schemaVersion`, `component` and `version` are required. `source` says how the
+component was delivered (a short lower-case word such as `sysext` or
+`package`). `artifact` names the system extension (a name in an extension
+directory, never a path) and may declare its digest; `files` may declare the
+digest of each file the agent hashes. Digests are written `sha256:` and 64
+lower-case hex digits; any other form makes the manifest invalid
+(`unsupported_digest`). Unknown fields, trailing data, a repeated key, a key whose case differs from
+the field's, invalid UTF-8, nesting deeper than a manifest needs, a file larger
+than 16 KiB or one that is not a regular file make the manifest invalid. A declared digest
+is checked against the digest the agent computed; it is never copied into the
+report.
+
+A component declared in both directories, or twice in one, is
+`MANIFEST_INVALID` with `duplicate_declaration`, reported with the read-only
+origin when the image declares it: a manifest in the writable directory cannot
+silently override the image's. It can still **add** a declaration the image
+does not make, so the writable directory must be as protected as the
+component files; a manager can accept only `READ_ONLY` manifests. A manifest
+that names no component of the agent's catalog is reported under the name
+`manifest-` and the first 16 hex digits of the SHA-256 of its file name. That
+hides the characters of the name, not its content: a short, guessable file
+name can be recovered by brute force, so file names must not carry anything
+sensitive.
+
+### What is collected
+
+The agent's built-in catalog names the components it knows, the files it
+executes or loads from each (hashed on every collection), and the version range
+it requires. The catalog's paths are the `/usr/bin` ones listed below: a
+component installed elsewhere is `MISSING` (or, without a manifest, not seen)
+until the catalog learns its path.
+
+| Component | Required | Files | Version read from |
+|-----------|----------|-------|-------------------|
+| `cloud-hypervisor` | yes | `cloud-hypervisor`, optional `ch-remote` | the extension's release file, then the executable's packaging note, then the package database |
+| `guest-kernel` | no | `vmlinux` | the same sources |
+| `hypervisor-firmware` | no | `hypervisor-fw` | the same sources |
+| `virtrigaud-agent` | yes | `vrtg-agent` (the running image, read through `/proc/self/exe`) | the agent's own build |
+
+Each reported component has one state, the first that applies:
+`MANIFEST_INVALID`, `MISSING` (declared but not installed, or required and
+neither declared nor present: `not_installed`, `not_declared`),
+`INCOMPATIBLE` (`version_out_of_range`; `version_unreadable` when no source gave a
+version or the version has no numeric part, such as `dev`), `UNHEALTHY`
+(`unexpected_extension`, `artifact_digest_mismatch`, `file_digest_mismatch`,
+`digest_limit_exceeded`), `UNMANIFESTED` (present, no manifest declares it),
+else `READY`. A component without a manifest is `UNMANIFESTED` when present and
+`MISSING` when required and absent; its version and digests are still reported.
+The reasons `socket_unanswered`, `self_test_failed` and `not_content_addressed`
+are in the closed set but not produced yet.
+
+`artifact_sha256` is the digest of the delivered system extension image;
+a directory extension has none. `files` are listed by name with the digest the
+agent computed. Hashing reads at most 1 GiB of a file and 4 GiB per
+collection; a file above a limit makes its component `UNHEALTHY`
+(`digest_limit_exceeded`).
+
+**Unexpected extensions.** Every entry of the system extension directories
+(`/etc/extensions`, `/run/extensions`, `/var/lib/extensions`,
+`/usr/lib/extensions`, `/usr/local/lib/extensions`, in that order; the first
+directory that holds a name wins, and `x` and `x.raw` are one name, as for the
+system extension tool) that no manifest declares is listed. A `.raw` regular
+file (or a link to one) is an undeclared image with its digest. A link to
+`/dev/null` masks an extension and is not listed. Everything else is listed as
+a directory extension, without a digest, so that nothing unusual in these
+directories is hidden: a directory, a dangling link, a device node, a FIFO, a
+versioned (`.v`) directory, a file without the `.raw` suffix, and an image
+that cannot be hashed (over the limit, unreadable). Two entries of one directory that name the
+same extension (`x` and `x.raw`) make the report `UNREADABLE`
+(`probe_failed`): which one the tool takes is not defined, and neither may be
+dropped. Entries whose name starts with a dot are skipped: the tool's image
+discovery ignores them, so they are never merged (stated from the tool's
+source, not checked against a local manual). One such entry never makes
+the whole report an error; the manager sees an unexpected extension and keeps
+the host out of service. Entries are listed whether or not the extension is
+merged. A directory extension that holds a catalog file of a component, and
+that the component does not declare itself, makes that component `UNHEALTHY`
+(`unexpected_extension`); an image that overlays a component's files is not
+detected. The search order follows the current system extension manual; the
+older manual pages list only the first three directories.
+
+**Feature probes.** `cgroup_v2`, `clone_into_cgroup`, `pidfd`, `pidfs_handle`,
+`pidfd_info_exit`, `initial_pid_namespace`, `initial_cgroup_namespace`,
+`initial_time_namespace`, `hypervisor_pause_resume`, `secure_boot`,
+`measured_boot`, `extension_image_policy_signed`, `kvm` and `tun`, each
+`PRESENT`, `ABSENT` or `ERROR` with a reason (`probe_failed`, `probe_timeout`,
+`permission_denied`, `not_evaluated`). They are data reads and calls on the
+agent's own descriptors: `pidfd_open`; a file handle taken from its own process
+descriptor and opened again (`name_to_handle_at`, `open_by_handle_at`), which
+must give the same process; `statfs` of the cgroup root; the namespace links;
+whether the host exposes `/dev/kvm` and `/dev/net/tun`, read from sysfs
+(`/sys/class/misc/kvm/dev` must read `10:232` and `/sys/class/misc/tun/dev`
+`10:200`); the agent never opens either device, and the sysfs files stay
+readable when the service hides device nodes. A `tun` module that is not loaded
+yet (it is often loaded on first use) has registered nothing and reads
+`ABSENT`; and the firmware's Secure Boot variable. A missing Secure
+Boot variable means `ABSENT` only when the host has no EFI firmware, or
+efivarfs is mounted and does not hold it; EFI firmware with efivarfs not
+mounted is `ERROR`. `measured_boot` says whether a TPM firmware event log is
+present, and is `ERROR` unless securityfs is mounted. `clone_into_cgroup` and
+`pidfd_info_exit` are inferred from the kernel release: they cannot see a
+feature a distribution backported, so they err towards `ABSENT`. Two probes
+cannot be decided without running something and are reported `ERROR` with
+`not_evaluated`: `hypervisor_pause_resume` (it needs a self-test of the
+hypervisor in a sandbox) and `extension_image_policy_signed` (the policy is not
+in a file the agent can read).
+
+**Process identity tier.** The strongest mechanism this host supports for
+identifying a process the agent starts, as the probes show: `PIDFS_HANDLE` when
+a file handle of a process descriptor opens the same process again,
+`PIDFS_INODE` when the agent's own process descriptor lives on the process file
+system, else `START_TIME`. The service manager's descriptor store is not used yet, so
+`PIDFD_STORE` is not reported.
+
+### Bounds
+
+The report is never truncated. When an observation would exceed a bound, the
+inventory is `OVER_LIMIT` and lists nothing, with a reason: more than 32
+components or 64 entries in a manifest directory (`too_many_components`), more
+than 8 files in a component or 64 in all (`too_many_files`), more than 32
+features (`too_many_features`), more than 16 unexpected extensions or 256
+entries in an extension directory (`too_many_extensions`), or more than 32 KiB
+encoded (`inventory_too_large`). A manifest directory that cannot be read, a
+manifest or component file that cannot be read, or a collection that cannot
+finish makes it `UNREADABLE` (`manifest_dir_unreadable`, `io_error`,
+`probe_failed`). Every reason is a member of a closed set; no error text, path,
+file content or environment value is ever copied into the report.
+
+### What the collector never does
+
+It never runs a program found on the host: no component binary with a version
+flag, no package tool, no self-test. Versions are read as data: an
+`extension-release` file (`SYSEXT_VERSION_ID`, else `SYSEXT_IMAGE_VERSION`;
+the unprefixed `VERSION_ID` is the host release the extension fits and is never
+used), the packaging metadata note of an ELF file (only the note section, at
+most 64 KiB; the ELF header and section table are read to find it), or a Debian
+or Alpine package database (a line longer than 64 KiB is skipped; a read error or a database over 32 MiB gives no version, never a half-read answer). A package
+database in a binary format is not read. Every parser is Go code with a bounded
+input and is fuzzed; the collector links no C code. Files are looked at before
+they are opened, and a device node or FIFO is never opened. Logs carry a class
+(permission, not found, an errno number), never an error's text, a path or a
+file name. A test checks that the collector's sources import
+nothing that starts a process.
+
+### Limits
+
+- A static binary, and firmware or a kernel image, usually carry no packaging
+  note and no package entry, so their version reads `version_unreadable` (the
+  component is `INCOMPATIBLE`) until the version a manifest declares can be
+  attested. The catalog's paths are the `/usr/bin` ones above.
+- The collector runs inside the agent process, which also holds the signer's
+  interface. A compromised agent can report any inventory, and a hostile
+  manifest or component file reaches the agent's own parsers. Moving the
+  collector into a separate unprivileged process is required before the
+  regulated profile.
+- Digests are computed when the collector runs, not when a component starts:
+  a file can change between collection and use. The inventory detects drift at
+  the next collection; it does not prevent it.
+- The agent trusts manifests delivered by the same provisioning path as the
+  components. A manager's policy of accepted origins, and an allow-list of
+  digests, are the counters; neither is in the agent.
 
 ## Host key signer
 
@@ -853,7 +1083,7 @@ that is already enrolled is never changed by this file.
   nothing commits, and the answers say UNATTESTED.
 - The provisioning marker is checked with `lstat` and then read with
   `O_NOFOLLOW`, not checked on the open descriptor; it holds no secret.
-- `GetHostInfo` reports no inventory (CPU, memory, storage, components).
+- `GetHostInfo` reports the component inventory but no CPU, memory or storage capacity, and the inventory is a detective control (see [Host inventory](#host-inventory)).
 - Certificate renewal (`InstallRenewedCertificate`) and rotation are not
   available; nor is revocation handling beyond what the start-up checks do
   (an expired certificate is refused at start). Enrolment needs the manager

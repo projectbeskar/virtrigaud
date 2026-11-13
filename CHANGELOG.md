@@ -46,6 +46,36 @@ The per-host agent could only refuse mutations. It now executes a signed operati
 - [ ] Documentation only
 - Development builds only: release builds keep the no-op executor and refuse every mutating call; no Provider routes to the agent yet. The wire contract is unchanged.
 
+## [2026-11-13 18:00] - Per-host agent: signed host inventory in the answer of GetHostInfo (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/inventory/`: the host inventory collector. It reads component manifests (JSON) from the read-only image directory and the writable host-configuration directory, matches them against a built-in catalog (hypervisor, guest kernel, firmware, the agent itself), hashes the files the agent executes or loads and the delivered system extension image (raw SHA-256, computed by the agent, never copied from a manifest), lists system extensions that no manifest declares, runs fourteen feature probes as data reads and calls on the agent's own descriptors (`kvm` and `tun` are read from sysfs; the agent opens no device), and reports the process identity tier. Component states (`READY`, `MISSING`, `INCOMPATIBLE`, `UNHEALTHY`, `UNMANIFESTED`, `MANIFEST_INVALID`), duplicate declarations (origin precedence), hashed names for manifests that name no catalog component, and the closed reason and probe-name sets of inventory version 1 follow the wire-shape document.
+- `internal/agent/inventory/collector.go`: background collection at start, every `--inventory-interval` (default 60 s, 30 to 600 s) and after a debounced change in a manifest or extension directory (5 s quiet, at least 30 s between collections), under a 120 s budget; a collection that exceeds it becomes `UNREADABLE/probe_failed` and no second one starts on top of the abandoned one. The request path reads the latest immutable snapshot only (no file access per request); `snapshot_age_seconds` uses `CLOCK_BOOTTIME`.
+- `internal/agent/inventory/sets.go`: `Validate`, the inventory field rules (version echo and min rule, ordering, bounds, state consistency, closed value sets, unknown fields, 32 KiB size bound). Bounds are never truncated: an exceeded bound is `OVER_LIMIT` with a reason and nothing listed.
+- Probes that cannot be decided as a data read report `ERROR` with the reason `not_evaluated`. A missing Secure Boot variable counts as "not secure boot" only where efivarfs is mounted or there is no EFI firmware, and the measured-boot probe needs securityfs. The tier follows the host's pidfs support (a handle round trip, or the file system of the agent's own process descriptor).
+- Extension directories: a link to `/dev/null` masks an extension; every other entry that is not a plain image (dangling link, device node, FIFO, versioned directory, file without the image suffix, unhashable image) is listed without a digest instead of being hidden or turning the report into an error; `x` and `x.raw` are one name; two entries with the same reported name, or two entries of one directory naming the same extension, make the snapshot `UNREADABLE`.
+- Manifests are read strictly (no repeated keys, exact key case, valid UTF-8). The agent hashes its running image through `/proc/self/exe`. Logs carry an error class, never error text or paths; an unsigned answer logs whether the signer was unavailable, refused the peer, refused or rate limited. A report that breaks a field rule is replaced by a signed `UNREADABLE` (`probe_failed`) inventory; a report above the size bound by `OVER_LIMIT`.
+- Version sources are data only: an extension-release file (`SYSEXT_VERSION_ID`, then `SYSEXT_IMAGE_VERSION`; never the host's `VERSION_ID`), the packaging note of an ELF file (only the note section, at most 64 KiB), a Debian or Alpine package database. The collector never executes a component binary or a package tool and links no C code; every parser is bounded and fuzzed. A test checks the package's sources for process-starting imports and calls and that it builds without cgo.
+- `internal/agent/internal/guard/guard.go`: two mutation guards, `inventory-validate` and `inventory-only-when-asked`.
+- `internal/agent/config/config.go`: `--inventory-interval`.
+- Tests: component states from fixture trees, duplicate declarations and origins, name collisions, `OVER_LIMIT` at every bound, digest formats, unexpected extensions, hashing limits, version sources and their order, debounce and minimum gap, collection budget, request path without I/O, echo and min rules, the published test vector for an inventory in the signed body reproduced from the generated types and signed through a test signer, a maximal report, an older decoder's view of an answer with and without inventory, `GetHostInfo` end to end (server and daemon), redaction canary, fuzzing of the manifest, ELF note, package database, extension-release and range parsers.
+
+### Changed
+- `internal/agent/answer/answer.go`: `AgentAPIVersion` is 2. `Host` carries the request's inventory version and the inventory; `HostAnswer` refuses an inventory for a request that asked for none or one that breaks a field rule (`ErrInvalidInventory`), and `Sign` validates an inventory again before signing, so an inventory that breaks a rule is never signed.
+- `internal/agent/server/`: `GetHostInfo` puts the inventory in the signed answer when the request carries a nonce and `inventory_version` of at least 1, echoing the requested version and using the lower of it and the supported version; `inventory_version` without a nonce is `InvalidArgument`. `Hello`, `AgentStatus` and reads without a nonce never carry it. An inventory that breaks a rule is dropped (the answer is still signed), and one that cannot be signed because of its size is replaced by an `OVER_LIMIT` inventory.
+- `internal/agent/daemon/daemon.go`: the collector runs from start-up until the agent drains.
+- `docs/per-host-agent-development.md`: the host inventory section (manifest locations and format, what is collected, bounds, what the collector never does, threat statement).
+
+### Why
+A manager needs the host's component state in the answer the Provider cannot alter. The collector gives it as data the agent read and hashed itself; signing protects it in transit and makes it fresh, not true.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-11-13 18:00] - Agent half of host enrolment: key, request, certificate install, enrolment from the certificate (development builds only)
 **Author:** @wrkode (William Rizzo)
 

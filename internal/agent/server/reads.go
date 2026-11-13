@@ -168,7 +168,7 @@ func (p *providerService) TaskStatus(ctx context.Context, req *providerv1.TaskSt
 		view, readErr = s.opts.Operations.AnswerOp(ctx, ref, req.GetContinuitySeq())
 		return readErr
 	}, false
-	blob := s.signAnswer(ctx, nonce, func(h answer.Host) (proto.Message, error) {
+	blob := s.signAnswer(ctx, nonce, 0, func(h answer.Host) (proto.Message, error) {
 		didRead = true
 		if err := read(); err != nil {
 			return nil, err
@@ -235,7 +235,7 @@ func (p *providerService) Describe(ctx context.Context, req *providerv1.Describe
 		view, readErr = s.opts.Operations.AnswerVM(ctx, uid, binding, req.GetContinuitySeq())
 		return readErr
 	}, false
-	blob := s.signAnswer(ctx, req.GetAnswerNonce(), func(h answer.Host) (proto.Message, error) {
+	blob := s.signAnswer(ctx, req.GetAnswerNonce(), 0, func(h answer.Host) (proto.Message, error) {
 		didRead = true
 		if err := read(); err != nil {
 			return nil, err

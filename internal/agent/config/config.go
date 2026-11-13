@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
+	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 )
 
 // Defaults.
@@ -52,6 +53,8 @@ const (
 	// DefaultScrubInterval is the period of the operation store's scrub: a
 	// read of every record against the store's live-state digest.
 	DefaultScrubInterval = time.Hour
+	// DefaultInventoryInterval is the period of the host inventory collection.
+	DefaultInventoryInterval = 60 * time.Second
 	// PKIDirName is the key material directory inside the state directory.
 	PKIDirName = "pki"
 	// DefaultSignerSocket is the Unix socket of the signer process, which
@@ -77,6 +80,8 @@ const (
 	FlagDrainTimeout = "drain-timeout"
 	// FlagScrubInterval names the scrub interval flag.
 	FlagScrubInterval = "scrub-interval"
+	// FlagInventoryInterval names the host inventory interval flag.
+	FlagInventoryInterval = "inventory-interval"
 	// FlagSignerSocket names the signer socket flag.
 	FlagSignerSocket = "signer-socket"
 	// FlagSignerUser names the signer user flag.
@@ -113,6 +118,9 @@ type Config struct {
 	// positive: the scrub cannot be switched off, because it is what finds a
 	// damaged record that nothing reads.
 	ScrubInterval time.Duration
+	// InventoryInterval is the period of the host inventory collection, from
+	// 30 s to 600 s; zero uses DefaultInventoryInterval.
+	InventoryInterval time.Duration
 	// SignerSocket is the Unix socket of the signer process; the agent signs
 	// only through it.
 	SignerSocket string
@@ -141,6 +149,7 @@ func Register(fs *flag.FlagSet) *Config {
 	fs.StringVar(&c.ListenAddress, FlagListenAddress, DefaultListenAddress, "the address the agent serves the Provider on")
 	fs.DurationVar(&c.DrainTimeout, FlagDrainTimeout, DefaultDrainTimeout, "how long a stop waits for running calls")
 	fs.DurationVar(&c.ScrubInterval, FlagScrubInterval, DefaultScrubInterval, "how often the operation store reads every record to verify it (cannot be disabled)")
+	fs.DurationVar(&c.InventoryInterval, FlagInventoryInterval, DefaultInventoryInterval, "how often the agent collects its host inventory (30s to 600s); manifest changes also trigger a collection")
 	fs.StringVar(&c.SignerSocket, FlagSignerSocket, DefaultSignerSocket, "the Unix socket of the signer process that holds the host key")
 	fs.StringVar(&c.SignerUser, FlagSignerUser, DefaultSignerUser, "the signer process's user (name or uid); the agent talks to no other peer")
 	fs.StringVar(&c.SignerKeyFile, FlagSignerKeyFile, DefaultSignerKeyFile, "the host key file the signer reads; the agent refuses to start when it can read it")
@@ -173,6 +182,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ScrubInterval <= 0 {
 		return fmt.Errorf("--%s must be positive", FlagScrubInterval)
+	}
+	if c.InventoryInterval != 0 && (c.InventoryInterval < inventory.MinInterval || c.InventoryInterval > inventory.MaxInterval) {
+		return fmt.Errorf("--%s must be between %v and %v", FlagInventoryInterval, inventory.MinInterval, inventory.MaxInterval)
 	}
 	if _, err := c.TrustDir(); err != nil {
 		return err

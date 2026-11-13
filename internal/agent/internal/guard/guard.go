@@ -125,6 +125,13 @@ const (
 	// RecoveredOpsRun: the agent starts a runner for every operation that
 	// recovery left runnable, so that no operation stays running without one.
 	RecoveredOpsRun Name = "recovered-ops-run"
+	// InventoryValidate: a host inventory is checked against the inventory
+	// field rules before it is put in an answer and again before it is
+	// signed.
+	InventoryValidate Name = "inventory-validate"
+	// InventoryOnlyWhenAsked: an inventory is never put in the answer to a
+	// request that did not ask for one.
+	InventoryOnlyWhenAsked Name = "inventory-only-when-asked"
 	// EnrolKeyNeverReplaced: enrolment never replaces an existing host key.
 	EnrolKeyNeverReplaced Name = "enrol-key-never-replaced"
 	// EnrolCSRKeyType: the enrolment request is built only for an ECDSA
@@ -156,7 +163,7 @@ func All() []Name {
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
 		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
-		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun,
+		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun, InventoryValidate, InventoryOnlyWhenAsked,
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
 		EnrolLoaderCheck,
 	}

@@ -185,7 +185,7 @@ func TestHostAnswer(t *testing.T) {
 		c.GetAgentState() != providerv1.AgentState_AGENT_STATE_READY || c.GetCheckpointSeq() != 0 || c.GetCheckpointHead() != nil {
 		t.Fatalf("context = %v", c)
 	}
-	if a.GetMode() != providerv1.AgentMode_AGENT_MODE_IDENTITY || a.GetAgentApiVersion() != 1 ||
+	if a.GetMode() != providerv1.AgentMode_AGENT_MODE_IDENTITY || a.GetAgentApiVersion() != answer.AgentAPIVersion ||
 		len(a.GetGrantVersions()) != 1 || a.GetGrantVersions()[0] != 1 || a.GetClockFloor().AsTime().Unix() != 1700000000 {
 		t.Fatalf("answer = %v", a)
 	}
