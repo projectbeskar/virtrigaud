@@ -82,6 +82,12 @@ const (
 	// KnownBeforeMismatch: admission answers a known op_id from its record
 	// or tombstone before refusing on the enrolment.
 	KnownBeforeMismatch Name = "known-before-mismatch"
+	// FreezeResumeRecover: recovery finishes a re-enrolment freeze that a
+	// crash left incomplete, before it classifies any operation.
+	FreezeResumeRecover Name = "freeze-resume-recover"
+	// FreezeResumeReenrol: Reenrol finishes an incomplete freeze before it
+	// activates the new enrolment.
+	FreezeResumeReenrol Name = "freeze-resume-reenrol"
 )
 
 // All lists every guard, in a fixed order.
@@ -90,6 +96,6 @@ func All() []Name {
 		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
-		CloseAfterIOError, UnknownEnrolmentNotDefinite,
+		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
 	}
 }

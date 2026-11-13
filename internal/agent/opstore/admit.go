@@ -226,7 +226,7 @@ func (s *Store) admitLocked(ctx context.Context, r Request) (Decision, *auditBuf
 	switch st, _ := s.j.State(); {
 	case st == journal.StateLost:
 		return refused(RefusalQuarantined), buf, nil
-	case st != journal.StateReady || !s.ready:
+	case st != journal.StateReady || !s.ready || s.freezing:
 		return refused(RefusalUnattested), buf, nil
 	}
 	id := r.identity()

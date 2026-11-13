@@ -142,7 +142,7 @@ func (s *Store) saveOp(ctx context.Context, rec *pb.OpRecord, extra func(tx *jou
 // to recovery; it never resolves a step.
 func (s *Store) Execute(ctx context.Context, ref OpRef, payload []byte) (OpView, error) {
 	s.mu.Lock()
-	if !s.ready {
+	if !s.ready || s.freezing {
 		s.mu.Unlock()
 		return OpView{}, ErrNotReady
 	}

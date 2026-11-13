@@ -242,6 +242,24 @@ func (s *Store) Recover(ctx context.Context) ([]OpRef, error) {
 	case s.ready:
 		return nil, fmt.Errorf("recover: %w", ErrAlreadyRecovered)
 	}
+	if s.freezing && !guard.Off(guard.FreezeResumeRecover) {
+		// A crash left a re-enrolment's freeze incomplete: finish it before any
+		// operation of the frozen enrolment is classified, so that each one is
+		// frozen once, as provider_changed.
+		var fm *freezeMarker
+		if err := s.j.View(ctx, func(tx *journal.Tx) error {
+			var err error
+			fm, err = readFreeze(tx)
+			return err
+		}); err != nil {
+			return nil, fmt.Errorf("recover: %w", err)
+		}
+		if fm != nil {
+			if err := s.freezeLocked(ctx, fm.prev); err != nil {
+				return nil, fmt.Errorf("recover: resume freeze: %w", err)
+			}
+		}
+	}
 	if err := s.scanWitnesses(ctx); err != nil {
 		return nil, fmt.Errorf("recover: %w", err)
 	}

@@ -57,6 +57,9 @@ const (
 	// PointMidReenrolment: the predecessor enrolment is frozen; the new one
 	// is not active.
 	PointMidReenrolment journal.Point = "mid-reenrolment"
+	// PointMidFreeze: one chunk of a re-enrolment's freeze is durable and
+	// the freeze-in-progress marker names the rest.
+	PointMidFreeze journal.Point = "mid-freeze"
 )
 
 // DefaultMaxStoreBytes is the default store size above which new operations
@@ -79,6 +82,10 @@ type Options struct {
 	// MaxStoreBytes is the store size above which new operations are
 	// refused. Zero uses DefaultMaxStoreBytes.
 	MaxStoreBytes int64
+	// FreezeChunk is the largest number of operations one re-enrolment
+	// freeze transaction freezes. Zero uses DefaultFreezeChunk; tests set a
+	// small value to exercise a freeze that takes several transactions.
+	FreezeChunk int
 	// Audit receives every admission decision and state change, including
 	// refusals that write nothing, for example to write a structured
 	// system-journal line. It never receives request bytes. Nil discards. It
@@ -110,7 +117,7 @@ type AuditEvent struct {
 // Errors returned by the store.
 var (
 	// ErrNotReady is returned before Recover has run.
-	ErrNotReady = errors.New("operation store not ready: recovery has not run")
+	ErrNotReady = errors.New("operation store not ready: recovery has not run or a re-enrolment freeze is incomplete")
 	// ErrNoEnrolment is returned when no enrolment is active.
 	ErrNoEnrolment = errors.New("operation store has no active enrolment")
 	// ErrUnknownOperation is returned for an operation the store has no
@@ -133,6 +140,10 @@ type Store struct {
 	// transitions, enrolment changes and compaction batches.
 	mu    sync.Mutex
 	ready bool
+	// freezing is set while a re-enrolment's freeze is incomplete (its
+	// marker is in the store). The host refuses every operation while it is
+	// set; Recover and Reenrol finish the freeze. Guarded by mu.
+	freezing bool
 	// recovered mirrors ready for readers that must not wait for s.mu
 	// (Ready), which Recover holds while it runs.
 	recovered atomic.Bool
@@ -162,6 +173,14 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	if err := s.checkMarker(ctx); err != nil {
 		_ = j.Close()
 		return nil, fmt.Errorf("open operation store: %w", err)
+	}
+	if err := j.View(ctx, func(tx *journal.Tx) error {
+		fm, err := readFreeze(tx)
+		s.freezing = fm != nil
+		return err
+	}); err != nil {
+		_ = j.Close()
+		return nil, fmt.Errorf("open operation store: read freeze marker: %w", err)
 	}
 	return s, nil
 }
