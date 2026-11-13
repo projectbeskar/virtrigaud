@@ -28,12 +28,16 @@ for f in "${UNIT_DIR}"/*.service; do
 	units+=("${tmp}/${name}")
 done
 
-# --recursive-errors=no keeps the exit status to the units given here.
-# systemd-analyze still loads the units they reference (targets, dbus) from
+# --recursive-errors=no (systemd 250 and later) keeps the exit status to the
+# units given here; older systemd-analyze lacks the option. It still loads the units they reference (targets, dbus) from
 # the build machine and prints that machine's own warnings about them, so
 # only messages that name one of our units count.
 names_re="$(printf '%s\n' "${units[@]##*/}" | sed 's/[.]/[.]/g' | paste -sd'|' -)"
-raw="$(systemd-analyze verify --man=no --recursive-errors=no "${units[@]}" 2>&1)" || {
+extra=()
+if systemd-analyze --help 2>/dev/null | grep -q -- '--recursive-errors'; then
+	extra+=(--recursive-errors=no)
+fi
+raw="$(systemd-analyze verify --man=no "${extra[@]}" "${units[@]}" 2>&1)" || {
 	echo "${raw}" >&2
 	echo "verify-systemd-units: systemd-analyze verify failed" >&2
 	exit 1
