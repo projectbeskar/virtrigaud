@@ -113,6 +113,13 @@ const (
 	// HostKeyUnreadable: the agent refuses to start when it can read the
 	// host key file.
 	HostKeyUnreadable Name = "host-key-unreadable"
+	// InventoryValidate: a host inventory is checked against the inventory
+	// field rules before it is put in an answer and again before it is
+	// signed.
+	InventoryValidate Name = "inventory-validate"
+	// InventoryOnlyWhenAsked: an inventory is never put in the answer to a
+	// request that did not ask for one.
+	InventoryOnlyWhenAsked Name = "inventory-only-when-asked"
 )
 
 // All lists every guard, in a fixed order.
@@ -124,5 +131,6 @@ func All() []Name {
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
 		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
+		InventoryValidate, InventoryOnlyWhenAsked,
 	}
 }

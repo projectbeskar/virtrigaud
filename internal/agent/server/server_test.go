@@ -376,7 +376,7 @@ func TestHelloSignedAnswer(t *testing.T) {
 	cx := a.GetContext()
 	if !bytes.Equal(cx.GetNonce(), nonce(5)) || cx.GetProviderUid() != trusttest.ProviderUID || cx.GetHostId() != trusttest.HostName ||
 		!bytes.Equal(cx.GetEnrolmentId(), e.pki.Record.EnrolmentID) || cx.GetAgentState() != providerv1.AgentState_AGENT_STATE_READY ||
-		a.GetAgentApiVersion() != 1 || a.GetMode() != providerv1.AgentMode_AGENT_MODE_IDENTITY {
+		a.GetAgentApiVersion() != answer.AgentAPIVersion || a.GetMode() != providerv1.AgentMode_AGENT_MODE_IDENTITY {
 		t.Fatalf("answer = %v", a)
 	}
 	st, err := c.AgentStatus(ctx(t), &agentv1.AgentStatusRequest{AnswerNonce: nonce(6)})

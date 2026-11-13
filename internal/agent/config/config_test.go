@@ -94,3 +94,19 @@ func TestScrubIntervalFlag(t *testing.T) {
 		t.Fatalf("%v, %v", c.ScrubInterval, err)
 	}
 }
+
+func TestInventoryIntervalFlag(t *testing.T) {
+	if c := parse(t); c.InventoryInterval != config.DefaultInventoryInterval || c.Validate() != nil {
+		t.Fatalf("default = %v", c.InventoryInterval)
+	}
+	for _, ok := range []string{"30s", "60s", "10m"} {
+		if c := parse(t, "--inventory-interval="+ok); c.Validate() != nil {
+			t.Errorf("%s refused", ok)
+		}
+	}
+	for _, bad := range []string{"29s", "601s", "-1s", "1h"} {
+		if c := parse(t, "--inventory-interval="+bad); c.Validate() == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+}
