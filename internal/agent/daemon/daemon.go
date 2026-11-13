@@ -215,6 +215,9 @@ func (a *agentState) TrustState() (providerv1.AgentState, string) {
 // UnattestedCause implements server.Agent: why a ready store still refuses
 // operations, or "".
 func (a *agentState) UnattestedCause() string {
+	if st, _ := a.store.Journal().State(); st == journal.StateLost {
+		return "" // a quarantine says why
+	}
 	if a.store.Freezing() {
 		return server.CauseFreezeIncomplete
 	}

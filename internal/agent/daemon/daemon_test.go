@@ -41,6 +41,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
+	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -666,5 +667,48 @@ func TestDrainMarksTheFloorDrained(t *testing.T) {
 	}
 	if !load().Drained {
 		t.Fatal("the floor was not marked drained at a clean stop")
+	}
+}
+
+// TestLostJournalWithoutADatabaseStillStarts: a store whose database is gone
+// (journal_missing) or unopenable (journal_corrupt) starts QUARANTINED and
+// answers reads, instead of refusing to start.
+func TestLostJournalWithoutADatabaseStillStarts(t *testing.T) {
+	for name, tc := range map[string]struct {
+		damage func(t *testing.T, path string)
+		want   journal.LostReason
+	}{
+		"missing": {func(t *testing.T, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}, journal.LostJournalMissing},
+		"garbage": {func(t *testing.T, path string) {
+			if err := os.WriteFile(path, bytes.Repeat([]byte("garbage!"), 1024), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, journal.LostJournalCorrupt},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHost(t)
+			r, _ := h.run()
+			if err := r.stop(); err != nil {
+				t.Fatal(err)
+			}
+			tc.damage(t, filepath.Join(h.stateDir, journal.StoreFile))
+			r, state := h.run()
+			if state != providerv1.AgentState_AGENT_STATE_QUARANTINED ||
+				!h.notes.has(systemd.NotifyReady+"\nSTATUS=AGENT_STATE_QUARANTINED ("+string(tc.want)+")") {
+				t.Fatalf("state = %v, notifications %v\n%s", state, h.notes.snapshot(), h.logs.text())
+			}
+			// Reads are served: Hello succeeds (unsigned, the store has no
+			// enrolment to read) and a mutation is refused as quarantined.
+			if _, err := agentv1.NewAgentServiceClient(r.conn()).Hello(callCtx(t), &agentv1.HelloRequest{AnswerNonce: bytes.Repeat([]byte{1}, 16), CallerApiVersion: 1}); err != nil {
+				t.Fatalf("Hello = %v", err)
+			}
+			if code, reason := r.create(); code != "FailedPrecondition" || reason != opstore.ReasonQuarantined {
+				t.Fatalf("Create = %s %s", code, reason)
+			}
+		})
 	}
 }

@@ -183,6 +183,14 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		s.freezing.Store(fm != nil)
 		return err
 	}); err != nil {
+		var lostErr *journal.LostError
+		if st, _ := j.State(); errors.As(err, &lostErr) || st == journal.StateLost {
+			// The journal is already lost (no database, one bbolt cannot open):
+			// the store is returned as before, quarantined and serving what
+			// reads it can, and the host refuses every operation.
+			s.freezing.Store(true)
+			return s, nil
+		}
 		if !errors.Is(err, journal.ErrCorruptRecord) && !errors.Is(err, errCorruptRecord) {
 			// Not damage (a cancelled context, a closed store): the caller
 			// retries; nothing is quarantined on it.
