@@ -170,17 +170,28 @@ type Agent interface {
 	// ClockFloorState returns the clock floor's health; the empty state when
 	// the agent has no floor (its store could not give it one).
 	ClockFloorState() clockfloor.StateKind
+	// UnattestedCause names why a ready store still refuses operations (one
+	// of the Cause constants), or "" when nothing does.
+	UnattestedCause() string
 }
 
-// The refusal reasons of a mutating call while the clock floor is not usable.
+// The causes of an UNATTESTED refusal besides the store's own continuity. A
+// refused mutating call carries the reserved UNATTESTED reason (the
+// published contract's, exempt from the circuit breaker) and the cause in the
+// ErrorInfo metadata under MetadataCause and in the message; a signed host
+// answer carries no state reason for them.
 const (
-	// ReasonClockFloorAhead: the clock floor is ahead of the host clock by
-	// more than its bound (the clock was rolled back or jumped and was
+	// MetadataCause is the ErrorInfo metadata key that names the cause.
+	MetadataCause = "cause"
+	// CauseClockFloorAhead: the clock floor is ahead of the host clock by more
+	// than its bound (the clock was rolled back, or jumped forward and was
 	// corrected). Mutating calls are refused until the clock catches up.
-	ReasonClockFloorAhead = answer.ReasonClockFloorAhead
-	// ReasonClockFloorUnavailable: the clock floor failed (a clock source
+	CauseClockFloorAhead = "clock_floor_ahead"
+	// CauseClockFloorUnavailable: the clock floor failed (a clock source
 	// failed or it could not be saved) or does not exist.
-	ReasonClockFloorUnavailable = answer.ReasonClockFloorUnavailable
+	CauseClockFloorUnavailable = "clock_floor_unavailable"
+	// CauseFreezeIncomplete: a re-enrolment's freeze stopped partway.
+	CauseFreezeIncomplete = "freeze_incomplete"
 )
 
 // Options configures New.
@@ -272,8 +283,13 @@ func MutatingMethods() map[string]bool {
 
 // refusal is a gRPC status with a google.rpc.ErrorInfo reason.
 func refusal(code codes.Code, reason, msg string) error {
+	return refusalWith(code, reason, msg, nil)
+}
+
+// refusalWith is refusal with ErrorInfo metadata.
+func refusalWith(code codes.Code, reason, msg string, metadata map[string]string) error {
 	st := status.New(code, msg)
-	if withInfo, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: ErrorInfoDomain}); err == nil {
+	if withInfo, err := st.WithDetails(&errdetails.ErrorInfo{Reason: reason, Domain: ErrorInfoDomain, Metadata: metadata}); err == nil {
 		return withInfo.Err()
 	}
 	return st.Err()
@@ -345,27 +361,19 @@ func (s *Server) gate(ctx context.Context, method string) error {
 	}
 	state, reason := s.opts.Agent.TrustState()
 	var err error
-	floor := s.opts.Agent.ClockFloorState()
+	cause := s.opts.Agent.UnattestedCause()
 	switch {
 	case state == providerv1.AgentState_AGENT_STATE_QUARANTINED:
 		err = refusal(codes.FailedPrecondition, opstore.ReasonQuarantined, "the host's operation store is quarantined ("+reason+")")
-	case floor == clockfloor.StateClockFloorAhead:
-		err = refusal(codes.FailedPrecondition, ReasonClockFloorAhead,
-			"the host's clock floor is ahead of its clock; correct the clock, or the host stays refused until the clock reaches the floor")
-	case floor != clockfloor.StateOK:
-		err = refusal(codes.Unavailable, ReasonClockFloorUnavailable, "the host's clock floor is not available")
-	}
-	if err != nil {
-		s.opts.Log.Info("mutation refused", "method", method, "state", state.String(), "clockFloor", string(floor))
-		return err
-	}
-	switch state {
-	case providerv1.AgentState_AGENT_STATE_READY:
+	case cause != "":
+		err = refusalWith(codes.Unavailable, opstore.ReasonUnattested, "the host refuses operations: "+cause,
+			map[string]string{MetadataCause: cause})
+	case state == providerv1.AgentState_AGENT_STATE_READY:
 		err = status.Error(codes.Unimplemented, "this agent executes no operations")
 	default:
 		err = refusal(codes.Unavailable, opstore.ReasonUnattested, "the host's operation store has not established its continuity")
 	}
-	s.opts.Log.Info("mutation refused", "method", method, "state", state.String())
+	s.opts.Log.Info("mutation refused", "method", method, "state", state.String(), "cause", cause)
 	return err
 }
 

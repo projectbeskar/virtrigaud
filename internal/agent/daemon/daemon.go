@@ -197,45 +197,34 @@ func (a *agentState) HostView(ctx context.Context, continuitySeq uint64) (opstor
 	return a.store.HostView(ctx, continuitySeq)
 }
 
-// The state reasons the agent adds to its store's trust state while the
-// store is ready but the host must not run operations (see package answer).
-const (
-	// ReasonFreezeIncomplete: a re-enrolment's freeze stopped partway; the
-	// host refuses every operation until it is finished.
-	ReasonFreezeIncomplete = answer.ReasonFreezeIncomplete
-	// ReasonClockFloorAhead is the state reason while the clock floor is ahead
-	// of the host clock beyond its bound.
-	ReasonClockFloorAhead = answer.ReasonClockFloorAhead
-	// ReasonClockFloorUnavailable is the state reason while the clock floor
-	// has failed or does not exist.
-	ReasonClockFloorUnavailable = answer.ReasonClockFloorUnavailable
-)
-
 // TrustState implements server.Agent. A store that is ready and recovered
-// reports READY only while no freeze is incomplete and the clock floor is
-// healthy; otherwise it reports UNATTESTED with the reason, so that the
-// reported state matches what the host admits.
+// reports READY only while nothing keeps the host from running operations
+// (UnattestedCause); otherwise it reports UNATTESTED. The signed answer
+// carries no state reason for these causes: they reach the operator through
+// the service status and the logs, and a refused call through its ErrorInfo
+// metadata.
 func (a *agentState) TrustState() (providerv1.AgentState, string) {
 	st, lost := a.store.Journal().State()
-	recovered := a.store.Recovered()
-	state, reason := answer.StoreState(st, lost, recovered)
-	if state != providerv1.AgentState_AGENT_STATE_READY {
-		if st == journal.StateReady && recovered && a.store.Freezing() {
-			return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonFreezeIncomplete
-		}
-		return state, reason
+	state, reason := answer.StoreState(st, lost, a.store.Recovered())
+	if state == providerv1.AgentState_AGENT_STATE_READY && a.UnattestedCause() != "" {
+		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ""
 	}
+	return state, reason
+}
+
+// UnattestedCause implements server.Agent: why a ready store still refuses
+// operations, or "".
+func (a *agentState) UnattestedCause() string {
 	if a.store.Freezing() {
-		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonFreezeIncomplete
+		return server.CauseFreezeIncomplete
 	}
 	switch a.ClockFloorState() {
 	case clockfloor.StateOK:
+		return ""
 	case clockfloor.StateClockFloorAhead:
-		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonClockFloorAhead
-	default:
-		return providerv1.AgentState_AGENT_STATE_UNATTESTED, ReasonClockFloorUnavailable
+		return server.CauseClockFloorAhead
 	}
-	return state, reason
+	return server.CauseClockFloorUnavailable
 }
 
 // ClockFloorState implements server.Agent.
@@ -463,7 +452,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			if js, _ := st.Journal().State(); js == journal.StateLost {
 				f.StopPersisting()
 			}
-			if err := f.Flush(dctx); err != nil {
+			if err := f.Drain(dctx); err != nil {
 				d.log.Error(err, "save the clock floor")
 			}
 		}
@@ -485,6 +474,13 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 	}
 
+	// The cause that keeps a ready host from running operations (an incomplete
+	// freeze, the clock floor's state) is logged when it appears or goes, and
+	// shown in the service status.
+	lastCause := agent.UnattestedCause()
+	if lastCause != "" {
+		d.log.Error(nil, "the host refuses operations", "cause", lastCause)
+	}
 	ticker := time.NewTicker(d.o.ObserveEvery)
 	defer ticker.Stop()
 	for {
@@ -513,6 +509,17 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 				}
 				if err := f.Observe(ctx); err != nil {
 					d.log.Error(err, "raise the clock floor")
+				}
+			}
+			if c := agent.UnattestedCause(); c != lastCause {
+				if c != "" {
+					d.log.Error(nil, "the host refuses operations", "cause", c)
+				} else {
+					d.log.Info("the host accepts operations again", "was", lastCause)
+				}
+				lastCause = c
+				if d.started.Load() {
+					_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent))
 				}
 			}
 		}
@@ -616,6 +623,9 @@ func (d *daemon) reload() error {
 // hides a quarantine.
 func trustStatus(a *agentState) string {
 	state, reason := a.TrustState()
+	if reason == "" {
+		reason = a.UnattestedCause()
+	}
 	if reason == "" {
 		return state.String()
 	}

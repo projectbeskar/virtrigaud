@@ -62,6 +62,7 @@ type fakeAgent struct {
 	// floor is the clock floor in unix seconds; 0 reports a floor long ago.
 	floor      atomic.Int64
 	floorState clockfloor.StateKind
+	cause      string
 }
 
 func (f *fakeAgent) HostView(context.Context, uint64) (opstore.HostView, error) {
@@ -97,6 +98,19 @@ func (f *fakeAgent) ClockFloorState() clockfloor.StateKind {
 		return ""
 	}
 	return f.floorState
+}
+
+// UnattestedCause reports the cause a test set.
+func (f *fakeAgent) UnattestedCause() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cause
+}
+
+func (f *fakeAgent) setCause(c string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cause = c
 }
 
 func (f *fakeAgent) setFloorState(st clockfloor.StateKind) {
@@ -517,11 +531,22 @@ func TestClientCertCheckUsesTheClockFloor(t *testing.T) {
 	}
 }
 
+// metadataOf returns the ErrorInfo metadata of a refusal.
+func metadataOf(err error) map[string]string {
+	for _, d := range status.Convert(err).Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetDomain() == server.ErrorInfoDomain {
+			return info.GetMetadata()
+		}
+	}
+	return nil
+}
+
 // TestClockFloorAheadDoesNotLockTheManagerOut: a floor ahead of the clock by
 // more than a certificate's lifetime does not refuse every call. Reads
-// (GetHostInfo, Hello) still answer and report the state; mutating methods are
-// refused with the clock-floor reason. The same holds for a failed floor and
-// for an agent with no floor.
+// (GetHostInfo, Hello) still answer, as UNATTESTED with no state reason (the
+// published contract); mutating methods are refused with the reserved
+// UNATTESTED reason and the cause in the ErrorInfo metadata. The same holds
+// for a failed floor, for an agent with no floor and for an incomplete freeze.
 func TestClockFloorAheadDoesNotLockTheManagerOut(t *testing.T) {
 	e := newEnv(t)
 	cc := e.dial(e.provider(), 0)
@@ -529,39 +554,45 @@ func TestClockFloorAheadDoesNotLockTheManagerOut(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		state clockfloor.StateKind
-		why   string
-		code  codes.Code
+		cause string
 	}{
-		{"ahead", clockfloor.StateClockFloorAhead, server.ReasonClockFloorAhead, codes.FailedPrecondition},
-		{"failed", clockfloor.StateFailed, server.ReasonClockFloorUnavailable, codes.Unavailable},
-		{"none", noFloor, server.ReasonClockFloorUnavailable, codes.Unavailable},
+		{"ahead", clockfloor.StateClockFloorAhead, server.CauseClockFloorAhead},
+		{"failed", clockfloor.StateFailed, server.CauseClockFloorUnavailable},
+		{"none", noFloor, server.CauseClockFloorUnavailable},
+		{"freeze", clockfloor.StateOK, server.CauseFreezeIncomplete},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Far beyond any certificate's lifetime.
+			// Far beyond any certificate's lifetime, unless the floor is healthy
+			// (then it would, rightly, refuse the certificate).
 			e.agent.floor.Store(time.Now().Add(1000 * 24 * time.Hour).Unix())
+			if tc.state == clockfloor.StateOK {
+				e.agent.floor.Store(time.Now().Unix())
+			}
 			e.agent.setFloorState(tc.state)
-			e.agent.set(providerv1.AgentState_AGENT_STATE_UNATTESTED, tc.why)
+			e.agent.setCause(tc.cause)
+			e.agent.set(providerv1.AgentState_AGENT_STATE_UNATTESTED, "")
 			info, err := pc.GetHostInfo(ctx(t), &providerv1.GetHostInfoRequest{AnswerNonce: nonce(5)})
 			if err != nil {
 				t.Fatalf("GetHostInfo = %v", err)
 			}
 			a := verifyAnswer(t, e, info.GetHostAnswer())
-			if a.GetContext().GetStateReason() != tc.why || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_UNATTESTED {
-				t.Fatalf("the answer does not report the floor: %v %q", a.GetContext().GetAgentState(), a.GetContext().GetStateReason())
+			if a.GetContext().GetStateReason() != "" || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_UNATTESTED {
+				t.Fatalf("the answer = %v %q", a.GetContext().GetAgentState(), a.GetContext().GetStateReason())
 			}
 			if _, err := agentv1.NewAgentServiceClient(cc).Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(6), CallerApiVersion: 1}); err != nil {
 				t.Fatalf("Hello = %v", err)
 			}
 			for _, row := range grantverify.Rows() {
 				err := cc.Invoke(ctx(t), row.FullMethod, row.NewRequest(), row.NewRequest())
-				if status.Code(err) != tc.code || reasonOf(err) != tc.why {
-					t.Errorf("%s = %v, want %v %q", row.FullMethod, err, tc.code, tc.why)
+				if status.Code(err) != codes.Unavailable || reasonOf(err) != contracts.UnattestedReason || metadataOf(err)[server.MetadataCause] != tc.cause {
+					t.Errorf("%s = %v (%q, %v), want Unavailable UNATTESTED cause %q", row.FullMethod, err, reasonOf(err), metadataOf(err), tc.cause)
 				}
 			}
 		})
 	}
 	// A healthy floor past the certificate's expiry still refuses it.
 	e.agent.setFloorState("")
+	e.agent.setCause("")
 	e.agent.floor.Store(time.Now().Add(1000 * 24 * time.Hour).Unix())
 	if _, err := pc.GetHostInfo(ctx(t), &providerv1.GetHostInfoRequest{}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("healthy floor past the expiry: %v", err)

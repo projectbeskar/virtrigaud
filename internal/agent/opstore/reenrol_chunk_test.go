@@ -367,3 +367,20 @@ func TestOpen_UnreadableFreezeMarkerFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// A cancelled context at open is not damage: Open fails and quarantines
+// nothing, and the next open is healthy.
+func TestOpen_CancelledContextDoesNotQuarantine(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	_ = h.s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := opstore.Open(ctx, h.options()); err == nil {
+		t.Fatal("Open with a cancelled context succeeded")
+	}
+	s := h.open()
+	st, reason := s.Journal().State()
+	assert.Equal(t, journal.StateUnattested, st, "reason %q", reason)
+	assert.False(t, s.Freezing())
+}

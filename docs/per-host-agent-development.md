@@ -137,15 +137,17 @@ even if the clock jumps, and once at drain. A crash loses at most an unsaved
 advance of about one minute plus an observe period, never a committed value.
 Within the same boot, the boot-time credit restores that advance after a
 restart. After a power loss, or a crash followed by a reboot (another
-`boot_id`), no credit is possible, so when the agent opens the store in a new
-boot it raises the stored floor by that bound (one minute plus the observe
-period, 65 seconds), but never beyond the wall clock plus the floor's ahead
-bound (5 minutes): the floor is then not lower than it was before the crash,
-and a correct clock is never pushed into the ahead state by the raise. The
-bound against grant expiry: with this raise, an expired grant-signing key
-stays expired across a power loss unless the wall clock was rolled back by
-more than 5 minutes and the host then ran on that clock; with the wall clock
-behind by more than the ahead bound the floor is simply ahead (below).
+`boot_id`), no credit is possible. A clean drain therefore commits the floor
+marked as drained (and the first write of the next run clears the mark); when
+the agent opens the store in a new boot and the last commit was not a clean
+drain, it raises the stored floor by that bound (one minute plus the observe
+period, 65 seconds), but never beyond the wall clock plus 65 seconds, and
+never below the stored floor. So the raise leaves the floor at most 65 seconds
+ahead of the clock however often the host reboots (fast reboots cannot ratchet
+it), and nothing is added after a clean drain. The bound against grant expiry:
+after a power loss an expired grant-signing key stays expired unless the
+wall clock was rolled back by more than 65 seconds below the lost floor and the
+host then ran on that clock.
 
 A quarantined store cannot commit; the floor then keeps running in memory (a
 commit that fails because the store was quarantined stops persisting, it does
@@ -157,17 +159,28 @@ host's reported chain position does not go backwards covers it), and that
 restore brings back an older floor with it.
 
 **Floor ahead of the clock.** If the floor is ahead of the wall clock by more
-than 5 minutes (the clock was rolled back, or jumped forward and was
-corrected), the floor is `ClockFloorAhead`: grants are refused and the host
-reports state `AGENT_STATE_UNATTESTED` with reason `clock_floor_ahead`.
-Reads (`Hello`, `GetHostInfo`) keep answering, so the manager can see why: the
-per-call check of the Provider's certificate uses the later of the host clock
-and the floor only while the floor is healthy; while it is ahead, failed or
-missing it uses the host clock, and every mutating call is refused with the
-reason `clock_floor_ahead` (`clock_floor_unavailable` for a failed or missing
-floor). Recovery is to correct the wall clock; once it reaches the floor the
-host is ready again with no restart. If the clock cannot be corrected, the
-only other way is to enrol the host again, which starts a new floor.
+than 5 minutes, the floor is `ClockFloorAhead`: grants are refused and the host
+refuses every mutating call. Export the floor's ahead state as a metric and
+alert on it: it is the primary control, because the state can have two very
+different causes. A wall clock that was rolled back heals without a restart as
+soon as it is corrected. A clock that jumped forward and was corrected leaves
+the floor at the jump: it persists within a boot, and across restarts and
+reboots, until the wall clock reaches it, so the host stays refused for the
+length of the jump. The only ways out are to wait for the clock to reach the
+floor, to power the host off for longer than the lead, or to enrol the host
+again (which starts a new floor).
+
+While the floor is ahead, failed or missing (and while a re-enrolment's freeze
+is incomplete) the host reports `AGENT_STATE_UNATTESTED` with no state reason
+(the signed answer's contract is unchanged), reads (`Hello`, `GetHostInfo`)
+keep answering, and every mutating call is refused with the reserved
+`UNATTESTED` reason and the cause in the `ErrorInfo` metadata
+(`cause: clock_floor_ahead`, `clock_floor_unavailable` or `freeze_incomplete`)
+and in the message. The cause is also in the service status
+(`STATUS=AGENT_STATE_UNATTESTED (clock_floor_ahead)`, refreshed when it
+changes) and in a log line when it appears or goes. The per-call check of the
+Provider's certificate uses the later of the host clock and the floor only
+while the floor is healthy.
 
 ### Re-enrolment freeze
 
@@ -185,7 +198,7 @@ chunks leaves the marker: recovery finishes the freeze at the next start, or
 the next re-enrolment does, before the new enrolment is activated. Every
 operation is frozen once. A freeze that stops partway without a crash keeps
 the host refusing every operation, and the host reports `AGENT_STATE_UNATTESTED`
-with reason `freeze_incomplete`. A marker that cannot be read quarantines the
+(cause `freeze_incomplete`, as above). A marker that cannot be read quarantines the
 store (`inconsistent_store`) and keeps the host refusing; reads still answer.
 
 ### Host checks
@@ -329,7 +342,9 @@ is not the one the certificate names, reads answer unsigned.
   check of the Provider's certificate, which uses the later of the host clock
   and a healthy floor, falls back to the host clock for reads, and every
   mutating call is refused (`clock_floor_unavailable`); grants are refused
-  too.
+  too. So while the floor is not OK, a rolled-back clock can re-admit an
+  expired Provider certificate for read-only calls (`Hello`, `GetHostInfo`);
+  nothing commits, and the answers say UNATTESTED.
 - The provisioning marker is checked with `lstat` and then read with
   `O_NOFOLLOW`, not checked on the open descriptor; it holds no secret.
 - `GetHostInfo` reports no inventory (CPU, memory, storage, components).

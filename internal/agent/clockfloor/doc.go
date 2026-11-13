@@ -48,12 +48,16 @@ limitations under the License.
 //     agent wiring should report StateFailed with its error and rely on its
 //     supervisor to restart the process.
 //   - There is no reset path. If the floor is ahead of the wall clock by more
-//     than Config.MaxAhead (the clock jumped forward and was corrected), the
-//     host refuses every grant and reports StateClockFloorAhead until the wall
-//     clock catches up. Recovery is re-enrolment, which starts a new floor;
-//     that is a documented residual, not something this package works around.
-//     Status.Ahead should be exported as a metric with an alert, so a forward
-//     jump is visible before the clock is corrected.
+//     than Config.MaxAhead, the host refuses every grant and reports
+//     StateClockFloorAhead until the wall clock catches up. A wall clock that
+//     was rolled back heals as soon as it is corrected, with no restart. A
+//     clock that jumped forward and was corrected leaves the floor at the
+//     jump, within a boot and across restarts and reboots: recovery is
+//     re-enrolment (which starts a new floor), or a power-off longer than the
+//     lead. That is a documented residual, not something this package works
+//     around. Status.Ahead should be exported as a metric with an alert, and
+//     that alert is the primary control: it makes a forward jump visible
+//     before the clock is corrected.
 //   - It fails closed. A floor that cannot be read, that does not decode, that
 //     is missing without Config.FirstUse, or whose clock sources fail makes
 //     Open return an error, and a floor that fails to persist, whose boot
@@ -94,7 +98,10 @@ limitations under the License.
 // lowers what was stored. A crash loses an unsaved raise, never a saved one:
 // the floor after a restart is at least the last saved value, and in the same
 // boot the boot-time credit restores the rest. StopPersisting returns a Floor
-// to memory only when the store can no longer commit.
+// to memory only when the store can no longer commit. Config.NewBootSlack
+// covers the unsaved advance across a reboot after an unclean end: Drain, the
+// clean-shutdown save, marks the record so that a clean end adds nothing, and
+// the raise never leaves the floor more than the slack ahead of the clock.
 //
 // The record carries a CRC-32 that detects accidental corruption only. The
 // floor's resistance to rollback of the whole store (an older, consistent

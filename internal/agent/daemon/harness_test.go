@@ -194,7 +194,7 @@ func (h *host) start() *running {
 	uid := testUID
 	opts := daemon.Options{
 		Config: h.cfg, Probe: h.probe, UID: &uid, Executor: h.exec, DevEnrolment: h.dev, Notifier: h.notes,
-		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, TrustFileOwner: &uid, Hooks: hooks,
+		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, TrustFileOwner: &uid, Hooks: hooks, ObserveEvery: 20 * time.Millisecond,
 		Floor: daemon.FloorSources{Wall: wall{off: &h.wallOff}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
 	}
 	go func() {

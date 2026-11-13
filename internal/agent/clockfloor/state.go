@@ -142,7 +142,7 @@ func (s State) MarshalBinary() ([]byte, error) {
 		flags |= flagDrained
 	}
 	buf = append(buf, flags)
-	buf = append(buf, byte(len(s.BootID)))                               // #nosec G115 -- validate: boot_id is at most maxBootIDLen (64) bytes
+	buf = append(buf, byte(len(s.BootID))) // #nosec G115 -- validate: boot_id is at most maxBootIDLen (64) bytes
 	buf = append(buf, s.BootID...)
 	buf = binary.BigEndian.AppendUint32(buf, crc32.ChecksumIEEE(buf))
 	return buf, nil

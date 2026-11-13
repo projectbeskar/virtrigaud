@@ -601,8 +601,9 @@ func TestScrubFindsDamageAndReflectsItInStatus(t *testing.T) {
 
 // TestClockFloorAheadReportsAndRefusesMutations: the host clock is rolled back
 // far beyond the floor's bound (and beyond a certificate's lifetime). The
-// floor is then ahead: reads still answer, and the answer reports it; mutating
-// calls are refused with the clock-floor reason.
+// floor is then ahead: reads still answer (UNATTESTED, no state reason), the
+// service status and the log name the cause, and mutating calls are refused
+// UNATTESTED with the cause in the ErrorInfo metadata.
 func TestClockFloorAheadReportsAndRefusesMutations(t *testing.T) {
 	h := newHost(t)
 	r, _ := h.run()
@@ -614,15 +615,56 @@ func TestClockFloorAheadReportsAndRefusesMutations(t *testing.T) {
 	if a == nil {
 		t.Fatalf("no answer while the floor is ahead\n%s", h.logs.text())
 	}
-	if a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_UNATTESTED || a.GetContext().GetStateReason() != "clock_floor_ahead" {
+	if a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_UNATTESTED || a.GetContext().GetStateReason() != "" {
 		t.Fatalf("answer = %v %q", a.GetContext().GetAgentState(), a.GetContext().GetStateReason())
 	}
-	if code, reason := r.create(); code != "FailedPrecondition" || reason != "clock_floor_ahead" {
+	if code, reason := r.create(); code != "Unavailable" || reason != opstore.ReasonUnattested {
 		t.Fatalf("Create = %s %s", code, reason)
+	}
+	waitNotify := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !h.notes.has(want) {
+			if time.Now().After(deadline) {
+				t.Fatalf("no %q in %v", want, h.notes.snapshot())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	waitNotify(systemd.NotifyReady + "\nSTATUS=AGENT_STATE_UNATTESTED (clock_floor_ahead)")
+	if !strings.Contains(h.logs.text(), "clock_floor_ahead") {
+		t.Fatalf("the cause is not logged\n%s", h.logs.text())
 	}
 	// The clock is corrected: the host is READY again.
 	h.wallOff.Store(0)
 	if a := r.hello(); a == nil || a.GetContext().GetAgentState() != providerv1.AgentState_AGENT_STATE_READY {
 		t.Fatalf("answer after the correction = %v", a)
+	}
+}
+
+// TestDrainMarksTheFloorDrained: a clean stop commits the floor marked as
+// drained (the clockfloor tests cover that the next run's first write clears
+// the mark).
+func TestDrainMarksTheFloorDrained(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	load := func() clockfloor.State {
+		t.Helper()
+		st, err := opstore.Open(context.Background(), opstore.Options{Journal: journal.Options{Dir: h.stateDir}, Executor: none.Executor{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		s, err := daemon.NewFloorStore(st).Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if !load().Drained {
+		t.Fatal("the floor was not marked drained at a clean stop")
 	}
 }

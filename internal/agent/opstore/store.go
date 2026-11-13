@@ -183,9 +183,15 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		s.freezing.Store(fm != nil)
 		return err
 	}); err != nil {
-		// Fail closed: a marker that cannot be read may name an incomplete
-		// freeze. The host refuses every operation, the store is quarantined
-		// (unless the failed read already did it) and keeps serving reads.
+		if !errors.Is(err, journal.ErrCorruptRecord) && !errors.Is(err, errCorruptRecord) {
+			// Not damage (a cancelled context, a closed store): the caller
+			// retries; nothing is quarantined on it.
+			_ = j.Close()
+			return nil, fmt.Errorf("open operation store: read freeze marker: %w", err)
+		}
+		// Fail closed: a marker that is damaged may name an incomplete freeze.
+		// The host refuses every operation, the store is quarantined (unless
+		// the failed read already did it) and keeps serving reads.
 		s.freezing.Store(true)
 		if st, _ := j.State(); st != journal.StateLost {
 			j.Quarantine(journal.LostInconsistentStore, "freeze marker unreadable")
