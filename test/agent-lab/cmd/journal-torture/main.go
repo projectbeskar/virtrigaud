@@ -205,7 +205,11 @@ func cmdRun(args []string) int {
 	}
 	var next uint64 = 1
 	if err := st.View(ctx, func(tx *journal.Tx) error {
-		if v := tx.Get(bucketOps, []byte(keyLast)); len(v) == 8 {
+		v, err := tx.Get(bucketOps, []byte(keyLast))
+		if err != nil {
+			return err
+		}
+		if len(v) == 8 {
 			next = binary.BigEndian.Uint64(v) + 1
 		}
 		return nil
@@ -356,11 +360,18 @@ func cmdVerify(args []string) int {
 	}
 	seen := map[uint64]bool{}
 	verr := st.View(ctx, func(tx *journal.Tx) error {
-		if v := tx.Get(bucketOps, []byte(keyLast)); len(v) == 8 {
-			r.Last = binary.BigEndian.Uint64(v)
+		last, err := tx.Get(bucketOps, []byte(keyLast))
+		if err != nil {
+			return err
+		}
+		if len(last) == 8 {
+			r.Last = binary.BigEndian.Uint64(last)
 		}
 		for i := uint64(1); i <= r.Acked; i++ {
-			v := tx.Get(bucketOps, opKey(i))
+			v, gerr := tx.Get(bucketOps, opKey(i))
+			if gerr != nil {
+				return gerr
+			}
 			switch {
 			case v == nil:
 				r.Missing++
