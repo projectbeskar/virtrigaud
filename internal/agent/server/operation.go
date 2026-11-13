@@ -127,7 +127,8 @@ func (s *Server) verifier() (*grantverify.Verifier, error) {
 //     floor, body rules, kind against the method and request type, request
 //     decoding, intent digest, installation and host);
 //  2. the grant's VM and Provider UIDs have the shape of a UID, and the
-//     decoded request names this host and the grant's VM (GRANT_MISMATCH:
+//     decoded request names this host and, as its owner, the grant's VM
+//     (GRANT_MISMATCH:
 //     nothing is recorded, so the refusal is definite);
 //  3. a kind the executor does not implement is Unimplemented;
 //  4. the operation store decides: a known op_id is answered from its record
@@ -230,15 +231,20 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// checkInner checks the decoded request against the grant: the host it names
-// and the owner it names, when set, are the grant's.
+// checkInner checks the decoded request against the grant: it names this
+// host, and its owner, which every executable kind's request carries, is set
+// and is the grant's VM.
 func checkInner(v *grantverify.Verified, hostID string) error {
-	if r, ok := v.Request.(interface{ GetTargetHostId() string }); ok && r.GetTargetHostId() != hostID {
+	if r, ok := v.Request.(interface{ GetTargetHostId() string }); !ok || r.GetTargetHostId() != hostID {
 		return errors.New("the request names another host than the grant")
 	}
-	if r, ok := v.Request.(interface {
+	r, ok := v.Request.(interface {
 		GetOwner() *providerv1.ObjectIdentity
-	}); ok && r.GetOwner().GetUid() != "" && r.GetOwner().GetUid() != v.Body.GetVmUid() {
+	})
+	if !ok || r.GetOwner().GetUid() == "" {
+		return errors.New("the request names no owner")
+	}
+	if r.GetOwner().GetUid() != v.Body.GetVmUid() {
 		return errors.New("the request names another owner than the grant's VM")
 	}
 	return nil

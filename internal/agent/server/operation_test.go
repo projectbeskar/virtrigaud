@@ -263,6 +263,13 @@ func TestOperation_AdversarialGrants(t *testing.T) {
 			_, err := e.send(o)
 			return err
 		}, code: codes.FailedPrecondition, reason: contracts.GrantMismatchReason},
+		"inner owner missing": {send: func() error {
+			req := powerReq("vm-1", providerv1.PowerOp_POWER_OP_ON)
+			req.Owner = nil
+			o := e.newOp(kOn, "vm-1", b, 1, req)
+			_, err := e.send(o)
+			return err
+		}, code: codes.FailedPrecondition, reason: contracts.GrantMismatchReason},
 		"unsigned": {send: func() error {
 			_, err := e.client().Power(ctx(t), powerReq("vm-1", providerv1.PowerOp_POWER_OP_ON))
 			return err
