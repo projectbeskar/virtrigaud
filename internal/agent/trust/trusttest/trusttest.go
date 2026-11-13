@@ -136,7 +136,7 @@ func (p *PKI) HostCAPool() *x509.CertPool {
 // WriteTrust writes the trust configuration files into dir.
 func (p *PKI) WriteTrust(t testing.TB, dir string) {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	for name, data := range map[string][]byte{
