@@ -497,7 +497,11 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	// drains and exits, and the next start's recovery resolves the step by
 	// its evidence (see package runner).
 	fatal := make(chan any, 1)
-	pool := runner.New(poolCtx, st, d.log.WithName("runner"), runner.Options{OnPanic: func(r any) {
+	giveUp := opstore.DefaultStepDeadline
+	for _, dl := range d.o.StepDeadlines {
+		giveUp = max(giveUp, dl)
+	}
+	pool := runner.New(poolCtx, st, d.log.WithName("runner"), runner.Options{GiveUpAfter: giveUp, OnPanic: func(r any) {
 		select {
 		case fatal <- r:
 		default:

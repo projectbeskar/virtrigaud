@@ -84,7 +84,7 @@ func (s *stubStore) snapshot() (int, string) {
 	return s.calls, s.resolved
 }
 
-var fast = runner.Options{Resumes: 3, InitialBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond}
+var fast = runner.Options{Resumes: 3, InitialBackoff: time.Millisecond, MaxBackoff: 2 * time.Millisecond, GiveUpAfter: time.Millisecond}
 
 func drain(t *testing.T, p *runner.Pool) {
 	t.Helper()
@@ -302,3 +302,21 @@ func (o *onceExec) Goal(context.Context, executor.Operation, executor.Step) (boo
 
 // containsWitness reports whether path is under a witness directory.
 func containsWitness(path string) bool { return strings.Contains(path, "/witness/") }
+
+// TestGiveUpWaitsForTheWindow: a run keeps being resumed until the give-up
+// window has passed, however many resumptions failed before.
+func TestGiveUpWaitsForTheWindow(t *testing.T) {
+	s := &stubStore{fails: 1000}
+	window := 200 * time.Millisecond
+	p := runner.New(context.Background(), s, logr.Discard(), runner.Options{Resumes: 1, InitialBackoff: time.Millisecond,
+		MaxBackoff: 5 * time.Millisecond, GiveUpAfter: window})
+	start := time.Now()
+	if err := p.Start(opstore.OpRef{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, p)
+	calls, resolved := s.snapshot()
+	if resolved != opstore.ReasonRunFailed || time.Since(start) < window || calls < 10 {
+		t.Fatalf("gave up after %s and %d calls (%q), want at least %s", time.Since(start), calls, resolved, window)
+	}
+}

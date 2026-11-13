@@ -24,10 +24,14 @@ limitations under the License.
 // context ends (the agent drains; the operation is left to the next start's
 // recovery, which never guesses), or when the store is quarantined (nothing
 // more is committed; every answer carries the quarantine). A run that fails
-// on any other store error is resumed with a bounded backoff; after
-// Options.Resumes failed resumptions the operation's outcome is recorded as
-// unknown (opstore.ReasonRunFailed), never as a definite outcome, so that no
-// operation stays running without a runner.
+// on any other store error is resumed with a bounded backoff for at least
+// Options.GiveUpAfter (by default the store's step deadline, minutes) and at
+// least Options.Resumes times, so that a short store fault does not end the
+// operation; only then is its outcome recorded as unknown
+// (opstore.ReasonRunFailed), never as a definite outcome, so that no
+// operation stays running without a runner. An unknown outcome keeps the
+// operation's VM busy: clearing it is an operator path that a later change
+// adds.
 //
 // A panic in a run (for example in an executor) is recovered, logged and
 // reported to Options.OnPanic; the operation is left to recovery. The agent
@@ -52,8 +56,11 @@ import (
 
 // Defaults of Options.
 const (
-	// DefaultResumes is how many times a failed run is resumed.
+	// DefaultResumes is the least number of times a failed run is resumed.
 	DefaultResumes = 5
+	// DefaultGiveUpAfter is the least time a failed run is resumed for: the
+	// store's default step deadline.
+	DefaultGiveUpAfter = opstore.DefaultStepDeadline
 	// DefaultInitialBackoff is the pause before the first resumption.
 	DefaultInitialBackoff = 200 * time.Millisecond
 	// DefaultMaxBackoff bounds the pause between resumptions.
@@ -73,9 +80,13 @@ type Store interface {
 
 // Options configures New. Zero fields take their defaults.
 type Options struct {
-	// Resumes is how many times a run that failed is resumed before the
-	// operation's outcome is recorded as unknown.
+	// Resumes is the least number of times a run that failed is resumed
+	// before the operation's outcome is recorded as unknown.
 	Resumes int
+	// GiveUpAfter is the least time, from the first failure, a run that
+	// failed is resumed for before the operation's outcome is recorded as
+	// unknown. Set it to at least the longest step deadline.
+	GiveUpAfter time.Duration
 	// InitialBackoff is the pause before the first resumption; it doubles
 	// up to MaxBackoff.
 	InitialBackoff time.Duration
@@ -112,6 +123,9 @@ func New(ctx context.Context, store Store, log logr.Logger, opts Options) *Pool 
 	if opts.MaxBackoff <= 0 {
 		opts.MaxBackoff = DefaultMaxBackoff
 	}
+	if opts.GiveUpAfter <= 0 {
+		opts.GiveUpAfter = DefaultGiveUpAfter
+	}
 	return &Pool{ctx: ctx, store: store, log: log, opts: opts}
 }
 
@@ -143,6 +157,7 @@ func (p *Pool) run(ref opstore.OpRef, payload []byte) {
 		}
 	}()
 	backoff := p.opts.InitialBackoff
+	var firstFailure time.Time
 	for failures := 0; ; failures++ {
 		v, err := p.store.Execute(p.ctx, ref, payload)
 		switch {
@@ -157,7 +172,11 @@ func (p *Pool) run(ref opstore.OpRef, payload []byte) {
 		case p.store.Lost():
 			p.log.Error(err, "operation run stopped: the store is quarantined", "op", ref.String())
 			return
-		case failures >= p.opts.Resumes:
+		}
+		if firstFailure.IsZero() {
+			firstFailure = time.Now()
+		}
+		if failures >= p.opts.Resumes && time.Since(firstFailure) >= p.opts.GiveUpAfter {
 			p.giveUp(ref, err)
 			return
 		}
