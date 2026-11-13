@@ -123,3 +123,10 @@ func (l *fileLock) release() error {
 	l.f, l.dir = nil, nil
 	return errors.Join(errs...)
 }
+
+// unlockFile drops the flock of f explicitly. Closing the descriptor is not
+// enough when a memory mapping of the file outlives it: the mapping keeps the
+// open file description, and with it the lock, alive.
+func unlockFile(f *os.File) {
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) // #nosec G115 -- a file descriptor fits in int
+}

@@ -364,11 +364,14 @@ func (s *Store) dbUpdate(db *bolt.DB, fn func(btx *bolt.Tx) error) error {
 // abandonLocked stops using a database that panicked while bbolt was
 // starting a transaction. Closing it through bbolt would wait for locks that
 // panic left held, so only the file descriptor is closed, which releases
-// the file lock; bbolt's mapping stays until the process exits. The caller
+// the file lock (dropped explicitly: bbolt's mapping, which stays until the
+// process exits, would otherwise keep the open file description and its lock
+// alive). The caller
 // holds s.mu, or is Open, where no other goroutine can reach the store.
 func (s *Store) abandonLocked() {
 	s.db = nil
 	if s.boltFile != nil {
+		unlockFile(s.boltFile)
 		_ = s.boltFile.Close()
 		s.boltFile = nil
 	}

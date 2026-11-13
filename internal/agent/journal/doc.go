@@ -29,6 +29,30 @@ limitations under the License.
 // A caller makes a change observable only after Update returns, so nothing
 // acknowledged is ever ahead of the anchor log.
 //
+// # Record trailers and the live-state digest
+//
+// Every value in a client bucket is stored as value || trailer, where the
+// trailer is a format version byte (1) || be64(seq of the commit that wrote
+// it) || a 32-byte SHA-256 over "vrtg-journal-rec-v1" || store_id ||
+// be32(len bucket) || bucket || be32(len key) || key || be64(seq) || value.
+// Tx.Put writes it; Tx.Get and Tx.ForEach verify and strip it, so a value
+// cannot be read under another key, bucket or store, nor with a changed byte.
+// A mismatch, an unknown version, a value shorter than its trailer, or a seq
+// above the committed position is an error that wraps ErrCorruptRecord, never
+// a missing key, and quarantines the store with LostJournalCorrupt (the
+// detail names the bucket and the key, never the value).
+//
+// The meta bucket also holds a live-state digest: the sum, modulo 2^256, of
+// the digests of all live client records. Every commit updates it
+// incrementally (the old record's digest is subtracted on an overwrite or a
+// delete, the new one added) and writes it as part of the commit, so the
+// chain step of that commit covers it: the transaction digest includes the
+// meta write of the new state digest. Open recomputes it from a full scan,
+// after the chain check and before anything is served, and Store.Scrub does
+// the same on demand. Together with the per-record trailers this catches a
+// stale page version of a record, a lost record and a resurrected delete.
+// The scan also verifies every trailer.
+//
 // # Guarantees
 //
 //   - An acknowledged commit survives a crash or power loss on storage that
@@ -65,8 +89,24 @@ limitations under the License.
 //   - No commit happens before continuity is established
 //     (EstablishContinuity); schema migrations run after it, so a migration
 //     never hides a rollback.
+//   - A damaged data page, or a record edited in place, that still decodes is
+//     detected: on read through its trailer, and at open and by Store.Scrub
+//     through the live-state digest, which also catches a record that was lost,
+//     restored to an older version, or deleted and brought back.
 //   - bbolt is never opened without fsync; a corrupt store surfaces as
-//     journal_corrupt, never as a panic of the caller.
+//     journal_corrupt, never as a panic of the caller. A memory fault on
+//     bbolt's mapping (unreadable blocks, a truncated file) is turned into such
+//     a panic (the runtime's panic-on-fault setting is switched on, and then
+//     restored, on the calling goroutine in every call that reads or writes
+//     the store). After a panic inside bbolt's own start of a transaction, the
+//     store drops the database and releases its file lock, so a later open in
+//     the same process reports the loss instead of failing with ErrLocked; the
+//     memory mapping stays until the process exits.
+//   - A first open that died after bbolt created the store file and before the
+//     journal committed anything (no anchor log, marker, quarantine record or
+//     bucket exists) is started again, like one that died before its anchor log
+//     was complete. Any such record, or any committed data, keeps the store
+//     lost.
 //   - One writer at a time: Open takes an exclusive flock on the state
 //     directory itself and then on state.db.lock (re-checked against the
 //     file at the path) before it reads or changes any other file, and holds
@@ -101,10 +141,19 @@ limitations under the License.
 //   - Storage that acknowledges a flush it did not perform defeats the
 //     durability guarantee.
 //   - The checks rest on the file-system semantics of fsync on the file and
-//     on its directory. bbolt checksums its meta pages only; the chain hashes
-//     each transaction's writes when they are made and is verified from its
-//     stored digests, never against the live buckets. A damaged data page,
-//     or a record edited in place, that still decodes is not detected.
+//     on its directory. bbolt checksums its meta pages only; the chain is
+//     verified from its stored digests, not against the live buckets. Damage
+//     to a data page is found by the record trailers and the live-state
+//     digest, and only when it is read, at open or by Store.Scrub: nothing
+//     checks a page at write time, and a record that is never read is found by
+//     the next open or scrub.
+//   - The live-state digest is an additive (sum modulo 2^256) multiset digest.
+//     It resists corruption, not an adversary: root on the host can rewrite the
+//     records, the digest and the chain, and the anchor log. A simultaneous,
+//     consistent rollback of the store and the anchor log to an earlier pair is
+//     still undetectable locally.
+//   - After a panic inside bbolt, a call that was already waiting on bbolt's
+//     locks in another goroutine is not released.
 //   - Options.Events is called with the store lock held: it must not call
 //     back into the store.
 package journal

@@ -23,6 +23,10 @@ var (
 	BucketChainForTest   = bucketChain
 	KeyStoreMetaForTest  = keyStoreMeta
 	KeyQuarantineForTest = keyQuarantine
+	// KeyStateDigestForTest is the meta key of the live-state digest.
+	KeyStateDigestForTest = keyStateDigest
+	// TrailerSizeForTest is the size of a record trailer.
+	TrailerSizeForTest = trailerSize
 	// MaxAnchorBytesForTest is the anchor log size bound.
 	MaxAnchorBytesForTest = maxAnchorBytes
 )
@@ -30,3 +34,29 @@ var (
 // SetTestBoltOptions installs f to adjust bbolt options in Open; nil removes
 // it.
 func SetTestBoltOptions(f func(*bolt.Options)) { testBoltOptions = f }
+
+// RawUpdateForTest runs fn in a bbolt write transaction on the store's own
+// database, outside the chain: it damages a store that is open.
+func (s *Store) RawUpdateForTest(fn func(btx *bolt.Tx) error) error { return s.db.Update(fn) }
+
+// SealRecordForTest returns value || trailer as the store writes it, and the
+// record digest.
+func SealRecordForTest(storeID [16]byte, bucket string, key []byte, seq uint64, value []byte) ([]byte, [32]byte) {
+	return sealRecord(storeID, bucket, key, seq, value)
+}
+
+// AddSumForTest and SubSumForTest are the digest arithmetic.
+func AddSumForTest(a, b [32]byte) [32]byte { return addSum(a, b) }
+
+// SubSumForTest is subSum.
+func SubSumForTest(a, b [32]byte) [32]byte { return subSum(a, b) }
+
+// TxDigestPutsForTest is the transaction digest of the puts (bucket, key,
+// value triples).
+func TxDigestPutsForTest(puts [][3][]byte) [32]byte {
+	var ws []write
+	for _, p := range puts {
+		ws = append(ws, write{op: writePut, bucket: string(p[0]), key: p[1], value: p[2]})
+	}
+	return txDigest(ws)
+}
