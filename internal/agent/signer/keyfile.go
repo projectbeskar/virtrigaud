@@ -96,7 +96,7 @@ func Listen(path string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", path, err)
 	}
-	if err := os.Chmod(path, SocketMode); err != nil {
+	if err := os.Chmod(path, SocketMode); err != nil { // #nosec G302 -- a socket, not a file: the agent's group must connect (0660); the directory is 2750 and both ends check the peer uid
 		_ = lis.Close()
 		return nil, fmt.Errorf("set the socket mode: %w", err)
 	}
