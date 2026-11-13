@@ -315,7 +315,7 @@ func (c *conn) acquire() error {
 		}
 	}
 	c.held = true
-	_ = c.Conn.SetReadDeadline(c.deadline)
+	_ = c.SetReadDeadline(c.deadline)
 	return nil
 }
 
