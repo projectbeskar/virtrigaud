@@ -38,6 +38,10 @@ var (
 	// Config.FirstUse is false: a deleted floor must not read as a new
 	// enrolment.
 	ErrFloorMissing = errors.New("clock floor missing for an enrolment that has used it")
+	// ErrStoreLost is what a Store's Save returns when the store can no
+	// longer commit at all (it is quarantined). The Floor then stops
+	// persisting and goes on in memory; it does not fail.
+	ErrStoreLost = errors.New("the store that holds the clock floor cannot commit")
 	// ErrBootTimeRegressed means CLOCK_BOOTTIME read lower than the value
 	// persisted in the same boot, which a healthy kernel never does.
 	ErrBootTimeRegressed = errors.New("boot time regressed within one boot")

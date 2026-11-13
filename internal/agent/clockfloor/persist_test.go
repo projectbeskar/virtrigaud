@@ -138,3 +138,67 @@ func TestFloor_PersistRateAndCrashLoss(t *testing.T) {
 	assert.Equal(t, lastSaved, f2.Status().Floor)
 	assert.LessOrEqual(t, inMemory.Sub(lastSaved), step+period)
 }
+
+// After a reboot (another boot_id) the floor is raised by NewBootSlack, the
+// unsaved advance a crash may have lost, but never beyond wall + MaxAhead.
+func TestOpen_NewBootSlack(t *testing.T) {
+	ctx := context.Background()
+	const slack = 65 * time.Second
+	c, s := newClocks(), &clockfloor.MemStore{}
+	f := open(t, c, s)
+	c.advance(time.Hour)
+	require.NoError(t, f.Flush(ctx))
+	stored := f.Now()
+	cfg := cfgFor(c, s)
+	cfg.NewBootSlack = slack
+	cfg.MaxAhead = 5 * time.Minute
+
+	// Same boot: the boot-time credit restores the advance; no slack.
+	c.boot += 10 * time.Second
+	c.wall = stored.Add(-time.Hour)
+	same, err := clockfloor.Open(ctx, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, stored.Add(10*time.Second), same.Status().Floor)
+
+	// A new boot with the wall clock just behind the stored floor.
+	c.reboot("boot-b")
+	c.wall = stored.Add(-10 * time.Second)
+	f2, err := clockfloor.Open(ctx, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, stored.Add(slack), f2.Status().Floor, "raised by the slack")
+	assert.Equal(t, clockfloor.StateOK, f2.Status().State)
+
+	// A wall clock far behind: the raise stops at wall + MaxAhead, which is
+	// below the stored floor, so the floor stays as stored.
+	c.reboot("boot-c")
+	c.wall = stored.Add(-time.Hour)
+	f3, err := clockfloor.Open(ctx, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, stored, f3.Status().Floor)
+
+	// Without the setting nothing is added.
+	c.reboot("boot-d")
+	c.wall = stored.Add(-10 * time.Second)
+	f4, err := clockfloor.Open(ctx, cfgFor(c, s))
+	require.NoError(t, err)
+	assert.Equal(t, stored, f4.Status().Floor)
+}
+
+// A save that fails because the store can no longer commit stops persisting;
+// it does not fail the floor.
+func TestFloor_StoreLostStopsPersisting(t *testing.T) {
+	ctx := context.Background()
+	c, s := newClocks(), &clockfloor.MemStore{}
+	f := open(t, c, s)
+	s.SaveErr = clockfloor.ErrStoreLost
+	c.advance(2 * clockfloor.DefaultPersistInterval)
+	require.ErrorIs(t, f.Observe(ctx), clockfloor.ErrStoreLost)
+	assert.Equal(t, clockfloor.StateOK, f.Status().State)
+	assert.False(t, f.Now().IsZero())
+	s.SaveErr = nil
+	saves := s.Saves
+	c.advance(2 * clockfloor.DefaultPersistInterval)
+	require.NoError(t, f.Observe(ctx))
+	assert.Equal(t, saves, s.Saves, "no further saves")
+	assert.Equal(t, c.wall, f.Now())
+}

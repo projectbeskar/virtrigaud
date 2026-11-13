@@ -89,6 +89,14 @@ type Config struct {
 	// the host loses power. The agent must call Observe at a period no longer
 	// than this interval, and Flush on graceful shutdown.
 	PersistInterval time.Duration
+	// NewBootSlack is added to the stored floor when Open finds the stored
+	// floor was anchored in another boot (a reboot, or a power loss): the
+	// floor may have advanced by up to the persist interval plus the observe
+	// period beyond the stored one without being saved, and no boot-time
+	// credit can restore it across boots. The agent sets it to that bound.
+	// The raise never takes the floor beyond the wall clock plus MaxAhead
+	// (an already-ahead stored floor is left as it is). Zero adds nothing.
+	NewBootSlack time.Duration
 }
 
 // Status is a snapshot of a Floor for a host answer.
@@ -210,6 +218,17 @@ func Open(ctx context.Context, cfg Config) (*Floor, error) {
 					return nil, fmt.Errorf("open clock floor: boot-time credit: %w", ErrClockOutOfRange)
 				}
 				floor = credited
+			}
+		} else if cfg.NewBootSlack > 0 {
+			// Another boot: raise by the unsaved advance a crash may have lost,
+			// but never beyond wall + MaxAhead, so a correct clock is never
+			// pushed into the ahead state by this.
+			raised := persisted.Floor.Add(cfg.NewBootSlack)
+			if limit := wall.Add(cfg.MaxAhead); raised.After(limit) {
+				raised = limit
+			}
+			if raised.After(floor) && !raised.After(maxFloor) {
+				floor = raised
 			}
 		}
 	}
@@ -343,6 +362,12 @@ func (f *Floor) observe(ctx context.Context, force bool) error {
 	err := f.cfg.Store.Save(ctx, next) // without f.mu: Now keeps answering
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if errors.Is(err, ErrStoreLost) {
+		// The store can no longer commit (a quarantine that raced this save):
+		// keep the floor in memory, not failed.
+		f.persisting = false
+		return fmt.Errorf("save clock floor: %w", err)
+	}
 	if err != nil {
 		f.failed = fmt.Errorf("save clock floor: %w", err)
 		return f.failed
