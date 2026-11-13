@@ -128,12 +128,21 @@ func (s *CredentialStore) Store(c *Credentials) { s.p.Store(c) }
 // certificate, and a required client certificate that chains to the pinned
 // Provider identity issuer and names an allowed Provider. Each handshake
 // reads the current Credentials.
-func TLSConfig(creds *CredentialStore) *tls.Config {
+func TLSConfig(creds *CredentialStore) *tls.Config { return tlsConfig(creds, nil) }
+
+// tlsConfig is TLSConfig with a hook that runs when a ClientHello has
+// arrived, before anything is signed: a non-nil error ends the handshake.
+func tlsConfig(creds *CredentialStore, onHello func(net.Conn) error) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		MaxVersion: tls.VersionTLS13,
 		NextProtos: []string{"h2"},
-		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			if onHello != nil {
+				if err := onHello(hello.Conn); err != nil {
+					return nil, err
+				}
+			}
 			c := creds.Load()
 			if c == nil {
 				return nil, errors.New("no server credentials")
@@ -210,7 +219,7 @@ func New(opts Options) (*Server, error) {
 	s := &Server{opts: opts, mutating: MutatingMethods(), noAnswer: logGate{every: refusalLogEvery}}
 	s.throttle = newThrottle(opts.Throttle, opts.Log, time.Now)
 	so := []grpc.ServerOption{
-		grpc.Creds(s.throttle.creds(credentials.NewTLS(TLSConfig(opts.Credentials)))),
+		grpc.Creds(s.throttle.creds(credentials.NewTLS(tlsConfig(opts.Credentials, s.throttle.acquire)))),
 		grpc.ConnectionTimeout(ConnectionTimeout),
 		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: MaxConnectionAge, MaxConnectionAgeGrace: MaxConnectionAgeGrace}),

@@ -19,6 +19,7 @@ package server
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,8 +51,15 @@ const (
 	// DefaultPerSourceBurst is the burst of new connections one source
 	// address may open.
 	DefaultPerSourceBurst = 10
-	// maxTrackedSources bounds the source addresses the throttle remembers;
-	// when it is full of active sources, a new source is refused.
+	// DefaultPerSourceHandshakes bounds the handshakes one source may have in
+	// progress at once.
+	DefaultPerSourceHandshakes = 2
+	// DefaultHelloTimeout is how long a new connection may stay silent: it
+	// must send its ClientHello within this time or it is closed, and until
+	// then it holds no handshake slot.
+	DefaultHelloTimeout = 2 * time.Second
+	// maxTrackedSources bounds each generation of the table of source
+	// addresses the throttle remembers (see sourceLimiter).
 	maxTrackedSources = 4096
 	// refusalLogEvery is the shortest interval between two log lines of the
 	// same kind of refusal; the lines carry the count suppressed since.
@@ -68,6 +76,11 @@ type Throttle struct {
 	PerSourceRate float64
 	// PerSourceBurst is the bucket size of each source address.
 	PerSourceBurst int
+	// PerSourceHandshakes bounds the handshakes in progress from one source.
+	PerSourceHandshakes int
+	// HelloTimeout is how long a connection may stay silent before its
+	// ClientHello.
+	HelloTimeout time.Duration
 }
 
 func (t Throttle) withDefaults() Throttle {
@@ -79,6 +92,12 @@ func (t Throttle) withDefaults() Throttle {
 	}
 	if t.PerSourceBurst <= 0 {
 		t.PerSourceBurst = DefaultPerSourceBurst
+	}
+	if t.PerSourceHandshakes <= 0 {
+		t.PerSourceHandshakes = DefaultPerSourceHandshakes
+	}
+	if t.HelloTimeout <= 0 {
+		t.HelloTimeout = DefaultHelloTimeout
 	}
 	return t
 }
@@ -106,22 +125,31 @@ func (g *logGate) allow(now time.Time) (bool, uint64) {
 	return true, n
 }
 
-// sourceBucket is one source address's token bucket.
+// sourceBucket is one source's token bucket.
 type sourceBucket struct {
 	tokens float64
 	last   time.Time
 }
 
-// sourceLimiter limits new connections per source address.
+// sourceLimiter limits events per key (a source address) with one token
+// bucket each. It remembers at most 2*maxTrackedSources keys, in two
+// generations: a key is looked up in the current one and then in the
+// previous one (and moved to the current one); when the current one is full
+// it becomes the previous one and the old previous one is dropped. So the
+// keys forgotten are those not seen for the longest, a new key never has to
+// be refused, and the cost of forgetting is amortised O(1) per event, with
+// no scan under the lock. A forgotten key starts again with a full bucket.
 type sourceLimiter struct {
-	mu    sync.Mutex
-	rate  float64
-	burst float64
-	m     map[string]*sourceBucket
+	mu       sync.Mutex
+	rate     float64
+	burst    float64
+	max      int
+	cur, old map[string]*sourceBucket
 }
 
 func newSourceLimiter(rate float64, burst int) *sourceLimiter {
-	return &sourceLimiter{rate: rate, burst: float64(burst), m: map[string]*sourceBucket{}}
+	return &sourceLimiter{rate: rate, burst: float64(burst), max: maxTrackedSources,
+		cur: map[string]*sourceBucket{}, old: map[string]*sourceBucket{}}
 }
 
 // allow takes a token of source at now.
@@ -131,16 +159,17 @@ func (l *sourceLimiter) allow(source string, now time.Time) bool {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	b, ok := l.m[source]
+	b, ok := l.cur[source]
 	if !ok {
-		if len(l.m) >= maxTrackedSources {
-			l.prune(now)
-			if len(l.m) >= maxTrackedSources {
-				return false
-			}
+		if b, ok = l.old[source]; ok {
+			delete(l.old, source)
+		} else {
+			b = &sourceBucket{tokens: l.burst, last: now}
 		}
-		b = &sourceBucket{tokens: l.burst, last: now}
-		l.m[source] = b
+		if len(l.cur) >= l.max {
+			l.old, l.cur = l.cur, make(map[string]*sourceBucket, l.max)
+		}
+		l.cur[source] = b
 	}
 	if el := now.Sub(b.last).Seconds(); el > 0 {
 		b.tokens = min(l.burst, b.tokens+el*l.rate)
@@ -153,26 +182,36 @@ func (l *sourceLimiter) allow(source string, now time.Time) bool {
 	return true
 }
 
-// prune forgets the sources whose bucket has refilled: they are
-// indistinguishable from new ones.
-func (l *sourceLimiter) prune(now time.Time) {
-	for k, b := range l.m {
-		if b.tokens+now.Sub(b.last).Seconds()*l.rate >= l.burst {
-			delete(l.m, k)
-		}
-	}
+// size is the number of keys remembered.
+func (l *sourceLimiter) size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.cur) + len(l.old)
 }
 
-// sourceOf returns the host part of a connection's remote address.
+// sourceOf returns the key of a connection's source: its IPv4 address, or
+// its IPv6 address truncated to the /64 (one subscriber or pod network holds
+// a whole /64, so keying on the full address would give one host 2^64
+// sources).
 func sourceOf(c net.Conn) string {
 	addr := c.RemoteAddr()
 	if addr == nil {
 		return ""
 	}
-	if host, _, err := net.SplitHostPort(addr.String()); err == nil {
-		return host
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		host = addr.String()
 	}
-	return addr.String()
+	if ip, perr := netip.ParseAddr(host); perr == nil {
+		ip = ip.Unmap()
+		if ip.Is6() {
+			if p, perr := ip.Prefix(64); perr == nil {
+				return p.String()
+			}
+		}
+		return ip.String()
+	}
+	return host
 }
 
 // throttle holds the pre-handshake limits of one server.
@@ -183,6 +222,9 @@ type throttle struct {
 	log     logr.Logger
 	now     func() time.Time
 
+	hsMu       sync.Mutex
+	hsBySource map[string]int
+
 	sourceGate, slotGate logGate
 	sourceRefused        atomic.Uint64
 	slotRefused          atomic.Uint64
@@ -191,7 +233,7 @@ type throttle struct {
 func newThrottle(cfg Throttle, log logr.Logger, now func() time.Time) *throttle {
 	cfg = cfg.withDefaults()
 	return &throttle{cfg: cfg, sources: newSourceLimiter(cfg.PerSourceRate, cfg.PerSourceBurst),
-		slots: make(chan struct{}, cfg.MaxHandshakes), log: log, now: now,
+		slots: make(chan struct{}, cfg.MaxHandshakes), log: log, now: now, hsBySource: map[string]int{},
 		sourceGate: logGate{every: refusalLogEvery}, slotGate: logGate{every: refusalLogEvery}}
 }
 
@@ -225,13 +267,104 @@ func (l *throttleListener) Accept() (net.Conn, error) {
 	}
 }
 
-// errTooManyHandshakes is returned to gRPC for a connection refused because
-// the handshake slots are full.
+// errTooManyHandshakes is returned for a handshake refused because the
+// handshake slots, or the source's share of them, are taken.
 var errTooManyHandshakes = errors.New("too many handshakes in progress")
 
-// creds wraps transport credentials so that at most MaxHandshakes handshakes
-// run at once; a connection that finds no slot is closed without a handshake,
-// so it never reaches the signer.
+// conn is a connection in the handshake: it knows its source, the slot it
+// holds (none until the ClientHello has arrived) and the deadline to restore
+// once it has.
+type conn struct {
+	net.Conn
+	t        *throttle
+	source   string
+	deadline time.Time
+
+	mu   sync.Mutex
+	held bool
+}
+
+// acquire takes a handshake slot for this connection; it is called when the
+// ClientHello has arrived, so a connection that stays silent holds nothing,
+// and before the server signs anything. At most MaxHandshakes handshakes run
+// at once and at most PerSourceHandshakes from one source; the rest fail
+// before the signer is asked. It also gives the connection the rest of the
+// handshake deadline back.
+func (c *conn) acquire() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.held {
+		return nil
+	}
+	t := c.t
+	if !guard.Off(guard.HandshakeCap) {
+		t.hsMu.Lock()
+		if t.hsBySource[c.source] >= t.cfg.PerSourceHandshakes {
+			t.hsMu.Unlock()
+			t.refuseSlot()
+			return errTooManyHandshakes
+		}
+		t.hsBySource[c.source]++
+		t.hsMu.Unlock()
+		select {
+		case t.slots <- struct{}{}:
+		default:
+			t.releaseSource(c.source)
+			t.refuseSlot()
+			return errTooManyHandshakes
+		}
+	}
+	c.held = true
+	_ = c.Conn.SetReadDeadline(c.deadline)
+	return nil
+}
+
+// release gives the slot back; it is safe to call twice.
+func (c *conn) release() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.held {
+		return
+	}
+	c.held = false
+	if !guard.Off(guard.HandshakeCap) {
+		<-c.t.slots
+		c.t.releaseSource(c.source)
+	}
+}
+
+func (t *throttle) releaseSource(source string) {
+	t.hsMu.Lock()
+	defer t.hsMu.Unlock()
+	if t.hsBySource[source] <= 1 {
+		delete(t.hsBySource, source)
+		return
+	}
+	t.hsBySource[source]--
+}
+
+func (t *throttle) refuseSlot() {
+	t.slotRefused.Add(1)
+	if ok, n := t.slotGate.allow(t.now()); ok {
+		t.log.Info("handshake refused: too many handshakes in progress", "suppressedSinceLast", n,
+			"refusedTotal", t.slotRefused.Load())
+	}
+}
+
+// acquire is the TLS configuration's hook for the ClientHello: it takes the
+// slot of the connection the hello came on.
+func (t *throttle) acquire(hello net.Conn) error {
+	c, ok := hello.(*conn)
+	if !ok {
+		return errors.New("handshake on a connection the throttle did not see")
+	}
+	return c.acquire()
+}
+
+// creds wraps transport credentials so that a connection must send its
+// ClientHello within HelloTimeout, holding no slot until then; it takes a
+// slot (see conn.acquire) for the rest of the handshake and gives it back
+// when the handshake ends.
 func (t *throttle) creds(inner credentials.TransportCredentials) credentials.TransportCredentials {
 	return &cappedCreds{TransportCredentials: inner, t: t}
 }
@@ -242,23 +375,14 @@ type cappedCreds struct {
 }
 
 // ServerHandshake implements credentials.TransportCredentials.
-func (c *cappedCreds) ServerHandshake(conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
-	select {
-	case c.t.slots <- struct{}{}:
-		defer func() { <-c.t.slots }()
-	default:
-		if guard.Off(guard.HandshakeCap) {
-			return c.TransportCredentials.ServerHandshake(conn)
-		}
-		_ = conn.Close()
-		c.t.slotRefused.Add(1)
-		if ok, n := c.t.slotGate.allow(c.t.now()); ok {
-			c.t.log.Info("connection refused before the handshake: too many handshakes in progress", "suppressedSinceLast", n,
-				"refusedTotal", c.t.slotRefused.Load())
-		}
-		return nil, nil, errTooManyHandshakes
-	}
-	return c.TransportCredentials.ServerHandshake(conn)
+func (c *cappedCreds) ServerHandshake(raw net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	// gRPC has set a deadline for the whole handshake; keep it to restore
+	// once the ClientHello is in, and meanwhile allow only HelloTimeout.
+	deadline := c.t.now().Add(ConnectionTimeout)
+	cn := &conn{Conn: raw, t: c.t, source: sourceOf(raw), deadline: deadline}
+	defer cn.release()
+	_ = raw.SetReadDeadline(c.t.now().Add(c.t.cfg.HelloTimeout))
+	return c.TransportCredentials.ServerHandshake(cn)
 }
 
 // Clone implements credentials.TransportCredentials.
