@@ -195,7 +195,25 @@ type Options struct {
 	// Throttle sets the pre-handshake limits (see Throttle); zero fields
 	// take their defaults.
 	Throttle Throttle
+	// AnswersPerSecond and AnswerBurst limit the signed answers made for one
+	// Provider identity (the verified client certificate's URI), so that one
+	// Provider cannot use up the signer's answer budget; a read above the
+	// limit is answered without a signed answer. Zero fields take
+	// DefaultAnswersPerSecond and DefaultAnswerBurst.
+	AnswersPerSecond float64
+	// AnswerBurst is the burst of the per-identity answer limit.
+	AnswerBurst int
 }
+
+// Defaults of the per-identity answer limit, below the signer's answer budget
+// (50 per second) so that one identity cannot use all of it.
+const (
+	// DefaultAnswersPerSecond is the sustained signed answers per second for
+	// one Provider identity.
+	DefaultAnswersPerSecond = 10.0
+	// DefaultAnswerBurst is the burst of signed answers for one identity.
+	DefaultAnswerBurst = 20
+)
 
 // Server is the agent's gRPC server.
 type Server struct {
@@ -203,7 +221,9 @@ type Server struct {
 	grpc      *grpc.Server
 	mutating  map[string]bool
 	throttle  *throttle
+	answers   *sourceLimiter
 	noAnswer  logGate
+	limited   logGate
 	providerS *providerService
 	agentS    *agentService
 }
@@ -218,6 +238,15 @@ func New(opts Options) (*Server, error) {
 	}
 	s := &Server{opts: opts, mutating: MutatingMethods(), noAnswer: logGate{every: refusalLogEvery}}
 	s.throttle = newThrottle(opts.Throttle, opts.Log, time.Now)
+	if opts.AnswersPerSecond <= 0 {
+		opts.AnswersPerSecond = DefaultAnswersPerSecond
+	}
+	if opts.AnswerBurst <= 0 {
+		opts.AnswerBurst = DefaultAnswerBurst
+	}
+	s.answers = newSourceLimiter(opts.AnswersPerSecond, opts.AnswerBurst)
+	s.limited = logGate{every: refusalLogEvery}
+	s.opts = opts
 	so := []grpc.ServerOption{
 		grpc.Creds(s.throttle.creds(credentials.NewTLS(tlsConfig(opts.Credentials, s.throttle.acquire)))),
 		grpc.ConnectionTimeout(ConnectionTimeout),
@@ -359,6 +388,12 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 	if len(nonce) == 0 {
 		return nil
 	}
+	if !s.answers.allow(peerIdentity(ctx), s.opts.Now()) {
+		if ok, n := s.limited.allow(s.opts.Now()); ok {
+			s.opts.Log.Info("no signed answer: the Provider is above its answer rate", "suppressedSinceLast", n)
+		}
+		return nil
+	}
 	c := s.opts.Credentials.Load()
 	view, err := s.opts.Agent.HostView(ctx, continuitySeq)
 	if err != nil {
@@ -386,6 +421,29 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 		return nil
 	}
 	return blob
+}
+
+// peerIdentity is the key of the verified caller for the answer limit: the
+// URI names of its client certificate (the Provider identity), or its serial
+// number.
+func peerIdentity(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return ""
+	}
+	info, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(info.State.PeerCertificates) == 0 {
+		return ""
+	}
+	leaf := info.State.PeerCertificates[0]
+	key := ""
+	for _, u := range leaf.URIs {
+		key += u.String() + " "
+	}
+	if key == "" {
+		key = leaf.SerialNumber.String()
+	}
+	return key
 }
 
 // logNoAnswer logs why an answer could not be made, one line per interval

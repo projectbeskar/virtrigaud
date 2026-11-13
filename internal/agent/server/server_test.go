@@ -145,6 +145,9 @@ func (p *signerProc) stop() {
 
 func newEnv(t *testing.T) *env { return newEnvWith(t, server.Throttle{}) }
 
+// withOptions changes the server options of an environment.
+type withOptions func(*server.Options)
+
 // countingSigner counts the signatures the agent asks the signer for.
 type countingSigner struct {
 	crypto.Signer
@@ -156,7 +159,7 @@ func (c *countingSigner) Sign(r io.Reader, d []byte, o crypto.SignerOpts) ([]byt
 	return c.Signer.Sign(r, d, o)
 }
 
-func newEnvWith(t *testing.T, th server.Throttle) *env {
+func newEnvWith(t *testing.T, th server.Throttle, mods ...withOptions) *env {
 	t.Helper()
 	p := trusttest.New(t)
 	dir := t.TempDir()
@@ -186,8 +189,12 @@ func newEnvWith(t *testing.T, th server.Throttle) *env {
 	view.Position.StoreID[0], view.Position.Head[0] = 7, 8
 	e := &env{t: t, pki: p, signer: sp, signs: counter, creds: server.NewCredentialStore(&server.Credentials{Identity: id, Trust: cfg}),
 		agent: &fakeAgent{view: view, state: providerv1.AgentState_AGENT_STATE_READY}}
-	srv, err := server.New(server.Options{Agent: e.agent, Credentials: e.creds, Version: "test", JournalSchemaVersion: 1, Log: logr.Discard(),
-		Now: func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) }, Throttle: th})
+	opts := server.Options{Agent: e.agent, Credentials: e.creds, Version: "test", JournalSchemaVersion: 1, Log: logr.Discard(),
+		Now: func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) }, Throttle: th}
+	for _, m := range mods {
+		m(&opts)
+	}
+	srv, err := server.New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,5 +613,31 @@ func TestUnauthenticatedFloodDoesNotReachTheSigner(t *testing.T) {
 	}
 	if got := e.signs.n.Load() - before; got > 3 {
 		t.Fatalf("%d signatures for 30 unauthenticated connections with a burst of 3", got)
+	}
+}
+
+// TestAnswerRatePerProviderIdentity: signed answers for one Provider identity
+// are limited; a read above the limit is answered without a signed answer,
+// and the signer is not asked.
+func TestAnswerRatePerProviderIdentity(t *testing.T) {
+	e := newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.AnswersPerSecond, o.AnswerBurst = 0.0001, 3 })
+	c := agentv1.NewAgentServiceClient(e.dial(e.provider(), 0))
+	before := e.signs.n.Load()
+	signed := 0
+	for i := 0; i < 10; i++ {
+		resp, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(byte(i)), CallerApiVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetHostAnswer() != nil {
+			signed++
+		}
+	}
+	if signed != 3 {
+		t.Fatalf("%d signed answers with a burst of 3", signed)
+	}
+	// One signature for the TLS handshake and one per signed answer.
+	if got := e.signs.n.Load() - before; got != 4 {
+		t.Fatalf("the signer was asked for %d signatures, want 4", got)
 	}
 }
