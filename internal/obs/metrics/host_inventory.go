@@ -57,12 +57,11 @@ const (
 )
 
 // SetHostInventoryCondition publishes the current reason of a Host's
-// inventory condition, replacing the series of its previous reason
-// (previous, "" for none).
-func SetHostInventoryCondition(namespace, host, condition, previous, reason string, isTrue bool) {
-	if previous != "" && previous != reason {
-		hostInventoryCondition.DeleteLabelValues(namespace, host, condition, previous)
-	}
+// inventory condition, replacing every other series of that condition, so
+// each Host has exactly one series per condition whatever was published
+// before.
+func SetHostInventoryCondition(namespace, host, condition, reason string, isTrue bool) {
+	hostInventoryCondition.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "host": host, "condition": condition})
 	v := 0.0
 	if isTrue {
 		v = 1

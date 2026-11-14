@@ -505,7 +505,7 @@ func hostInventoryInScope(provider *infravirtrigaudiov1beta1.Provider) bool {
 // Unsigned host information can only make a host not ready, never ready.
 func (r *HostReconciler) applyHostInventory(ctx context.Context, host *infravirtrigaudiov1beta1.Host, obs inventoryObservation) {
 	if !obs.inScope {
-		clearHostInventory(host)
+		r.clearHostInventory(host)
 		return
 	}
 	p := r.HostAnswers.inventoryPolicy()
@@ -531,29 +531,35 @@ func (r *HostReconciler) applyHostInventory(ctx context.Context, host *infravirt
 }
 
 // withdrawHostInventory sets both inventory conditions False/NoSignedAnswer
-// for a heartbeat that ended without a host answer. With inScope false it
-// does so only for a host that carries an inventory condition from an
-// earlier heartbeat (the Provider's type is unknown, for example because the
-// Provider is gone).
-func withdrawHostInventory(host *infravirtrigaudiov1beta1.Host, inScope bool, why string) {
+// for a heartbeat that ended without a host answer, and audits it like any
+// other verdict (log line, Event, metric). With inScope false it does so only
+// for a host that carries an inventory condition from an earlier heartbeat
+// (the Provider's type is unknown, for example because the Provider is gone).
+func (r *HostReconciler) withdrawHostInventory(ctx context.Context, host *infravirtrigaudiov1beta1.Host, inScope bool, why string) {
 	dropStaleInventoryMirror(host)
 	if !inScope && meta.FindStatusCondition(host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified) == nil {
 		return
 	}
-	setHostCondition(host, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, metav1.ConditionFalse,
-		infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer, why)
-	setHostCondition(host, infravirtrigaudiov1beta1.HostConditionComponentsReady, metav1.ConditionFalse,
-		infravirtrigaudiov1beta1.HostReasonComponentsInventoryNotVerified,
-		"the host inventory is not verified ("+infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer+")")
+	before := slices.Clone(host.Status.Conditions)
+	v := inventoryVerdict{
+		verified: conditionVerdict{status: metav1.ConditionFalse, reason: infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer, message: why},
+		components: conditionVerdict{status: metav1.ConditionFalse, reason: infravirtrigaudiov1beta1.HostReasonComponentsInventoryNotVerified,
+			message: "the host inventory is not verified (" + infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer + ")"},
+	}
+	setHostCondition(host, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, v.verified.status, v.verified.reason, v.verified.message)
+	setHostCondition(host, infravirtrigaudiov1beta1.HostConditionComponentsReady, v.components.status, v.components.reason, v.components.message)
+	r.auditInventory(ctx, host, before, v, nil)
 }
 
 // clearHostInventory removes the inventory mirror and conditions of a host
 // whose Provider does not run a per-host agent (it moved to another
-// Provider).
-func clearHostInventory(host *infravirtrigaudiov1beta1.Host) {
+// Provider), with its metric series and audit state.
+func (r *HostReconciler) clearHostInventory(host *infravirtrigaudiov1beta1.Host) {
 	host.Status.AgentInventory = nil
 	meta.RemoveStatusCondition(&host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified)
 	meta.RemoveStatusCondition(&host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionComponentsReady)
+	r.inventoryEvents.forget(host.Namespace + "/" + host.Name)
+	metrics.DeleteHostInventoryConditions(host.Namespace, host.Name)
 }
 
 // dropStaleInventoryMirror clears the inventory mirror when it was verified
@@ -760,11 +766,7 @@ func (r *HostReconciler) auditInventory(ctx context.Context, host *infravirtriga
 		{infravirtrigaudiov1beta1.HostConditionComponentsReady, v.components},
 	} {
 		old := meta.FindStatusCondition(before, c.typ)
-		previous := ""
-		if old != nil {
-			previous = metricReason(old.Reason)
-		}
-		metrics.SetHostInventoryCondition(host.Namespace, host.Name, c.typ, previous, metricReason(c.cv.reason), c.cv.status == metav1.ConditionTrue)
+		metrics.SetHostInventoryCondition(host.Namespace, host.Name, c.typ, metricReason(c.cv.reason), c.cv.status == metav1.ConditionTrue)
 		if old == nil || old.Status != c.cv.status || old.Reason != c.cv.reason {
 			kv := []any{"host", host.Name, "condition", c.typ, "status", c.cv.status, "reason", c.cv.reason, "component", v.component,
 				"answerSHA256", answerSHA, "allowListSHA256", allowSHA}

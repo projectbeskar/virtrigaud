@@ -43,6 +43,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostinventory"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -921,7 +922,7 @@ func TestHostInventory_MirrorClearedOnEnrolmentChangeAndLeaving(t *testing.T) {
 	assert.Nil(t, h.Status.AgentInventory)
 	// So does an error heartbeat.
 	h.Status.AgentInventory = &infravirtrigaudiov1beta1.HostAgentInventoryStatus{State: "Complete", EnrolmentID: strings.Repeat("1", 32)}
-	withdrawHostInventory(h, true, "x")
+	f.r.withdrawHostInventory(context.Background(), h, true, "x")
 	assert.Nil(t, h.Status.AgentInventory)
 
 	// Leaving: a heartbeat of a Provider that runs no per-host agent.
@@ -980,4 +981,62 @@ func TestSetComponentAllowListReadiness_KeepsEarlierReason(t *testing.T) {
 	assert.Equal(t, k8s.ReasonOperationSignerUnavailable, c.Reason)
 	assert.Contains(t, c.Message, "no signer")
 	assert.Contains(t, c.Message, k8s.ReasonAllowListDigestMismatch)
+}
+
+// A heartbeat failure is audited like any other verdict: a transition log
+// line, an Event, and the condition gauge flipped to NoSignedAnswer with 0;
+// leaving a Provider that runs a per-host agent removes the series.
+func TestHostInventory_WithdrawIsAudited(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	key := types.NamespacedName{Namespace: clusteredNS, Name: "host-alpha"}
+	f.r.forgetHostInventory(key)
+	f.reconcile(t)
+	drainEvents(f.events)
+	var mu sync.Mutex
+	var lines []string
+	ctx := log.IntoContext(context.Background(), funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, args)
+	}, funcr.Options{}))
+	f.clock.advance(time.Minute)
+	f.signed.hostErr = contracts.NewRetryableError("connection refused", nil)
+	_, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	mu.Lock()
+	joined := strings.Join(lines, "\n")
+	mu.Unlock()
+	assert.Contains(t, joined, "Host inventory condition changed")
+	assert.Contains(t, joined, infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer)
+	events := drainEvents(f.events)
+	require.NotEmpty(t, events)
+	assert.Contains(t, strings.Join(events, "\n"), infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer)
+	v, ok := inventoryMetric(t, "host-alpha", infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified,
+		infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer)
+	require.True(t, ok)
+	assert.Zero(t, v)
+	_, stale := inventoryMetric(t, "host-alpha", infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified,
+		infravirtrigaudiov1beta1.HostReasonInventoryVerified)
+	assert.False(t, stale, "the Verified series is gone")
+	assert.Equal(t, 2, seriesOf(t, "host-alpha"))
+
+	h := &infravirtrigaudiov1beta1.Host{}
+	require.NoError(t, f.r.Get(context.Background(), key, h))
+	f.r.applyHostInventory(context.Background(), h, inventoryObservation{})
+	assert.Zero(t, seriesOf(t, "host-alpha"), "leaving removes the series")
+}
+
+// Whatever was published before (a status write that failed between two
+// heartbeats included), a condition has exactly one series.
+func TestHostInventory_OneSeriesPerCondition(t *testing.T) {
+	ns, host := "metrics-ns", "host-series"
+	metrics.DeleteHostInventoryConditions(ns, host)
+	cond := infravirtrigaudiov1beta1.HostConditionComponentsReady
+	metrics.SetHostInventoryCondition(ns, host, cond, "A", true)
+	metrics.SetHostInventoryCondition(ns, host, cond, "B", false) // never saved
+	metrics.SetHostInventoryCondition(ns, host, cond, "C", false)
+	assert.Equal(t, 1, seriesOf(t, host))
+	_, ok := inventoryMetric(t, host, cond, "C")
+	assert.True(t, ok)
+	metrics.DeleteHostInventoryConditions(ns, host)
 }

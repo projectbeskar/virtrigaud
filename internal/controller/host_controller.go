@@ -329,12 +329,12 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	provider, err := r.resolveProvider(ctx, host)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			r.setHostUnavailable(host, reasonProviderUnavailable,
+			r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
 				fmt.Sprintf("Provider %s not found", host.Spec.ProviderRef.Name))
 			return r.persist(ctx, host, base, hostSyncBackoffInterval)
 		}
 		metrics.RecordError(errReasonHostProviderResolve, metrics.ComponentManager)
-		r.setHostUnavailable(host, reasonProviderUnavailable,
+		r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
 			fmt.Sprintf("failed to get Provider %s: %v", host.Spec.ProviderRef.Name, err))
 		return r.persist(ctx, host, base, hostSyncBackoffInterval)
 	}
@@ -343,7 +343,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	//    single-host Provider cannot answer GetHostInfo — short-circuit before the
 	//    RPC and flag the misconfiguration rather than probing a doomed endpoint.
 	if !isClusterTopology(provider) {
-		r.setHostUnavailable(host, reasonProviderNotClustered,
+		r.setHostUnavailable(ctx, host, reasonProviderNotClustered,
 			fmt.Sprintf("Provider %s is not clustered (spec.topology != cluster); a Host requires a clustered Provider", provider.Name))
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}
@@ -354,7 +354,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
 		metrics.RecordError(errReasonHostProviderResolve, metrics.ComponentManager)
-		r.setHostUnavailable(host, reasonProviderUnavailable,
+		r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
 			fmt.Sprintf("Provider %s runtime is not ready: %v", provider.Name, err))
 		return r.persist(ctx, host, base, hostSyncBackoffInterval)
 	}
@@ -382,27 +382,27 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 // crash-loop on a bad or unreachable provider.
 func (r *HostReconciler) handleGetHostInfoError(ctx context.Context, host, base *infravirtrigaudiov1beta1.Host, provider *infravirtrigaudiov1beta1.Provider, err error) (ctrl.Result, error) {
 	if hostInventoryInScope(provider) {
-		withdrawHostInventory(host, true, "the heartbeat's GetHostInfo failed, so there is no signed host answer")
+		r.withdrawHostInventory(ctx, host, true, "the heartbeat's GetHostInfo failed, so there is no signed host answer")
 	} else {
-		clearHostInventory(host)
+		r.clearHostInventory(host)
 	}
 	switch {
 	case contracts.IsNotSupported(err):
 		// The Provider claims clustered topology but does not implement the
 		// inventory RPC (gRPC Unimplemented). Treat it like a non-clustered
 		// reference: a config error, requeued at heartbeat cadence, not a crash.
-		r.setHostUnavailable(host, reasonProviderNotClustered,
+		r.setHostUnavailable(ctx, host, reasonProviderNotClustered,
 			fmt.Sprintf("Provider %s does not implement GetHostInfo (not a clustered provider)", provider.Name))
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	case contracts.IsNotFound(err):
 		// The provider is clustered and reachable but does not know this host id.
-		r.setHostUnavailable(host, reasonHostNotFound,
+		r.setHostUnavailable(ctx, host, reasonHostNotFound,
 			fmt.Sprintf("host %s is not in Provider %s inventory", host.Name, provider.Name))
 		return r.persist(ctx, host, base, hostSyncBackoffInterval)
 	default:
 		metrics.RecordError(errReasonHostGetInfo, metrics.ComponentManager)
 		log.FromContext(ctx).Error(err, "GetHostInfo failed", "host", host.Name, "provider", provider.Name)
-		r.setHostUnavailable(host, reasonProviderUnavailable,
+		r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
 			fmt.Sprintf("GetHostInfo failed on Provider %s: %v", provider.Name, err))
 		return r.persist(ctx, host, base, hostSyncBackoffInterval)
 	}
@@ -466,10 +466,10 @@ func mapHostHealth(h contracts.HostHealth) (infravirtrigaudiov1beta1.HostHealth,
 // flipped, matching node-status convention) and does NOT touch LastHeartbeatTime
 // (this was not a successful sync — a stale heartbeat is the signal operators
 // read).
-func (r *HostReconciler) setHostUnavailable(host *infravirtrigaudiov1beta1.Host, reason, msg string) {
+func (r *HostReconciler) setHostUnavailable(ctx context.Context, host *infravirtrigaudiov1beta1.Host, reason, msg string) {
 	host.Status.Health = infravirtrigaudiov1beta1.HostHealthUnknown
 	setHostReady(host, metav1.ConditionFalse, reason, msg)
-	withdrawHostInventory(host, false, "the heartbeat did not reach the host, so there is no signed host answer")
+	r.withdrawHostInventory(ctx, host, false, "the heartbeat did not reach the host, so there is no signed host answer")
 }
 
 // setHostReady upserts the Host's Ready condition, stamping ObservedGeneration =
