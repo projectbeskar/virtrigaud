@@ -113,6 +113,18 @@ const (
 	// HostKeyUnreadable: the agent refuses to start when it can read the
 	// host key file.
 	HostKeyUnreadable Name = "host-key-unreadable"
+	// DeletedOnlyFromVMTombstone: a VM answer says a placement was deleted
+	// only from the VM tombstone of its completed Delete, never from the
+	// absence of a VM record.
+	DeletedOnlyFromVMTombstone Name = "deleted-only-from-vm-tombstone"
+	// LookupBeforeEnrolment: the agent's operation path answers a known op_id
+	// from the store before it refuses a grant naming another Provider or
+	// enrolment, and never refuses an enrolment the store has no record of as
+	// definitely not performed.
+	LookupBeforeEnrolment Name = "lookup-before-enrolment"
+	// RecoveredOpsRun: the agent starts a runner for every operation that
+	// recovery left runnable, so that no operation stays running without one.
+	RecoveredOpsRun Name = "recovered-ops-run"
 	// InventoryValidate: a host inventory is checked against the inventory
 	// field rules before it is put in an answer and again before it is
 	// signed.
@@ -151,7 +163,7 @@ func All() []Name {
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
 		ClockFloorNeverLower, ClockFloorReadOnlyOpen, SignerPeerCheck, SignerClientPeerCheck, SignerDigestCheck,
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
-		InventoryValidate, InventoryOnlyWhenAsked,
+		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun, InventoryValidate, InventoryOnlyWhenAsked,
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
 		EnrolLoaderCheck,
 	}

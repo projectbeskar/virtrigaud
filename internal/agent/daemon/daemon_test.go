@@ -68,7 +68,13 @@ func TestStartEmptyStore(t *testing.T) {
 		a.GetContext().GetHostId() != trusttest.HostName || a.GetClockFloor() == nil {
 		t.Fatalf("answer = %v", a)
 	}
-	if code, reason := r.create(); code != "Unimplemented" || reason != "" {
+	// A release build has no operation path; a development build verifies
+	// the grant, and a call without one is refused before anything else.
+	wantCode, wantReason := "Unimplemented", ""
+	if config.DevBuild {
+		wantCode, wantReason = "FailedPrecondition", "IDENTITY_REQUIRED"
+	}
+	if code, reason := r.create(); code != wantCode || reason != wantReason {
 		t.Fatalf("Create = %s %s", code, reason)
 	}
 	if err := r.stop(); err != nil {

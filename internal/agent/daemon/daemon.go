@@ -48,10 +48,15 @@ limitations under the License.
 //     store only from a development enrolment (never set outside tests), and
 //     otherwise leaves answers unsigned.
 //  7. Recovery resolves every interrupted operation by the store's recovery
-//     table. This agent starts no runner for an operation left runnable.
+//     table. A development build starts a runner for every operation that
+//     recovery left runnable, so that no operation stays running without
+//     one.
 //  8. Ready: systemd is notified (READY=1), and the trust state turns
-//     READY. Mutations are still refused (Unimplemented), because this agent
-//     executes no operations yet.
+//     READY. A development build then serves the operation path: it
+//     verifies each mutating call's operation grant, has the operation store
+//     admit it, runs it through the configured executor and answers
+//     TaskStatus and Describe from the store (see package server). A release
+//     build refuses every mutation (Unimplemented).
 //
 // A quarantined store also notifies READY=1, with the quarantine in STATUS=,
 // so that systemd keeps the agent running to answer reads instead of
@@ -101,9 +106,11 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/agent/runner"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
 	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/systemd"
@@ -153,6 +160,11 @@ const (
 	signerWaitStatus     = systemd.NotifyReady + "\nSTATUS=waiting for the host key signer"
 	signerWaitMessage    = "waiting for the host key signer"
 )
+
+// ErrRunPanicked is returned by Run after an operation run panicked: the
+// agent drained and stopped, and its next start's recovery resolves the
+// interrupted operation.
+var ErrRunPanicked = errors.New("an operation run panicked")
 
 // ErrStartRefused is wrapped by every refused start.
 var ErrStartRefused = errors.New("the agent refused to start")
@@ -241,6 +253,9 @@ type Options struct {
 	// Now is the clock for certificate validity at load and reload (test
 	// override); nil uses time.Now.
 	Now func() time.Time
+	// StepDeadlines bounds each operation step's run per kind (test
+	// override); nil uses opstore.DefaultStepDeadline for every kind.
+	StepDeadlines map[providerv1.OperationKind]time.Duration
 }
 
 // agentState is what the server reads about the agent.
@@ -320,6 +335,7 @@ func (o Options) testOverrides() []string {
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
 		"TrustFileOwner": o.TrustFileOwner != nil, "InventoryRoot": o.InventoryRoot != "", "Listener": o.Listener != nil, "Now": o.Now != nil,
 		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
+		"StepDeadlines": o.StepDeadlines != nil,
 	} {
 		if on {
 			set = append(set, name)
@@ -443,10 +459,13 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	d.log.Info("host checks passed", "host", creds.Identity.HostURI)
 
 	// Steps 1 to 3: single writer, open, local continuity checks.
+	hooks, rotate := devJournalHooks(d.log)
 	st, err := opstore.Open(ctx, opstore.Options{
-		Journal:  journal.Options{Dir: d.o.Config.StateDir, FS: d.o.JournalFS, Events: d.journalEvent},
-		Executor: d.o.Executor,
-		Audit:    d.auditEvent,
+		Journal: journal.Options{Dir: d.o.Config.StateDir, FS: d.o.JournalFS, Events: d.journalEvent,
+			Hooks: hooks, AnchorRotateBytes: rotate},
+		Executor:      d.o.Executor,
+		Audit:         d.auditEvent,
+		StepDeadlines: d.o.StepDeadlines,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -486,13 +505,35 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	if info, err := st.Journal().Schema(ctx); err == nil {
 		schema = info.SchemaVersion
 	}
+	// The runner pool lives until the drain; only a development build has an
+	// operation path.
+	poolCtx, stopPool := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopPool()
+	// A run that panicked leaves its executor's state unknown: the agent
+	// drains and exits, and the next start's recovery resolves the step by
+	// its evidence (see package runner).
+	fatal := make(chan any, 1)
+	giveUp := opstore.DefaultStepDeadline
+	for _, dl := range d.o.StepDeadlines {
+		giveUp = max(giveUp, dl)
+	}
+	pool := runner.New(poolCtx, st, d.log.WithName("runner"), runner.Options{GiveUpAfter: giveUp, OnPanic: func(r any) {
+		select {
+		case fatal <- r:
+		default:
+		}
+	}})
+	var ops server.Operations
+	if config.DevBuild {
+		ops = &operations{store: st, exec: d.o.Executor, pool: pool}
+	}
 	coll, err := d.newInventory()
 	if err != nil {
 		closeStore()
 		return err
 	}
 	srv, err := server.New(server.Options{Agent: agent, Credentials: d.creds, Version: d.o.Version,
-		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Inventory: coll})
+		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Operations: ops, Inventory: coll})
 	if err != nil {
 		closeStore()
 		return err
@@ -543,6 +584,12 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			d.log.Error(dctx.Err(), "the host inventory collector did not stop within the drain timeout; abandoned")
 		}
 		srv.Shutdown(dctx)
+		// Runs stop between steps; an interrupted step is left to the next
+		// start's recovery.
+		stopPool()
+		if !pool.Drain(dctx) {
+			d.log.Error(dctx.Err(), "operation runs did not stop within the drain timeout; abandoned to the next start's recovery")
+		}
 		if f := agent.floor.Load(); f != nil {
 			if js, _ := st.Journal().State(); js == journal.StateLost {
 				f.StopPersisting()
@@ -556,7 +603,11 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 
 	// Steps 6 to 8.
-	d.establish(ctx, st, agent.floor.Load())
+	for _, ref := range d.establish(ctx, st, agent.floor.Load()) {
+		if ops != nil && !guard.Off(guard.RecoveredOpsRun) {
+			_ = pool.Start(ref, nil)
+		}
+	}
 	if ctx.Err() == nil {
 		state, reason := agent.TrustState()
 		if err := d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent)); err != nil {
@@ -586,6 +637,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		case err := <-serveErr:
 			drain()
 			return err
+		case r := <-fatal:
+			d.log.Error(fmt.Errorf("%v", r), "an operation run panicked; the agent stops so that recovery resolves it")
+			drain()
+			return fmt.Errorf("%w: %v", ErrRunPanicked, r)
 		case <-reload:
 			_ = d.notifier.Notify(systemd.NotifyReloading)
 			if err := d.reload(ctx, st); err != nil {
@@ -868,17 +923,18 @@ func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
 
 // establish runs steps 6 and 7: continuity, the first commit of the clock
 // floor, the development enrolment stand-in, and recovery. floor is nil when
-// the floor could not be opened (the store is quarantined).
-func (d *daemon) establish(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) {
+// the floor could not be opened (the store is quarantined). It returns the
+// operations recovery left runnable.
+func (d *daemon) establish(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) []opstore.OpRef {
 	if js, _ := st.Journal().State(); js != journal.StateUnattested {
-		return
+		return nil
 	}
 	if err := st.EstablishContinuity(ctx); err != nil {
 		d.log.Error(err, "continuity not established")
-		return
+		return nil
 	}
 	if !d.startFloor(ctx, st, floor) {
-		return
+		return nil
 	}
 	d.enrol(ctx, st)
 	if d.o.Hooks.BeforeRecover != nil {
@@ -886,20 +942,21 @@ func (d *daemon) establish(ctx context.Context, st *opstore.Store, floor *clockf
 	}
 	if ctx.Err() != nil {
 		d.log.Info("recovery cancelled by a stop; the next start resumes it")
-		return
+		return nil
 	}
 	refs, err := st.Recover(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			d.log.Info("recovery cancelled by a stop; the next start resumes it")
-			return
+			return nil
 		}
 		d.log.Error(err, "recovery failed")
-		return
+		return nil
 	}
 	if len(refs) > 0 {
-		d.log.Info("operations remain runnable; this agent starts no runner", "count", len(refs))
+		d.log.Info("operations remain runnable after recovery", "count", len(refs))
 	}
+	return refs
 }
 
 // startFloor commits the clock floor, raised in memory since step 4, as the

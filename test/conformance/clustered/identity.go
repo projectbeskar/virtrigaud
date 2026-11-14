@@ -66,8 +66,10 @@ func (e *Env) OperationIdentity() OperationIdentityConfig {
 	return cfg
 }
 
-// NewOp prepares attempt 1 of an operation of kind on host for req, owned by
-// req's owner: a fresh op_id and salt, and req serialised once.
+// NewOp prepares an operation of kind on host for req, owned by req's owner:
+// a fresh op_id and salt, and req serialised once. It is attempt 1 of a fresh
+// binding, unless the Target tracks placements (PlacementTracker), which then
+// gives the VM's binding and the next attempt.
 func (e *Env) NewOp(kind providerv1.OperationKind, host string, req proto.Message) *SignedOp {
 	e.T.Helper()
 	cfg := e.OperationIdentity()
@@ -75,6 +77,7 @@ func (e *Env) NewOp(kind providerv1.OperationKind, host string, req proto.Messag
 	require.NoError(e.T, err)
 	binding, err := operation.NewRandomID()
 	require.NoError(e.T, err)
+	attempt := uint64(1)
 	salt, err := operation.NewDigestSalt()
 	require.NoError(e.T, err)
 	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(req)
@@ -84,6 +87,9 @@ func (e *Env) NewOp(kind providerv1.OperationKind, host string, req proto.Messag
 		GetOwner() *providerv1.ObjectIdentity
 	}); ok {
 		vmUID = o.GetOwner().GetUid()
+	}
+	if pt, ok := e.Target.(PlacementTracker); ok {
+		binding, attempt = pt.NextPlacement(host, vmUID, kind)
 	}
 	return &SignedOp{
 		Identity: operation.Identity{
@@ -95,7 +101,7 @@ func (e *Env) NewOp(kind providerv1.OperationKind, host string, req proto.Messag
 			BindingID:   binding,
 			OpID:        opID,
 			Kind:        kind,
-			Attempt:     1,
+			Attempt:     attempt,
 			MintEpoch:   cfg.Epoch,
 		},
 		Salt:    salt,

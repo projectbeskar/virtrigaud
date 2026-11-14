@@ -40,6 +40,8 @@ package clustered
 
 import (
 	"context"
+	"crypto/x509"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -115,6 +117,15 @@ const (
 	// host accepts end with a chosen typed TaskOutcome (Target implements
 	// OutcomeScripter).
 	FeatureScriptedOutcomes Feature = "scripted-outcomes"
+
+	// FeatureHostAnswers means the Target's hosts answer a TaskStatus or
+	// Describe that carries answer_nonce with a host-signed answer
+	// (OperationAnswer, VMAnswer), keep their operation records across a
+	// crash of the host's agent, and can be crashed, rolled back and made
+	// to stall a step (Target implements HostAnswerTarget). The
+	// identity.* cases about host answers need it; for every other Target
+	// they are skipped and listed as not applicable.
+	FeatureHostAnswers Feature = "host-answers"
 )
 
 // Capabilities declares what a Target offers beyond the required core.
@@ -366,23 +377,62 @@ type OutcomeScripter interface {
 	ScriptOutcome(host string, outcome providerv1.TaskOutcome, reason string) error
 }
 
+// PlacementTracker is implemented by a Target whose hosts keep, per VM, the
+// placement binding an operation must name and the highest attempt accepted
+// per VM and kind (a per-host agent). NewOp then takes the binding and the
+// next attempt from it, as a manager does, instead of drawing a fresh binding
+// and attempt 1. A Create starts a new placement.
+type PlacementTracker interface {
+	// NextPlacement returns the binding and the next attempt for an
+	// operation of kind on vmUID's placement on host.
+	NextPlacement(host, vmUID string, kind providerv1.OperationKind) (binding []byte, attempt uint64)
+}
+
+// HostAnswerTarget is implemented by a Target that offers FeatureHostAnswers.
+type HostAnswerTarget interface {
+	// HostAnswerRoots returns the issuer certificates the hosts' signed
+	// answers must chain to.
+	HostAnswerRoots() *x509.CertPool
+	// CrashHost kills the host's agent abruptly (as SIGKILL would) and
+	// starts it again on its kept state.
+	CrashHost(host string) error
+	// SnapshotHost keeps a copy of the host's operation store as it is now.
+	SnapshotHost(host string) error
+	// RollBackHost puts the copy SnapshotHost kept back in place of the
+	// host's operation store, without its anchor log (a restored backup),
+	// and restarts the host's agent.
+	RollBackHost(host string) error
+	// StallNextStep makes the next operation step on host do nothing and
+	// never return on its own: only the host's step deadline ends it.
+	StallNextStep(host string) error
+	// StepDeadline is the hosts' step deadline.
+	StepDeadline() time.Duration
+}
+
 // identityProbe is the operation-identity probe: a case that needs
 // FeatureOperationIdentity runs only against a Target that declares the
 // feature and implements OperationIdentityTarget. It returns why c does not
 // apply to tg, or "". The identity.capabilities case then checks that the
 // Provider reports supports_operation_identity on the wire.
 func identityProbe(c Case, tg Target) string {
-	needs := false
+	needs, answers := false, false
 	for _, f := range c.Requires {
-		if f == FeatureOperationIdentity {
+		switch f {
+		case FeatureOperationIdentity:
 			needs = true
+		case FeatureHostAnswers:
+			answers = true
 		}
 	}
-	if !needs {
-		return ""
+	if needs {
+		if _, ok := tg.(OperationIdentityTarget); !ok {
+			return "the target declares operation identity but does not implement OperationIdentityTarget"
+		}
 	}
-	if _, ok := tg.(OperationIdentityTarget); !ok {
-		return "the target declares operation identity but does not implement OperationIdentityTarget"
+	if answers {
+		if _, ok := tg.(HostAnswerTarget); !ok {
+			return "the target declares host answers but does not implement HostAnswerTarget"
+		}
 	}
 	return ""
 }

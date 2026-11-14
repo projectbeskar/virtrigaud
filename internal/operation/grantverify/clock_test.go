@@ -73,7 +73,7 @@ func TestVerify_UntrustworthyClockFailsClosed(t *testing.T) {
 	r, ok := grantverify.AsRefusal(err)
 	require.True(t, ok)
 	assert.Equal(t, grantverify.ReasonGrantUnauthenticated, r.Reason)
-	assert.Equal(t, grantverify.RuleValidity, r.Rule)
+	assert.Equal(t, grantverify.RuleUntrustedClock, r.Rule)
 }
 
 // TestVerify_ClockIsReadOncePerCall: the verifier reads its Clock, not the

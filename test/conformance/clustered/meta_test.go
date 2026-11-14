@@ -143,6 +143,15 @@ func identityMutations() []mutation {
 		{violation: fake.RetiredAsSucceeded, kills: []string{"identity.outcome-retired"}, want: map[string]string{"identity.outcome-retired": "typed outcome"}},
 		{violation: fake.UnknownAsDone, kills: []string{"identity.outcome-unknown"}, want: map[string]string{"identity.outcome-unknown": "typed outcome"}},
 		{violation: fake.DirtyAsClean, kills: []string{"identity.outcome-failed-dirty"}, want: map[string]string{"identity.outcome-failed-dirty": "typed outcome"}},
+		{violation: fake.ForgetsOpsOnHostCrash, kills: []string{"identity.tombstone-after-restart"}, want: map[string]string{"identity.tombstone-after-restart": "must not delete the VM made after it"}},
+		{violation: fake.AnswersAnotherOp, kills: []string{"identity.taskstatus-bound"}, want: map[string]string{"identity.taskstatus-bound": "names the op_id asked about"}},
+		{violation: fake.DeletedWithoutTombstone, kills: []string{"identity.deleted-answer"}, want: map[string]string{"identity.deleted-answer": "never DELETED"}},
+		{violation: fake.StaleAnswerNonce, kills: []string{"identity.answer-fresh"}, want: map[string]string{"identity.answer-fresh": "nonce"}},
+		{violation: fake.AcceptsAttemptRegression, kills: []string{"identity.attempt-regression"}, want: map[string]string{"identity.attempt-regression": "must be refused"}},
+		{violation: fake.AcceptsInnerUnknownField, kills: []string{"identity.inner-unknown-field"}, want: map[string]string{"identity.inner-unknown-field": "must be refused"}},
+		{violation: fake.QuarantineAcceptsMutations, kills: []string{"identity.store-quarantined"}, want: map[string]string{"identity.store-quarantined": "must be refused"}},
+		{violation: fake.StorelessUnknownEnrolment, kills: []string{"identity.binding-refused"}, want: map[string]string{"identity.binding-refused": "GRANT_MISMATCH"}},
+		{violation: fake.StalledRunsForever, kills: []string{"identity.no-running-forever"}, want: map[string]string{"identity.no-running-forever": "never running past it"}},
 	}
 }
 

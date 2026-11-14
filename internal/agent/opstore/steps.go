@@ -18,6 +18,7 @@ package opstore
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
@@ -58,7 +59,159 @@ const (
 	// ReasonNotPerformed: the executor reported the step definitely not
 	// performed.
 	ReasonNotPerformed = "not_performed"
+	// ReasonRunFailed: the operation's run failed repeatedly on errors that
+	// are neither a quarantine nor a stop, and was given up (ResolveUnknown).
+	ReasonRunFailed = "run_failed"
+	// ReasonRunPanicked: the operation's runs panicked repeatedly, each one
+	// stopping the agent, and the operation was given up without running it
+	// again (ResolveUnknown).
+	ReasonRunPanicked = "run_panicked"
 )
+
+// panicKeyPrefix starts the key of an operation's panic count in the meta
+// bucket.
+const panicKeyPrefix = "panic/"
+
+// panicKey is the key of ref's panic count.
+func panicKey(ref OpRef) []byte {
+	return append([]byte(panicKeyPrefix), opKey(ref.EnrolmentID, ref.OpID)...)
+}
+
+// ErrStoreBusy is returned by RecordPanic when the store lock was not free
+// within its bound.
+var ErrStoreBusy = errors.New("operation store busy")
+
+// recordPanicLockWait bounds RecordPanic's wait for the store lock.
+const recordPanicLockWait = 5 * time.Second
+
+// RecordPanic durably adds one to the number of runs of ref that panicked and
+// returns the new count. The agent calls it from the run that panicked,
+// before it stops, so that a run that always panics is given up after a few
+// restarts instead of stopping the host's agent forever. The count is
+// removed with the operation's terminal write, and with its enrolment's
+// records when a freeze is confirmed.
+//
+// It is called from a recovered panic, which may have unwound a store method
+// that held the store lock without releasing it. It therefore never blocks
+// on the lock: it tries it for at most a few seconds and otherwise returns
+// ErrStoreBusy, counting nothing (the agent then stops all the same; the
+// count only bounds how often).
+func (s *Store) RecordPanic(ctx context.Context, ref OpRef) (int, error) {
+	if !s.tryLock(ctx, recordPanicLockWait) {
+		return 0, fmt.Errorf("record panic of %s: %w", ref, ErrStoreBusy)
+	}
+	defer s.mu.Unlock()
+	n := 0
+	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+		b, err := tx.Get(bucketMeta, panicKey(ref))
+		if err != nil {
+			return err
+		}
+		if len(b) == 4 {
+			n = int(binary.BigEndian.Uint32(b))
+		}
+		n++
+		return tx.Put(bucketMeta, panicKey(ref), binary.BigEndian.AppendUint32(nil, uint32(n))) // #nosec G115 -- a small count
+	})
+	if err != nil {
+		return 0, fmt.Errorf("record panic of %s: %w", ref, err)
+	}
+	return n, nil
+}
+
+// tryLock takes the store lock, waiting at most wait.
+func (s *Store) tryLock(ctx context.Context, wait time.Duration) bool {
+	if s.mu.TryLock() {
+		return true
+	}
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-tick.C:
+			if s.mu.TryLock() {
+				return true
+			}
+		}
+	}
+}
+
+// deletePanicCount removes ref's panic count, if any, in tx.
+func deletePanicCount(tx *journal.Tx, ref OpRef) error {
+	b, err := tx.Get(bucketMeta, panicKey(ref))
+	if err != nil || b == nil {
+		return err
+	}
+	return tx.Delete(bucketMeta, panicKey(ref))
+}
+
+// Panics returns the number of runs of ref that panicked (RecordPanic).
+func (s *Store) Panics(ctx context.Context, ref OpRef) (int, error) {
+	n := 0
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		b, err := tx.Get(bucketMeta, panicKey(ref))
+		if err != nil {
+			return err
+		}
+		if len(b) == 4 {
+			n = int(binary.BigEndian.Uint32(b))
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("panics of %s: %w", ref, err)
+	}
+	return n, nil
+}
+
+// ResolveUnknown records a runnable operation's outcome as unknown with
+// reason, for a run that cannot be completed: the operation keeps holding its
+// VM and is never reported running again, and nothing is said about whether
+// its effect happened. An operation that already left the runnable states is
+// returned as it is. It refuses while the operation has a runner.
+func (s *Store) ResolveUnknown(ctx context.Context, ref OpRef, reason string) (OpView, error) {
+	s.mu.Lock()
+	if !s.ready || s.freezing.Load() {
+		s.mu.Unlock()
+		return OpView{}, ErrNotReady
+	}
+	k := runKey(ref)
+	if s.running[k] {
+		s.mu.Unlock()
+		return OpView{}, ErrRunning
+	}
+	s.running[k] = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.running, k)
+		s.mu.Unlock()
+	}()
+	rec, err := s.loadOp(ctx, ref)
+	if err != nil {
+		return OpView{}, fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	if rec.GetState() != StateAccepted && rec.GetState() != StateExecuting {
+		return viewOfRecord(rec), nil
+	}
+	if err := s.outcomeUnknown(ctx, rec, reason); err != nil {
+		return OpView{}, fmt.Errorf("resolve %s: %w", ref, err)
+	}
+	return viewOfRecord(rec), nil
+}
+
+// Lost reports whether the store lost its persistence guarantee
+// (quarantined): nothing more is committed until the host is enrolled again.
+func (s *Store) Lost() bool {
+	st, _ := s.j.State()
+	return st == journal.StateLost
+}
 
 func operationOf(id *pb.OpIdentity, payload []byte) executor.Operation {
 	return executor.Operation{
@@ -368,6 +521,9 @@ func (s *Store) finish(ctx context.Context, rec *pb.OpRecord, state OpState, rea
 func terminalWrites(tx *journal.Tx, rec *pb.OpRecord, buf *auditBuf) error {
 	id := rec.GetIdentity()
 	key := opKey(id.GetEnrolmentId(), id.GetOpId())
+	if err := deletePanicCount(tx, OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()}); err != nil {
+		return err
+	}
 	if err := put(tx, bucketTombstones, key, &pb.Tombstone{Identity: id, State: rec.GetState(), Irrev: rec.GetIrrev(),
 		Reason: rec.GetReason()}); err != nil {
 		return err

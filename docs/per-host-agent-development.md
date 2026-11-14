@@ -3,12 +3,15 @@
 `vrtg-agent` is the agent a clustered Provider with one agent per host
 (`spec.type: cloudhypervisor`) will route to: one process per host, serving
 that Provider over mutually authenticated TLS. This page describes the agent
-as it is today: a process skeleton that starts, checks its host, opens and
-recovers its operation store, answers reads with host-signed answers and
-**refuses every mutating call**. It executes no operation, creates no VM,
-scope, cgroup or process, and holds no Linux capability. It does not hold
-its host private key either: a separate signer process, run as its own user,
-does (see [Host key signer](#host-key-signer)).
+as it is today: a process that starts, checks its host, opens and recovers
+its operation store and answers reads with host-signed answers. A
+**development build** also executes signed operations, at most once each,
+through its development fake executor, and answers `TaskStatus` and
+`Describe` from its store with signed, request-bound answers (see
+[Operations](#operations)); a release build refuses every mutating call. It
+creates no VM, scope, cgroup or process, and holds no Linux capability. It
+does not hold its host private key either: a separate signer process, run as
+its own user, does (see [Host key signer](#host-key-signer)).
 
 Nothing here is part of a release. No release workflow, container image or
 make target builds `vrtg-agent` (a test in `cmd/vrtg-agent` checks the
@@ -127,8 +130,8 @@ the host's URI identity, `urn:virtrigaud:enrolment:<32 hex>`,
 | 4 | The clock floor record is read from the store and raised in memory from the host's own clocks. Nothing is written. | A missing floor for an enrolled store, or an unreadable one, quarantines the store (`inconsistent_store`); clocks the floor cannot use refuse the start. |
 | 5 | The server starts serving, unattested. Nothing is committed before step 6. | |
 | 6 | Continuity is established. The clock floor is committed as the first write. The store's active enrolment is brought to the one the host certificate carries: in a development build a store that was never enrolled is enrolled, and a store with another (or no) active enrolment is re-enrolled with the [freeze](#re-enrolment-freeze) (see [Enrolment](#enrolment)); a release build does neither. | A floor that cannot be committed quarantines the store (`io_error`). |
-| 7 | Recovery of interrupted operations. An operation left runnable stays as it is: this agent starts no runner. | |
-| 8 | systemd is notified `READY=1`; the agent's trust state is READY. | |
+| 7 | Recovery of interrupted operations. A development build starts a runner for every operation that recovery left runnable, so that no operation stays running without one. | |
+| 8 | systemd is notified `READY=1`; the agent's trust state is READY. A development build now runs signed operations. | |
 
 A quarantined store also sends `READY=1`, with `STATUS=AGENT_STATE_QUARANTINED
 (<reason>)`, so that systemd keeps the agent running to answer reads. A store
@@ -320,7 +323,9 @@ and a client may not send keepalive pings more often than every 30 seconds.
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
 | `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. |
 | `agent.v1.AgentService/InstallRenewedCertificate` | `Unimplemented`. |
-| Every mutating Provider method (the operation kind table) | `Unavailable` with `UNATTESTED` before the agent is ready; `FailedPrecondition` with `QUARANTINED` while the store is quarantined; `Unimplemented` once ready. |
+| Every mutating Provider method (the operation kind table) | `Unavailable` with `UNATTESTED` before the agent is ready; `FailedPrecondition` with `QUARANTINED` while the store is quarantined. Once ready: a release build answers `Unimplemented`; a development build runs the operation path (see [Operations](#operations)). |
+| `provider.v1.Provider/TaskStatus` | Development builds: the operation's state from its record or tombstone, by task reference, or by `op_id` with a signed `OperationAnswer` (see [Operations](#operations)). Release builds: `Unimplemented`. |
+| `provider.v1.Provider/Describe` | Development builds: whether the owner's VM has a placement on the host, and with `answer_nonce` a signed `VMAnswer` about one placement (see [Operations](#operations)). Release builds: `Unimplemented`. |
 | Every other Provider method | `Unimplemented`. |
 
 A signed answer is made only for a request with a nonce, and only while the
@@ -333,6 +338,126 @@ schema version and clock floor. It is signed with the host key, by the signer pr
 (ECDSA P-256, SHA-256, low-S), as defined in
 [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#the-signature-input); a test
 reproduces the published test vector.
+
+## Operations
+
+A development build (`-tags virtrigaud_dev`) executes signed operations of
+the seven kinds a manager marks with operation identity (Create, Delete, the
+four power kinds and Reconfigure) with the executor it is started with: the
+`fake` executor performs them on its stand-in VMs; the `none` executor
+implements no kind, so every such call is refused `Unimplemented` after its
+grant is verified. A release build has no operation path at all.
+
+**Check order of a mutating call.** Each call is checked in this order; the
+first check that fails answers it, and nothing after it runs:
+
+1. the caller is the Provider the host is enrolled with (mutual TLS,
+   `PROVIDER_MISMATCH` otherwise);
+2. the store is ready: not quarantined (`QUARANTINED`), continuity
+   established, recovery run, no incomplete re-enrolment freeze and a
+   healthy clock floor (`UNATTESTED`, with the cause in the `ErrorInfo`
+   metadata). The floor is read again, once, for the call: a floor that
+   stopped being healthy since the gate refuses the call the same way, never
+   with a definite reason;
+3. the grant, with the shared verifier, at that one reading of the floor: an envelope (`IDENTITY_REQUIRED`
+   without one), no other field of the outer request (`INVALID_ARGUMENT`),
+   the signature and certificate chain to a pinned grant anchor, the
+   certificate and grant validity judged at the later of the host clock and
+   the clock floor (`GRANT_UNAUTHENTICATED`), the body rules, the kind
+   against the method and request type, the request decoded with no
+   unknown field, the intent digest, and the installation and host
+   (`GRANT_MISMATCH`);
+4. the store is read for the `op_id`. A known `op_id` (record or tombstone)
+   goes straight to the store, which answers it from its record: the same
+   identity fields give the same task reference and nothing runs again; other
+   fields give `OP_ID_CONFLICT`. Only an `op_id` the store does not know is
+   checked further:
+   - the grant's VM and Provider UIDs have the shape of a UID, and the
+     decoded request names this host and, as its owner, the grant's VM
+     (`GRANT_MISMATCH`);
+   - a kind the executor does not implement: `Unimplemented`;
+   - the store's active enrolment is the one the host certificate names
+     (`UNATTESTED`, cause `enrolment_mismatch`, never definite);
+5. the operation store decides, under its lock. The grant's Provider and
+   enrolment are compared with the active enrolment: another Provider is `GRANT_MISMATCH`; an enrolment the store
+   holds no record of is `UNKNOWN_TO_AGENT`, never a definite refusal,
+   because it may be a predecessor whose records were lost. Then the
+   first-delivery rule for `mint_epoch` (`GRANT_MISMATCH`), the VM's other
+   open operation (`VM_BUSY`), the placement binding (`VM_BINDING_STALE`,
+   `VM_NOT_OWNED`), an attempt that does not increase for the VM and kind
+   (`OP_ID_CONFLICT`) and a full store (`RESOURCE_EXHAUSTED`);
+6. an accepted operation is answered with its task reference
+   (`op-<enrolment id><op_id>` in hex) once its record is durable and
+   anchored, and a runner drives its steps.
+
+Every decision is logged as one structured line (`operation decision` and
+`operation event`) with identity fields only: the decision, the reason, the
+method, `op_id`, enrolment, VM, kind, attempt and the caller's identity.
+Request bytes, cloud-init user data and grant bytes are never written to the
+store, the anchor log, the logs, an error or an answer.
+
+**Runners and step deadlines.** One runner per operation drives its steps
+through the store's step journal: the intent is durable before the effect, a
+once-only step's witness file before its effect, and the terminal state, its
+tombstone and, for a completed Delete, the placement's VM tombstone in one
+transaction. Every step has a deadline (10 minutes per kind by default); a
+step that has not ended by then is resolved by inspection: its effect found
+is done, its definite absence a failure (dirty after an irreversible step),
+no evidence an unknown outcome, so a step that never returns ends the
+operation instead of leaving it running. A drain stops runners between
+steps; the next start's recovery resumes them. A run that fails on a store
+error that neither quarantines nor stops it is resumed with a bounded
+backoff for at least the longest step deadline; only then is its outcome
+recorded unknown (`run_failed`). A run that panics is counted durably, and
+the agent stops so that its next start's recovery resolves the step; after
+three panicked runs the operation is not run again (`run_panicked`).
+
+**TaskStatus.** A request with a task reference is answered from the
+operation's record or tombstone: running while it is accepted or executing,
+then its typed outcome (`SUCCEEDED`, `FAILED_CLEAN`, `FAILED_DIRTY`,
+`UNKNOWN`, `RETIRED`). A request with `answer_nonce` names the operation by
+`op_id`, `op_enrolment_id` and `target_host_id` (this host; no task) and is
+answered with a signed `OperationAnswer` made from the same store read as
+the unsigned fields: the operation's state number for number, its kind,
+attempt, VM, binding and intent digest, `tombstoned` when it is over. An
+operation the store holds no record of is `NotFound` with `UNKNOWN_TO_AGENT`,
+never done, with the signed answer (`NO_RECORD` when the store holds the
+enrolment, `UNKNOWN_TO_AGENT` when it does not) as a status detail.
+
+**Outcome reasons.** An operation's `outcome_reason` (in `TaskStatus` and in
+the signed `OperationAnswer`) names why it ended as it did. None is ever a
+secret, a path or an address.
+
+| Reason | State | Means |
+|--------|-------|-------|
+| `not_performed` | `FAILED_CLEAN`, or `FAILED_DIRTY` after an irreversible step | The executor reported a step definitely not performed. |
+| `step_deadline` | `FAILED_CLEAN`, `FAILED_DIRTY` or `OUTCOME_UNKNOWN` | A step ran past its deadline; inspection found its effect absent (a failure) or could not decide (unknown). |
+| `effect_error` | as `step_deadline` | A step failed in a way that left its effect in doubt, and inspection decided as above. |
+| `witness_no_effect` | `OUTCOME_UNKNOWN` | A once-only step's witness exists and inspection did not find its effect: it is never run again. |
+| `goal_not_observed` | `FAILED_DIRTY` or `OUTCOME_UNKNOWN` | An irreversible step's intent was durable and its goal state was not observed after a restart. |
+| `probe_error` | `OUTCOME_UNKNOWN` | An inspection or goal check failed. |
+| `inconsistent_store` | `OUTCOME_UNKNOWN` | A witness exists without its step intent; the store is quarantined. |
+| `provider_changed` | `RETIRED` or `OUTCOME_UNKNOWN` | A re-enrolment froze the operation. |
+| `run_failed` | `OUTCOME_UNKNOWN` | Its runs failed on store errors for longer than the longest step deadline. |
+| `run_panicked` | `OUTCOME_UNKNOWN` | Its runs panicked three times, each stopping the agent; it is not run again. |
+
+An `OUTCOME_UNKNOWN` operation keeps its VM busy. Clearing it, once an operator
+has established what happened, is an operator path that a later change adds.
+
+**Describe.** The owner's UID is required. Without a nonce, the VM exists
+while the store records a placement of it, and the executor reports its power
+state. With `answer_nonce` and `binding_id`, the signed `VMAnswer` says
+`DELETED`, naming the Delete, only when that placement's Delete completed (its
+VM tombstone); otherwise `CREATING`, `PRESENT`, `OTHER_BINDING` or
+`NO_RECORD`. The absence of a record never says deleted.
+
+**Crash hook.** A development build reads `VRTG_AGENT_DEV_CRASH_AT`, a
+comma-separated sequence of crash points of the journal and the operation
+store (for example `before-accept,after-store-commit`), and kills its own
+process with SIGKILL when the last point is reached after the earlier ones;
+`VRTG_AGENT_DEV_ANCHOR_ROTATE_BYTES` shrinks the anchor log's rotation size.
+They exist for the crash-point tests (`test/conformance/clustered/agenttarget`);
+a release build ignores both.
 
 ## Host inventory
 
@@ -896,7 +1021,23 @@ that is already enrolled is never changed by this file.
 
 ## Limits
 
-- The agent executes no operation; every mutating call is refused.
+- A release build executes no operation; every mutating call is refused. A
+  development build executes operations only with the fake executor, which
+  stands in for VMs with files; no real VM is created.
+- The agent's continuity checks are local: a joint restore of the store and
+  its anchor log is not detected on the host, and recovery may then run an
+  operation again whose effect survived. The fake executor recognises its own
+  effect (by the placement) and reports the step done, never a definite
+  failure; a manager that tracks the host's chain position narrows the rest.
+- A run that recovery resumes, after a restart, has no request payload: the
+  store never writes request bytes. The fake executor needs none; a real
+  executor must resolve such a step by inspection only, or park it with its
+  effect in doubt, and never perform an effect it cannot reconstruct
+  (documented on `executor.Operation.Payload`). How a real executor parks a
+  step and how the manager re-delivers the request for it is a follow-up.
+- The re-enrolment freeze, compaction and certificate installation are not
+  reachable from the agent process yet, so their crash points are tested in
+  the store library only.
 - The host key is held by a separate signer process, but the signer is a
   digest oracle: `crypto/tls` hands it a digest, so it cannot check what it
   signs. A compromised agent process cannot exfiltrate the key or use it later,

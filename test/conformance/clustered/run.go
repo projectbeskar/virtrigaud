@@ -64,6 +64,7 @@ func Cases() []Case {
 	all = append(all, hostInventoryCases()...)
 	all = append(all, createCases()...)
 	all = append(all, identityCases()...)
+	all = append(all, agentIdentityCases()...)
 	return all
 }
 

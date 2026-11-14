@@ -221,6 +221,37 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 //     fixed field; and intent_digest is SHA-256(digest_salt || request)
 //     (else GRANT_MISMATCH).
 func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, error) {
+	return v.verify(fullMethod, outer, true)
+}
+
+// VerifyHostBound is Verify without the Provider and enrolment comparison of
+// rule 5: the installation and the host are still compared, and every other
+// rule applies in the same order. It is for a caller that keeps a durable
+// record of every operation it accepted (a per-host agent's operation store):
+// such a caller must answer an op_id it knows from its record before it
+// refuses a Provider or enrolment that differs from its own, and must then
+// compare both itself (Verified.Body carries them), because a grant naming an
+// enrolment whose records the caller no longer holds proves nothing about
+// whether its op_id ran. Every other caller uses Verify.
+//
+// clock, when not nil, replaces the verifier's Clock for this call, so that a
+// caller judges the grant at one reading of its own clock state.
+func (v *Verifier) VerifyHostBound(fullMethod string, outer proto.Message, clock Clock) (*Verified, error) {
+	return v.verifyAt(fullMethod, outer, false, clock)
+}
+
+// verify implements Verify; bindAll includes the Provider and enrolment in
+// the binding comparison.
+func (v *Verifier) verify(fullMethod string, outer proto.Message, bindAll bool) (*Verified, error) {
+	return v.verifyAt(fullMethod, outer, bindAll, nil)
+}
+
+// verifyAt is verify with clock in place of the verifier's Clock when not
+// nil.
+func (v *Verifier) verifyAt(fullMethod string, outer proto.Message, bindAll bool, clock Clock) (*Verified, error) {
+	if clock == nil {
+		clock = v.clock
+	}
 	env, refusal := envelopeOf(outer)
 	if refusal != nil {
 		return nil, refusal
@@ -232,9 +263,9 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 	if refusal := checkSizes(env); refusal != nil {
 		return nil, refusal
 	}
-	now := v.clock.Now()
+	now := clock.Now()
 	if now.IsZero() {
-		return nil, unauthenticated(RuleValidity, "the verifier's clock is not trustworthy")
+		return nil, unauthenticated(RuleUntrustedClock, "the verifier's clock is not trustworthy")
 	}
 	if refusal := v.authenticate(grant, now); refusal != nil {
 		return nil, refusal
@@ -262,8 +293,10 @@ func (v *Verifier) Verify(fullMethod string, outer proto.Message) (*Verified, er
 	if body.GetNotAfter().AsTime().Sub(body.GetIssuedAt().AsTime()) > MaxGrantLifetime {
 		return nil, unauthenticated(RuleValidity, "the grant is valid for longer than %s", MaxGrantLifetime)
 	}
-	if !bytes.Equal(body.GetInstallId(), v.installID) || body.GetProviderUid() != v.providerUID ||
-		body.GetHostId() != v.hostID || !bytes.Equal(body.GetEnrolmentId(), v.enrolmentID) {
+	if !bytes.Equal(body.GetInstallId(), v.installID) || body.GetHostId() != v.hostID {
+		return nil, mismatch(RuleBinding, "the grant is for another installation, Provider, host or enrolment")
+	}
+	if bindAll && (body.GetProviderUid() != v.providerUID || !bytes.Equal(body.GetEnrolmentId(), v.enrolmentID)) {
 		return nil, mismatch(RuleBinding, "the grant is for another installation, Provider, host or enrolment")
 	}
 	row, _ := RowFor(body.GetKind()) // checkOperationBody refused an unknown kind

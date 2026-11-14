@@ -283,19 +283,23 @@ type OpView struct {
 	// Tombstoned is set when the answer comes from the tombstone (the record
 	// payload was compacted).
 	Tombstoned bool
+	// IntentDigest is the salted digest of the operation's request bytes, an
+	// identity field.
+	IntentDigest []byte
 }
 
 func viewOf(id *pb.OpIdentity, state OpState, reason string, irrev, tomb bool) OpView {
 	return OpView{
-		Ref:        OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()},
-		VMUID:      id.GetVmUid(),
-		BindingID:  id.GetBindingId(),
-		Kind:       providerv1.OperationKind(id.GetKind()),
-		Attempt:    id.GetAttempt(),
-		State:      state,
-		Reason:     reason,
-		Irrev:      irrev,
-		Tombstoned: tomb,
+		Ref:          OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()},
+		VMUID:        id.GetVmUid(),
+		BindingID:    id.GetBindingId(),
+		Kind:         providerv1.OperationKind(id.GetKind()),
+		Attempt:      id.GetAttempt(),
+		State:        state,
+		Reason:       reason,
+		Irrev:        irrev,
+		Tombstoned:   tomb,
+		IntentDigest: id.GetIntentDigest(),
 	}
 }
 

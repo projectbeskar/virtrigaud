@@ -9,6 +9,10 @@
 # least one test to fail. A guard whose removal no test notices is a
 # surviving mutant: the script prints it and exits 1.
 #
+# Each round runs the tests twice: as a release build, and as a development
+# build (virtrigaud_dev), whose operation path (runners, the fake executor)
+# only a development build serves. A guard is killed when either fails.
+#
 # The reference-model test runs with VIRTRIGAUD_MODEL_RUNS (default here 3000)
 # so that one round stays short.
 set -euo pipefail
@@ -18,6 +22,12 @@ cd "${REPO_ROOT}"
 
 PKGS="./internal/agent/..."
 TAGS="virtrigaud_mutation"
+DEV_TAGS="virtrigaud_mutation,virtrigaud_dev"
+
+# run_tests runs the agent tests in both builds; it fails when either fails.
+run_tests() {
+	go test -count=1 -tags "${TAGS}" ${PKGS} && go test -count=1 -tags "${DEV_TAGS}" ${PKGS}
+}
 export VIRTRIGAUD_MODEL_RUNS="${VIRTRIGAUD_MODEL_RUNS:-3000}"
 
 guards="$(sed -n 's/^[[:space:]]*[A-Za-z]* Name = "\([a-z-]*\)"$/\1/p' internal/agent/internal/guard/guard.go)"
@@ -27,7 +37,7 @@ if [ -z "${guards}" ]; then
 fi
 
 echo "agent-mutation: baseline (no guard off)"
-if ! VIRTRIGAUD_MUTATION="" go test -count=1 -tags "${TAGS}" ${PKGS} >/dev/null; then
+if ! VIRTRIGAUD_MUTATION="" run_tests >/dev/null; then
 	echo "agent-mutation: the tests fail with no guard off" >&2
 	exit 1
 fi
@@ -36,7 +46,7 @@ survivors=()
 total=0
 for g in ${guards}; do
 	total=$((total + 1))
-	if VIRTRIGAUD_MUTATION="${g}" go test -count=1 -tags "${TAGS}" ${PKGS} >/dev/null 2>&1; then
+	if VIRTRIGAUD_MUTATION="${g}" run_tests >/dev/null 2>&1; then
 		echo "SURVIVED  ${g}"
 		survivors+=("${g}")
 	else

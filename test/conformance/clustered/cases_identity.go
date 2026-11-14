@@ -43,6 +43,15 @@ func idCase(c Case, more ...Feature) Case {
 	return c
 }
 
+// durableRecords reports whether the Target's hosts keep durable operation
+// records and answer for them (FeatureHostAnswers and HostAnswerTarget):
+// only such a host may answer UNKNOWN_TO_AGENT for an enrolment it holds no
+// record of.
+func durableRecords(e *Env) bool {
+	_, ok := e.Target.(HostAnswerTarget)
+	return ok && e.Target.Capabilities().Has(FeatureHostAnswers)
+}
+
 // seedStopped seeds a stopped VM of OwnerA on host.
 func seedStopped(e *Env, host, name string) VM {
 	return e.Seed(SeedSpec{Host: host, Name: name, Owner: OwnerA})
@@ -253,8 +262,8 @@ func identityCases() []Case {
 		}),
 		idCase(Case{
 			ID:     "identity.binding-refused",
-			Rule:   "an authentic grant for another Provider, another enrolment or another host than the one the request names is refused with GRANT_MISMATCH, and nothing is performed",
-			Source: srcGrantBody + " (provider_uid, host_id, enrolment_id); contracts.GrantMismatchReason",
+			Rule:   "an authentic grant for another Provider, another enrolment or another host than the one the request names is refused, and nothing is performed: with GRANT_MISMATCH, except that a host that keeps durable operation records may refuse an enrolment it holds no record of with UNKNOWN_TO_AGENT, which is never definite",
+			Source: srcGrantBody + " (provider_uid, host_id, enrolment_id); contracts.GrantMismatchReason; docs/task-status-outcomes.md (UNKNOWN_TO_AGENT)",
 			Run: func(e *Env) {
 				vm := seedStopped(e, e.HostA(), "id-binding")
 				op := e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON))
@@ -267,6 +276,18 @@ func identityCases() []Case {
 				} {
 					_, err := e.SendEnvelope(providerv1.Provider_Power_FullMethodName,
 						&providerv1.OperationEnvelope{Request: op.Request, Grant: e.Resign(op, mutate)}, nil)
+					if name == "another enrolment" && durableRecords(e) {
+						// A host that keeps durable operation records cannot
+						// tell another host's enrolment from a predecessor of
+						// its own whose records it lost: it may refuse without
+						// claiming that the op_id never ran.
+						if w := WireOf(err); w.Code == codes.NotFound {
+							if r, unknown := w.Reason(contracts.UnknownToAgentReason); unknown {
+								assert.Equal(e.T, contracts.ErrorInfoDomain, r.Domain, "UNKNOWN_TO_AGENT ErrorInfo domain")
+								continue
+							}
+						}
+					}
 					requireRefusedWith(e, err, contracts.GrantMismatchReason, "a grant for "+name)
 				}
 				requireNotRunning(e, vm, "grants bound elsewhere")
@@ -429,9 +450,11 @@ func identityCases() []Case {
 			Rule:   "a task that failed after an irreversible step reports TASK_OUTCOME_FAILED_DIRTY with done=true and an error, and the manager reads it as a failure, never as not performed",
 			Source: srcOutcomes + " (FAILED_DIRTY: \"something may have happened, and the VM is held\")",
 			Run: func(e *Env) {
-				vm := seedStopped(e, e.HostA(), "id-dirty")
-				e.ScriptOutcome(vm.Host, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY, "disk_half_written")
-				a, err := e.SendSigned(e.NewOp(providerv1.OperationKind_OPERATION_KIND_POWER_ON, vm.Host, powerReq(vm, providerv1.PowerOp_POWER_OP_ON)))
+				// A Create: its definition of the VM is a step that cannot be
+				// undone, so a later failure is a dirty one.
+				host := e.HostA()
+				e.ScriptOutcome(host, providerv1.TaskOutcome_TASK_OUTCOME_FAILED_DIRTY, "disk_half_written")
+				a, err := e.SendSigned(e.NewOp(providerv1.OperationKind_OPERATION_KIND_CREATE, host, e.CreateRequest("id-dirty", host, OwnerA)))
 				require.NoError(e.T, err)
 				require.NotEmpty(e.T, a.TaskRef)
 				e.FinishTasks()
@@ -446,6 +469,6 @@ func identityCases() []Case {
 				assert.True(e.T, mgr.IsCompleted && mgr.Error != "", "the manager reads a failure")
 				assert.False(e.T, strings.HasPrefix(mgr.Error, "not performed"), "a dirty failure is never read as not performed: %q", mgr.Error)
 			},
-		}, FeatureScriptedOutcomes, FeatureAsyncTasks),
+		}, FeatureScriptedOutcomes, FeatureAsyncTasks, FeatureCreate),
 	}
 }

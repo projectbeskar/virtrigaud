@@ -64,6 +64,12 @@ const (
 	// RuleValidity: the grant is expired, issued in the future, or valid for
 	// longer than the verifier allows.
 	RuleValidity Rule = "validity"
+	// RuleUntrustedClock: the verifier's clock could not vouch for its
+	// reading (it returned the zero time); nothing about the grant was
+	// judged. The reason is GRANT_UNAUTHENTICATED; a caller that keeps a
+	// durable record of what it accepted (a per-host agent) answers it as
+	// its own non-definite refusal instead.
+	RuleUntrustedClock Rule = "untrusted_clock"
 	// RuleUnknownField: a message on the envelope path carries a field the
 	// verifier does not know.
 	RuleUnknownField Rule = "unknown_field"

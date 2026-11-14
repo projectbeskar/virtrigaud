@@ -18,7 +18,9 @@ package fake
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
+	"time"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/test/conformance/clustered"
@@ -34,6 +36,7 @@ type Target struct {
 	async      bool
 	caps       clustered.Capabilities
 	ident      *identityMode
+	placements *clustered.Placements
 }
 
 // Option configures New.
@@ -65,7 +68,7 @@ func NewIdentity(cfg IdentityConfig, opts ...Option) (*Target, error) {
 
 // build makes the fake, in identity mode when identity is set.
 func build(identity *IdentityConfig, opts []Option) (*Target, error) {
-	t := &Target{violations: map[Violation]bool{}, async: true}
+	t := &Target{violations: map[Violation]bool{}, async: true, placements: clustered.NewPlacements()}
 	for _, o := range opts {
 		o(t)
 	}
@@ -80,6 +83,9 @@ func build(identity *IdentityConfig, opts []Option) (*Target, error) {
 			return nil, err
 		}
 		t.ident = m
+		for _, hs := range t.w.hosts {
+			hs.answers = newAnswerState()
+		}
 	}
 	t.p = t.newProvider()
 	feats := []clustered.Feature{
@@ -95,6 +101,11 @@ func build(identity *IdentityConfig, opts []Option) (*Target, error) {
 	}
 	if t.ident != nil {
 		feats = append(feats, clustered.FeatureOperationIdentity, clustered.FeatureScriptedOutcomes)
+		if t.violations[StorelessUnknownEnrolment] {
+			reasons[clustered.FeatureHostAnswers] = "the fake commits storeless-unknown-enrolment"
+		} else {
+			feats = append(feats, clustered.FeatureHostAnswers)
+		}
 		if t.ident.required {
 			feats = append(feats, clustered.FeatureOperationIdentityRequired)
 		} else {
@@ -105,6 +116,7 @@ func build(identity *IdentityConfig, opts []Option) (*Target, error) {
 		reasons[clustered.FeatureOperationIdentity] = why
 		reasons[clustered.FeatureOperationIdentityRequired] = why
 		reasons[clustered.FeatureScriptedOutcomes] = why
+		reasons[clustered.FeatureHostAnswers] = why
 	}
 	t.caps = clustered.Capabilities{Features: feats, Reasons: reasons}
 	return t, nil
@@ -114,6 +126,7 @@ func (t *Target) newProvider() *provider {
 	return &provider{
 		w: t.w, violations: t.violations, async: t.async, notOwned: true,
 		memTasks: map[string]*task{}, ident: t.ident, memOps: map[string]map[string]*opRecord{},
+		placements: t.placements,
 	}
 }
 
@@ -233,7 +246,7 @@ func (t *Target) FinishTasks() error {
 	t.w.mu.Lock()
 	defer t.w.mu.Unlock()
 	finish := func(k *task) {
-		if k.done {
+		if k.done || k.stalled {
 			return
 		}
 		k.done = true
@@ -310,3 +323,53 @@ func (t *Target) withHost(host string, fn func(*hostState)) error {
 	fn(hs)
 	return nil
 }
+
+// NextPlacement implements clustered.PlacementTracker: the fake keeps each
+// VM's placement binding and attempts per kind, as a per-host agent does.
+func (t *Target) NextPlacement(host, vmUID string, kind providerv1.OperationKind) ([]byte, uint64) {
+	return t.placements.NextPlacement(host, vmUID, kind)
+}
+
+// HostAnswerRoots implements clustered.HostAnswerTarget.
+func (t *Target) HostAnswerRoots() *x509.CertPool {
+	if t.ident == nil {
+		return x509.NewCertPool()
+	}
+	return t.ident.hostKeys.roots
+}
+
+// CrashHost implements clustered.HostAnswerTarget: the host's records are on
+// the host and survive (unless the fake commits ForgetsOpsOnHostCrash).
+func (t *Target) CrashHost(host string) error {
+	return t.withHost(host, func(hs *hostState) {
+		if t.violations[ForgetsOpsOnHostCrash] {
+			hs.ops = map[string]*opRecord{}
+		}
+	})
+}
+
+// SnapshotHost implements clustered.HostAnswerTarget. The fake has no store
+// to copy: a later RollBackHost quarantines the host.
+func (t *Target) SnapshotHost(host string) error { return t.withHost(host, func(*hostState) {}) }
+
+// RollBackHost implements clustered.HostAnswerTarget: the host's store is
+// quarantined (rolled_back).
+func (t *Target) RollBackHost(host string) error {
+	return t.withHost(host, func(hs *hostState) {
+		if hs.answers != nil {
+			hs.answers.quarantine = rolledBackReason
+		}
+	})
+}
+
+// StallNextStep implements clustered.HostAnswerTarget.
+func (t *Target) StallNextStep(host string) error {
+	return t.withHost(host, func(hs *hostState) {
+		if hs.answers != nil {
+			hs.answers.stallNext = true
+		}
+	})
+}
+
+// StepDeadline implements clustered.HostAnswerTarget.
+func (t *Target) StepDeadline() time.Duration { return StepDeadline }

@@ -70,7 +70,14 @@ type Operation struct {
 	Attempt uint64
 	// Payload is the verified request, held in memory only for the duration
 	// of the call. It is nil when the store resumes an operation after a
-	// restart.
+	// restart (its recovery runs, and the runners that recovery starts): the
+	// store never writes request bytes, so nothing can give them back. An
+	// executor whose step needs the request must then resolve that step by
+	// inspection only (Inspect or Goal, reporting the effect present or
+	// absent), or park it by failing without ErrNotPerformed, which leaves
+	// the effect in doubt; it must never perform an effect it cannot
+	// reconstruct, nor report a nil-payload step not performed unless that
+	// is true. The development fake executor needs no payload.
 	Payload []byte
 }
 
@@ -113,6 +120,22 @@ type Executor interface {
 	// Goal reports whether the goal state of an Irreversible step holds for
 	// op (for example: the file is absent, the process positively absent).
 	Goal(ctx context.Context, op Operation, step Step) (bool, error)
+}
+
+// VMState is what an executor can read about one VM on the host.
+type VMState struct {
+	// Exists reports whether the VM is on the host.
+	Exists bool
+	// Running reports whether it is powered on.
+	Running bool
+}
+
+// Describer is implemented by an executor that can read a VM's state, for the
+// agent's Describe answers.
+type Describer interface {
+	// Describe reads the state of the VM vmUID. A VM that is not on the
+	// host is the zero VMState and no error.
+	Describe(ctx context.Context, vmUID string) (VMState, error)
 }
 
 // Stopper stops every VM an executor runs. The agent's shutdown command calls
