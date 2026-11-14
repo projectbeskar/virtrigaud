@@ -100,6 +100,109 @@ const (
 	HostReasonAgentCertificateExpired = "CertificateExpired"
 )
 
+// HostConditionAgentInventoryVerified is the Host condition type the Host
+// controller sets on a host whose Provider runs a per-host agent: True when
+// the last heartbeat got a verified signed host answer carrying a complete
+// host inventory that is recent enough, False (with one of the
+// HostReasonInventory* reasons) otherwise. Used only by development builds.
+const HostConditionAgentInventoryVerified = "AgentInventoryVerified"
+
+// HostConditionComponentsReady is the Host condition type the Host controller
+// sets on a host whose Provider runs a per-host agent: True when the verified
+// host inventory shows every host component ready and allow-listed, no
+// unexpected system extension, every required feature present and an
+// accepted process identity tier; False (with one of the HostReasonComponents*
+// reasons) otherwise. A host is a placement candidate only while both this
+// condition and AgentInventoryVerified are True. Used only by development
+// builds.
+const HostConditionComponentsReady = "ComponentsReady"
+
+// Reasons of the AgentInventoryVerified Host condition. Used only by
+// development builds.
+const (
+	// HostReasonInventoryVerified: the last heartbeat got a verified, complete
+	// and recent host inventory.
+	HostReasonInventoryVerified = "InventoryVerified"
+	// HostReasonInventoryNoSignedAnswer: the last heartbeat got no verified
+	// signed host answer (an error, an unsigned or stripped answer, a failed
+	// verification, or an inventory that does not echo the request).
+	HostReasonInventoryNoSignedAnswer = "NoSignedAnswer"
+	// HostReasonInventoryMissing: the verified answer carries no inventory.
+	HostReasonInventoryMissing = "InventoryMissing"
+	// HostReasonInventoryInvalid: the host's agent signed an inventory that
+	// breaks a field rule; the manager asks again after a backoff.
+	HostReasonInventoryInvalid = "InventoryInvalid"
+	// HostReasonInventoryPending: the agent has not finished its first
+	// collection.
+	HostReasonInventoryPending = "InventoryPending"
+	// HostReasonInventoryStale: the collection the agent reported is older
+	// than the maximum inventory age.
+	HostReasonInventoryStale = "InventoryStale"
+	// HostReasonInventoryOverLimit: the agent observed more than an
+	// inventory can hold.
+	HostReasonInventoryOverLimit = "InventoryOverLimit"
+	// HostReasonInventoryUnreadable: the agent could not read its manifests
+	// or finish its probes.
+	HostReasonInventoryUnreadable = "InventoryUnreadable"
+)
+
+// Reasons of the ComponentsReady Host condition, in the order the manager
+// checks them (the first that applies is reported). Used only by development
+// builds.
+const (
+	// HostReasonComponentsVerified: every check passed.
+	HostReasonComponentsVerified = "ComponentsVerified"
+	// HostReasonComponentsInventoryNotVerified: AgentInventoryVerified is not
+	// True.
+	HostReasonComponentsInventoryNotVerified = "AgentInventoryNotVerified"
+	// HostReasonComponentsAgentNotReady: the agent reports a state other than
+	// ready.
+	HostReasonComponentsAgentNotReady = "AgentNotReady"
+	// HostReasonComponentsUnexpectedExtension: a system extension no
+	// component declares is merged on the host.
+	HostReasonComponentsUnexpectedExtension = "UnexpectedExtension"
+	// HostReasonComponentsUnmanifested: a known component is present without
+	// a manifest.
+	HostReasonComponentsUnmanifested = "ComponentUnmanifested"
+	// HostReasonComponentsManifestInvalid: a component manifest cannot be
+	// used.
+	HostReasonComponentsManifestInvalid = "ManifestInvalid"
+	// HostReasonComponentsManifestOriginNotAccepted: a component is declared
+	// by a manifest from a directory the manager does not accept.
+	HostReasonComponentsManifestOriginNotAccepted = "ManifestOriginNotAccepted"
+	// HostReasonComponentsMissing: a declared or required component is not
+	// present.
+	HostReasonComponentsMissing = "ComponentMissing"
+	// HostReasonComponentsIncompatible: a component's version is outside the
+	// range the agent requires.
+	HostReasonComponentsIncompatible = "ComponentIncompatible"
+	// HostReasonComponentsUnhealthy: a component failed a check on the host.
+	HostReasonComponentsUnhealthy = "ComponentUnhealthy"
+	// HostReasonComponentsAllowListNotConfigured: the manager has no
+	// component allow-list. It is the reason of False, or of True when the
+	// manager runs with the development-only flag that skips the allow-list.
+	HostReasonComponentsAllowListNotConfigured = "AllowListNotConfigured"
+	// HostReasonComponentsAllowListUnverified: the manager could not load the
+	// component allow-list it was configured with (its digest differs from the
+	// pinned one, or its signature does not verify).
+	HostReasonComponentsAllowListUnverified = "AllowListUnverified"
+	// HostReasonComponentsDigestNotAllowListed: a component's digests match
+	// no allow-list entry for its version, or its version has no entry.
+	HostReasonComponentsDigestNotAllowListed = "DigestNotAllowListed"
+	// HostReasonComponentsDigestsNotReported: a component reports neither an
+	// artifact digest nor files, so it cannot be checked.
+	HostReasonComponentsDigestsNotReported = "DigestsNotReported"
+	// HostReasonComponentsRequiredAbsent: a component the allow-list requires
+	// is not reported ready.
+	HostReasonComponentsRequiredAbsent = "RequiredComponentAbsent"
+	// HostReasonComponentsFeatureMissing: a required feature probe is not
+	// present.
+	HostReasonComponentsFeatureMissing = "FeatureMissing"
+	// HostReasonComponentsIdentityTierNotAccepted: the process identity tier
+	// the agent reports is not accepted.
+	HostReasonComponentsIdentityTierNotAccepted = "IdentityTierNotAccepted"
+)
+
 // HostEnrolVerb is the verb a requester must be allowed on the Host
 // (resource hosts in group infra.virtrigaud.io, the Host's namespace and
 // name) for the manager to approve an agent enrolment request for it. It is
@@ -255,6 +358,228 @@ type HostAgentStatus struct {
 	CertificateExpiry *metav1.Time `json:"certificateExpiry,omitempty"`
 }
 
+// HostInventoryAllowList is the result of comparing one host component with
+// the manager's component allow-list.
+// +kubebuilder:validation:Enum=Allowed;NotAllowed;NotListed;NotChecked
+type HostInventoryAllowList string
+
+// Results of the allow-list comparison of a host component.
+const (
+	// HostInventoryAllowListAllowed: the component's artifact digest and
+	// complete file set match an allow-list alternative for its version.
+	HostInventoryAllowListAllowed HostInventoryAllowList = "Allowed"
+	// HostInventoryAllowListNotAllowed: the allow-list has an entry for the
+	// component and version but no alternative matches.
+	HostInventoryAllowListNotAllowed HostInventoryAllowList = "NotAllowed"
+	// HostInventoryAllowListNotListed: the allow-list has no entry for the
+	// component and version.
+	HostInventoryAllowListNotListed HostInventoryAllowList = "NotListed"
+	// HostInventoryAllowListNotChecked: the component was not compared: it
+	// reports no digest, or the manager has no allow-list.
+	HostInventoryAllowListNotChecked HostInventoryAllowList = "NotChecked"
+)
+
+// HostInventoryFile is one file of a host component: a file the agent
+// executes or loads, by name, with its digest.
+type HostInventoryFile struct {
+	// Name is the file's name within the component, never a path.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+
+	// Digest is the SHA-256 of the file's content the agent computed, as
+	// "sha256:" and 64 lowercase hexadecimal characters.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	Digest string `json:"digest"`
+}
+
+// HostInventoryComponent is one host component as the host's agent reported
+// it, with the manager's allow-list result.
+type HostInventoryComponent struct {
+	// Name is the component name.
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,62}$`
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// State is the component's readiness.
+	// +kubebuilder:validation:Enum=Ready;Missing;Incompatible;Unhealthy;Unmanifested;ManifestInvalid
+	State string `json:"state"`
+
+	// Reason qualifies a state other than Ready, from a closed set.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	Reason string `json:"reason,omitempty"`
+
+	// ObservedVersion is the version the agent read for the installed
+	// component.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9A-Za-z][0-9A-Za-z.+~_-]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	ObservedVersion string `json:"observedVersion,omitempty"`
+
+	// DeclaredVersion is the version the component's manifest declares.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9A-Za-z][0-9A-Za-z.+~_-]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	DeclaredVersion string `json:"declaredVersion,omitempty"`
+
+	// RequiredRange is the version range the agent requires, set only for an
+	// incompatible component.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9A-Za-z.+~_<>=, -]{1,64}$`
+	// +kubebuilder:validation:MaxLength=64
+	RequiredRange string `json:"requiredRange,omitempty"`
+
+	// Source is how the manifest says the component was delivered.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]{0,31}$`
+	// +kubebuilder:validation:MaxLength=32
+	Source string `json:"source,omitempty"`
+
+	// ManifestOrigin is where the manifest that declares the component lies:
+	// None, ReadOnly (the read-only image directory) or Writable (the
+	// writable host-configuration directory).
+	// +kubebuilder:validation:Enum=None;ReadOnly;Writable
+	ManifestOrigin string `json:"manifestOrigin"`
+
+	// ArtifactDigest is the SHA-256 of the artifact the component was
+	// delivered in, as "sha256:" and 64 lowercase hexadecimal characters.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	ArtifactDigest string `json:"artifactDigest,omitempty"`
+
+	// Files are the component's files the agent executes or loads.
+	// +optional
+	// +kubebuilder:validation:MaxItems=8
+	Files []HostInventoryFile `json:"files,omitempty"`
+
+	// AllowList is the result of the manager's allow-list comparison.
+	AllowList HostInventoryAllowList `json:"allowList"`
+}
+
+// HostInventoryFeature is the result of one feature probe of the host's
+// agent.
+type HostInventoryFeature struct {
+	// Name is the probe name, from a closed set.
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+
+	// Result is what the probe found.
+	// +kubebuilder:validation:Enum=Present;Absent;Error
+	Result string `json:"result"`
+
+	// Reason qualifies an Error result, from a closed set.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	Reason string `json:"reason,omitempty"`
+}
+
+// HostInventoryExtension is a system extension merged on the host that no
+// component declares.
+type HostInventoryExtension struct {
+	// Name is the extension's name, never a path.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+
+	// Kind says how the extension is unexpected.
+	// +kubebuilder:validation:Enum=Directory;UndeclaredImage;OverlaysComponent
+	Kind string `json:"kind"`
+
+	// ImageDigest is the SHA-256 of the extension image, as "sha256:" and 64
+	// lowercase hexadecimal characters; empty for a directory extension.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	ImageDigest string `json:"imageDigest,omitempty"`
+}
+
+// HostAgentInventoryStatus is the host inventory the manager last verified
+// in a signed host answer of the host's agent. It is an output only: no
+// controller, the scheduler included, reads it back to decide anything; the
+// conditions and health are computed from the verified answer itself. It is
+// a statement by the host's agent, signed so the Provider cannot alter it,
+// not a proof: a host whose agent is compromised can report anything. Used
+// only by development builds.
+type HostAgentInventoryStatus struct {
+	// ObservedTime is when the manager last verified a host inventory of the
+	// host.
+	// +optional
+	ObservedTime *metav1.Time `json:"observedTime,omitempty"`
+
+	// AnswerSHA256 is the SHA-256 of the signed answer that carried the
+	// inventory, for audit.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=64
+	AnswerSHA256 string `json:"answerSHA256,omitempty"`
+
+	// AllowListSHA256 is the SHA-256 of the component allow-list the
+	// manager compared the inventory with; empty when it has none.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=64
+	AllowListSHA256 string `json:"allowListSHA256,omitempty"`
+
+	// InventoryVersion is the version of the inventory content.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4294967295
+	InventoryVersion int64 `json:"inventoryVersion,omitempty"`
+
+	// SupportedVersion is the highest inventory version the agent
+	// implements.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4294967295
+	SupportedVersion int64 `json:"supportedVersion,omitempty"`
+
+	// State says whether the inventory is complete.
+	// +kubebuilder:validation:Enum=Complete;Pending;OverLimit;Unreadable
+	State string `json:"state"`
+
+	// StateReason qualifies an OverLimit or Unreadable state, from a closed
+	// set.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,63}$`
+	// +kubebuilder:validation:MaxLength=64
+	StateReason string `json:"stateReason,omitempty"`
+
+	// SnapshotAgeSeconds is how long before its answer the agent finished
+	// the collection it reported.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4294967295
+	SnapshotAgeSeconds int64 `json:"snapshotAgeSeconds,omitempty"`
+
+	// ProcessIdentityTier is the strongest way the agent can identify the
+	// processes it starts on the host.
+	// +optional
+	// +kubebuilder:validation:Enum=PidfdStore;PidfsHandle;PidfsInode;StartTime
+	ProcessIdentityTier string `json:"processIdentityTier,omitempty"`
+
+	// Components are the host components, sorted by name.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Components []HostInventoryComponent `json:"components,omitempty"`
+
+	// Features are the feature probe results, sorted by name.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Features []HostInventoryFeature `json:"features,omitempty"`
+
+	// UnexpectedExtensions are the system extensions merged on the host that
+	// no component declares, sorted by name.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	UnexpectedExtensions []HostInventoryExtension `json:"unexpectedExtensions,omitempty"`
+}
+
 // HostStatus is operator-synced observed state from the provider's ListHosts and
 // GetHostInfo calls. It carries capacity and health only, never connection
 // secrets.
@@ -312,6 +637,13 @@ type HostStatus struct {
 	// per-host agent. Used only by development builds.
 	// +optional
 	Agent *HostAgentStatus `json:"agent,omitempty"`
+
+	// AgentInventory is the host inventory the manager last verified in a
+	// signed answer of the host's agent, for operators and audit. An output
+	// only: nothing reads it back to decide. Set only for hosts of a Provider
+	// that runs a per-host agent. Used only by development builds.
+	// +optional
+	AgentInventory *HostAgentInventoryStatus `json:"agentInventory,omitempty"`
 
 	// LastHeartbeatTime is when the operator last successfully synced this host.
 	// +optional

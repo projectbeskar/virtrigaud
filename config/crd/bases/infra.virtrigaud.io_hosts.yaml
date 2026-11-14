@@ -247,6 +247,265 @@ spec:
                     maxItems: 8
                     type: array
                 type: object
+              agentInventory:
+                description: |-
+                  AgentInventory is the host inventory the manager last verified in a
+                  signed answer of the host's agent, for operators and audit. An output
+                  only: nothing reads it back to decide. Set only for hosts of a Provider
+                  that runs a per-host agent. Used only by development builds.
+                properties:
+                  allowListSHA256:
+                    description: |-
+                      AllowListSHA256 is the SHA-256 of the component allow-list the
+                      manager compared the inventory with; empty when it has none.
+                    maxLength: 64
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  answerSHA256:
+                    description: |-
+                      AnswerSHA256 is the SHA-256 of the signed answer that carried the
+                      inventory, for audit.
+                    maxLength: 64
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                  components:
+                    description: Components are the host components, sorted by name.
+                    items:
+                      description: |-
+                        HostInventoryComponent is one host component as the host's agent reported
+                        it, with the manager's allow-list result.
+                      properties:
+                        allowList:
+                          description: AllowList is the result of the manager's allow-list
+                            comparison.
+                          enum:
+                          - Allowed
+                          - NotAllowed
+                          - NotListed
+                          - NotChecked
+                          type: string
+                        artifactDigest:
+                          description: |-
+                            ArtifactDigest is the SHA-256 of the artifact the component was
+                            delivered in, as "sha256:" and 64 lowercase hexadecimal characters.
+                          maxLength: 71
+                          pattern: ^sha256:[0-9a-f]{64}$
+                          type: string
+                        declaredVersion:
+                          description: DeclaredVersion is the version the component's
+                            manifest declares.
+                          maxLength: 64
+                          pattern: ^[0-9A-Za-z][0-9A-Za-z.+~_-]{0,63}$
+                          type: string
+                        files:
+                          description: Files are the component's files the agent executes
+                            or loads.
+                          items:
+                            description: |-
+                              HostInventoryFile is one file of a host component: a file the agent
+                              executes or loads, by name, with its digest.
+                            properties:
+                              digest:
+                                description: |-
+                                  Digest is the SHA-256 of the file's content the agent computed, as
+                                  "sha256:" and 64 lowercase hexadecimal characters.
+                                maxLength: 71
+                                pattern: ^sha256:[0-9a-f]{64}$
+                                type: string
+                              name:
+                                description: Name is the file's name within the component,
+                                  never a path.
+                                maxLength: 64
+                                pattern: ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$
+                                type: string
+                            required:
+                            - digest
+                            - name
+                            type: object
+                          maxItems: 8
+                          type: array
+                        manifestOrigin:
+                          description: |-
+                            ManifestOrigin is where the manifest that declares the component lies:
+                            None, ReadOnly (the read-only image directory) or Writable (the
+                            writable host-configuration directory).
+                          enum:
+                          - None
+                          - ReadOnly
+                          - Writable
+                          type: string
+                        name:
+                          description: Name is the component name.
+                          maxLength: 63
+                          pattern: ^[a-z][a-z0-9-]{0,62}$
+                          type: string
+                        observedVersion:
+                          description: |-
+                            ObservedVersion is the version the agent read for the installed
+                            component.
+                          maxLength: 64
+                          pattern: ^[0-9A-Za-z][0-9A-Za-z.+~_-]{0,63}$
+                          type: string
+                        reason:
+                          description: Reason qualifies a state other than Ready,
+                            from a closed set.
+                          maxLength: 64
+                          pattern: ^[a-z][a-z0-9_]{0,63}$
+                          type: string
+                        requiredRange:
+                          description: |-
+                            RequiredRange is the version range the agent requires, set only for an
+                            incompatible component.
+                          maxLength: 64
+                          pattern: ^[0-9A-Za-z.+~_<>=, -]{1,64}$
+                          type: string
+                        source:
+                          description: Source is how the manifest says the component
+                            was delivered.
+                          maxLength: 32
+                          pattern: ^[a-z][a-z0-9-]{0,31}$
+                          type: string
+                        state:
+                          description: State is the component's readiness.
+                          enum:
+                          - Ready
+                          - Missing
+                          - Incompatible
+                          - Unhealthy
+                          - Unmanifested
+                          - ManifestInvalid
+                          type: string
+                      required:
+                      - allowList
+                      - manifestOrigin
+                      - name
+                      - state
+                      type: object
+                    maxItems: 32
+                    type: array
+                  features:
+                    description: Features are the feature probe results, sorted by
+                      name.
+                    items:
+                      description: |-
+                        HostInventoryFeature is the result of one feature probe of the host's
+                        agent.
+                      properties:
+                        name:
+                          description: Name is the probe name, from a closed set.
+                          maxLength: 64
+                          pattern: ^[a-z][a-z0-9_]{0,63}$
+                          type: string
+                        reason:
+                          description: Reason qualifies an Error result, from a closed
+                            set.
+                          maxLength: 64
+                          pattern: ^[a-z][a-z0-9_]{0,63}$
+                          type: string
+                        result:
+                          description: Result is what the probe found.
+                          enum:
+                          - Present
+                          - Absent
+                          - Error
+                          type: string
+                      required:
+                      - name
+                      - result
+                      type: object
+                    maxItems: 32
+                    type: array
+                  inventoryVersion:
+                    description: InventoryVersion is the version of the inventory
+                      content.
+                    format: int64
+                    maximum: 4294967295
+                    minimum: 0
+                    type: integer
+                  observedTime:
+                    description: |-
+                      ObservedTime is when the manager last verified a host inventory of the
+                      host.
+                    format: date-time
+                    type: string
+                  processIdentityTier:
+                    description: |-
+                      ProcessIdentityTier is the strongest way the agent can identify the
+                      processes it starts on the host.
+                    enum:
+                    - PidfdStore
+                    - PidfsHandle
+                    - PidfsInode
+                    - StartTime
+                    type: string
+                  snapshotAgeSeconds:
+                    description: |-
+                      SnapshotAgeSeconds is how long before its answer the agent finished
+                      the collection it reported.
+                    format: int64
+                    maximum: 4294967295
+                    minimum: 0
+                    type: integer
+                  state:
+                    description: State says whether the inventory is complete.
+                    enum:
+                    - Complete
+                    - Pending
+                    - OverLimit
+                    - Unreadable
+                    type: string
+                  stateReason:
+                    description: |-
+                      StateReason qualifies an OverLimit or Unreadable state, from a closed
+                      set.
+                    maxLength: 64
+                    pattern: ^[a-z][a-z0-9_]{0,63}$
+                    type: string
+                  supportedVersion:
+                    description: |-
+                      SupportedVersion is the highest inventory version the agent
+                      implements.
+                    format: int64
+                    maximum: 4294967295
+                    minimum: 0
+                    type: integer
+                  unexpectedExtensions:
+                    description: |-
+                      UnexpectedExtensions are the system extensions merged on the host that
+                      no component declares, sorted by name.
+                    items:
+                      description: |-
+                        HostInventoryExtension is a system extension merged on the host that no
+                        component declares.
+                      properties:
+                        imageDigest:
+                          description: |-
+                            ImageDigest is the SHA-256 of the extension image, as "sha256:" and 64
+                            lowercase hexadecimal characters; empty for a directory extension.
+                          maxLength: 71
+                          pattern: ^sha256:[0-9a-f]{64}$
+                          type: string
+                        kind:
+                          description: Kind says how the extension is unexpected.
+                          enum:
+                          - Directory
+                          - UndeclaredImage
+                          - OverlaysComponent
+                          type: string
+                        name:
+                          description: Name is the extension's name, never a path.
+                          maxLength: 64
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    maxItems: 16
+                    type: array
+                required:
+                - state
+                type: object
               allocatableCPU:
                 description: AllocatableCPU is the schedulable vCPU capacity the provider
                   reports live.
