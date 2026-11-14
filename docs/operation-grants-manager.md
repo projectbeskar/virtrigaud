@@ -350,11 +350,23 @@ checkpoint differs from one the manager verified, holds the host: its VMs report
 signed for it, and the Host reports `AgentStoreRegressed=True`. The hold is persisted with
 the enrolment it happened under and ends only with a new enrolment. Positions are raised
 after each verified answer and persisted at least every 30 s or 1024 commits, before an
-attempt is first sent, and always before a definite answer, or a `NO_RECORD` that
+attempt is first sent, on the first answer of each attempt that shows its record, on the
+first verified host answer after the manager started, and always before a definite answer, or a `NO_RECORD` that
 authorises a re-send, above the persisted position is acted on (a failed write is then no
-answer). The store state is read uncached and a write conflict is retried. A hold whose
+answer). The store state is read uncached and a write conflict is retried. Writes are serialised
+per host, a write another reconcile already made is not repeated, and after a failure a
+host's writes are paced (1 s doubling to 1 min), so a failing API server sees about one
+write per host per interval whatever the number of VMs. A hold whose
 write fails is kept in memory and written again on every later read of the host, so a
 manager restart never lifts it.
+
+**Starting a manager with enrolment.** The `--dev-host-enrolment-*` flags exist only in
+development builds: a release build refuses to start when any is set. A development build
+with enrolment needs the development operation signer (`--dev-operation-signer-key-file`):
+without it the enrolment configuration is refused (it needs the signer's install id), and
+the start-up separation check refuses a signer that names no grant anchor. Each refusal
+exits the manager with a log line naming the cause, so a crash loop on these flags means
+one of them is missing or wrong.
 
 **The host answer gate.** The Host controller's heartbeat (every 60 s) asks each Host of
 such a Provider for a signed host answer and records whether it verified
@@ -709,6 +721,18 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   can make a signed-successful Reconfigure be recorded as pending a restart, or as applied
   to the persistent definition only, but never as succeeded when the host did not sign
   `COMPLETED`.
+- The manager refuses a signed answer whose body is not exactly its own deterministic
+  re-encoding. Build the agent and the manager with the same protobuf-go minor version: a
+  change in either side's encoder output would make every answer refused (fail closed: VMs
+  held, never acted on wrongly). `internal/hostidentity/testdata/operation_answer_body.hex`
+  is a golden vector of the agent's encoding that the tests check on both sides.
+- A store regression detected in memory is lost if the manager stops before the hold is
+  written to the pins Secret (it is retried on every read until then). This is bounded:
+  the manager acts only on positions it persisted first (before an attempt's first send,
+  on its first answer showing a record, on a definite answer or a `NO_RECORD` that
+  authorises a re-send), so a store rolled back below any position acted on is detected
+  again by the next manager; and a manager that just started or took over signs nothing
+  new for a host until it has a verified position of the host persisted.
 - The start-up separation check sees only the configured certificates: a grant anchor and a
   host-agent CA that both chain to an external issuer configured on neither side are not
   detected. Keep them under unrelated roots.
