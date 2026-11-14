@@ -23,7 +23,7 @@ package.
 | `--health-port` | `8080` | HTTP health port. |
 | `--hosts-file` | `/etc/virtrigaud/hosts/hosts.json` | The mounted host inventory. |
 | `--agent-client-cert`, `--agent-client-key` | (required) | PEM certificate and key the Provider presents to every agent: its Provider identity certificate. |
-| `--provider-uid` | (none) | UID of the Provider resource. When set, an agent whose certificate records an enrolment with another Provider is refused. |
+| `--provider-uid` | (none) | UID of the Provider resource. When set, an agent whose certificate records an enrolment with another Provider is refused. Optional for now, with a warning in the log when unset; a deployment the manager renders must set it. |
 
 The manager-facing TLS is the one of the other Providers (the mounted
 provider TLS material and its environment contract).
@@ -37,6 +37,7 @@ libvirt): the Provider reads a file, never the Kubernetes API. Every entry
 must carry agent TLS material and nothing else
 (`hostsecret.ValidateAgentHost`):
 
+- `id`: a host name (a DNS-1123 subdomain of at most 253 characters);
 - `endpoint`: `grpc://host:port`;
 - `credentials.agentTLS.caBundle`: PEM CA certificates the agent's
   certificate must chain to;
@@ -50,7 +51,11 @@ An entry that fails these rules, or shares its id with another entry, is not
 routed and is logged by id only. A reload that removes a host, or changes its
 endpoint or TLS material, closes its connection before the reload returns
 (calls in flight on it fail); a change of labels alone keeps the connection.
-A file that turns unreadable or invalid keeps the last good host set.
+A file that turns unreadable or invalid keeps the last good host set. The
+file is re-read every 30 seconds on its own, besides the watch on its
+directory; when the watch cannot be set up, the Provider logs it at error
+level and says it in its `Validate` answer, and the periodic re-read still
+follows the file.
 
 ## Connections to agents
 
@@ -83,9 +88,27 @@ of version 2 or 1. An agent outside that window, or one that does not serve
 An answer that is missing or does not verify leaves the host unavailable
 (cause `AgentUnverified`), and the next call tries again.
 
+A `Hello` is bound to the transport it was made on (by its local address).
+A client connection carries one transport only: once a transport began, its
+dialer refuses to dial again, so that no call, not even one gRPC retries
+transparently, reaches a new transport (a restarted agent, possibly of
+another version) without a new `Hello`. Before a call is sent, its transport
+is checked against the host's `Hello`; after it, a call found to have run on
+another transport drops that `Hello`. A caller that waits for another
+caller's `Hello` of the same host gives up when its own context ends.
+
+A connection is replaced before the next call when its transport ended, is
+older than 30 minutes, or carries an agent certificate that has expired, so
+that the agent is verified again by a new handshake (the agent also closes
+its connections after 30 minutes). Connections send keepalive pings every 20
+seconds, with or without calls in flight, and are closed when a ping is not
+answered within 10 seconds.
+
 A call waits at most 2 seconds for a connection. A connection that failed is
 retried at once by the next call, rather than after its backoff, so that a
-host that came back is reached by that call.
+host that came back is reached by that call. Every forwarded call has its own
+deadline: 20 seconds, or the caller's deadline less half a second when that
+is sooner, so that the Provider answers before the caller gives up.
 
 ## Routing
 
@@ -96,15 +119,17 @@ host that came back is reached by that call.
 | `GetHostInfo` | By `host_id`. | The request, byte for byte. |
 | `TaskStatus` with `answer_nonce` | By `target_host_id` (a request that also names a task is `InvalidArgument`). | The request, byte for byte. |
 | `TaskStatus` naming a task | By the host encoded in the task reference (`host-task/v1/<host>/<task>`). | A request naming the agent's own task reference. |
-| `ListHosts` | Answered by the Provider from its inventory. | Nothing; a host without a Hello on its current connection gets one first, for at most 5 seconds. |
+| `ListHosts` | Answered by the Provider from its inventory. | Nothing; the hosts without a Hello on their current transport get one first, all at once, within 5 seconds in all. |
 | `GetCapabilities`, `Validate` | Answered by the Provider. | Nothing. |
 | Every other method (`ListVMs`, snapshots, clones, disk export and import, image preparation, ...) | Not served: `Unimplemented`. | Nothing. |
 
 A mutating call without `operation_envelope` is refused `FailedPrecondition`
 with the `IDENTITY_REQUIRED` reason, and one that sets any other field (or an
 unknown field) beside it `InvalidArgument`, before any host is dialed. An
-envelope whose request does not decode, or names no host, is
-`InvalidArgument`. Everything inside the envelope, the grant included, is
+envelope without a grant, or whose grant has no body, signature or signer
+chain, is refused `FailedPrecondition` with `GRANT_UNAUTHENTICATED`, as the
+agent would refuse it. An envelope whose request does not decode, or names no
+host, is `InvalidArgument`. Everything inside the envelope, the grant included, is
 judged by the agent. A read without a host is `InvalidArgument`; a host the
 Provider does not front is `HOST_UNAVAILABLE` (cause `HostNotFronted`, and the
 id is not echoed); a task of a host it does not front is `NotFound`.
@@ -121,9 +146,16 @@ is kept.
 
 The agent's own answers, refusals included, are relayed unchanged. A call the
 agent never received is `HOST_UNAVAILABLE` (not performed). A mutating call
-that was sent and got no answer (the connection dropped) is `Unavailable` with
-`OUTCOME_UNKNOWN_RETRY`: it may have been performed, and repeating it with the
-same grant is safe because the agent performs an operation at most once.
+that was sent and got no answer (the connection dropped, or the Provider's
+call deadline expired) is `Unavailable` with `OUTCOME_UNKNOWN_RETRY`: it may
+have been performed, and repeating it with the same grant is safe because the
+agent performs an operation at most once. A read the agent did not answer
+within the call deadline is `HOST_UNAVAILABLE` (cause `AgentTimeout`). All of
+these are host-scoped, so the manager keeps them out of its Provider-wide
+breaker; only the caller's own cancellation or deadline is answered as such.
+An answer to a mutating call whose host-encoded task reference would exceed
+the reference length limit is replaced by `OUTCOME_UNKNOWN_RETRY` (the
+operation is then asked about by `op_id`).
 
 `GetCapabilities` reports `supports_operation_identity`,
 `requires_operation_identity` and `supports_clustering`, and nothing else.
@@ -133,7 +165,8 @@ same grant is safe because the agent performs an operation at most once.
 Each host has its own breaker (5 counted failures open it for 30 seconds). A
 failure counts only when the agent could not be reached: no answer
 (connection refused or reset, a certificate refused in the handshake, the
-connection dropped, the Provider's own deadline), unless the caller gave up;
+connection dropped, the Provider's own call deadline, an agent that went
+silent on an open connection), unless the caller gave up;
 or an answer of `Unavailable` without a reason of the agent contract. An
 answer with such a reason (`UNATTESTED`, `VM_BUSY`, `UNKNOWN_TO_AGENT`, the
 grant refusals and the other reasons in `contracts.PartAReasons`) and every
@@ -160,4 +193,9 @@ agent processes with the fake executor
 - `ListVMs` is not served: a per-host agent does not list VMs yet.
 - The Provider verifies only the answer to its own `Hello`. It relays every
   other signed answer unchanged; verifying them is the manager's job.
-- The breaker thresholds and the connection timeout are fixed (not flags).
+- The breaker thresholds, the connection and call timeouts, the keepalive
+  and the maximum connection age are fixed (not flags).
+- A transport replaced in the instant between the check of a call's
+  transport and its send is caught only after the call (its `Hello` is then
+  dropped); a client connection never dials a second transport, which keeps
+  that window to a transport the same connection had verified.
