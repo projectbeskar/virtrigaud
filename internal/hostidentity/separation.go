@@ -27,11 +27,16 @@ var ErrHierarchiesShared = errors.New("the host-agent CA and the operation-grant
 
 // CheckHierarchySeparation checks that the host-agent CA hierarchy (whose
 // leaves sign host answers) and the operation-grant anchors (whose leaves
-// sign grants) share no certificate, no key and no ancestor: no certificate
-// of one set equals, has the key of, or chains to a certificate of the
-// other. Whoever holds the host-agent CA key could otherwise issue a leaf
-// that verifies as a grant signer, or the converse. The manager refuses to
-// start when it fails.
+// sign grants) share no certificate, no key and no issuer link between the
+// configured certificates: no certificate of one set equals, has the key of,
+// is signed by, names as its authority key (AuthorityKeyId equal to the
+// other's SubjectKeyId), or chains to a certificate of the other. Whoever
+// holds the host-agent CA key could otherwise issue a leaf that verifies as a
+// grant signer, or the converse. The manager refuses to start when it fails.
+//
+// It sees only the configured certificates: two hierarchies that both chain
+// to an external issuer configured on neither side are not detected. Keep the
+// grant anchor and the host-agent CA under unrelated roots.
 func CheckHierarchySeparation(hostAnchors, grantAnchors []*x509.Certificate) error {
 	if crosses(hostAnchors, grantAnchors) || crosses(grantAnchors, hostAnchors) {
 		return ErrHierarchiesShared
@@ -40,7 +45,7 @@ func CheckHierarchySeparation(hostAnchors, grantAnchors []*x509.Certificate) err
 }
 
 // crosses reports whether a certificate of from equals, shares its key with,
-// or chains to a certificate of to.
+// is signed by, names as its authority key, or chains to a certificate of to.
 func crosses(from, to []*x509.Certificate) bool {
 	roots := x509.NewCertPool()
 	for _, c := range to {
@@ -48,7 +53,12 @@ func crosses(from, to []*x509.Certificate) bool {
 	}
 	for _, f := range from {
 		for _, c := range to {
-			if f.Equal(c) || bytes.Equal(f.RawSubjectPublicKeyInfo, c.RawSubjectPublicKeyInfo) {
+			switch {
+			case f.Equal(c), bytes.Equal(f.RawSubjectPublicKeyInfo, c.RawSubjectPublicKeyInfo):
+				return true
+			case f.CheckSignatureFrom(c) == nil:
+				return true
+			case len(f.AuthorityKeyId) > 0 && bytes.Equal(f.AuthorityKeyId, c.SubjectKeyId):
 				return true
 			}
 		}

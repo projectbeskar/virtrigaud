@@ -153,3 +153,44 @@ func TestCheckHierarchySeparation(t *testing.T) {
 		t.Fatal("a grant issuer under the host anchor was accepted")
 	}
 }
+
+// certWith issues a certificate for a fresh key from parent (self-signed when
+// parent is nil), with the given validity start and authority key id.
+func certWith(t *testing.T, parent *x509.Certificate, parentKey any, notBefore time.Time, aki []byte) *x509.Certificate {
+	t.Helper()
+	key := hostidentitytest.NewKey(t)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: "c"},
+		NotBefore: notBefore, NotAfter: notBefore.Add(time.Hour), IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign, AuthorityKeyId: aki}
+	if parent == nil {
+		parent, parentKey = tmpl, key
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// A certificate signed by the other hierarchy is refused even when no chain
+// verifies (here its validity starts before its issuer's), and so is one
+// that names the other's key as its authority key.
+func TestCheckHierarchySeparation_SignatureAndAuthorityKey(t *testing.T) {
+	now := time.Now()
+	hostCA, hostKey := caCert(t, nil, nil, "host sub-CA")
+	early := certWith(t, hostCA, hostKey, now.Add(-48*time.Hour), nil)
+	if err := hostidentity.CheckHierarchySeparation([]*x509.Certificate{hostCA}, []*x509.Certificate{early}); !errors.Is(err, hostidentity.ErrHierarchiesShared) {
+		t.Fatalf("a grant anchor signed by the host CA was accepted: %v", err)
+	}
+	claiming := certWith(t, nil, nil, now.Add(-time.Minute), hostCA.SubjectKeyId)
+	if len(hostCA.SubjectKeyId) == 0 {
+		t.Skip("no subject key id generated")
+	}
+	if err := hostidentity.CheckHierarchySeparation([]*x509.Certificate{hostCA}, []*x509.Certificate{claiming}); !errors.Is(err, hostidentity.ErrHierarchiesShared) {
+		t.Fatalf("a grant anchor naming the host CA's key as its authority was accepted: %v", err)
+	}
+}

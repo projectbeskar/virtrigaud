@@ -803,16 +803,25 @@ type grantAnchored interface {
 	Anchor() *x509.Certificate
 }
 
+// errNoGrantAnchor is CheckHostAnswerTrust's answer when enrolment is
+// configured but the signer names no grant anchor to check against.
+var errNoGrantAnchor = errors.New("per-host agent enrolment is configured, but the operation signer names no grant anchor to check the host-agent CA against")
+
 // CheckHostAnswerTrust checks, at start-up, that the host-agent CA of cfg
 // and the grant anchor of signer share no certificate, key or issuer
-// (hostidentity.CheckHierarchySeparation). Nothing to check without either.
+// (hostidentity.CheckHierarchySeparation). Without enrolment there is
+// nothing to check; with it, a signer that names no grant anchor fails
+// closed.
 func CheckHostAnswerTrust(cfg *HostEnrolmentConfig, signer operation.Signer) error {
-	if cfg == nil || signer == nil {
+	if cfg == nil {
 		return nil
+	}
+	if signer == nil {
+		return errNoGrantAnchor
 	}
 	a, ok := signer.(grantAnchored)
 	if !ok || a.Anchor() == nil {
-		return nil
+		return errNoGrantAnchor
 	}
 	hostCAs, err := hostidentity.ParseCertificates(cfg.CABundle)
 	if err != nil {

@@ -19,6 +19,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -375,4 +376,29 @@ func TestHostAnswers_PredecessorAttemptIsNeverResent(t *testing.T) {
 	vm := idVM(t, r)
 	assert.Empty(t, vm.Status.ID)
 	assert.Equal(t, k8s.ReasonOperationIntentLost, readyReason(vm))
+}
+
+// anchoredSigner is an operation signer that names a grant anchor.
+type anchoredSigner struct{ anchor *x509.Certificate }
+
+func (anchoredSigner) InstallID() []byte           { return make([]byte, 16) }
+func (anchoredSigner) AuthorityGeneration() uint64 { return 1 }
+func (anchoredSigner) Sign(context.Context, []byte, time.Time) (operation.Signature, error) {
+	return operation.Signature{}, errors.New("not used")
+}
+func (s anchoredSigner) Anchor() *x509.Certificate { return s.anchor }
+
+// With enrolment configured, the start-up separation check fails closed: a
+// missing signer, or one that names no grant anchor, refuses to start, as
+// does an anchor that is the host-agent CA.
+func TestCheckHostAnswerTrust(t *testing.T) {
+	hostCA := hostidentitytest.NewCA(t)
+	grant := hostidentitytest.NewCA(t)
+	cfg := &HostEnrolmentConfig{CABundle: hostCA.PEM}
+	require.NoError(t, CheckHostAnswerTrust(nil, nil), "nothing to check without enrolment")
+	require.ErrorIs(t, CheckHostAnswerTrust(cfg, nil), errNoGrantAnchor)
+	require.ErrorIs(t, CheckHostAnswerTrust(cfg, anchoredSigner{}), errNoGrantAnchor)
+	require.ErrorIs(t, CheckHostAnswerTrust(cfg, struct{ operation.Signer }{anchoredSigner{}}), errNoGrantAnchor)
+	require.NoError(t, CheckHostAnswerTrust(cfg, anchoredSigner{anchor: grant.Cert}))
+	require.ErrorIs(t, CheckHostAnswerTrust(cfg, anchoredSigner{anchor: hostCA.Cert}), hostidentity.ErrHierarchiesShared)
 }
