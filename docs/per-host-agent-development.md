@@ -1089,7 +1089,13 @@ that is already enrolled is never changed by this file.
   `O_NOFOLLOW`, not checked on the open descriptor; it holds no secret.
 - `GetHostInfo` reports the component inventory but no CPU, memory or storage capacity, and the inventory is a detective control (see [Host inventory](#host-inventory)).
 - Certificate renewal (`InstallRenewedCertificate`) and rotation are not
-  available; nor is revocation handling beyond what the start-up checks do
-  (an expired certificate is refused at start). Enrolment needs the manager
-  side's flow by hand (copying files).
+  available. Revocation is enforced by the Provider, which stops routing to
+  a revoked host (see
+  [the Provider's inventory Secret watch](clustered-agent-provider-development.md#following-the-inventory-secret));
+  the agent itself refuses an expired certificate at start, without opening
+  its store, and a new enrolment restores it. The freeze of a predecessor
+  enrolment is never confirmed to the agent yet (no message carries the
+  confirmation), so its records stay answerable until a later change
+  delivers it. Enrolment needs the manager side's flow by hand (copying
+  files).
 - The Provider identity CA is a development stand-in.
