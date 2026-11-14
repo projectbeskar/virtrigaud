@@ -211,7 +211,7 @@ rules:
 # Secrets, delete only: for a Provider whose type requires operation identity
 # (development builds only; no built-in type does), the manager keeps the exact
 # request of each operation attempt in flight in an operation-intent Secret
-# (vrtg-op-<op_id>, type virtrigaud.io/operation-intent) in the Provider's
+# (vrtg-op-<op_id> and vrtg-opr-<op_id>, type virtrigaud.io/operation-intent) in the Provider's
 # namespace, and deletes it once the attempt is over. RBAC cannot scope delete
 # by name prefix, label or type, so the verb is granted in a rule of its own
 # (no patch, no deletecollection). It still covers every Secret this role
@@ -581,7 +581,7 @@ rules:
 # Secrets, delete only: for a Provider whose type requires operation identity
 # (development builds only; no built-in type does), the manager keeps the exact
 # request of each operation attempt in flight in an operation-intent Secret
-# (vrtg-op-<op_id>, type virtrigaud.io/operation-intent) in the Provider's
+# (vrtg-op-<op_id> and vrtg-opr-<op_id>, type virtrigaud.io/operation-intent) in the Provider's
 # namespace, and deletes it once the attempt is over. RBAC cannot scope delete
 # by name prefix, label or type, so the verb is granted in a rule of its own
 # (no patch, no deletecollection). It still covers every Secret this role
