@@ -90,6 +90,10 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 
 // run serves the Provider.
 func run(ctx context.Context, f flags, log *slog.Logger) error {
+	if f.providerUID == "" {
+		log.Warn("--provider-uid is not set: an agent enrolled with another Provider is not refused by this Provider " +
+			"(the agent still refuses this Provider); a deployment rendered by the manager must set it")
+	}
 	client, err := tls.LoadX509KeyPair(f.clientCert, f.clientKey)
 	if err != nil {
 		return fmt.Errorf("load the agent client certificate: %w", err)

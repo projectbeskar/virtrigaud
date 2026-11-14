@@ -28,7 +28,9 @@ limitations under the License.
 //	--agent-client-cert    PEM certificate the Provider presents to agents
 //	--agent-client-key     PEM key of that certificate
 //	--provider-uid         UID of the Provider resource; agents enrolled with
-//	                       another Provider are refused (optional)
+//	                       another Provider are refused. Optional for now (a
+//	                       warning is logged when unset); a deployment the
+//	                       manager renders must set it
 //
 // The manager-facing TLS follows the other Providers (the mounted provider
 // TLS material and its environment contract).
