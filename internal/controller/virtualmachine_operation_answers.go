@@ -230,7 +230,7 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 		return stepWaiting, r.operationInProgress(ctx, vm, cur, operationPollInterval), nil
 	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED:
 		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate && a.ID == "" {
-			return r.learnCreateID(ctx, vm, ia, a, prepared, sent)
+			return r.learnCreateID(ctx, vm, ia, a, prepared, sent || pre)
 		}
 		return r.closeSigned(ctx, vm, ia, a, poll, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded)
 	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_FAILED_CLEAN:
@@ -281,10 +281,12 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 // the manager never received (the send's answer was lost): the same op_id is
 // delivered once more (the host answers a known op_id from its record, and
 // executes nothing again), and the id it returns is recorded on the marker;
-// the Create closes on the next signed COMPLETED.
+// the Create closes on the next signed COMPLETED. noSend is true when this
+// reconcile already delivered the attempt, or when the attempt was sent
+// under a predecessor enrolment (never re-sent): the VM is then held.
 func (r *VirtualMachineReconciler) learnCreateID(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
-	a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation, sent bool) (attemptStep, ctrl.Result, error) {
-	if !sent {
+	a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation, noSend bool) (attemptStep, ctrl.Result, error) {
+	if !noSend {
 		answer, err := ia.sender.SendOperation(ctx, prepared)
 		if err == nil && answer.ID != "" {
 			if _, werr := r.markSent(ctx, vm, a, &answer); werr == nil {

@@ -196,6 +196,9 @@ type signedHostStub struct {
 	vmDeleted []byte
 	// answers counts the signed reads.
 	answers int
+	// predecessors are earlier enrolments of the host whose operations it
+	// still answers about.
+	predecessors [][]byte
 }
 
 func newSignedHostStub(t testing.TB, h *testHost) *signedHostStub {
@@ -263,8 +266,12 @@ func (s *signedHostStub) operationAnswer(q contracts.OperationAnswerQuery,
 	a := &providerv1.OperationAnswer{Context: s.host.context(signNonce, q.ContinuitySeq), OpId: q.OpID, OpEnrolmentId: q.OpEnrolmentID}
 	var plain contracts.TaskStatus
 	var err error
+	known := bytes.Equal(q.OpEnrolmentID, s.host.trust.Enrolment.EnrolmentID)
+	for _, pre := range s.predecessors {
+		known = known || bytes.Equal(q.OpEnrolmentID, pre)
+	}
 	switch {
-	case !bytes.Equal(q.OpEnrolmentID, s.host.trust.Enrolment.EnrolmentID):
+	case !known:
 		a.State = providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNKNOWN_TO_AGENT
 		err = contracts.NewNotFoundError("no record", errors.Join(contracts.ErrUnknownToAgent))
 	case !ok:

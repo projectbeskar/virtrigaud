@@ -330,3 +330,49 @@ func TestHostAnswers_PositionPersistedBeforeEverySend(t *testing.T) {
 	assert.Equal(t, seenAtSend[0], persistedAtSend[0], "the first send follows the persisted position of the last answer seen")
 	assert.Equal(t, seenAtSend[1], persistedAtSend[1], "the re-send follows the persisted position of the NO_RECORD that authorised it")
 }
+
+// An attempt sent under an enrolment the host has since replaced is asked
+// about, never re-sent: a Create the host signed COMPLETED under that
+// predecessor enrolment, whose provider id the manager never received, holds
+// the VM without a single send.
+func TestHostAnswers_PredecessorAttemptIsNeverResent(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "create-task"}, nil // accepted, no id
+	}
+	running := true
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		if running {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		return contracts.TaskStatus{Outcome: contracts.TaskOutcomeSucceeded, IsCompleted: true}, nil
+	}
+	reconcileN(t, r, req, 1)
+	a := findAttempt(idVM(t, r), contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	require.Empty(t, a.ID)
+
+	// The host is re-enrolled: a new enrolment (and certificate), the old one
+	// kept as a frozen predecessor.
+	p := &infravirtrigaudiov1beta1.Provider{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, p))
+	old := stub.signed.host
+	h2 := newTestHost(t, p, "host-alpha", bytes.Repeat([]byte{0x44}, 16), old.trust.Enrolment.Epoch)
+	h2.trust.Predecessors = [][]byte{old.trust.Enrolment.EnrolmentID}
+	trust, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	trust.mu.Lock()
+	trust.hosts["host-alpha"] = h2
+	trust.mu.Unlock()
+	stub.signed.host = h2
+	stub.signed.predecessors = [][]byte{old.trust.Enrolment.EnrolmentID}
+	running = false
+
+	sends := len(stub.sent())
+	reconcileN(t, r, req, 3)
+	assert.Len(t, stub.sent(), sends, "an attempt under a predecessor enrolment is never re-sent")
+	vm := idVM(t, r)
+	assert.Empty(t, vm.Status.ID)
+	assert.Equal(t, k8s.ReasonOperationIntentLost, readyReason(vm))
+}
