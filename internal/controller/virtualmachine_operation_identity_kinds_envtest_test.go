@@ -396,8 +396,11 @@ var _ = Describe("Operation identity: power, Reconfigure and serialisation again
 		Expect(e.target.RemoveVM("host-a", vm.Status.ID)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
+		// The host refuses the Delete of a VM it no longer has and signs no
+		// record of the Delete and no deleted placement: nothing is
+		// concluded.
 		Eventually(func(g Gomega) {
-			g.Expect(readyReasonOf(ctx, g, key)).To(Equal(k8s.ReasonOperationDeleteUnconfirmed))
+			g.Expect(readyReasonOf(ctx, g, key)).To(Equal(k8s.ReasonOperationAnswerUnverified))
 		}, "30s", "100ms").Should(Succeed())
 		Consistently(func(g Gomega) {
 			g.Expect(k8sClient.Get(ctx, key, &infravirtrigaudiov1beta1.VirtualMachine{})).To(Succeed())
