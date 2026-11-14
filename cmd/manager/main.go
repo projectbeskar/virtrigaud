@@ -545,7 +545,7 @@ func main() {
 	// prepare state, VM creates that need a prepare are held.
 	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
 
-	hostAnswers := controller.NewHostAnswers(mgr.GetClient(), hostEnrolment, installID)
+	hostAnswers := controller.NewHostAnswers(mgr.GetClient(), mgr.GetAPIReader(), hostEnrolment, installID)
 
 	vmReconciler := &controller.VirtualMachineReconciler{
 		Client:           mgr.GetClient(),

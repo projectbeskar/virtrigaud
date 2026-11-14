@@ -32,6 +32,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -129,8 +130,13 @@ const maxPreviousStores = 8
 // enrolment configuration (sub-CA, trust domain, install id). Grants are
 // issued under Epoch.
 type PinsHostTrust struct {
-	// Client reads and writes the pins Secrets and reads Hosts.
+	// Client writes the pins Secrets and reads Hosts.
 	Client client.Client
+	// Reader reads the pins Secrets uncached (the API reader), so a
+	// read-modify-write of the store state starts from the stored
+	// resourceVersion rather than an informer copy that lags the manager's
+	// own writes. nil: Client.
+	Reader client.Reader
 	// Config is the enrolment configuration.
 	Config *HostEnrolmentConfig
 	// Epoch is the epoch grants are issued under (identity only).
@@ -143,6 +149,14 @@ type PinsHostTrust struct {
 
 // Compile-time assertion.
 var _ HostTrustSource = (*PinsHostTrust)(nil)
+
+// secretReader is Reader, or Client when none is set.
+func (p *PinsHostTrust) secretReader() client.Reader {
+	if p.Reader != nil {
+		return p.Reader
+	}
+	return p.Client
+}
 
 // pool parses the sub-CA bundle once.
 func (p *PinsHostTrust) pool() (*x509.CertPool, error) {
@@ -325,7 +339,7 @@ func (p *PinsHostTrust) LoadStoreState(ctx context.Context, provider *infravirtr
 	if err != nil {
 		return HostStoreState{}, err
 	}
-	l, err := loadHostEnrolment(ctx, p.Client, p.Config, h)
+	l, err := loadHostEnrolment(ctx, p.secretReader(), p.Config, h)
 	if err != nil {
 		return HostStoreState{}, err
 	}
@@ -335,17 +349,18 @@ func (p *PinsHostTrust) LoadStoreState(ctx context.Context, provider *infravirtr
 	return decodeStoreState(l.secret.Data[hostStoreStateKey])
 }
 
-// UpdateStoreState implements HostTrustSource: a read of the pins Secret, the
-// update, and a write that carries the read resourceVersion (a concurrent
-// writer makes it fail with a conflict, never overwritten). The enrolment
-// state in the same Secret is left as it is.
+// UpdateStoreState implements HostTrustSource: an uncached read of the pins
+// Secret, the update, and a write that carries the read resourceVersion (a
+// concurrent writer makes it fail with a conflict, never overwritten; the
+// caller retries a conflict with a fresh read). The enrolment state in the
+// same Secret is left as it is.
 func (p *PinsHostTrust) UpdateStoreState(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string,
 	update func(*HostStoreState)) error {
 	h, err := p.host(ctx, provider, hostID)
 	if err != nil {
 		return err
 	}
-	l, err := loadHostEnrolment(ctx, p.Client, p.Config, h)
+	l, err := loadHostEnrolment(ctx, p.secretReader(), p.Config, h)
 	if err != nil {
 		return err
 	}
@@ -388,6 +403,10 @@ type hostAnswerState struct {
 	store        HostStoreState
 	persistedSeq uint64
 	persistedAt  time.Time
+	// regressionPending reports a store-regression hold that is held in
+	// memory but not yet written to the pins Secret: every read of the host
+	// retries the write until it lands.
+	regressionPending bool
 	// hostAnswerAt is when the last verified host answer arrived; its
 	// enrolment, store and grant versions.
 	hostAnswerAt      time.Time
@@ -442,9 +461,23 @@ func (h *HostAnswers) state(ctx context.Context, provider *infravirtrigaudiov1be
 		if err != nil {
 			return nil, err
 		}
+		if s.regressionPending {
+			// A hold this manager has not yet persisted outlives a reload.
+			st.RegressedReason, st.RegressedEnrolmentID = s.store.RegressedReason, s.store.RegressedEnrolmentID
+		}
 		s.store, s.loaded, s.persistedSeq, s.persistedAt = st, true, st.Current.Seq, h.now()
 	}
 	return s, nil
+}
+
+// updateStore applies update to the host's persisted store state, retrying a
+// write conflict with a fresh read (every update is a monotonic merge, so a
+// retry is idempotent).
+func (h *HostAnswers) updateStore(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string,
+	update func(*HostStoreState)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		return h.Trust.UpdateStoreState(ctx, provider, hostID, update)
+	})
 }
 
 // answerVerdict is what one signed read gave the manager.
@@ -491,7 +524,13 @@ func (h *HostAnswers) begin(ctx context.Context, provider *infravirtrigaudiov1be
 		return hostRead{}, fmt.Errorf("%w: %w", errHostTrust, err)
 	}
 	if s.store.RegressedReason != "" && bytes.Equal(s.store.RegressedEnrolmentID, t.Enrolment.EnrolmentID) {
-		return hostRead{}, fmt.Errorf("%w (%s)", errHostRegressed, s.store.RegressedReason)
+		reason, enrol, pending := s.store.RegressedReason, bytes.Clone(s.store.RegressedEnrolmentID), s.regressionPending
+		h.mu.Unlock()
+		if pending {
+			h.persistRegression(ctx, provider, hostID, reason, enrol)
+		}
+		h.mu.Lock()
+		return hostRead{}, fmt.Errorf("%w (%s)", errHostRegressed, reason)
 	}
 	return hostRead{trust: t, snapshot: s.store.Current}, nil
 }
@@ -544,7 +583,7 @@ func (h *HostAnswers) finish(ctx context.Context, provider *infravirtrigaudiov1b
 	if !persist {
 		return v, answerVerified
 	}
-	err = h.Trust.UpdateStoreState(ctx, provider, hostID, func(st *HostStoreState) {
+	err = h.updateStore(ctx, provider, hostID, func(st *HostStoreState) {
 		if st.Current.StoreID != want.Current.StoreID && !st.Current.Empty() {
 			st.Previous = append([]hostidentity.StoreRecord{st.Current}, st.Previous...)
 			if len(st.Previous) > maxPreviousStores {
@@ -573,29 +612,92 @@ func (h *HostAnswers) finish(ctx context.Context, provider *infravirtrigaudiov1b
 	return v, answerVerified
 }
 
-// forget drops the in-memory state of a host.
+// forget drops the in-memory store positions of a host, so its next read
+// reloads what is persisted. A store-regression hold is kept, persisted or
+// not: forgetting positions never lifts a hold.
 func (h *HostAnswers) forget(provider *infravirtrigaudiov1beta1.Provider, hostID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.hosts, hostAnswerKey(provider, hostID))
+	s := h.hosts[hostAnswerKey(provider, hostID)]
+	if s == nil {
+		return
+	}
+	if s.store.RegressedReason == "" {
+		delete(h.hosts, hostAnswerKey(provider, hostID))
+		return
+	}
+	held := hostAnswerState{regressionPending: s.regressionPending}
+	held.store.RegressedReason, held.store.RegressedEnrolmentID = s.store.RegressedReason, s.store.RegressedEnrolmentID
+	h.hosts[hostAnswerKey(provider, hostID)] = &held
 }
 
 // markRegressed holds a host for a store regression under enrolment: in
-// memory at once, then persisted (retried by the next answer if the write
-// fails).
+// memory at once, then persisted. A write that fails leaves the hold pending,
+// and every later read of the host retries it (begin), so a manager restart
+// never lifts a hold this manager decided.
 func (h *HostAnswers) markRegressed(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID, reason string, enrolment []byte) {
 	log.FromContext(ctx).Info("The host's operation store regressed; the host is held until it is re-enrolled", "host", hostID,
 		"reason", reason)
 	h.mu.Lock()
-	if s, err := h.state(ctx, provider, hostID); err == nil {
-		s.store.RegressedReason, s.store.RegressedEnrolmentID = reason, bytes.Clone(enrolment)
+	if h.hosts == nil {
+		h.hosts = map[string]*hostAnswerState{}
 	}
+	k := hostAnswerKey(provider, hostID)
+	s := h.hosts[k]
+	if s == nil {
+		s = &hostAnswerState{}
+		h.hosts[k] = s
+	}
+	s.store.RegressedReason, s.store.RegressedEnrolmentID, s.regressionPending = reason, bytes.Clone(enrolment), true
 	h.mu.Unlock()
-	if err := h.Trust.UpdateStoreState(ctx, provider, hostID, func(st *HostStoreState) {
+	h.persistRegression(ctx, provider, hostID, reason, enrolment)
+}
+
+// persistRegression writes a store-regression hold to the pins Secret and,
+// once written, clears its pending mark.
+func (h *HostAnswers) persistRegression(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID, reason string, enrolment []byte) {
+	if err := h.updateStore(ctx, provider, hostID, func(st *HostStoreState) {
 		st.RegressedReason, st.RegressedEnrolmentID = reason, bytes.Clone(enrolment)
 	}); err != nil {
-		log.FromContext(ctx).Info("Cannot persist the host's store regression; it is held in memory", "host", hostID, "error", err.Error())
+		log.FromContext(ctx).Info("Cannot persist the host's store regression; it is held in memory and written again on the next read",
+			"host", hostID, "error", err.Error())
+		return
 	}
+	h.mu.Lock()
+	if s := h.hosts[hostAnswerKey(provider, hostID)]; s != nil && s.store.RegressedReason == reason {
+		s.regressionPending = false
+	}
+	h.mu.Unlock()
+}
+
+// persistPosition writes the host's in-memory store position when it is above
+// the persisted one: the position whose continuity a later answer is checked
+// against survives a restart. It is called before an attempt is first sent.
+func (h *HostAnswers) persistPosition(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string) error {
+	h.mu.Lock()
+	s, err := h.state(ctx, provider, hostID)
+	if err != nil {
+		h.mu.Unlock()
+		return err
+	}
+	want, persisted := s.store.Current, s.persistedSeq
+	h.mu.Unlock()
+	if want.Empty() || want.Seq <= persisted {
+		return nil
+	}
+	if err := h.updateStore(ctx, provider, hostID, func(st *HostStoreState) {
+		if st.Current.Empty() || st.Current.StoreID == want.StoreID {
+			st.Current = hostidentity.MergeStoreRecords(st.Current, want)
+		}
+	}); err != nil {
+		return fmt.Errorf("persist the store position of host %s: %w", hostID, err)
+	}
+	h.mu.Lock()
+	if s := h.hosts[hostAnswerKey(provider, hostID)]; s != nil {
+		s.persistedSeq, s.persistedAt = max(s.persistedSeq, want.Seq), h.now()
+	}
+	h.mu.Unlock()
+	return nil
 }
 
 // RegressedReason returns why the host is held for a store regression under
@@ -687,11 +789,11 @@ func auditSignedDecision(ctx context.Context, read contracts.SignedRead, v hosti
 // enrolment configuration cfg (nil: none, and nothing is sent to a Provider
 // that requires operation identity). Grants are issued under an
 // identity-only epoch whose holder is the install id.
-func NewHostAnswers(c client.Client, cfg *HostEnrolmentConfig, installID []byte) *HostAnswers {
+func NewHostAnswers(c client.Client, reader client.Reader, cfg *HostEnrolmentConfig, installID []byte) *HostAnswers {
 	if cfg == nil || len(installID) != operation.IDLen {
 		return nil
 	}
-	return &HostAnswers{Trust: &PinsHostTrust{Client: c, Config: cfg,
+	return &HostAnswers{Trust: &PinsHostTrust{Client: c, Reader: reader, Config: cfg,
 		Epoch: operation.Epoch{Counter: 1, Holder: bytes.Clone(installID)}}}
 }
 

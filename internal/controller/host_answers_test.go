@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -227,4 +230,74 @@ func TestHostReconciler_SignedHeartbeat(t *testing.T) {
 	_, err = hr.getHostInfo(context.Background(), fresh, plain, stub)
 	require.NoError(t, err)
 	assert.Empty(t, fresh.Status.Conditions, "no host answer condition for a non-identity Provider")
+}
+
+// flakyTrust fails the store-state writes of its inner trust: conflicts
+// counts writes answered with a conflict, failures writes answered with
+// another error.
+type flakyTrust struct {
+	*staticTrust
+	mu        sync.Mutex
+	conflicts int
+	failures  int
+}
+
+func (f *flakyTrust) UpdateStoreState(ctx context.Context, p *infravirtrigaudiov1beta1.Provider, hostID string, update func(*HostStoreState)) error {
+	f.mu.Lock()
+	switch {
+	case f.conflicts > 0:
+		f.conflicts--
+		f.mu.Unlock()
+		return apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, "pins", errors.New("modified"))
+	case f.failures > 0:
+		f.failures--
+		f.mu.Unlock()
+		return errors.New("the API server is unavailable")
+	}
+	f.mu.Unlock()
+	return f.staticTrust.UpdateStoreState(ctx, p, hostID, update)
+}
+
+// A store-regression hold survives a manager restart even when its first
+// write fails: a conflict is retried at once, any other failure on the next
+// read of the host, and forgetting the host's positions never drops the hold.
+func TestHostAnswers_RegressionHoldIsAlwaysPersisted(t *testing.T) {
+	ctx := context.Background()
+	prov := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "ch", Namespace: "default", UID: identityProviderUID}}
+	enrol := bytes.Repeat([]byte{3}, 16)
+	h := newTestHost(t, prov, "host-a", enrol, operation.Epoch{Counter: 1, Holder: bytes.Repeat([]byte{1}, 16)})
+	held := func(trust HostTrustSource) bool {
+		return (&HostAnswers{Trust: trust}).RegressedReason(ctx, prov, "host-a") != ""
+	}
+
+	t.Run("a conflict is retried", func(t *testing.T) {
+		inner := &staticTrust{hosts: map[string]*testHost{"host-a": h}}
+		trust := &flakyTrust{staticTrust: inner, conflicts: 1}
+		answers := &HostAnswers{Trust: trust}
+		answers.markRegressed(ctx, prov, "host-a", hostidentity.ContinuityRolledBack, enrol)
+		assert.True(t, held(inner), "a restarted manager still holds the host")
+	})
+	t.Run("a failed write is retried on the next read", func(t *testing.T) {
+		inner := &staticTrust{hosts: map[string]*testHost{"host-a": h}}
+		trust := &flakyTrust{staticTrust: inner, failures: 1}
+		answers := &HostAnswers{Trust: trust}
+		answers.markRegressed(ctx, prov, "host-a", hostidentity.ContinuityRolledBack, enrol)
+		require.False(t, held(inner), "the first write failed")
+		answers.forget(prov, "host-a")
+		assert.NotEmpty(t, answers.RegressedReason(ctx, prov, "host-a"), "forgetting positions keeps the hold")
+		assert.True(t, held(inner), "the next read wrote the hold; a restarted manager still holds the host")
+	})
+	t.Run("a failed position write keeps the hold", func(t *testing.T) {
+		inner := &staticTrust{hosts: map[string]*testHost{"host-a": h}}
+		trust := &flakyTrust{staticTrust: inner, failures: 100}
+		answers := &HostAnswers{Trust: trust}
+		answers.markRegressed(ctx, prov, "host-a", hostidentity.ContinuityRolledBack, enrol)
+		answers.forget(prov, "host-a") // what a failed definite position write does
+		assert.NotEmpty(t, answers.RegressedReason(ctx, prov, "host-a"))
+		trust.mu.Lock()
+		trust.failures = 0
+		trust.mu.Unlock()
+		assert.NotEmpty(t, answers.RegressedReason(ctx, prov, "host-a"))
+		assert.True(t, held(inner))
+	})
 }
