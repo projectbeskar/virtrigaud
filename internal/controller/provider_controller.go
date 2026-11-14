@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	stderrors "errors"
 	"fmt"
 	"sync"
@@ -1415,7 +1414,7 @@ func (r *ProviderReconciler) providerReadsInventorySecret(provider *infravirtrig
 const DevAgentProviderInventoryWatchFlagName = "dev-agent-provider-inventory-watch"
 
 // errAgentProviderInventoryWatchRelease refuses the flag in a release build.
-var errAgentProviderInventoryWatchRelease = errors.New("--" + DevAgentProviderInventoryWatchFlagName +
+var errAgentProviderInventoryWatchRelease = stderrors.New("--" + DevAgentProviderInventoryWatchFlagName +
 	" is honoured only by a manager built with the " + devgate.BuildTag + " build tag")
 
 // CheckAgentProviderInventoryWatch refuses --dev-agent-provider-inventory-watch
