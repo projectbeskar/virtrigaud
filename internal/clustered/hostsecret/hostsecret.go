@@ -273,6 +273,44 @@ func (c Credentials) Validate() error {
 	return nil
 }
 
+// AgentEndpointScheme starts the endpoint of a host that runs a per-host
+// agent (grpc://host:port).
+const AgentEndpointScheme = "grpc://"
+
+// agentSANPrefix is the path of a host URI identity before its namespace.
+const agentSANPrefix = "/virtrigaud/host/"
+
+// ValidateAgentHost checks one inventory entry that a Provider routing to
+// per-host agents is to dial: the entry carries agent TLS material and no SSH
+// material (Credentials.Validate), its endpoint is an accepted grpc://host:port
+// endpoint, and its expected SAN names this host, by its id, as the last
+// segment of spiffe://<trust domain>/virtrigaud/host/<namespace>/<host id>.
+// The error never echoes a value of the entry, only its id.
+func ValidateAgentHost(h Host) error {
+	if h.Credentials.AgentTLS == nil {
+		return fmt.Errorf("host %q: %w: no agent TLS material", h.ID, ErrInvalidCredentials)
+	}
+	if err := h.Credentials.Validate(); err != nil {
+		return fmt.Errorf("host %q: %w", h.ID, err)
+	}
+	if err := ValidateEndpoint(h.Endpoint); err != nil {
+		return fmt.Errorf("host %q: %w", h.ID, err)
+	}
+	if !strings.HasPrefix(h.Endpoint, AgentEndpointScheme) {
+		return fmt.Errorf("host %q: %w: an agent host is reached at grpc://host:port", h.ID, ErrInvalidEndpoint)
+	}
+	u, err := url.Parse(h.Credentials.AgentTLS.ExpectedSAN)
+	if err != nil {
+		return fmt.Errorf("host %q: %w: agent expected SAN does not parse", h.ID, ErrInvalidCredentials)
+	}
+	rest, _ := strings.CutPrefix(u.Path, agentSANPrefix)
+	ns, name, ok := strings.Cut(rest, "/")
+	if !ok || ns == "" || name != h.ID || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("host %q: %w: agent expected SAN does not name this host", h.ID, ErrInvalidCredentials)
+	}
+	return nil
+}
+
 // validateCABundle requires one or more PEM certificates, each a CA.
 func validateCABundle(data []byte) error {
 	rest := bytes.TrimSpace(data)

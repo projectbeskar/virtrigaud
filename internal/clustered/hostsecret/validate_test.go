@@ -153,3 +153,36 @@ func TestCredentialsValidateRefusesMixingSSHAndAgentTLS(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agent.KeyPins, inv.Hosts[0].Credentials.AgentTLS.KeyPins)
 }
+
+// TestValidateAgentHost: an entry a Provider routing to per-host agents
+// dials must carry agent TLS material only, a grpc:// endpoint and an
+// expected SAN that names the entry's own host id.
+func TestValidateAgentHost(t *testing.T) {
+	agent := func(san string) *AgentTLS {
+		return &AgentTLS{CABundle: testAgentCA(t), ExpectedSAN: san, KeyPins: []string{strings.Repeat("ab", 32)}}
+	}
+	good := Host{ID: "host-a", Endpoint: "grpc://agent-a.example:7443",
+		Credentials: Credentials{AgentTLS: agent("spiffe://cluster.test/virtrigaud/host/infra/host-a")}}
+	require.NoError(t, ValidateAgentHost(good))
+
+	bad := map[string]Host{
+		"no agent TLS": {ID: "host-a", Endpoint: good.Endpoint, Credentials: Credentials{SSHPrivateKey: []byte("k")}},
+		"mixed":        {ID: "host-a", Endpoint: good.Endpoint, Credentials: Credentials{SSHPrivateKey: []byte("k"), AgentTLS: good.Credentials.AgentTLS}},
+		"ssh endpoint": {ID: "host-a", Endpoint: "qemu+ssh://virt@agent-a/system", Credentials: good.Credentials},
+		"bad endpoint": {ID: "host-a", Endpoint: "grpc://agent-a", Credentials: good.Credentials},
+		"other host": {ID: "host-a", Endpoint: good.Endpoint,
+			Credentials: Credentials{AgentTLS: agent("spiffe://cluster.test/virtrigaud/host/infra/host-b")}},
+		"no namespace": {ID: "host-a", Endpoint: good.Endpoint,
+			Credentials: Credentials{AgentTLS: agent("spiffe://cluster.test/virtrigaud/host/host-a")}},
+		"extra segment": {ID: "host-a", Endpoint: good.Endpoint,
+			Credentials: Credentials{AgentTLS: agent("spiffe://cluster.test/virtrigaud/host/infra/host-a/x")}},
+		"query": {ID: "host-a", Endpoint: good.Endpoint,
+			Credentials: Credentials{AgentTLS: agent("spiffe://cluster.test/virtrigaud/host/infra/host-a?x=1")}},
+	}
+	for name, h := range bad {
+		err := ValidateAgentHost(h)
+		require.Error(t, err, name)
+		assert.True(t, errors.Is(err, ErrInvalidCredentials) || errors.Is(err, ErrInvalidEndpoint), "%s: %v", name, err)
+		assert.NotContains(t, err.Error(), "agent-a.example", "%s: the error never echoes the endpoint", name)
+	}
+}
