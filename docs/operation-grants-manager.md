@@ -439,13 +439,14 @@ as the reconcile read them. A write that fails sends nothing. The order of one a
    of it; a host answers a known `op_id` from its record and never executes it twice.
 4. Close: `Terminal` with the outcome the host signed, then the intent Secret is deleted (a
    Delete's is kept until the finalizer is released, and the latest Create's, when it was
-   not performed, while it is the latest). A successful Create writes `Terminal`,
+   not performed, is replaced by a redacted intent kept while that Create is the latest;
+   see "Intent Secrets"). A successful Create writes `Terminal`,
    `status.id` and the confirmed placement in one status write.
 
 A VM's finalizer is released once a Delete attempt is `Terminal/Succeeded`, or when no
 Create of the VM was ever performed: it has no Create attempt and no binding, or its latest
 Create is recorded not performed, no id is recorded, and the host signs that again, now,
-for that Create's `op_id` from its kept intent (`FAILED_CLEAN`, or `RETIRED` under its
+for that Create's `op_id` from its redacted intent (`FAILED_CLEAN`, or `RETIRED` under its
 current enrolment); otherwise the VM is held as `OperationStateLost`. A Delete recorded
 `Succeeded` that the reconcile which recorded it did not release (a restart in between, or
 an edited status) releases the finalizer only when its intent Secret authenticates and
@@ -550,7 +551,28 @@ and its digest salt are kept in a Secret, never in the VM's status:
 - immutable (written once).
 
 It is written before the marker leaves `Prepared` and deleted once the marker is
-`Terminal`. The bytes are never logged or put in an event or condition. A request larger
+`Terminal`.
+
+**Redacted intents.** The intent of a Create that its host signed not performed is still
+needed: before the VM is released without a Delete, the host is asked about that Create's
+`op_id` again, which needs its identity and intent digest, never its request. So when such
+a Create goes `Terminal`, the manager writes a redacted intent and deletes the full one:
+
+- name `vrtg-opr-<opID>`, same type, labels, annotations and owner as the full intent;
+- data `identity`, `salt`, `digest` (SHA-256 of the salt and the exact request bytes) and
+  `tag`, and no `request`: the request bytes, cloud-init user data included, are gone;
+- `tag` covers the same metadata and the identity, salt and digest under its own domain
+  (`virtrigaud.io/operation-intent-redacted/v1` and a NUL byte), so a redacted intent never
+  verifies as a full one, nor the converse; an edited field is refused as tampered.
+
+The redacted Secret is written first, then the full one is deleted with its UID and
+`resourceVersion` as preconditions (a conflict is retried with a fresh read). An intent
+Secret is immutable, so this is the only safe order: a crash in between leaves both, and the
+next reconcile of the VM finishes the redaction; nothing is lost. A redacted intent is
+read only to ask the host about the attempt (its digest binds the answer); it can never be
+sent: a re-send needs the full request, and an attempt in flight whose full intent is gone
+is held as `OperationIntentLost` without sending anything. The sweeper removes a redacted
+intent once a later Create replaces that marker or the VM is gone. The bytes are never logged or put in an event or condition. A request larger
 than 768 KiB is not stored: the VM is held as `OperationRequestTooLarge` and nothing is
 sent.
 
@@ -714,8 +736,6 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   earlier enrolments yet: an attempt sent under one is held after a re-enrolment.
 - Store positions are mirrored nowhere in the Host's status; they live only in the pins
   Secret.
-- The latest Create of a VM that was not performed keeps its intent Secret, cloud-init user
-  data included, while it is the VM's latest Create.
 - A Reconfigure's `RestartRequired` and honest-result flags come from the unsigned answer to
   its send (bound to the attempt by its task tag, not signed by the host): a lying Provider
   can make a signed-successful Reconfigure be recorded as pending a restart, or as applied
