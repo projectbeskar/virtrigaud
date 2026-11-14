@@ -43,6 +43,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -63,20 +64,22 @@ import (
 )
 
 // These tests run the VirtualMachine controller against real per-host agent
-// processes (test/conformance/clustered/agenttarget) behind the in-test
-// router standing in for the clustered Provider, through the real
-// operation-identity transport client: every outcome the manager acts on is
-// one the agent signed. A wrapper around the router plays a lying Provider.
+// processes (test/conformance/clustered/agenttarget) behind the real
+// clustered cloudhypervisor Provider, through the real operation-identity
+// transport client: every outcome the manager acts on is one the agent
+// signed. A gRPC front in front of the Provider's own server plays a lying
+// Provider.
 
 const agentHost = "host-a"
 
-// lyingProvider wraps the router: each flag makes it lie in one way. It also
-// forwards GetHostInfo to the host's agent, which the in-test router does
-// not route.
+// lyingProvider is a front for the Target's Provider: it forwards every call
+// the manager makes to the Provider's own gRPC server (whose interceptor
+// records the task references FinishTasks settles), and each flag makes it
+// lie in one way.
 type lyingProvider struct {
-	providerv1.ProviderServer
-	tg *agenttarget.Target
-	mu sync.Mutex
+	providerv1.UnimplementedProviderServer
+	inner providerv1.ProviderClient
+	mu    sync.Mutex
 	// strip removes every signed answer the agent returned.
 	strip bool
 	// retired rewrites every TaskStatus as an unsigned RETIRED.
@@ -116,13 +119,29 @@ func stripStatus(err error) error {
 	return status.FromProto(pst).Err()
 }
 
+func (l *lyingProvider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+	return l.inner.GetCapabilities(ctx, req)
+}
+
+func (l *lyingProvider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
+	return l.inner.Delete(ctx, req)
+}
+
+func (l *lyingProvider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
+	return l.inner.Power(ctx, req)
+}
+
+func (l *lyingProvider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
+	return l.inner.Reconfigure(ctx, req)
+}
+
+func (l *lyingProvider) ListHosts(ctx context.Context, req *providerv1.ListHostsRequest) (*providerv1.ListHostsResponse, error) {
+	return l.inner.ListHosts(ctx, req)
+}
+
 func (l *lyingProvider) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoRequest) (*providerv1.HostInfo, error) {
-	h := l.tg.Host(req.GetHostId())
-	if h == nil {
-		return nil, status.Error(codes.NotFound, "no such host")
-	}
 	strip, _, _, _ := l.flags()
-	resp, err := h.Client().GetHostInfo(ctx, req)
+	resp, err := l.inner.GetHostInfo(ctx, req)
 	if strip && err == nil {
 		resp.HostAnswer = nil
 	}
@@ -131,7 +150,7 @@ func (l *lyingProvider) GetHostInfo(ctx context.Context, req *providerv1.GetHost
 
 func (l *lyingProvider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusRequest) (*providerv1.TaskStatusResponse, error) {
 	strip, retired, _, _ := l.flags()
-	resp, err := l.ProviderServer.TaskStatus(ctx, req)
+	resp, err := l.inner.TaskStatus(ctx, req)
 	if retired {
 		return &providerv1.TaskStatusResponse{Done: true, Outcome: providerv1.TaskOutcome_TASK_OUTCOME_RETIRED,
 			OutcomeReason: "never_received", Error: "not performed: RETIRED{never_received}"}, nil
@@ -147,7 +166,7 @@ func (l *lyingProvider) TaskStatus(ctx context.Context, req *providerv1.TaskStat
 
 func (l *lyingProvider) Describe(ctx context.Context, req *providerv1.DescribeRequest) (*providerv1.DescribeResponse, error) {
 	strip, _, _, _ := l.flags()
-	resp, err := l.ProviderServer.Describe(ctx, req)
+	resp, err := l.inner.Describe(ctx, req)
 	if strip {
 		if err != nil {
 			return nil, stripStatus(err)
@@ -165,7 +184,7 @@ func (l *lyingProvider) Create(ctx context.Context, req *providerv1.CreateReques
 		sig := req.OperationEnvelope.Grant.Signature
 		sig[len(sig)-1] ^= 1
 	}
-	resp, err := l.ProviderServer.Create(ctx, req)
+	resp, err := l.inner.Create(ctx, req)
 	if drop && err == nil {
 		l.set(func(l *lyingProvider) { l.dropCreateReply = false })
 		return nil, status.Error(codes.Unavailable, "the reply was lost")
@@ -214,7 +233,18 @@ func newAgentEnv(t *testing.T) *agentEnv {
 	tg, err := agenttarget.New(t, agenttarget.Config{Hosts: []string{agentHost}})
 	require.NoError(t, err)
 	cfg := tg.OperationIdentity()
-	lie := &lyingProvider{ProviderServer: tg.Server(), tg: tg}
+	// The Provider's own gRPC server (its interceptor records the task
+	// references FinishTasks settles), on loopback; the lying front forwards
+	// to it.
+	providerSrv := tg.NewGRPCServer()
+	providerLis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = providerSrv.Serve(providerLis) }()
+	t.Cleanup(providerSrv.Stop)
+	providerConn, err := grpc.NewClient(providerLis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = providerConn.Close() })
+	lie := &lyingProvider{inner: providerv1.NewProviderClient(providerConn)}
 	serverTLS, clientTLS := agentTLS(t)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
