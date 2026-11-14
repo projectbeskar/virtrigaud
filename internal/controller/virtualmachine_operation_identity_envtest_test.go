@@ -182,8 +182,9 @@ func testTLS() (server *tls.Config, clientCfg *tls.Config) {
 // newIdentityEnv makes the namespace, a clustered cloudhypervisor Provider
 // with one Ready host (host-a), a class, the fake in identity mode (requiring
 // it) enrolled with the Provider's uid behind a TLS gRPC server, and an
-// operation-identity client signed by a development signer.
-func newIdentityEnv(ctx context.Context) *identityEnv {
+// operation-identity client signed by a development signer. opts configure
+// the fake.
+func newIdentityEnv(ctx context.Context, opts ...fake.Option) *identityEnv {
 	e := &identityEnv{}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "op-identity-"}}
 	Expect(k8sClient.Create(ctx, ns)).To(Succeed())
@@ -210,7 +211,9 @@ func newIdentityEnv(ctx context.Context) *identityEnv {
 	}
 	Expect(k8sClient.Create(ctx, host)).To(Succeed())
 	cpu, mem := int32(16), int64(1<<20)
-	host.Status = infravirtrigaudiov1beta1.HostStatus{Health: infravirtrigaudiov1beta1.HostHealthReady, AllocatableCPU: &cpu, AllocatableMemoryMiB: &mem}
+	heartbeat := metav1.Now()
+	host.Status = infravirtrigaudiov1beta1.HostStatus{Health: infravirtrigaudiov1beta1.HostHealthReady, AllocatableCPU: &cpu, AllocatableMemoryMiB: &mem,
+		LastHeartbeatTime: &heartbeat}
 	Expect(k8sClient.Status().Update(ctx, host)).To(Succeed())
 	Expect(k8sClient.Create(ctx, envtestClass(ns.Name, "small", nil))).To(Succeed())
 
@@ -221,7 +224,7 @@ func newIdentityEnv(ctx context.Context) *identityEnv {
 	signer, err := operation.NewDevSigner(key, installID, nil)
 	Expect(err).NotTo(HaveOccurred())
 	target, err := fake.NewIdentity(fake.IdentityConfig{Anchor: signer.Anchor(), Signer: signer, Required: true,
-		ProviderUID: string(prov.UID), HostNamespace: ns.Name})
+		ProviderUID: string(prov.UID), HostNamespace: ns.Name}, opts...)
 	Expect(err).NotTo(HaveOccurred())
 	e.target = target
 	e.auth = operation.IntentAuthenticatorOf(signer)
