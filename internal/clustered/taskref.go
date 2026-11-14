@@ -18,9 +18,9 @@ package clustered
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
+	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -54,11 +54,8 @@ const (
 	HostTaskRefMaxLen = 1024
 
 	// HostIDMaxLen is the longest Host object name (a DNS-1123 subdomain).
-	HostIDMaxLen = 253
+	HostIDMaxLen = hostsecret.HostIDMaxLen
 )
-
-// hostIDRE matches a Host object name: a DNS-1123 subdomain.
-var hostIDRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 
 // EncodeHostTaskRef returns the host-encoded form of the host-local task
 // reference inner, returned by a routed call that ran on host. An empty inner
@@ -87,7 +84,7 @@ func ParseHostTaskRef(ref string) (HostID, string, error) {
 	if !ok || inner == "" {
 		return "", "", fmt.Errorf("host-encoded task reference has no task after its host")
 	}
-	if len(host) > HostIDMaxLen || !hostIDRE.MatchString(host) {
+	if !hostsecret.ValidHostID(host) {
 		return "", "", fmt.Errorf("host-encoded task reference names an invalid host id")
 	}
 	return HostID(host), inner, nil

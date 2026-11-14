@@ -273,6 +273,22 @@ func (c Credentials) Validate() error {
 	return nil
 }
 
+// HostIDPattern is the shape of a host id: a Host object name, a DNS-1123
+// subdomain. It never contains '/', which ends the host id in a host-encoded
+// task reference.
+const HostIDPattern = `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+
+// HostIDMaxLen is the longest host id (a DNS-1123 subdomain).
+const HostIDMaxLen = 253
+
+// hostIDRE is HostIDPattern compiled once (a load-time guard on a constant).
+var hostIDRE = regexp.MustCompile(HostIDPattern)
+
+// ValidHostID reports whether id is a well-formed host id.
+func ValidHostID(id string) bool {
+	return len(id) <= HostIDMaxLen && hostIDRE.MatchString(id)
+}
+
 // AgentEndpointScheme starts the endpoint of a host that runs a per-host
 // agent (grpc://host:port).
 const AgentEndpointScheme = "grpc://"
@@ -281,12 +297,16 @@ const AgentEndpointScheme = "grpc://"
 const agentSANPrefix = "/virtrigaud/host/"
 
 // ValidateAgentHost checks one inventory entry that a Provider routing to
-// per-host agents is to dial: the entry carries agent TLS material and no SSH
+// per-host agents is to dial: its id is a well-formed host id (ValidHostID,
+// never echoed when it is not), the entry carries agent TLS material and no SSH
 // material (Credentials.Validate), its endpoint is an accepted grpc://host:port
 // endpoint, and its expected SAN names this host, by its id, as the last
 // segment of spiffe://<trust domain>/virtrigaud/host/<namespace>/<host id>.
 // The error never echoes a value of the entry, only its id.
 func ValidateAgentHost(h Host) error {
+	if !ValidHostID(h.ID) {
+		return fmt.Errorf("%w: the host id is not a DNS-1123 subdomain of at most %d characters", ErrInvalidCredentials, HostIDMaxLen)
+	}
 	if h.Credentials.AgentTLS == nil {
 		return fmt.Errorf("host %q: %w: no agent TLS material", h.ID, ErrInvalidCredentials)
 	}
