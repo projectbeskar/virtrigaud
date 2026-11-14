@@ -1114,35 +1114,61 @@ func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, v
 
 // eventReasonIntentRedactionBlocked is the Warning event of a redaction that
 // cannot be done (a Secret at the redacted intent's name that is not this
-// attempt's, or a full intent that does not authenticate).
+// attempt's, a full intent that does not authenticate, or a full intent
+// stuck on finalizers).
 const eventReasonIntentRedactionBlocked = "OperationIntentRedactionBlocked"
 
+// redactionState is the redaction state of a VM's latest not-performed
+// Create, kept in memory per VM: its op_id, whether this process saw its
+// redaction done (then it is not read again: a settled VM costs no reads;
+// after a restart it is checked once, which also finishes a redaction a crash
+// interrupted), and whether its blocked redaction was announced.
+type redactionState struct {
+	opID   string
+	done   bool
+	warned bool
+}
+
 // ensureRedacted redacts the intent of a, a not-performed latest Create,
-// unless this process already saw it redacted (then it costs no read). A
-// blocked redaction is announced once per op_id with a Warning event that
-// names both Secrets and none of their content; the full intent stays.
+// unless this process already saw it redacted. A blocked redaction is
+// announced once per op_id with a Warning event that names both Secrets and
+// none of their content; the full intent stays, and it is tried again on the
+// next reconcile.
 func (r *VirtualMachineReconciler) ensureRedacted(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
 	vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) {
-	if _, done := r.redactedOps.Load(a.OpID); done {
+	key := client.ObjectKeyFromObject(vm).String()
+	st := redactionState{opID: a.OpID}
+	if v, ok := r.redactions.Load(key); ok {
+		if cur, ok := v.(redactionState); ok && cur.opID == a.OpID {
+			st = cur
+		}
+	}
+	if st.done {
 		return
 	}
 	err := r.redactIntent(ctx, provider, vm, a.OpID)
 	if err == nil {
-		r.redactedOps.Store(a.OpID, struct{}{})
+		r.redactions.Store(key, redactionState{opID: a.OpID, done: true})
 		return
 	}
 	log.FromContext(ctx).Info("Could not redact a not-performed Create's operation-intent Secret; retrying", "opID", a.OpID,
 		"error", err.Error())
-	if !errors.Is(err, errIntentTampered) && !errors.Is(err, errRedactionMismatch) {
+	blocked := errors.Is(err, errIntentTampered) || errors.Is(err, errRedactionMismatch) || errors.Is(err, errIntentStuck)
+	if !blocked || st.warned {
+		r.redactions.Store(key, st)
 		return
 	}
-	if _, warned := r.redactionWarned.LoadOrStore(a.OpID, struct{}{}); warned {
-		return
+	st.warned = true
+	r.redactions.Store(key, st)
+	why := fmt.Sprintf("Secret %s or %s in the Provider's namespace is not this attempt's (or does not authenticate)",
+		intentSecretName(a.OpID), redactedIntentName(a.OpID))
+	if errors.Is(err, errIntentStuck) {
+		why = fmt.Sprintf("the full intent Secret %s in the Provider's namespace is stuck on finalizers and is not deleted",
+			intentSecretName(a.OpID))
 	}
 	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonIntentRedactionBlocked, fmt.Sprintf(
-		"The intent of %s attempt %d cannot be redacted: Secret %s or %s in the Provider's namespace is not this attempt's "+
-			"(or does not authenticate). The full intent is kept; inspect both, delete the wrong redacted Secret, and the next "+
-			"reconcile redacts (docs/operation-grants-manager.md)", a.Kind, a.Attempt, intentSecretName(a.OpID), redactedIntentName(a.OpID)))
+		"The intent of %s attempt %d cannot be redacted: %s. The full intent is kept; see docs/operation-grants-manager.md "+
+			"(\"A blocked redaction\"), and the next reconcile redacts", a.Kind, a.Attempt, why))
 }
 
 // afterCreateSucceeded records what follows a successful Create once its id

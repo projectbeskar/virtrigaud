@@ -384,14 +384,11 @@ type VirtualMachineReconciler struct {
 	// blockedRetryMax. Any answer of the provider resets it.
 	deleteTaskStatusRetry unschedulableBackoff
 
-	// redactedOps names (by op_id) the not-performed Creates whose intent
-	// this process saw redacted: they are not read again (a settled VM costs
-	// no reads). After a restart each is checked once, which also finishes a
-	// redaction a crash interrupted.
-	redactedOps sync.Map
-	// redactionWarned names (by op_id) the attempts whose blocked redaction
-	// was announced with a Warning event, once.
-	redactionWarned sync.Map
+	// redactions holds, per VM (namespace/name), the redaction state of its
+	// latest not-performed Create: one entry per VM, overwritten by a new
+	// op_id, deleted with the VM's finalizer or once the VM is gone (see
+	// redactionState).
+	redactions sync.Map
 
 	// HostAnswers is the manager's state of signed host answers (development
 	// builds only, with per-host agent enrolment): the trust of each host of
@@ -528,6 +525,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.Get(ctx, req.NamespacedName, vm); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("VirtualMachine not found, assuming deleted")
+			r.redactions.Delete(req.String())
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to fetch VirtualMachine")
@@ -1626,6 +1624,7 @@ func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infr
 	r.forgetUnsavedCreate(vm.UID)
 	r.forgetDeleteTask(vm)
 	r.diskLimitWarned.Delete(string(vm.UID))
+	r.redactions.Delete(client.ObjectKeyFromObject(vm).String())
 
 	logger.Info("VirtualMachine deleted successfully")
 	return ctrl.Result{}, nil

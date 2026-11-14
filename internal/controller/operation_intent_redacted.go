@@ -238,8 +238,11 @@ func (r *VirtualMachineReconciler) redactIntent(ctx context.Context, provider *i
 			return errRedactionMismatch
 		}
 	}
+	if full.DeletionTimestamp != nil {
+		return fmt.Errorf("%s: %w", intentSecretName(opID), errIntentStuck)
+	}
 	cur := full
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if cur == nil {
 			again, s, ok, lerr := r.loadIntentSecret(ctx, vm, opID, ns)
 			if lerr != nil {
@@ -253,6 +256,9 @@ func (r *VirtualMachineReconciler) redactIntent(ctx context.Context, provider *i
 			}
 			cur = s
 		}
+		if cur.DeletionTimestamp != nil {
+			return fmt.Errorf("%s: %w", intentSecretName(opID), errIntentStuck)
+		}
 		uid, rv := cur.UID, cur.ResourceVersion
 		err := r.Delete(ctx, cur, client.Preconditions{UID: &uid, ResourceVersion: &rv})
 		cur = nil
@@ -261,4 +267,22 @@ func (r *VirtualMachineReconciler) redactIntent(ctx context.Context, provider *i
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	// A delete that a finalizer holds returns success and leaves the Secret,
+	// request bytes included, under a deletion timestamp: that is not done.
+	left := &corev1.Secret{}
+	if gerr := r.intentReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: intentSecretName(opID)}, left); gerr == nil {
+		return fmt.Errorf("%s: %w", intentSecretName(opID), errIntentStuck)
+	} else if !apierrors.IsNotFound(gerr) {
+		return fmt.Errorf("confirm the full operation-intent Secret is gone: %w", gerr)
+	}
+	return nil
 }
+
+// errIntentStuck is redactIntent's answer for a full intent Secret that is
+// not gone after its delete (a finalizer holds it under a deletion
+// timestamp): its request bytes are still stored, so the redaction is not
+// done.
+var errIntentStuck = errors.New("the full operation-intent Secret is stuck on finalizers")

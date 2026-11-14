@@ -32,6 +32,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -429,7 +430,7 @@ func TestIntentRedaction_SettledVMCostsNoReads(t *testing.T) {
 	reconcileN(t, r, req, 3)
 	assert.Zero(t, sc.secretReads(), "no intent Secret is read once the redaction is known done")
 
-	r.redactedOps = sync.Map{} // a restarted manager
+	r.redactions = sync.Map{} // a restarted manager
 	reconcileN(t, r, req, 3)
 	assert.Equal(t, 1, sc.secretReads(), "checked once after a restart, then not again")
 
@@ -456,5 +457,173 @@ func TestIntentRedaction_PredecessorIntentHeld(t *testing.T) {
 	markDeleted(t, r, nil)
 	reconcileN(t, r, req, 2)
 	assert.False(t, vmGone(t, r), "a predecessor's not-performed Create does not release the VM")
-	assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(idVM(t, r)))
+	vm := idVM(t, r)
+	assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(vm))
+	c := k8s.GetCondition(vm.Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, c)
+	assert.Equal(t, msgCreateNotPerformedUnconfirmed, c.Message, "held because the not-performed outcome is not signed again")
+}
+
+// redactionEntries counts the in-memory redaction entries.
+func redactionEntries(r *VirtualMachineReconciler) int {
+	n := 0
+	r.redactions.Range(func(any, any) bool { n++; return true })
+	return n
+}
+
+// The in-memory redaction state is one entry per VM, whatever the number of
+// its op_ids, and is dropped once the VM is gone.
+func TestIntentRedaction_StateBoundedPerVM(t *testing.T) {
+	_, r, req, _ := redactedNotPerformedCreate(t)
+	vm := idVM(t, r)
+	p := providerOf(t, r)
+	for i := 0; i < 50; i++ {
+		a := &infravirtrigaudiov1beta1.OperationAttempt{Kind: infravirtrigaudiov1beta1.OperationAttemptKindCreate,
+			OpID: strings.Repeat("0", 30) + string(rune('a'+i%26)) + string(rune('a'+i/26))}
+		r.ensureRedacted(context.Background(), p, vm, a)
+	}
+	assert.Equal(t, 1, redactionEntries(r), "one entry per VM")
+	vm.Finalizers = nil
+	require.NoError(t, r.Update(context.Background(), vm))
+	require.NoError(t, r.Delete(context.Background(), idVM(t, r)))
+	reconcileN(t, r, req, 1)
+	assert.Zero(t, redactionEntries(r), "dropped once the VM is gone")
+}
+
+// A full intent held by a finalizer is not deleted by its delete: the
+// redaction is not done, a Warning says it is stuck, it is tried again, and
+// it completes once the finalizer is removed.
+func TestIntentRedaction_FinalizerOnFullIntent(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	rec := record.NewFakeRecorder(50)
+	r.Recorder = rec
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "create-task"}, nil
+	}
+	running := true
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		if running {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedClean, IsCompleted: true}, nil
+	}
+	reconcileN(t, r, req, 1)
+	full := secretsByPrefix(t, r, operationIntentSecretPrefix)[0]
+	full.Finalizers = []string{"example.test/hold"}
+	require.NoError(t, r.Update(context.Background(), &full))
+	running = false
+	reconcileN(t, r, req, 3)
+	stuck := secretsByPrefix(t, r, operationIntentSecretPrefix)
+	require.Len(t, stuck, 1, "the finalizer keeps the full intent")
+	assert.NotNil(t, stuck[0].DeletionTimestamp)
+	v, ok := r.redactions.Load(client.ObjectKeyFromObject(idVM(t, r)).String())
+	require.True(t, ok)
+	assert.False(t, v.(redactionState).done, "a stuck full intent is not done") //nolint:forcetypeassert // the map holds redactionState
+	warnings := 0
+	for len(rec.Events) > 0 {
+		if ev := <-rec.Events; strings.Contains(ev, eventReasonIntentRedactionBlocked) {
+			warnings++
+			assert.Contains(t, ev, "finalizers")
+			assert.Contains(t, ev, full.Name)
+		}
+	}
+	assert.Equal(t, 1, warnings)
+
+	stuck[0].Finalizers = nil
+	require.NoError(t, r.Update(context.Background(), &stuck[0]))
+	reconcileN(t, r, req, 1)
+	assert.Empty(t, secretsByPrefix(t, r, operationIntentSecretPrefix))
+	v, _ = r.redactions.Load(client.ObjectKeyFromObject(idVM(t, r)).String())
+	assert.True(t, v.(redactionState).done)                                                 //nolint:forcetypeassert // the map holds redactionState
+	assert.False(t, v.(redactionState).warned, "a successful redaction clears the warning") //nolint:forcetypeassert // the map holds redactionState
+}
+
+// uidPreconditionClient enforces a Delete's UID precondition as the API
+// server does (the fake client does not): a Secret whose UID differs is a
+// conflict.
+type uidPreconditionClient struct{ *swapClient }
+
+func (c uidPreconditionClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	do := &client.DeleteOptions{}
+	do.ApplyOptions(opts)
+	if do.Preconditions != nil && do.Preconditions.UID != nil {
+		cur := &corev1.Secret{}
+		if err := c.Client.Get(ctx, client.ObjectKeyFromObject(obj), cur); err == nil && cur.UID != *do.Preconditions.UID {
+			return apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, obj.GetName(), errors.New("UID precondition failed"))
+		}
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+// A swap by delete and re-create (a new UID) between the authenticated read
+// and the delete is caught by the UID precondition: the re-created Secret,
+// which does not authenticate, is kept.
+func TestIntentRedaction_SwapByRecreate(t *testing.T) {
+	stub := newIdentityStub()
+	_, r, _, s := preparedWithIntentStub(t, stub)
+	vm := idVM(t, r)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	base := r.Client
+	sc := &swapClient{Client: base}
+	sc.swap = func() {
+		planted := &corev1.Secret{}
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(s), planted))
+		require.NoError(t, base.Delete(context.Background(), planted.DeepCopy()))
+		original := planted.UID
+		planted.ResourceVersion, planted.UID = "", types.UID("recreated-"+string(original))
+		planted.Data[intentKeySalt] = bytes.Repeat([]byte{7}, 32)
+		require.NoError(t, base.Create(context.Background(), planted))
+	}
+	uc := uidPreconditionClient{sc}
+	r.Client, r.APIReader = uc, uc
+	err := r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID)
+	require.ErrorIs(t, err, errIntentTampered)
+	r.Client, r.APIReader = base, nil
+	full := secretsByPrefix(t, r, operationIntentSecretPrefix)
+	require.Len(t, full, 1, "the re-created Secret is kept as evidence")
+	assert.Equal(t, bytes.Repeat([]byte{7}, 32), full[0].Data[intentKeySalt])
+}
+
+// An authentic redacted Secret for the same op_id that carries another digest
+// blocks the redaction: the full intent is kept and announced once.
+func TestIntentRedaction_BlockedByMismatch(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	rec := record.NewFakeRecorder(50)
+	r.Recorder = rec
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "create-task"}, nil
+	}
+	running := true
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		if running {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedClean, IsCompleted: true}, nil
+	}
+	reconcileN(t, r, req, 1)
+	vm := idVM(t, r)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	p, found, err := r.loadIntent(context.Background(), vm, a.OpID, clusteredNS)
+	require.NoError(t, err)
+	require.True(t, found)
+	p.DigestSalt = bytes.Repeat([]byte{8}, 32) // same op_id, another digest
+	other, err := buildRedactedIntentSecret(providerOf(t, r), vm, p, r.ownerScheme(), r.OperationIntentAuth)
+	require.NoError(t, err)
+	require.NoError(t, r.Create(context.Background(), other))
+	ref, ok, err := r.loadRedactedIntent(context.Background(), vm, a.OpID, clusteredNS)
+	require.NoError(t, err, "the other redacted Secret authenticates")
+	require.True(t, ok)
+	require.NotEmpty(t, ref.Digest)
+	running = false
+	reconcileN(t, r, req, 3)
+	assert.Len(t, secretsByPrefix(t, r, operationIntentSecretPrefix), 1, "the full intent is kept")
+	warnings := 0
+	for len(rec.Events) > 0 {
+		if ev := <-rec.Events; strings.Contains(ev, eventReasonIntentRedactionBlocked) {
+			warnings++
+		}
+	}
+	assert.Equal(t, 1, warnings)
 }
