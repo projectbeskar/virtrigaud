@@ -5,6 +5,45 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-14 12:00] - Manager acts on clustered agent outcomes only with verified signed answers (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/virtualmachine_operation_answers.go`, `internal/controller/virtualmachine_operation_identity.go`: for a Provider whose type requires operation identity, the manager acts on clustered agent outcomes only with verified signed answers. Every attempt in flight is moved by asking its host about its `op_id` (never by a task reference), and only a verified answer from a `READY` agent that binds to the attempt's verified intent (op_id, enrolment, kind, attempt, VM UID, binding, intent digest) closes it. The answer to a send, success or refusal whatever its reason, a task status and a `Describe` never decide an attempt or release a finalizer: an unsigned `RETIRED` can no longer make the manager mint a second attempt, and a refused first delivery is never closed `Rejected`. A re-send of the same `op_id` follows only a signed `NO_RECORD` under the host's current enrolment. A Delete releases its VM's finalizer only on a signed `COMPLETED` of the Delete or a signed `DELETED` of the VM's placement (`authenticatedHostDeleted`, from the verified Delete intent); a release without a Delete needs the latest Create's not-performed outcome signed again, from its redacted intent. Each signed closure is audited (log line with the signed answer, event `OperationSignedOutcome`). Holds `OperationAnswerUnverified`, `OperationHostAnswerUnavailable`, `OperationHostStoreRegressed`.
+- `internal/controller/virtualmachine_controller.go`, `cmd/manager/main.go`: `VirtualMachineReconciler.OperationEnrolments` is replaced by `HostAnswers`; grants name the host's current enrolment from its pins Secret, under an identity-only epoch. The development enrolment file can no longer be combined with per-host agent enrolment (the manager refuses to start) and no longer lets anything be sent on its own.
+- `internal/controller/host_controller.go`, `internal/controller/host_controller_answer.go`: the Host heartbeat of such a Provider asks for a signed host answer and records it (`AgentAnswerVerified`, `AgentStoreRegressed`); nothing new is signed for a host without a recent verified host answer from a `READY` agent that implements grant version 1.
+- `internal/controller/host_enrolment.go`: the pins Secret keeps the store positions under their own data key when the enrolment state is rewritten; `predecessorEnrolmentIDs` read side (empty until re-enrolment writes it).
+- `internal/providers/contracts/errors.go`: the grant and Provider refusal reasons and `IsDefiniteNotPerformedReason` are documented as definite for this delivery only.
+- `internal/agent/answer/answer.go`: the signature input framing comes from `hostidentity`, shared with the manager's verifier (no behaviour change).
+- `test/conformance/clustered/fake/`: the identity fake's host certificates have the agent profile (host URI identity and enrolment record), and it signs a host answer on `GetHostInfo`.
+- `docs/operation-grants-manager.md`: signed host answers, the deleted rule, the separation of the grant anchor from the host-agent CA, holds and limits.
+
+### Added
+- `internal/hostidentity/answer.go`: `VerifyAnswer`, a pure verifier of signed host answers (sizes, unknown fields, closed body types, agent certificate profile and host URI identity, chain to the host-agent sub-CA, key pin, low-S DER signature, body field rules, nonce, Provider, host, installation and enrolment), and `AnswerSignatureInput`.
+- `internal/hostidentity/continuity.go`: store continuity checks (store change, rollback, fork, checkpoint) and raising of the last verified position.
+- `internal/hostidentity/separation.go`: `CheckHierarchySeparation`; the manager refuses to start when its host-agent CA and grant anchor share a certificate, key or issuer.
+- `internal/providers/contracts/host_answer.go`, `internal/transport/grpc/client_answer.go`: `HostAnswerReader`; reads that draw a fresh 16-byte nonce from `crypto/rand` per request (never stored) and extract the relayed signed answer from the response or the one status detail.
+- `internal/controller/host_answers.go`: `HostAnswers`, `PinsHostTrust` (trust from the Host's pins Secret), store positions in the pins Secret written with a `resourceVersion` precondition, persisted before a definite answer is acted on, and a host held on a store regression until it is re-enrolled.
+- Tests: verifier and continuity tests; transport nonce and extraction tests; a fresh grant on every send; a `go/ast` guard that only `SendOperation` mints a grant or builds an envelope; a table test that no refusal reason decides an attempt; lying-Provider, replayed, foreign and mismatched answers; the deleted rule; store regression; the grant gate; the manager against real per-host agent processes (signed outcomes, a lying Provider, Delete release, a refused re-delivery, edited markers, a joint store and anchor restore); an agent test that a known op_id re-delivered under a grant that no longer verifies never runs or resumes.
+
+### Security
+- `internal/controller/host_answers.go`: a store-regression hold whose write to the pins Secret fails is kept in memory and written again on every later read of the host (conflicts retried at once), and forgetting a host's positions never drops it, so a manager restart cannot lift a hold. The store state is read through the uncached API reader and conflicts are retried with a monotonic merge.
+- `internal/controller/virtualmachine_operation_identity.go`, `virtualmachine_operation_answers.go`: the host's store position is persisted before an attempt is first sent and before a re-send that a signed `NO_RECORD` authorised; an attempt sent under a predecessor enrolment is never re-sent, also not to learn a Create's provider id.
+- `internal/hostidentity/separation.go`, `internal/controller/host_answers.go`: the start-up separation of the host-agent CA from the grant anchor fails closed when enrolment is configured and the signer names no anchor, and also refuses a certificate signed by, or naming as its authority key, a certificate of the other set.
+- `internal/controller/operation_intent_redacted.go`, `internal/operation/intent_auth.go`: the intent of a Create that went Terminal not performed is redacted: a `vrtg-opr-<op_id>` Secret keeps only the identity, salt and intent digest under its own MAC domain, and the full Secret with the request bytes and cloud-init user data is deleted (the redacted Secret built only from the authenticated intent, the VM and the Provider; the full Secret deleted with the UID and resourceVersion of the read that authenticated, re-authenticated on a conflict, never deleted when it does not authenticate; an interrupted redaction finished on the next reconcile; a full intent held by a finalizer treated as not done; a blocked redaction announced once with a Warning event; checked once per manager process, with one in-memory entry per VM dropped with the VM). A redacted intent can only be asked about, never sent, and an intent under a predecessor enrolment does not release a VM without a Delete.
+- `internal/hostidentity/answer.go`: a signed answer whose body is not exactly its canonical encoding is refused; a golden vector (`internal/hostidentity/testdata/operation_answer_body.hex`) pins the agent's encoding against the manager's check (agent and manager must use the same protobuf-go minor).
+- `internal/controller/host_answers.go`: a manager that just started or took over signs nothing new for a host until a verified position of the host is persisted; the first answer of each attempt that shows its record is persisted; store-state writes are serialised per host, coalesced, and paced after a failure (1 s doubling to 1 min).
+- `internal/controller/grant_mint_sites_test.go`: the guard that only `SendOperation` mints a grant or builds an envelope covers, in `internal/` and `cmd/`, construction (literals, empty or not, `new`, attaching an envelope), field sets, proto copies, Unmarshal into an envelope or grant, and reflective sets; a verifier that only reads an envelope is not a site.
+
+### Why
+Outcomes relayed by a Provider were unsigned claims: a lying or faulty Provider could make the manager mint a second attempt or release a VM that still runs. The manager now concludes only from answers the host signed for its own request, bound to the attempt's verified intent and checked against the host's pinned key and store history.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-14 02:52] - A clustered Provider that routes signed operations to per-host agents (development builds only)
 **Author:** @wrkode (William Rizzo)
 

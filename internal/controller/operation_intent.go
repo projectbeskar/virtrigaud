@@ -235,31 +235,52 @@ func ownIntent(s *corev1.Secret, opID string, vmUID types.UID) bool {
 // (errIntentNotOurs for a foreign Secret); nothing from it is used.
 func (r *VirtualMachineReconciler) loadIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
 	p contracts.PreparedOperation, found bool, err error) {
+	p, _, found, err = r.loadIntentSecret(ctx, vm, opID, ns)
+	return p, found, err
+}
+
+// loadIntentSecret is loadIntent that also returns the Secret it
+// authenticated (nil unless err is nil and found), so a caller that acts on
+// that Secret (deletes it, or derives another from it) acts on exactly the
+// read that authenticated, never on a second read.
+func (r *VirtualMachineReconciler) loadIntentSecret(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+	p contracts.PreparedOperation, secret *corev1.Secret, found bool, err error) {
 	if r.OperationIntentAuth == nil {
-		return p, false, operation.ErrNoIntentAuthenticator
+		return p, nil, false, operation.ErrNoIntentAuthenticator
 	}
 	s := &corev1.Secret{}
 	if err := r.intentReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: intentSecretName(opID)}, s); err != nil {
 		if apierrors.IsNotFound(err) {
-			return p, false, nil
+			return p, nil, false, nil
 		}
-		return p, false, fmt.Errorf("read the operation-intent Secret: %w", err)
+		return p, nil, false, fmt.Errorf("read the operation-intent Secret: %w", err)
 	}
+	p, err = r.openIntentSecret(vm, opID, s)
+	if err != nil {
+		return p, nil, true, err
+	}
+	return p, s, true, nil
+}
+
+// openIntentSecret authenticates and decodes the intent Secret s of op_id
+// opID for vm (see loadIntent).
+func (r *VirtualMachineReconciler) openIntentSecret(vm *infravirtrigaudiov1beta1.VirtualMachine, opID string, s *corev1.Secret) (
+	p contracts.PreparedOperation, err error) {
 	if !ownIntent(s, opID, vm.UID) {
-		return p, true, fmt.Errorf("%w: %w", errIntentTampered, errIntentNotOurs)
+		return p, fmt.Errorf("%w: %w", errIntentTampered, errIntentNotOurs)
 	}
 	if !r.OperationIntentAuth.OpenIntent(intentMAC(s), s.Data[intentKeyTag]) {
-		return p, true, fmt.Errorf("authenticate: %w", errIntentTampered)
+		return p, fmt.Errorf("authenticate: %w", errIntentTampered)
 	}
 	if s.Annotations[operationIntentVMNamespaceAnnotation] != vm.Namespace || s.Annotations[operationIntentVMNameAnnotation] != vm.Name {
-		return p, true, fmt.Errorf("another VM: %w", errIntentTampered)
+		return p, fmt.Errorf("another VM: %w", errIntentTampered)
 	}
 	var ident intentIdentity
 	if err := json.Unmarshal(s.Data[intentKeyIdentity], &ident); err != nil {
-		return p, true, fmt.Errorf("decode the identity: %w", errIntentTampered)
+		return p, fmt.Errorf("decode the identity: %w", errIntentTampered)
 	}
 	if hex.EncodeToString(ident.Identity.OpID) != opID || string(ident.Kind) != s.Labels[operationIntentKindLabel] {
-		return p, true, fmt.Errorf("another attempt: %w", errIntentTampered)
+		return p, fmt.Errorf("another attempt: %w", errIntentTampered)
 	}
 	p = contracts.PreparedOperation{
 		Kind:         ident.Kind,
@@ -267,7 +288,7 @@ func (r *VirtualMachineReconciler) loadIntent(ctx context.Context, vm *infravirt
 		RequestBytes: s.Data[intentKeyRequest],
 		DigestSalt:   s.Data[intentKeySalt],
 	}
-	return p, true, nil
+	return p, nil
 }
 
 // deleteIntent deletes the intent Secret of op_id opID for the VM of UID
@@ -331,6 +352,9 @@ func sweepOperationIntents(ctx context.Context, c client.Client, reader client.R
 	for i := range secrets.Items {
 		s := &secrets.Items[i]
 		opID, ok := strings.CutPrefix(s.Name, operationIntentSecretPrefix)
+		if !ok {
+			opID, ok = strings.CutPrefix(s.Name, redactedIntentSecretPrefix)
+		}
 		if !ok || s.Type != operationIntentSecretType || !metav1.IsControlledBy(s, provider) ||
 			now.Sub(s.CreationTimestamp.Time) < operationIntentSweepGrace {
 			continue

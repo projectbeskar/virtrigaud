@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -317,6 +318,26 @@ func main() {
 		setupLog.Info("WARNING: per-host agent enrolment is enabled; this manager is not for production use",
 			"namespace", hostEnrolment.Namespace)
 	}
+	// Host answers are verified against the enrolment's pins and sub-CA
+	// only: the development enrolment file cannot be mixed with them (two
+	// sources of trust for one host), and without enrolment nothing is sent
+	// to a Provider that requires operation identity.
+	if devOperationEnrolments != nil && hostEnrolment != nil {
+		setupLog.Error(errors.New("two sources of host trust"), "--"+operation.DevEnrolmentFileFlagName+
+			" cannot be used together with per-host agent enrolment (--"+controller.DevHostEnrolmentNamespaceFlagName+")")
+		os.Exit(1)
+	}
+	if devOperationEnrolments != nil {
+		setupLog.Info("WARNING: --" + operation.DevEnrolmentFileFlagName + " no longer lets anything be sent: operations of a " +
+			"Provider that requires operation identity need verified signed host answers, which need per-host agent enrolment")
+	}
+	// The host-agent CA and the grant anchors must share no certificate,
+	// key or issuer: whoever holds the host CA key could otherwise issue a
+	// grant signer.
+	if err := controller.CheckHostAnswerTrust(hostEnrolment, devOperationSigner); err != nil {
+		setupLog.Error(err, "refusing to verify signed host answers")
+		os.Exit(1)
+	}
 
 	// The client rate limits, checked before the manager connects to the
 	// cluster: an invalid value stops it rather than running with a limit
@@ -524,6 +545,8 @@ func main() {
 	// prepare state, VM creates that need a prepare are held.
 	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
 
+	hostAnswers := controller.NewHostAnswers(mgr.GetClient(), mgr.GetAPIReader(), hostEnrolment, installID)
+
 	vmReconciler := &controller.VirtualMachineReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
@@ -532,9 +555,11 @@ func main() {
 		ImageCRDFeatures: vmCRDCheck,
 		APIReader:        mgr.GetAPIReader(),
 		MaxDiskSize:      maxDiskSizeLimit,
-		// Development builds only: enrolments of the hosts of Providers
-		// whose type requires operation identity (nil: none).
-		OperationEnrolments: devOperationEnrolments,
+		// Development builds only, with per-host agent enrolment: the
+		// trust, store positions and host answers of the hosts of
+		// Providers whose type requires operation identity (nil: nothing
+		// is sent to them).
+		HostAnswers: hostAnswers,
 		// The authenticator of the intent Secrets, derived from the
 		// signer (nil without one: nothing is stored or sent).
 		OperationIntentAuth: operation.IntentAuthenticatorOf(devOperationSigner),
@@ -679,6 +704,7 @@ func main() {
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
 		RemoteResolver: remoteResolver,
+		HostAnswers:    hostAnswers,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Host")
 		os.Exit(1)

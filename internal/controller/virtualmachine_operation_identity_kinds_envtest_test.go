@@ -214,7 +214,7 @@ var _ = Describe("Operation identity: power, Reconfigure and serialisation again
 			var fired atomic.Bool
 			r := &VirtualMachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), APIReader: k8sClient,
 				RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(100),
-				OperationEnrolments: e.enrol, OperationIntentAuth: e.auth,
+				HostAnswers: e.hostAnswers(ctx, e.trust), OperationIntentAuth: e.auth,
 				operationCrashHook: func(_ context.Context, p operationCrashPoint) bool {
 					return p == point && fired.CompareAndSwap(false, true)
 				}}
@@ -396,8 +396,11 @@ var _ = Describe("Operation identity: power, Reconfigure and serialisation again
 		Expect(e.target.RemoveVM("host-a", vm.Status.ID)).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, vm)).To(Succeed())
+		// The host refuses the Delete of a VM it no longer has and signs no
+		// record of the Delete and no deleted placement: nothing is
+		// concluded.
 		Eventually(func(g Gomega) {
-			g.Expect(readyReasonOf(ctx, g, key)).To(Equal(k8s.ReasonOperationDeleteUnconfirmed))
+			g.Expect(readyReasonOf(ctx, g, key)).To(Equal(k8s.ReasonOperationAnswerUnverified))
 		}, "30s", "100ms").Should(Succeed())
 		Consistently(func(g Gomega) {
 			g.Expect(k8sClient.Get(ctx, key, &infravirtrigaudiov1beta1.VirtualMachine{})).To(Succeed())

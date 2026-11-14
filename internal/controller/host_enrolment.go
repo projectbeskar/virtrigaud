@@ -393,6 +393,11 @@ type hostEnrolmentState struct {
 	// RetiredEnrolmentIDs are enrolment ids already used or abandoned for
 	// the host; none is drawn again.
 	RetiredEnrolmentIDs []string `json:"retiredEnrolmentIDs,omitempty"`
+	// PredecessorEnrolmentIDs are earlier enrolments the host still holds
+	// frozen after a re-enrolment: an attempt under one may be asked about by
+	// op_id, never re-sent. Read by the manager; written by the re-enrolment
+	// flow (empty until then).
+	PredecessorEnrolmentIDs []string `json:"predecessorEnrolmentIDs,omitempty"`
 	// LastDenial is the last denied request of an authorised requester, for
 	// the Host condition.
 	LastDenial *requestOutcome `json:"lastDenial,omitempty"`
@@ -553,7 +558,14 @@ func saveHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentC
 	sec.Annotations = map[string]string{certrequest.AnnotationHost: hostKey(host.Namespace, host.Name)}
 	sec.OwnerReferences = nil
 	sec.Type = corev1.SecretTypeOpaque
+	// The store positions under their own key (host_answers.go) are kept,
+	// except when the stored state belonged to another Host object or
+	// identity: a replaced host inherits nothing.
+	keep := sec.Data[hostStoreStateKey]
 	sec.Data = map[string][]byte{hostEnrolmentStateKey: data}
+	if len(keep) > 0 && !l.reset {
+		sec.Data[hostStoreStateKey] = keep
+	}
 	if create {
 		err = c.Create(ctx, sec)
 	} else {

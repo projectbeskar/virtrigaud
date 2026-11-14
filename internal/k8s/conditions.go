@@ -708,6 +708,18 @@ const (
 	// not confirm a Delete, so the finalizer is kept: it is released only by
 	// a confirmed Delete, orphan-on-delete or force-delete.
 	ReasonOperationDeleteUnconfirmed = "OperationDeleteUnconfirmed"
+	// ReasonOperationHostAnswerUnavailable: the host has no recent verified
+	// signed host answer (or the manager cannot verify its answers), so
+	// nothing new is signed for it (development builds).
+	ReasonOperationHostAnswerUnavailable = "OperationHostAnswerUnavailable"
+	// ReasonOperationAnswerUnverified: the host gave no verified signed
+	// answer about an attempt in flight; nothing is concluded and the host
+	// is asked again (development builds).
+	ReasonOperationAnswerUnverified = "OperationAnswerUnverified"
+	// ReasonOperationHostStoreRegressed: the host's operation store was
+	// replaced, rolled back or forked; its VMs are held until it is
+	// re-enrolled (development builds).
+	ReasonOperationHostStoreRegressed = "OperationHostStoreRegressed"
 	// ReasonOperationIdentityUnsupported: the operation (a snapshot, clone,
 	// disk export or import, image prepare, adoption, ...) has no signed
 	// path, and its Provider requires operation identity. It is refused

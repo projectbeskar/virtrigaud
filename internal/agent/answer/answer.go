@@ -43,7 +43,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"regexp"
@@ -62,18 +61,19 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// DomainSeparator starts the signature input of every message a host signs.
-const DomainSeparator = "virtrigaud.host-signed.v1\x00"
+// DomainSeparator starts the signature input of every message a host signs
+// (shared with the manager's verifier, hostidentity.AnswerDomainSeparator).
+const DomainSeparator = hostidentity.AnswerDomainSeparator
 
-// The closed set of body types.
+// The closed set of body types (shared with the manager's verifier).
 const (
 	// BodyTypeOperationAnswer is the body type of an answer about one
 	// operation.
-	BodyTypeOperationAnswer = "provider.v1.OperationAnswer"
+	BodyTypeOperationAnswer = hostidentity.BodyTypeOperationAnswer
 	// BodyTypeVMAnswer is the body type of an answer about one VM placement.
-	BodyTypeVMAnswer = "provider.v1.VMAnswer"
+	BodyTypeVMAnswer = hostidentity.BodyTypeVMAnswer
 	// BodyTypeHostAnswer is the body type of an answer about the host.
-	BodyTypeHostAnswer = "provider.v1.HostAnswer"
+	BodyTypeHostAnswer = hostidentity.BodyTypeHostAnswer
 )
 
 // Size limits of a signed answer.
@@ -115,7 +115,8 @@ var ErrSign = errors.New("sign host answer")
 // error also wraps inventory.ErrTooLarge when the cause is the size bound.
 var ErrInvalidInventory = errors.New("host inventory breaks a field rule")
 
-// SignatureInput returns the exact bytes a host signs for body of bodyType.
+// SignatureInput returns the exact bytes a host signs for body of bodyType:
+// hostidentity.AnswerSignatureInput, the framing the manager verifies.
 func SignatureInput(bodyType string, body []byte) ([]byte, error) {
 	if len(bodyType) == 0 || len(bodyType) > MaxBodyTypeBytes {
 		return nil, fmt.Errorf("%w: body type length %d", ErrSign, len(bodyType))
@@ -123,12 +124,10 @@ func SignatureInput(bodyType string, body []byte) ([]byte, error) {
 	if len(body) > MaxBodyBytes {
 		return nil, fmt.Errorf("%w: %w: body of %d bytes exceeds %d", ErrSign, inventory.ErrTooLarge, len(body), MaxBodyBytes)
 	}
-	m := make([]byte, 0, len(DomainSeparator)+2+len(bodyType)+4+len(body))
-	m = append(m, DomainSeparator...)
-	m = binary.BigEndian.AppendUint16(m, uint16(len(bodyType))) // #nosec G115 -- bounded by MaxBodyTypeBytes above
-	m = append(m, bodyType...)
-	m = binary.BigEndian.AppendUint32(m, uint32(len(body))) // #nosec G115 -- bounded by MaxBodyBytes above
-	m = append(m, body...)
+	m, err := hostidentity.AnswerSignatureInput(bodyType, body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSign, err)
+	}
 	return m, nil
 }
 

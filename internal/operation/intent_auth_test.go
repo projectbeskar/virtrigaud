@@ -84,3 +84,12 @@ func TestTaskMessage_VersionedPrefix(t *testing.T) {
 	assert.False(t, bytes.HasPrefix([]byte(taskAuthContextV1), []byte(TaskAuthContext)))
 	assert.False(t, bytes.HasPrefix([]byte(TaskAuthContext), []byte(IntentAuthContext)))
 }
+
+// TestRedactedIntentMessage_SeparatedFromIntents: a redacted intent's message
+// never equals a full intent's, whatever the fields.
+func TestRedactedIntentMessage_SeparatedFromIntents(t *testing.T) {
+	assert.False(t, bytes.HasPrefix([]byte(RedactedIntentAuthContext), []byte(IntentAuthContext)))
+	assert.False(t, bytes.HasPrefix([]byte(IntentAuthContext), []byte(RedactedIntentAuthContext)))
+	assert.NotEqual(t, IntentMessage([]byte("a"), []byte("b")), RedactedIntentMessage([]byte("a"), []byte("b")))
+	assert.NotEqual(t, IntentAuthContext[:31], RedactedIntentAuthContext[:31])
+}

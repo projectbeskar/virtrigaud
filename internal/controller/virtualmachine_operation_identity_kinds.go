@@ -426,45 +426,19 @@ func decodePrepared(p *contracts.PreparedOperation) (proto.Message, error) {
 // that finds no VM releases the finalizer (virtualmachine_delete_task.go,
 // handleDeletion); here it never does. "No such VM" is an unsigned claim that
 // a misrouted, restored or lying host can make about a VM that still runs, so
-// it does not confirm the Delete, and neither does UNKNOWN_TO_AGENT (no
-// record of the task proves nothing). The finalizer is released only by:
-//   - a confirmed Delete: a bound task of this Delete attempt Succeeded, or a
-//     re-send of the same op_id was answered with success (releaseAfterDelete,
-//     confirmDeleteRelease);
-//   - no Create ever performed (nothingCreated);
-//   - orphan-on-delete or force-delete;
-//   - later, an authenticated host answer that the VM is deleted
-//     (authenticatedHostDeleted), which does not exist yet.
+// it does not confirm the Delete, and neither does a host's signed "no
+// record" of the Delete or of the VM. The finalizer is released only by:
+//   - a confirmed Delete: the host signed that the Delete's op_id COMPLETED,
+//     or that the VM's placement is DELETED (a tombstone its Delete wrote),
+//     for a request the manager made (virtualmachine_operation_answers.go);
+//   - no Create ever performed (nothingCreated), the latest Create's
+//     not-performed outcome signed again by the host;
+//   - orphan-on-delete or force-delete.
 
 // msgOperationDeleteUnconfirmed is the hold of a Delete whose VM is reported
 // absent, or whose Provider is gone.
 var msgOperationDeleteUnconfirmed = "the VM is being deleted, and its host reports no such VM (or its Provider is gone); " +
 	"for a Provider that requires operation identity that does not confirm a Delete, so the finalizer is kept; " + operationHoldRecovery
-
-// authenticatedHostDeleted is the extension point for an authenticated answer
-// from the VM's host that the VM is deleted: bound to the VM's UID and its
-// placement binding, and signed by (or otherwise bound to) the host's
-// enrolment, for example a host-signed tombstone. Such an answer would let
-// the finalizer of a VM whose Delete is unconfirmed be released. No wire
-// shape for it exists yet, so this always answers false and nothing is
-// released on an absence.
-func (r *VirtualMachineReconciler) authenticatedHostDeleted(context.Context, *infravirtrigaudiov1beta1.VirtualMachine,
-	identityAttempt, *infravirtrigaudiov1beta1.OperationAttempt) bool {
-	return false
-}
-
-// deleteAbsent handles a Delete attempt a whose send the host answered with
-// "no such VM": the VM is held (OperationDeleteUnconfirmed), the attempt stays
-// as it is and is re-sent with the same op_id when the hold is re-checked.
-// Only authenticatedHostDeleted (not implemented) could release it.
-func (r *VirtualMachineReconciler) deleteAbsent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (attemptStep, ctrl.Result, error) {
-	if r.authenticatedHostDeleted(ctx, vm, ia, a) {
-		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, "", "")
-	}
-	return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationDeleteUnconfirmed, msgOperationDeleteUnconfirmed,
-		operationHoldRecheckInterval), nil
-}
 
 // identityDeleteUnconfirmed reports whether vm records operation attempts
 // (only a Provider that requires operation identity has them) of which a
@@ -517,11 +491,12 @@ func (r *VirtualMachineReconciler) reconfiguredResources(vm *infravirtrigaudiov1
 // supersedableHoldReasons are the holds of an attempt in flight whose outcome
 // the controller cannot learn.
 var supersedableHoldReasons = map[string]bool{
-	k8s.ReasonOperationUnknownToAgent: true,
-	k8s.ReasonOperationOutcomeUnknown: true,
-	k8s.ReasonOperationIntentLost:     true,
-	k8s.ReasonOperationIntentTampered: true,
-	k8s.ReasonOperationStateLost:      true,
+	k8s.ReasonOperationUnknownToAgent:   true,
+	k8s.ReasonOperationOutcomeUnknown:   true,
+	k8s.ReasonOperationIntentLost:       true,
+	k8s.ReasonOperationIntentTampered:   true,
+	k8s.ReasonOperationStateLost:        true,
+	k8s.ReasonOperationAnswerUnverified: true,
 }
 
 // supersedableByDelete reports whether the held attempt a in flight may be
@@ -561,10 +536,22 @@ func (r *VirtualMachineReconciler) supersedeForDelete(ctx context.Context, vm *i
 }
 
 // intentKeptAsEvidence reports whether the intent Secret of the Terminal
-// attempt a is kept while vm exists: a Delete awaiting its release, or an
-// attempt a Delete superseded.
+// attempt a is kept while vm exists: a Delete awaiting its release, an
+// attempt a Delete superseded, or the latest Create, not performed.
 func intentKeptAsEvidence(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) bool {
-	return deleteAwaitingRelease(vm, a) || a.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded
+	return deleteAwaitingRelease(vm, a) || a.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSuperseded ||
+		createNotPerformedLatest(a)
+}
+
+// createNotPerformedLatest reports whether a is a Create marker (the VM's
+// latest Create: there is one marker per kind) that is Terminal with a
+// not-performed outcome. Its intent Secret is kept while it is the latest,
+// so that a release without a Delete can ask the host about its op_id again
+// (signedNotPerformed); a later Create replaces the marker, and the sweeper
+// then removes the Secret.
+func createNotPerformedLatest(a *infravirtrigaudiov1beta1.OperationAttempt) bool {
+	return a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate &&
+		a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal && notPerformed(a.Outcome)
 }
 
 // acknowledgeOperationAnnotation, set on a VirtualMachine to the op_id of its

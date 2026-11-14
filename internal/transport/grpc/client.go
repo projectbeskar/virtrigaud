@@ -1029,6 +1029,12 @@ func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contr
 		return contracts.DescribeResponse{}, c.mapGRPCError("describe", err)
 	}
 
+	return describeFromProto(resp), nil
+}
+
+// describeFromProto converts a provider.v1 DescribeResponse into the
+// manager-side contracts.DescribeResponse.
+func describeFromProto(resp *providerv1.DescribeResponse) contracts.DescribeResponse {
 	// Parse provider raw data
 	var providerRaw map[string]string
 	if resp.ProviderRawJson != "" {
@@ -1054,7 +1060,7 @@ func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contr
 		ProviderRaw:  providerRaw,
 		MaxMemoryMiB: resp.GetMaxMemoryMib(),
 		VCPUs:        resp.GetVcpus(),
-	}, nil
+	}
 }
 
 // IsTaskComplete implements contracts.Provider. It reads the answer as
