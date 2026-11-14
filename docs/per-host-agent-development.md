@@ -15,8 +15,9 @@ its own user, does (see [Host key signer](#host-key-signer)).
 
 Nothing here is part of a release. No release workflow, container image or
 make target builds `vrtg-agent` (a test in `cmd/vrtg-agent` checks the
-release workflow, the CI workflow and the `Makefile`), and no Provider routes
-to it yet.
+release workflow, the CI workflow and the `Makefile`). The Provider that
+routes to it, also for development builds only, is described in
+[`clustered-agent-provider-development.md`](clustered-agent-provider-development.md).
 
 ## Builds
 

@@ -5,6 +5,35 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-14 02:52] - A clustered Provider that routes signed operations to per-host agents (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/cloudhypervisor/`: the clustered Provider for per-host agents, development builds only (every file but the package doc carries the `virtrigaud_dev` build tag). It fronts the hosts of its inventory and routes each per-VM call to the agent of the host the call names: a mutating call (`Create`, `Delete`, `Power`, `Reconfigure`) by the `target_host_id` of a decoded copy of the request inside its operation envelope, `Describe`, `GetHostInfo` and a signed `TaskStatus` by their host field, and a `TaskStatus` naming a task by the host encoded in its reference. The outer request is forwarded byte for byte as it arrived (the service reads forwarded requests as raw bytes, `ServiceDesc`), and a read's answer is relayed byte for byte; a mutating call's answer is decoded only to host-encode its task reference. The agent's own answers are relayed unchanged; a call that never reached the agent is `HOST_UNAVAILABLE`, and a mutating call that was sent and got no answer is `OUTCOME_UNKNOWN_RETRY`, never "not performed". `ListHosts` is answered from the inventory; `ListVMs` and the other methods are `Unimplemented`; capabilities report operation identity supported and required, and clustering.
+- `internal/providers/cloudhypervisor/dialer.go`, `hello.go`: one lazy TLS 1.3 connection per host with the Provider's identity certificate. An agent is accepted only with a certificate that chains to the host's CA bundle for server authentication, has the host certificate profile, names exactly the host's URI and one enrolment record (of this Provider when its UID is configured), and certifies a pinned key. Each new connection starts with `agent.v1` `Hello`, whose host-signed answer must be signed with the connection's own certificate and echo the nonce; an agent outside the Provider's API version and the one before it is not routed (`HOST_UNAVAILABLE`, cause `AgentIncompatible`).
+- `internal/providers/cloudhypervisor/breaker.go`: a circuit breaker per host. Only an unreachable agent counts (no answer, or an answered `Unavailable` without an agent-contract reason); an open breaker refuses calls for its host only, without dialing.
+- `internal/providers/cloudhypervisor/inventory.go`, `pool.go`: the inventory is read from the mounted file and followed as it changes; a reload that removes a host, or changes its endpoint or TLS material, closes its connection; a failed connection is retried at once by the next call, and a call waits at most 2 seconds for a connection.
+- `cmd/provider-cloudhypervisor/`: the binary (flags `--hosts-file`, `--agent-client-cert`, `--agent-client-key`, `--provider-uid`, and the manager-facing TLS of the other Providers). A release build links none of the Provider and refuses to run; no release workflow, make target or image builds it, and neither build links the `testing` package (tests assert both).
+- `internal/clustered/hostsecret/hostsecret.go`: `ValidateAgentHost`, the checks an inventory entry of a per-host agent host must pass before it is dialed (agent TLS material only, a `grpc://` endpoint, an expected SAN naming the entry's own host id).
+- `internal/operation/grantverify/verify.go`: `CheckOuter`, the outer-request rules of `Verify` alone (`IDENTITY_REQUIRED` without an envelope, `INVALID_ARGUMENT` for an outer field beside it), for a router that must refuse such a call before it forwards it without judging the grant.
+- `test/conformance/clustered/target.go`: `GRPCServerTarget`, for a Target whose Provider registers its own service description.
+- `docs/clustered-agent-provider-development.md`: the Provider, its inventory, agent checks, version window, routing, breaker, conformance and limits.
+- Tests: certificate refusals (pin mismatch, unpinned leaf, foreign CA, wrong SAN, another Provider) with no call reaching the agent; unsigned and outer-field calls refused without dialing; a wire capture showing the forwarded request and the relayed answer byte-identical, in encodings a re-marshal changes; the version window with a version override (also against real agents); one host down with the other unaffected, a per-host breaker that agent answers never open, recovery on the next call and a bounded wait for a black-holed agent; a dropped connection mid-mutation; inventory reloads; and the whole clustered conformance suite against the Provider in front of real agent processes, with its deviations listed and pinned.
+
+### Changed
+- `internal/clustered/inventoryfile/`: the host-inventory file loader and watcher moved, unchanged, from `internal/providers/libvirt/hostconn` so that both clustered Providers share them; `hostconn` keeps its names as aliases.
+- `test/conformance/clustered/agenttarget/`: the per-host agent target routes through the real clustered Provider, over an inventory of loopback proxies in front of the agent processes, instead of an in-test router; it now also offers host inventory, black-holed hosts and host removal. The `identity.*` cases pass end to end through the Provider.
+- `docs/per-host-agent-development.md`, `docs/README.md`, `test/conformance/README.md`: the Provider, and the deviations the suite records against it.
+
+### Why
+Per-host agents verify and execute signed operations, but nothing routed to them outside a test. The Provider is the pure router between the manager and the agents: it forwards the exact request the grant covers, refuses unsigned or malformed calls before any host is dialed, trusts an agent only by its pinned key, keeps one host's failure from affecting another, and refuses agents of an unsupported version.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-13 19:50] - Per-host agent executes signed operations at most once and answers status with signed, request-bound answers (development builds only)
 **Author:** @wrkode (William Rizzo)
 
