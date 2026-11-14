@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -241,10 +242,12 @@ type flakyTrust struct {
 	mu        sync.Mutex
 	conflicts int
 	failures  int
+	calls     int
 }
 
 func (f *flakyTrust) UpdateStoreState(ctx context.Context, p *infravirtrigaudiov1beta1.Provider, hostID string, update func(*HostStoreState)) error {
 	f.mu.Lock()
+	f.calls++
 	switch {
 	case f.conflicts > 0:
 		f.conflicts--
@@ -281,9 +284,11 @@ func TestHostAnswers_RegressionHoldIsAlwaysPersisted(t *testing.T) {
 	t.Run("a failed write is retried on the next read", func(t *testing.T) {
 		inner := &staticTrust{hosts: map[string]*testHost{"host-a": h}}
 		trust := &flakyTrust{staticTrust: inner, failures: 1}
-		answers := &HostAnswers{Trust: trust}
+		now := time.Now()
+		answers := &HostAnswers{Trust: trust, Now: func() time.Time { return now }}
 		answers.markRegressed(ctx, prov, "host-a", hostidentity.ContinuityRolledBack, enrol)
 		require.False(t, held(inner), "the first write failed")
+		now = now.Add(storeWriteBackoffMax) // past the write pacing
 		answers.forget(prov, "host-a")
 		assert.NotEmpty(t, answers.RegressedReason(ctx, prov, "host-a"), "forgetting positions keeps the hold")
 		assert.True(t, held(inner), "the next read wrote the hold; a restarted manager still holds the host")
@@ -291,13 +296,15 @@ func TestHostAnswers_RegressionHoldIsAlwaysPersisted(t *testing.T) {
 	t.Run("a failed position write keeps the hold", func(t *testing.T) {
 		inner := &staticTrust{hosts: map[string]*testHost{"host-a": h}}
 		trust := &flakyTrust{staticTrust: inner, failures: 100}
-		answers := &HostAnswers{Trust: trust}
+		now := time.Now()
+		answers := &HostAnswers{Trust: trust, Now: func() time.Time { return now }}
 		answers.markRegressed(ctx, prov, "host-a", hostidentity.ContinuityRolledBack, enrol)
 		answers.forget(prov, "host-a") // what a failed definite position write does
 		assert.NotEmpty(t, answers.RegressedReason(ctx, prov, "host-a"))
 		trust.mu.Lock()
 		trust.failures = 0
 		trust.mu.Unlock()
+		now = now.Add(storeWriteBackoffMax)
 		assert.NotEmpty(t, answers.RegressedReason(ctx, prov, "host-a"))
 		assert.True(t, held(inner))
 	})
@@ -401,4 +408,109 @@ func TestCheckHostAnswerTrust(t *testing.T) {
 	require.ErrorIs(t, CheckHostAnswerTrust(cfg, struct{ operation.Signer }{anchoredSigner{}}), errNoGrantAnchor)
 	require.NoError(t, CheckHostAnswerTrust(cfg, anchoredSigner{anchor: grant.Cert}))
 	require.ErrorIs(t, CheckHostAnswerTrust(cfg, anchoredSigner{anchor: hostCA.Cert}), hostidentity.ErrHierarchiesShared)
+}
+
+func (f *flakyTrust) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// A manager that just started (or took over) signs nothing new for a host
+// until it has a verified position of the host persisted: while the pins
+// Secret cannot be written, the host answer does not count.
+func TestHostAnswers_NewManagerAnchorsBeforeSigning(t *testing.T) {
+	ctx := context.Background()
+	stub := newIdentityStub()
+	r, _ := identityFixture(t, stub)
+	p := &infravirtrigaudiov1beta1.Provider{}
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, p))
+	inner, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	trust := &flakyTrust{staticTrust: inner, failures: 1}
+	now := time.Now()
+	fresh := &HostAnswers{Trust: trust, Now: func() time.Time { return now }}
+	_, _, verdict, err := fresh.RefreshHostAnswer(ctx, p, stub, "host-alpha")
+	require.NoError(t, err)
+	assert.Equal(t, answerNone, verdict, "a host answer whose position cannot be persisted does not count")
+	enrol := stub.signed.host.trust.Enrolment.EnrolmentID
+	require.Error(t, fresh.grantReady(p, "host-alpha", enrol))
+
+	now = now.Add(storeWriteBackoffMax)
+	_, _, verdict, err = fresh.RefreshHostAnswer(ctx, p, stub, "host-alpha")
+	require.NoError(t, err)
+	require.Equal(t, answerVerified, verdict)
+	require.NoError(t, fresh.grantReady(p, "host-alpha", enrol))
+	inner.mu.Lock()
+	persisted := inner.stores["host-alpha"].Current.Seq
+	inner.mu.Unlock()
+	stub.signed.host.mu.Lock()
+	assert.Equal(t, stub.signed.host.seq, persisted, "the anchoring answer's position is persisted")
+	stub.signed.host.mu.Unlock()
+}
+
+// The first answer of an attempt that shows its record is persisted, once:
+// later answers about the attempt do not write again.
+func TestHostAnswers_FirstRecordAnswerPersistedOnce(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	trust, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{ID: "vm-1", TaskRef: "create-task"}, nil
+	}
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+	}
+	reconcileN(t, r, req, 1)
+	trust.mu.Lock()
+	persisted, writes := trust.stores["host-alpha"].Current.Seq, trust.writes
+	trust.mu.Unlock()
+	stub.signed.host.mu.Lock()
+	assert.Equal(t, stub.signed.host.seq, persisted, "the first EXECUTING answer's position is persisted")
+	stub.signed.host.mu.Unlock()
+	reconcileN(t, r, req, 3)
+	trust.mu.Lock()
+	assert.Equal(t, writes, trust.writes, "later EXECUTING answers of the attempt write nothing")
+	trust.mu.Unlock()
+}
+
+// Many VMs of a host whose pins Secret cannot be written cause one write per
+// backoff interval, not one per VM.
+func TestHostAnswers_FailingWritesArePacedPerHost(t *testing.T) {
+	ctx := context.Background()
+	prov := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "ch", Namespace: "default", UID: identityProviderUID}}
+	for name, trust := range map[string]*flakyTrust{
+		"failure":  {staticTrust: &staticTrust{}, failures: 1 << 20},
+		"conflict": {staticTrust: &staticTrust{}, conflicts: 1 << 20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			var clock sync.Mutex
+			answers := &HostAnswers{Trust: trust, Now: func() time.Time { clock.Lock(); defer clock.Unlock(); return now }}
+			answers.hosts = map[string]*hostAnswerState{hostAnswerKey(prov, "host-a"): {loaded: true, verified: true,
+				store: HostStoreState{Current: hostidentity.StoreRecord{StoreID: [16]byte{1}, Seq: 10}}, persistedSeq: 1}}
+			wave := func() {
+				var wg sync.WaitGroup
+				for i := 0; i < 50; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						_ = answers.persistPosition(ctx, prov, "host-a")
+					}()
+				}
+				wg.Wait()
+			}
+			wave()
+			first := trust.callCount()
+			assert.LessOrEqual(t, first, retry.DefaultRetry.Steps, "one write (with its conflict retries) for 50 VMs")
+			wave()
+			assert.Equal(t, first, trust.callCount(), "no write while paced")
+			clock.Lock()
+			now = now.Add(storeWriteBackoffMax)
+			clock.Unlock()
+			wave()
+			assert.LessOrEqual(t, trust.callCount()-first, retry.DefaultRetry.Steps, "one write per interval")
+		})
+	}
 }

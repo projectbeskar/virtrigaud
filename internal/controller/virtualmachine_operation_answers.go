@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -122,6 +123,18 @@ func definiteOpState(s providerv1.OperationRecordState) bool {
 	return false
 }
 
+// showsRecord reports whether s is the state of an operation record the host
+// holds (any state but NO_RECORD and UNKNOWN_TO_AGENT).
+func showsRecord(s providerv1.OperationRecordState) bool {
+	switch s {
+	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNSPECIFIED,
+		providerv1.OperationRecordState_OPERATION_RECORD_STATE_NO_RECORD,
+		providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNKNOWN_TO_AGENT:
+		return false
+	}
+	return true
+}
+
 // bindsTo reports whether a verified OperationAnswer is about the attempt p:
 // its op_id and enrolment, and, for an answer from a record, its kind,
 // attempt, VM, binding and the digest of p's exact request bytes.
@@ -148,6 +161,7 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 	p *contracts.PreparedOperation) opPoll {
 	logger := log.FromContext(ctx)
 	host := p.Identity.HostID
+	opIDHex := hex.EncodeToString(p.Identity.OpID)
 	hr, err := r.HostAnswers.begin(ctx, ia.providerCR, host)
 	if errors.Is(err, errHostRegressed) {
 		return opPoll{verdict: answerRegressed}
@@ -172,12 +186,19 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 		// the in-memory position cannot pass a stale NO_RECORD.
 		noRecord := v.Operation.GetState() == providerv1.OperationRecordState_OPERATION_RECORD_STATE_NO_RECORD &&
 			bytes.Equal(v.Operation.GetOpEnrolmentId(), v.Context.GetEnrolmentId())
-		return definiteOpState(v.Operation.GetState()) || noRecord
+		// The first answer of the attempt that shows its record is
+		// persisted too (one write per attempt): a later NO_RECORD from a
+		// store rolled back to before that record then fails continuity.
+		firstRecord := showsRecord(v.Operation.GetState()) && !r.HostAnswers.recordIsAnchored(ia.providerCR, host, opIDHex)
+		return definiteOpState(v.Operation.GetState()) || noRecord || firstRecord
 	}
 	v, verdict := r.HostAnswers.finish(ctx, ia.providerCR, host, hr, hostidentity.BodyTypeOperationAnswer, read, definite)
 	if verdict == answerVerified && !bindsTo(v.Operation, p) {
 		logger.Info("The host's signed answer is about another operation than the attempt; nothing is concluded", "host", host)
 		return opPoll{verdict: answerNone, read: read}
+	}
+	if verdict == answerVerified && v.Ready() && showsRecord(v.Operation.GetState()) {
+		r.HostAnswers.setRecordAnchored(ia.providerCR, host, opIDHex, true)
 	}
 	return opPoll{verdict: verdict, v: v, read: read}
 }
@@ -304,6 +325,7 @@ func (r *VirtualMachineReconciler) closeSigned(ctx context.Context, vm *infravir
 	if r.operationCrashed(ctx, crashAfterReply) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	r.HostAnswers.setRecordAnchored(ia.providerCR, a.HostID, a.OpID, false)
 	summary := auditSignedDecision(ctx, poll.read, poll.v, fmt.Sprintf("%s attempt %d closed %s", a.Kind, a.Attempt, outcome), a.OpID)
 	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonSignedOutcome, summary)
 	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {

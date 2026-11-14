@@ -407,6 +407,18 @@ type hostAnswerState struct {
 	// memory but not yet written to the pins Secret: every read of the host
 	// retries the write until it lands.
 	regressionPending bool
+	// verified reports that this process verified an answer of the host.
+	verified bool
+	// anchored reports that this process has a verified position of the
+	// host persisted (written by it, or covered by the persisted one): until
+	// then nothing new is signed for the host, so every send of a manager
+	// that just started, or just took over, rests on a position in the pins
+	// Secret.
+	anchored bool
+	// recordAnchored names the attempts (op_id hex) whose first answer
+	// showing a record was persisted: a later NO_RECORD for them cannot pass
+	// a rollback to before that record.
+	recordAnchored map[string]bool
 	// hostAnswerAt is when the last verified host answer arrived; its
 	// enrolment, store and grant versions.
 	hostAnswerAt      time.Time
@@ -429,7 +441,30 @@ type HostAnswers struct {
 
 	mu    sync.Mutex
 	hosts map[string]*hostAnswerState
+
+	wmu     sync.Mutex
+	writers map[string]*hostWriter
 }
+
+// hostWriter serialises the store-state writes of one host and paces them
+// after a failure, so a failing API server sees about one write per host per
+// backoff interval, however many VMs of the host are reconciled.
+type hostWriter struct {
+	mu       sync.Mutex
+	failures int
+	until    time.Time
+}
+
+// Pacing of a host's store-state writes after a failure: from
+// storeWriteBackoffMin doubling to storeWriteBackoffMax.
+const (
+	storeWriteBackoffMin = time.Second
+	storeWriteBackoffMax = time.Minute
+)
+
+// errStoreWriteBackoff is updateStore's answer while a host's writes are
+// paced after a failure: nothing is sent to the API server.
+var errStoreWriteBackoff = errors.New("the host's store state writes are paced after a failure")
 
 // now returns the clock.
 func (h *HostAnswers) now() time.Time {
@@ -470,14 +505,93 @@ func (h *HostAnswers) state(ctx context.Context, provider *infravirtrigaudiov1be
 	return s, nil
 }
 
+// writer returns the write serialiser of a host.
+func (h *HostAnswers) writer(key string) *hostWriter {
+	h.wmu.Lock()
+	defer h.wmu.Unlock()
+	if h.writers == nil {
+		h.writers = map[string]*hostWriter{}
+	}
+	w := h.writers[key]
+	if w == nil {
+		w = &hostWriter{}
+		h.writers[key] = w
+	}
+	return w
+}
+
 // updateStore applies update to the host's persisted store state, retrying a
 // write conflict with a fresh read (every update is a monotonic merge, so a
-// retry is idempotent).
+// retry is idempotent). One write per host runs at a time; a caller that
+// waited for another's write first checks satisfied (nil: never) and skips
+// its own when that write already did what it needs. After a failure the
+// host's writes are paced (errStoreWriteBackoff), doubling up to
+// storeWriteBackoffMax.
 func (h *HostAnswers) updateStore(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string,
-	update func(*HostStoreState)) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	satisfied func() bool, update func(*HostStoreState)) error {
+	w := h.writer(hostAnswerKey(provider, hostID))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if satisfied != nil && satisfied() {
+		return nil
+	}
+	now := h.now()
+	if now.Before(w.until) {
+		return errStoreWriteBackoff
+	}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		return h.Trust.UpdateStoreState(ctx, provider, hostID, update)
 	})
+	if err != nil {
+		w.failures++
+		wait := storeWriteBackoffMin
+		for i := 1; i < w.failures && wait < storeWriteBackoffMax; i++ {
+			wait *= 2
+		}
+		w.until = now.Add(min(wait, storeWriteBackoffMax))
+		return err
+	}
+	w.failures, w.until = 0, time.Time{}
+	return nil
+}
+
+// positionPersisted is updateStore's satisfied check for a position write:
+// the host's persisted position is already at least seq.
+func (h *HostAnswers) positionPersisted(provider *infravirtrigaudiov1beta1.Provider, hostID string, seq uint64) func() bool {
+	return func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		s := h.hosts[hostAnswerKey(provider, hostID)]
+		return s != nil && s.loaded && s.persistedSeq >= seq
+	}
+}
+
+// recordIsAnchored reports whether the first answer of attempt opID showing a
+// record was persisted.
+func (h *HostAnswers) recordIsAnchored(provider *infravirtrigaudiov1beta1.Provider, hostID, opID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.hosts[hostAnswerKey(provider, hostID)]
+	return s != nil && s.recordAnchored[opID]
+}
+
+// setRecordAnchored records (on) or forgets (off) that the first answer of
+// attempt opID showing a record was persisted.
+func (h *HostAnswers) setRecordAnchored(provider *infravirtrigaudiov1beta1.Provider, hostID, opID string, on bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.hosts[hostAnswerKey(provider, hostID)]
+	if s == nil {
+		return
+	}
+	if !on {
+		delete(s.recordAnchored, opID)
+		return
+	}
+	if s.recordAnchored == nil {
+		s.recordAnchored = map[string]bool{}
+	}
+	s.recordAnchored[opID] = true
 }
 
 // answerVerdict is what one signed read gave the manager.
@@ -575,6 +689,10 @@ func (h *HostAnswers) finish(ctx context.Context, provider *infravirtrigaudiov1b
 		}
 	}
 	s.store.Current = hostidentity.MergeStoreRecords(s.store.Current, c.Next)
+	s.verified = true
+	if s.store.Current.Seq <= s.persistedSeq {
+		s.anchored = true
+	}
 	now := h.now()
 	persist := (mustPersist && s.store.Current.Seq > s.persistedSeq) || now.Sub(s.persistedAt) >= storePersistInterval ||
 		s.store.Current.Seq-s.persistedSeq >= hostidentity.CheckpointInterval
@@ -583,7 +701,7 @@ func (h *HostAnswers) finish(ctx context.Context, provider *infravirtrigaudiov1b
 	if !persist {
 		return v, answerVerified
 	}
-	err = h.updateStore(ctx, provider, hostID, func(st *HostStoreState) {
+	err = h.updateStore(ctx, provider, hostID, h.positionPersisted(provider, hostID, want.Current.Seq), func(st *HostStoreState) {
 		if st.Current.StoreID != want.Current.StoreID && !st.Current.Empty() {
 			st.Previous = append([]hostidentity.StoreRecord{st.Current}, st.Previous...)
 			if len(st.Previous) > maxPreviousStores {
@@ -607,6 +725,7 @@ func (h *HostAnswers) finish(ctx context.Context, provider *infravirtrigaudiov1b
 	h.mu.Lock()
 	if s, ok := h.hosts[hostAnswerKey(provider, hostID)]; ok {
 		s.persistedSeq, s.persistedAt = max(s.persistedSeq, want.Current.Seq), now
+		s.anchored = true
 	}
 	h.mu.Unlock()
 	return v, answerVerified
@@ -656,7 +775,13 @@ func (h *HostAnswers) markRegressed(ctx context.Context, provider *infravirtriga
 // persistRegression writes a store-regression hold to the pins Secret and,
 // once written, clears its pending mark.
 func (h *HostAnswers) persistRegression(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID, reason string, enrolment []byte) {
-	if err := h.updateStore(ctx, provider, hostID, func(st *HostStoreState) {
+	persisted := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		s := h.hosts[hostAnswerKey(provider, hostID)]
+		return s != nil && !s.regressionPending && s.store.RegressedReason == reason
+	}
+	if err := h.updateStore(ctx, provider, hostID, persisted, func(st *HostStoreState) {
 		st.RegressedReason, st.RegressedEnrolmentID = reason, bytes.Clone(enrolment)
 	}); err != nil {
 		log.FromContext(ctx).Info("Cannot persist the host's store regression; it is held in memory and written again on the next read",
@@ -681,11 +806,14 @@ func (h *HostAnswers) persistPosition(ctx context.Context, provider *infravirtri
 		return err
 	}
 	want, persisted := s.store.Current, s.persistedSeq
+	if !want.Empty() && want.Seq <= persisted && s.verified {
+		s.anchored = true
+	}
 	h.mu.Unlock()
 	if want.Empty() || want.Seq <= persisted {
 		return nil
 	}
-	if err := h.updateStore(ctx, provider, hostID, func(st *HostStoreState) {
+	if err := h.updateStore(ctx, provider, hostID, h.positionPersisted(provider, hostID, want.Seq), func(st *HostStoreState) {
 		if st.Current.Empty() || st.Current.StoreID == want.StoreID {
 			st.Current = hostidentity.MergeStoreRecords(st.Current, want)
 		}
@@ -695,6 +823,7 @@ func (h *HostAnswers) persistPosition(ctx context.Context, provider *infravirtri
 	h.mu.Lock()
 	if s := h.hosts[hostAnswerKey(provider, hostID)]; s != nil {
 		s.persistedSeq, s.persistedAt = max(s.persistedSeq, want.Seq), h.now()
+		s.anchored = s.anchored || s.verified
 	}
 	h.mu.Unlock()
 	return nil
@@ -727,6 +856,8 @@ func (h *HostAnswers) grantReady(provider *infravirtrigaudiov1beta1.Provider, ho
 		return errNoHostAnswer
 	case !bytes.Equal(s.hostAnswerEnrol, enrolment):
 		return fmt.Errorf("%w under the host's current enrolment", errNoHostAnswer)
+	case !s.anchored:
+		return errors.New("no verified position of the host is persisted yet by this manager")
 	case s.hostAgentState != providerv1.AgentState_AGENT_STATE_READY:
 		return fmt.Errorf("the host's agent is %s", s.hostAgentState)
 	case !slices.Contains(s.hostGrantVersions, grantverify.GrantVersion):
@@ -752,7 +883,15 @@ func (h *HostAnswers) RefreshHostAnswer(ctx context.Context, provider *infravirt
 	if rerr != nil {
 		return info, hostidentity.VerifiedAnswer{}, answerNone, rerr
 	}
-	v, verdict := h.finish(ctx, provider, hostID, hr, hostidentity.BodyTypeHostAnswer, read, nil)
+	// Until this process has a verified position of the host persisted, the
+	// host answer's position is written before it counts.
+	unanchored := func(hostidentity.VerifiedAnswer) bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		s := h.hosts[hostAnswerKey(provider, hostID)]
+		return s == nil || !s.anchored
+	}
+	v, verdict := h.finish(ctx, provider, hostID, hr, hostidentity.BodyTypeHostAnswer, read, unanchored)
 	if verdict != answerVerified {
 		return info, v, verdict, nil
 	}
