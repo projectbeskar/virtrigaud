@@ -90,8 +90,9 @@ type Options struct {
 	// agent's certificate has expired.
 	MaxConnectionAge time.Duration
 	// InventoryReloadInterval is how often NewFromFile re-reads the
-	// inventory file, whether or not the file is watched; zero uses
-	// DefaultInventoryReloadInterval.
+	// inventory file, whether or not the file is watched, and the longest
+	// watch cycle of NewFromSecret (each cycle starts from a fresh read of
+	// the Secret); zero uses DefaultInventoryReloadInterval.
 	InventoryReloadInterval time.Duration
 	// DialContext, when set, opens the connections to agents.
 	DialContext func(ctx context.Context, addr string) (net.Conn, error)
@@ -116,6 +117,9 @@ type Provider struct {
 	reloadDone chan struct{}
 	// unwatched is set when the inventory file could not be watched.
 	unwatched bool
+	// secret follows the inventory Secret through the API (NewFromSecret);
+	// nil when the inventory comes from a file or from New.
+	secret *secretFollower
 }
 
 var _ providerv1.ProviderServer = (*Provider)(nil)
@@ -160,7 +164,7 @@ func New(opts Options, inv hostsecret.Inventory) (*Provider, error) {
 // changed, is closed before Reconcile returns.
 func (p *Provider) Reconcile(inv hostsecret.Inventory) error { return p.pool.reconcile(inv) }
 
-// Close stops following the inventory file, if the Provider does, and
+// Close stops following the inventory file or Secret, if the Provider does, and
 // closes every connection to an agent. It is not safe to call concurrently
 // with itself.
 func (p *Provider) Close() error {
@@ -291,13 +295,15 @@ func (p *Provider) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoR
 
 // Validate implements providerv1.ProviderServer: the Provider itself is
 // healthy while it runs; a host's health is reported per host (ListHosts).
-// Its message says when the inventory file is not watched.
+// Its message says when the inventory file is not watched, and when the
+// inventory Secret has not been read for a while.
 func (p *Provider) Validate(context.Context, *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
 	msg := fmt.Sprintf("fronting %d hosts", len(p.pool.ids()))
 	if p.unwatched {
 		msg += fmt.Sprintf("; the host inventory file is not watched: changes are picked up by its re-read every %s",
 			p.opts.InventoryReloadInterval)
 	}
+	msg += p.secretStaleness()
 	return &providerv1.ValidateResponse{Ok: true, Message: msg}, nil
 }
 

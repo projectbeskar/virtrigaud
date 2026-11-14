@@ -212,15 +212,27 @@ func LoadInventory(path string) (hostsecret.Inventory, error) {
 	if err != nil {
 		return hostsecret.Inventory{}, fmt.Errorf("read host inventory %s: %w", path, err)
 	}
+	inv, err := DecodeInventory(data)
+	if err != nil {
+		return hostsecret.Inventory{}, fmt.Errorf("host inventory %s: %w", path, err)
+	}
+	return inv, nil
+}
+
+// DecodeInventory parses an inventory document (the bytes stored under
+// hostsecret.SecretDataKey) with the same rules as LoadInventory: a document
+// whose schema version this provider does not understand is refused. Its
+// errors carry a coarse reason, never credential bytes.
+func DecodeInventory(data []byte) (hostsecret.Inventory, error) {
 	inv, err := hostsecret.Unmarshal(data)
 	if err != nil {
 		// json errors carry offsets/type names, never decoded credential values.
-		return hostsecret.Inventory{}, fmt.Errorf("parse host inventory %s: %w", path, err)
+		return hostsecret.Inventory{}, fmt.Errorf("parse: %w", err)
 	}
 	if inv.SchemaVersion < 1 || inv.SchemaVersion > hostsecret.SchemaVersion {
 		return hostsecret.Inventory{}, fmt.Errorf(
-			"host inventory %s has unsupported schemaVersion %d (this provider understands 1..%d)",
-			path, inv.SchemaVersion, hostsecret.SchemaVersion)
+			"unsupported schemaVersion %d (this provider understands 1..%d)",
+			inv.SchemaVersion, hostsecret.SchemaVersion)
 	}
 	return inv, nil
 }
