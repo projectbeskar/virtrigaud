@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/host_answers.go`: `HostAnswers`, `PinsHostTrust` (trust from the Host's pins Secret), store positions in the pins Secret written with a `resourceVersion` precondition, persisted before a definite answer is acted on, and a host held on a store regression until it is re-enrolled.
 - Tests: verifier and continuity tests; transport nonce and extraction tests; a fresh grant on every send; a `go/ast` guard that only `SendOperation` mints a grant or builds an envelope; a table test that no refusal reason decides an attempt; lying-Provider, replayed, foreign and mismatched answers; the deleted rule; store regression; the grant gate; the manager against real per-host agent processes (signed outcomes, a lying Provider, Delete release, a refused re-delivery, edited markers, a joint store and anchor restore); an agent test that a known op_id re-delivered under a grant that no longer verifies never runs or resumes.
 
+### Security
+- `internal/controller/host_answers.go`: a store-regression hold whose write to the pins Secret fails is kept in memory and written again on every later read of the host (conflicts retried at once), and forgetting a host's positions never drops it, so a manager restart cannot lift a hold. The store state is read through the uncached API reader and conflicts are retried with a monotonic merge.
+- `internal/controller/virtualmachine_operation_identity.go`, `virtualmachine_operation_answers.go`: the host's store position is persisted before an attempt is first sent and before a re-send that a signed `NO_RECORD` authorised; an attempt sent under a predecessor enrolment is never re-sent, also not to learn a Create's provider id.
+- `internal/hostidentity/separation.go`, `internal/controller/host_answers.go`: the start-up separation of the host-agent CA from the grant anchor fails closed when enrolment is configured and the signer names no anchor, and also refuses a certificate signed by, or naming as its authority key, a certificate of the other set.
+- `internal/hostidentity/answer.go`: a signed answer whose body is not exactly its canonical encoding is refused.
+- `internal/controller/grant_mint_sites_test.go`: the guard that only `SendOperation` mints a grant or builds an envelope covers every reference and proto copy in `internal/` and `cmd/`.
+
 ### Why
 Outcomes relayed by a Provider were unsigned claims: a lying or faulty Provider could make the manager mint a second attempt or release a VM that still runs. The manager now concludes only from answers the host signed for its own request, bound to the attempt's verified intent and checked against the host's pinned key and store history.
 

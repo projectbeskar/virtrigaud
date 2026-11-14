@@ -334,7 +334,8 @@ with the agent certificate profile whose URI names are exactly the Host's URI id
 chains to the host-agent sub-CA for server authentication at the manager's clock; its key
 is one of the Host's pins; the signature over the domain-separated body is a low-S, exactly
 DER encoded ECDSA signature that verifies; the body decodes with no unknown field and no
-undefined enum value in it or any nested message and meets every field rule; the nonce is
+undefined enum value in it or any nested message, is exactly the canonical (deterministic)
+encoding of what it decodes to, and meets every field rule; the nonce is
 the one drawn for this request; the Provider UID, host, installation and enrolment are the
 manager's and the certificate's. The signature input is built by the same function the
 agent signs with.
@@ -348,9 +349,12 @@ checkpoint differs from one the manager verified, holds the host: its VMs report
 `Ready=False/OperationHostStoreRegressed`, nothing it answers is acted on, nothing new is
 signed for it, and the Host reports `AgentStoreRegressed=True`. The hold is persisted with
 the enrolment it happened under and ends only with a new enrolment. Positions are raised
-after each verified answer and persisted at least every 30 s or 1024 commits, and always
-before a definite answer above the persisted position is acted on (a failed write is then
-no answer).
+after each verified answer and persisted at least every 30 s or 1024 commits, before an
+attempt is first sent, and always before a definite answer, or a `NO_RECORD` that
+authorises a re-send, above the persisted position is acted on (a failed write is then no
+answer). The store state is read uncached and a write conflict is retried. A hold whose
+write fails is kept in memory and written again on every later read of the host, so a
+manager restart never lifts it.
 
 **The host answer gate.** The Host controller's heartbeat (every 60 s) asks each Host of
 such a Provider for a signed host answer and records whether it verified
@@ -700,6 +704,14 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   Secret.
 - The latest Create of a VM that was not performed keeps its intent Secret, cloud-init user
   data included, while it is the VM's latest Create.
+- A Reconfigure's `RestartRequired` and honest-result flags come from the unsigned answer to
+  its send (bound to the attempt by its task tag, not signed by the host): a lying Provider
+  can make a signed-successful Reconfigure be recorded as pending a restart, or as applied
+  to the persistent definition only, but never as succeeded when the host did not sign
+  `COMPLETED`.
+- The start-up separation check sees only the configured certificates: a grant anchor and a
+  host-agent CA that both chain to an external issuer configured on neither side are not
+  detected. Keep them under unrelated roots.
 - No fencing: the epoch fields carry identity only, with no ordering.
 - `authority_generation` is not yet bound to the generation the issuer certificate names;
   it is only checked to be at least 1, and a verifier refuses a configured minimum above 1
