@@ -163,7 +163,16 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 		return opPoll{verdict: answerNone, read: read}
 	}
 	definite := func(v hostidentity.VerifiedAnswer) bool {
-		return v.Ready() && bindsTo(v.Operation, p) && definiteOpState(v.Operation.GetState())
+		if !v.Ready() || !bindsTo(v.Operation, p) {
+			return false
+		}
+		// A NO_RECORD under the host's current enrolment authorises a
+		// re-send: its position is persisted first, like a definite
+		// outcome's, so a restart and a rollback between the persisted and
+		// the in-memory position cannot pass a stale NO_RECORD.
+		noRecord := v.Operation.GetState() == providerv1.OperationRecordState_OPERATION_RECORD_STATE_NO_RECORD &&
+			bytes.Equal(v.Operation.GetOpEnrolmentId(), v.Context.GetEnrolmentId())
+		return definiteOpState(v.Operation.GetState()) || noRecord
 	}
 	v, verdict := r.HostAnswers.finish(ctx, ia.providerCR, host, hr, hostidentity.BodyTypeOperationAnswer, read, definite)
 	if verdict == answerVerified && !bindsTo(v.Operation, p) {

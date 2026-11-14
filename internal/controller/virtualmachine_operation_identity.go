@@ -667,6 +667,13 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
 	logger.Info("Operation attempt recorded", "kind", opReq.Kind, "attempt", attemptNo, "opID", opIDHex, "host", host)
+	// The host's store position the manager holds now is persisted before the
+	// attempt is first sent: every answer about the attempt is checked
+	// against at least that position, also after a restart.
+	if err := r.HostAnswers.persistPosition(ctx, ia.providerCR, host); err != nil {
+		logger.Info("The host's store position was not persisted; the attempt is sent later", "error", err.Error())
+		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+	}
 	if r.operationCrashed(ctx, crashAfterPrepared) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}

@@ -301,3 +301,32 @@ func TestHostAnswers_RegressionHoldIsAlwaysPersisted(t *testing.T) {
 		assert.True(t, held(inner))
 	})
 }
+
+// The host's store position is persisted before an attempt is first sent,
+// and before a re-send that a signed NO_RECORD authorised: a restart and a
+// rollback between the persisted and the in-memory position cannot pass.
+func TestHostAnswers_PositionPersistedBeforeEverySend(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	trust, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	var persistedAtSend, seenAtSend []uint64
+	calls := 0
+	stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		trust.mu.Lock()
+		persistedAtSend = append(persistedAtSend, trust.stores["host-alpha"].Current.Seq)
+		trust.mu.Unlock()
+		stub.signed.host.mu.Lock()
+		seenAtSend = append(seenAtSend, stub.signed.host.seq)
+		stub.signed.host.mu.Unlock()
+		calls++
+		if calls == 1 {
+			return contracts.OperationAnswer{}, errors.New("connection reset")
+		}
+		return contracts.OperationAnswer{ID: "vm-1"}, nil
+	}
+	reconcileN(t, r, req, 2)
+	require.Len(t, persistedAtSend, 2)
+	assert.Equal(t, seenAtSend[0], persistedAtSend[0], "the first send follows the persisted position of the last answer seen")
+	assert.Equal(t, seenAtSend[1], persistedAtSend[1], "the re-send follows the persisted position of the NO_RECORD that authorised it")
+}
