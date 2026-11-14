@@ -335,10 +335,11 @@ func (s *signedHostStub) vmAnswer(q contracts.VMAnswerQuery) (contracts.Describe
 }
 
 // hostAnswer answers a signed GetHostInfo.
-func (s *signedHostStub) hostAnswer(hostID string, continuitySeq uint64) (contracts.HostInfo, contracts.SignedRead, error) {
+func (s *signedHostStub) hostAnswer(q contracts.HostAnswerQuery) (contracts.HostInfo, contracts.SignedRead, error) {
 	nonce := drawNonce()
 	read := contracts.SignedRead{Nonce: nonce}
-	a := &providerv1.HostAnswer{Context: s.host.context(nonce, continuitySeq), AgentVersion: "test", AgentApiVersion: 2, GrantVersions: []uint32{1},
+	hostID := q.HostID
+	a := &providerv1.HostAnswer{Context: s.host.context(nonce, q.ContinuitySeq), AgentVersion: "test", AgentApiVersion: 2, GrantVersions: []uint32{1},
 		Mode: providerv1.AgentMode_AGENT_MODE_IDENTITY}
 	if !s.unsigned {
 		read.Answer = s.host.sign(s.t, a)

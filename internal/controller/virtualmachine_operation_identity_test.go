@@ -166,11 +166,11 @@ func (s *identityStub) VMAnswer(_ context.Context, q contracts.VMAnswerQuery) (c
 	return s.signed.vmAnswer(q)
 }
 
-func (s *identityStub) HostAnswer(_ context.Context, hostID string, seq uint64) (contracts.HostInfo, contracts.SignedRead, error) {
+func (s *identityStub) HostAnswer(_ context.Context, q contracts.HostAnswerQuery) (contracts.HostInfo, contracts.SignedRead, error) {
 	if s.signed == nil {
 		return contracts.HostInfo{}, contracts.SignedRead{}, errors.New("no signed host")
 	}
-	return s.signed.hostAnswer(hostID, seq)
+	return s.signed.hostAnswer(q)
 }
 
 func (s *identityStub) TaskStatus(_ context.Context, ref string) (contracts.TaskStatus, error) {

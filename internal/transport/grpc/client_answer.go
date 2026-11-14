@@ -99,8 +99,9 @@ func (c *Client) VMAnswer(ctx context.Context, q contracts.VMAnswerQuery) (contr
 }
 
 // HostAnswer implements contracts.HostAnswerReader: a GetHostInfo with a
-// fresh nonce and no inventory request.
-func (c *Client) HostAnswer(ctx context.Context, hostID string, continuitySeq uint64) (contracts.HostInfo, contracts.SignedRead, error) {
+// fresh nonce that asks for the host inventory when q.InventoryVersion is at
+// least 1.
+func (c *Client) HostAnswer(ctx context.Context, q contracts.HostAnswerQuery) (contracts.HostInfo, contracts.SignedRead, error) {
 	nonce, err := drawAnswerNonce()
 	if err != nil {
 		return contracts.HostInfo{}, contracts.SignedRead{}, err
@@ -108,7 +109,8 @@ func (c *Client) HostAnswer(ctx context.Context, hostID string, continuitySeq ui
 	read := contracts.SignedRead{Nonce: nonce}
 	ctx, cancel := context.WithTimeout(ctx, getHostInfoCallTimeout)
 	defer cancel()
-	resp, err := c.client.GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: hostID, AnswerNonce: nonce, ContinuitySeq: continuitySeq})
+	resp, err := c.client.GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: q.HostID, AnswerNonce: nonce,
+		ContinuitySeq: q.ContinuitySeq, InventoryVersion: q.InventoryVersion})
 	if err != nil {
 		read.Answer = answerFromStatus(err)
 		return contracts.HostInfo{}, read, c.mapGRPCError("getHostInfo", err)

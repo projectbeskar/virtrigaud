@@ -879,7 +879,7 @@ func (h *HostAnswers) RefreshHostAnswer(ctx context.Context, provider *infravirt
 		}
 		return contracts.HostInfo{}, hostidentity.VerifiedAnswer{}, answerNone, err
 	}
-	info, read, rerr := reader.HostAnswer(ctx, hostID, hr.snapshot.ContinuitySeq())
+	info, read, rerr := reader.HostAnswer(ctx, contracts.HostAnswerQuery{HostID: hostID, ContinuitySeq: hr.snapshot.ContinuitySeq()})
 	if rerr != nil {
 		return info, hostidentity.VerifiedAnswer{}, answerNone, rerr
 	}
