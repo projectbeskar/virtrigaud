@@ -81,6 +81,8 @@ type secretFollower struct {
 	// failedClosed is set while every host is refused because no inventory
 	// was applied within the fail-closed bound.
 	failedClosed bool
+	// deleted is set while the Secret is known to be deleted.
+	deleted bool
 }
 
 // followerState is a snapshot of the follower.
@@ -355,6 +357,9 @@ func (p *Provider) watchSecret(ctx context.Context, rv string) bool {
 func (p *Provider) applySecret(s *corev1.Secret) {
 	f := p.secret
 	f.markAlive()
+	f.mu.Lock()
+	f.deleted = false
+	f.mu.Unlock()
 	inv, err := secretInventory(s, f.name)
 	if err != nil {
 		f.markApplyFailed("the inventory document is invalid")
@@ -365,11 +370,22 @@ func (p *Provider) applySecret(s *corev1.Secret) {
 	p.apply(inv)
 }
 
-// applySecretDeleted fronts no host: the inventory Secret is gone.
+// applySecretDeleted fronts no host: the inventory Secret is gone. The
+// deletion is logged once, when it is first seen, not at every watch cycle
+// that finds the Secret still absent.
 func (p *Provider) applySecretDeleted() {
-	p.secret.markAlive()
+	f := p.secret
+	f.markAlive()
+	f.mu.Lock()
+	first := !f.deleted
+	f.mu.Unlock()
 	if p.apply(hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion}) {
-		p.log.Warn("host inventory Secret: the Secret is deleted; no host is fronted", "secret", p.secret.name)
+		f.mu.Lock()
+		f.deleted = true
+		f.mu.Unlock()
+		if first {
+			p.log.Warn("host inventory Secret: the Secret is deleted; no host is fronted", "secret", f.name)
+		}
 	}
 }
 

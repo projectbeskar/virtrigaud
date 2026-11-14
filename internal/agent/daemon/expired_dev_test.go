@@ -204,11 +204,13 @@ func TestStartedOperationNeverRetiredAfterOutage(t *testing.T) {
 		name  string
 		kind  providerv1.OperationKind
 		point journal.Point
+		// effected: whether the effect happened before the crash.
+		effected bool
 	}{
-		{"power off, after its intent", providerv1.OperationKind_OPERATION_KIND_POWER_OFF, opstore.PointAfterIntent},
-		{"power off, after its effect", providerv1.OperationKind_OPERATION_KIND_POWER_OFF, opstore.PointAfterEffect},
-		{"create, after its witness", providerv1.OperationKind_OPERATION_KIND_CREATE, opstore.PointAfterWitness},
-		{"create, after its first effect", providerv1.OperationKind_OPERATION_KIND_CREATE, opstore.PointAfterEffect},
+		{"power off, after its intent", providerv1.OperationKind_OPERATION_KIND_POWER_OFF, opstore.PointAfterIntent, false},
+		{"power off, after its effect", providerv1.OperationKind_OPERATION_KIND_POWER_OFF, opstore.PointAfterEffect, true},
+		{"create, after its witness", providerv1.OperationKind_OPERATION_KIND_CREATE, opstore.PointAfterWitness, false},
+		{"create, after its first effect", providerv1.OperationKind_OPERATION_KIND_CREATE, opstore.PointAfterEffect, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHost(t)
@@ -265,6 +267,13 @@ func TestStartedOperationNeverRetiredAfterOutage(t *testing.T) {
 			}
 			_ = st.Close()
 			effects := opEffects(t, h, started.OpID)
+			// Both sides of "whether or not its effect happened".
+			if c.effected && effects < 1 {
+				t.Fatalf("effects %d before the outage, want at least 1 (crash after the effect)", effects)
+			}
+			if !c.effected && effects != 0 {
+				t.Fatalf("effects %d before the outage, want 0 (crash before the effect)", effects)
+			}
 
 			// The certificate expired during the outage: the start is refused
 			// and the store is not touched.

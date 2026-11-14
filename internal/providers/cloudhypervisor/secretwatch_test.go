@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -161,7 +162,8 @@ func TestSecretWatchDeletedFrontsNothing(t *testing.T) {
 	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
 	cs := fake.NewClientset(inventorySecret(t, a))
 	w := countWatches(cs)
-	prov := secretProvider(t, p, cs, Options{})
+	var logs syncBuffer
+	prov := secretProvider(t, p, cs, Options{InventoryReloadInterval: time.Second, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	client := providerv1.NewProviderClient(served(t, prov))
 	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
 	require.NoError(t, err)
@@ -171,6 +173,10 @@ func TestSecretWatchDeletedFrontsNothing(t *testing.T) {
 	require.Eventually(t, func() bool { return a.lis.open.Load() == 0 && len(prov.pool.ids()) == 0 }, testTimeout, 5*time.Millisecond)
 	_, err = client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
 	requireHostUnavailable(t, err, CauseNotFronted)
+	// Several watch cycles later the deletion has been logged once.
+	start := w.count()
+	require.Eventually(t, func() bool { return w.count() >= start+2 }, testTimeout, 10*time.Millisecond)
+	assert.Equal(t, 1, strings.Count(logs.String(), "the Secret is deleted"), "logged on the transition only")
 
 	_, err = cs.CoreV1().Secrets(testSecretNS).Create(ctx(t), inventorySecret(t, a), metav1.CreateOptions{})
 	require.NoError(t, err)
