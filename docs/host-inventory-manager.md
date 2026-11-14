@@ -91,6 +91,7 @@ verified the answer. False reasons:
 |---|---|
 | `AgentInventoryNotVerified` | `AgentInventoryVerified` is not True |
 | `AgentNotReady` | The agent's state in the answer is not `READY` |
+| `NoComponentsReported` | The inventory lists no component at all |
 | `UnexpectedExtension` | A system extension no component declares is merged on the host |
 | `ComponentUnmanifested` | A known component is present without a manifest |
 | `ManifestInvalid` | A component manifest cannot be used |
@@ -136,13 +137,16 @@ healthy Provider and agent expect well under one change per host per hour. Alert
 
 ## The status mirror
 
-`Host.status.agentInventory` mirrors the last verified inventory for operators and audit:
-when it was verified (`observedTime`), the SHA-256 of the signed answer and of the
-allow-list, the versions, state, collection age, identity tier, and each component (with
-its allow-list result `Allowed`, `NotAllowed`, `NotListed` or `NotChecked`), feature and
-unexpected extension. Its schema bounds match the signed inventory's. It is an **output
-only**: no controller, the scheduler included, reads it back. It keeps the last verified
-inventory across failed heartbeats; the conditions say whether it is current.
+`Host.status.agentInventory` is the **last verified** inventory, for operators and audit;
+`observedTime` says when it was verified. It carries the SHA-256 of the signed answer and
+of the allow-list, the enrolment it was verified under, the versions, state, collection
+age, identity tier, and each component (with its allow-list result `Allowed`,
+`NotAllowed`, `NotListed` or `NotChecked`), feature and unexpected extension. Its schema
+bounds match the signed inventory's. It is an **output only**: no controller, the
+scheduler included, reads it back. It is kept across failed heartbeats under the same
+enrolment (the conditions say whether it is current), dropped when the host's enrolment
+changes, and removed, with both conditions, when the Host's Provider no longer runs a
+per-host agent.
 
 ## The component allow-list
 
@@ -177,7 +181,8 @@ A reported component is `Allowed` only if its artifact digest equals an alternat
 missing) and every file digest is equal. An entry with no matching alternative gives
 `NotAllowed`; no entry for the component and version gives `NotListed`; a component that
 reports no digest at all gives `NotChecked`. Every component named in `required` must be
-reported ready. Unknown fields, repeated entries or file names, malformed names, versions
+reported ready; an allow-list must require at least one component (so that a host
+reporting nothing cannot pass). Unknown fields, repeated entries or file names, malformed names, versions
 or digests, and files larger than 1 MiB are refused.
 
 **Digest pin.** The file's SHA-256 is pinned by a manager flag. Render the file into an
@@ -193,7 +198,9 @@ allow-list), the file must also carry a detached signature
 (`--component-allow-list-signature-file`, base64; for ECDSA an ASN.1 DER signature over
 the SHA-256 of the file, as `cosign sign-blob --key` writes it; for Ed25519 a signature
 over the file). It is verified offline against those keys only; no network is used. The
-fingerprint of the key that verified is logged.
+fingerprint of the key that verified is logged. A signers file without a signature file,
+a signers file that does not parse, or a digest pin that is not 64 lowercase hexadecimal
+characters stops the manager at start.
 
 **When it cannot be put in force.** A configured allow-list that is missing, has no pin,
 does not have the pinned digest, or whose signature does not verify does not stop the
@@ -215,7 +222,7 @@ All are refused by a release build, which exits at start when any is set.
 |---|---|---|
 | `--component-allow-list-file` | none | The allow-list file |
 | `--component-allow-list-sha256` | none | Its pinned SHA-256 (required with the file) |
-| `--component-allow-list-signers-file` | none | Keys one of which must sign the allow-list; requires the signature |
+| `--component-allow-list-signers-file` | none | Keys one of which must sign the allow-list; requires the signature file |
 | `--component-allow-list-signature-file` | none | The detached signature |
 | `--insecure-skip-component-allow-list` | false | Hosts may be ready without an allow-list comparison; cannot be combined with an allow-list |
 | `--host-inventory-max-age` | `5m` | Maximum inventory age, from `1m` to `1h`; also the scheduler's heartbeat limit for these hosts |
@@ -223,18 +230,43 @@ All are refused by a release build, which exits at start when any is set.
 | `--host-inventory-accepted-origins` | `read-only,writable` | Manifest origins accepted for a ready component |
 | `--host-inventory-accepted-tiers` | `pidfd-store,pidfs-handle,pidfs-inode,start-time` | Process identity tiers accepted |
 
-Every flag set to other than its default is logged at start with its effective value. A
+Every flag set to other than its default is logged at start with its effective value.
+`kvm` and `tun` are required by default because a Cloud Hypervisor host needs both
+devices; a test or CI host without them overrides `--host-inventory-required-features`. A
 stricter profile accepts `read-only` origins only, the `pidfd-store` and `pidfs-handle`
 tiers only, adds `secure_boot`, `measured_boot` and `extension_image_policy_signed` to the
 required features, and signs the allow-list. The current agent reports
 `hypervisor_pause_resume` and `extension_image_policy_signed` as not evaluated, so
 requiring either keeps every host not ready until the agent evaluates them.
 
-## Audit
+## Audit and metrics
 
 On every change of either condition the manager writes one log line with the condition,
-its reason, the component it is about, the SHA-256 of the signed answer and of the
-allow-list, and the whole signed answer (base64; it carries no secret). It records an
-Event on the Host naming the same, deduplicated per condition and reason and limited to
-one per Host per minute (a dropped Event is recorded on a later heartbeat). The
-allow-list's SHA-256 is logged at start.
+its reason, the component it is about, and the SHA-256 of the signed answer and of the
+allow-list. The whole signed answer (base64; it carries no secret) is added to such a
+line once per answer and at most once per Host every 10 minutes, so a flapping Provider
+does not flood the log; the other lines carry its SHA-256 only.
+
+Each condition records an Event on the Host when its reason changes, at most one per
+condition per minute. Changes within that minute are counted and, at the first heartbeat
+after it, reported in one `InventoryTransitionsSuppressed` Event that gives their number,
+their reasons and the current reason, so recovering and failing again within a minute is
+never shown as one outage.
+
+At start the manager logs the allow-list's SHA-256 (with `audit=component-allow-list`)
+and publishes `virtrigaud_component_allow_list{state, sha256}` (state `loaded`,
+`not_in_force`, `not_configured` or `skipped`). Per Host it publishes
+`virtrigaud_host_inventory_condition{namespace, host, condition, reason}`: 1 while the
+condition is True, 0 otherwise, one series per condition with its current reason (from
+the closed set above, anything else as `Other`), removed with the Host. Alert on changes
+of its `AgentInventoryVerified` series.
+
+When the Host is deleted, the manager also drops its inventory backoff and audit state.
+
+## Not done yet
+
+- The allow-list signature is over the file's bytes (or their SHA-256) with no domain
+  separation of its own: a signing key used for allow-lists should not sign anything else.
+- There is no single stricter profile that requires a signers file and read-only manifest
+  origins; set the flags explicitly.
+- The Helm chart does not render the allow-list object or its digest pin.

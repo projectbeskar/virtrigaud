@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-14 21:00] - Host inventory review fixes (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/host_inventory.go`: inventory Events keep a window per condition and the last observed reason; transitions suppressed within a window are reported in one `InventoryTransitionsSuppressed` Event when it ends, so two outages in one window stay visible.
+- `internal/controller/host_inventory.go`: the whole signed answer is logged once per answer and at most once per Host every 10 minutes; other transition lines carry its SHA-256.
+- `internal/controller/host_inventory.go`, `api/infra.virtrigaud.io/v1beta1/host_types.go`: an inventory that lists no component is never ready (`ComponentsReady=False/NoComponentsReported`).
+- `internal/hostinventory/allowlist.go`: an allow-list that requires no component is refused.
+- `internal/controller/host_inventory.go`, `api/infra.virtrigaud.io/v1beta1/host_types.go`: `Host.status.agentInventory` records its enrolment (`enrolmentID`) and is dropped when the host's enrolment changes; the mirror and both conditions are removed when the Host's Provider runs no per-host agent.
+- `internal/controller/host_inventory_policy.go`: a signers file without a signature file, an unparsable signers file or a malformed digest pin stop the manager at start.
+- `internal/controller/provider_operation_identity.go`: the allow-list reason no longer replaces an earlier Provider `Ready=False` reason; it is added to its message.
+- `internal/controller/host_controller.go`, `internal/controller/host_inventory.go`: a deleted or vanished Host's inventory backoff, audit state and metric series are dropped.
+
+### Added
+- `internal/obs/metrics/host_inventory.go`: `virtrigaud_host_inventory_condition` (per Host and condition, reason from a closed set) and `virtrigaud_component_allow_list` (the allow-list state and SHA-256 at start; development builds only).
+- Tests: the audit decision and two outages in one window; the signed answer logged rarely under flapping; the condition metric and its removal; an inventory without components; the allow-list `required` rule; the mirror dropped on re-enrolment and removed on leaving; the earlier Provider reason kept; a deleted Host's state forgotten; the new startup errors; the startup metric.
+- `docs/host-inventory-manager.md`: the mirror as last verified, the Event and log limits, the metrics, the default `kvm` and `tun` requirement, and what is not done yet.
+
+### Why
+An automated security review found these minor issues before the change is merged: audit gaps, unbounded logging, an allow-list that could accept an empty inventory, and a status mirror outliving its enrolment.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (additive Host CRD status field)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-14 18:00] - Manager host inventory and readiness from the signed host answer (development builds only)
 **Author:** @wrkode (William Rizzo)
 
