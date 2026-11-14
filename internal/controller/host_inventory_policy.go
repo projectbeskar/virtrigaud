@@ -19,6 +19,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"slices"
@@ -193,8 +194,27 @@ func (p *HostInventoryPolicy) maxAge() time.Duration {
 // force.
 var errAllowListNotLoaded = errors.New("the configured component allow-list is not in force")
 
-// fileReader reads the policy's files (os.ReadFile; tests replace it).
-var fileReader = os.ReadFile
+// errPolicyFileTooLarge is returned by readPolicyFile for a file above its
+// bound.
+var errPolicyFileTooLarge = errors.New("the file is larger than its bound")
+
+// readPolicyFile reads a policy file of at most limit bytes, reading at most
+// limit+1, so an oversized file is refused without reading it whole.
+func readPolicyFile(path string, limit int) ([]byte, error) {
+	f, err := os.Open(path) // #nosec G304 -- an administrator-supplied manager flag
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("%s: %w (%d bytes)", path, errPolicyFileTooLarge, limit)
+	}
+	return data, nil
+}
 
 // ParseHostInventoryPolicy parses the host inventory flags into a policy.
 // With no flag set it returns DefaultHostInventoryPolicy in every build. A
@@ -231,7 +251,7 @@ func ParseHostInventoryPolicy(f HostInventoryFlags) (*HostInventoryPolicy, error
 	}
 	var signers []hostinventory.Signer
 	if f.SignersFile != "" {
-		pemData, err := fileReader(f.SignersFile)
+		pemData, err := readPolicyFile(f.SignersFile, hostinventory.MaxSignersBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read --%s: %w", ComponentAllowListSignersFileFlagName, err)
 		}
@@ -340,14 +360,14 @@ func (p *HostInventoryPolicy) loadAllowList(f HostInventoryFlags, signers []host
 		fail(fmt.Errorf("%w: --%s is not set", hostinventory.ErrDigestMismatch, ComponentAllowListSHA256FlagName))
 		return
 	}
-	data, err := fileReader(f.AllowListFile)
+	data, err := readPolicyFile(f.AllowListFile, hostinventory.MaxFileBytes)
 	if err != nil {
-		fail(fmt.Errorf("%w: the allow-list file cannot be read", hostinventory.ErrDigestMismatch))
+		fail(fmt.Errorf("%w: the allow-list file cannot be read: %w", hostinventory.ErrDigestMismatch, err))
 		return
 	}
 	opts := hostinventory.LoadOptions{Data: data, PinnedSHA256: f.AllowListSHA256, Signers: signers}
 	if len(signers) > 0 {
-		if opts.Signature, err = fileReader(f.SignatureFile); err != nil {
+		if opts.Signature, err = readPolicyFile(f.SignatureFile, hostinventory.MaxSignatureBytes); err != nil {
 			fail(fmt.Errorf("%w: the signature file cannot be read", hostinventory.ErrUnverified))
 			return
 		}

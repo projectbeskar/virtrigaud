@@ -239,3 +239,26 @@ func TestParseHostInventoryPolicy_BadSignersFile(t *testing.T) {
 		SignersFile: bad, SignatureFile: filepath.Join(f.dir, "x.sig")})
 	require.ErrorIs(t, err, hostinventory.ErrInvalid)
 }
+
+// Policy files are read with a bound: an oversized signers file stops the
+// manager and an oversized allow-list is not put in force, both without
+// reading the file whole.
+func TestParseHostInventoryPolicy_OversizedFiles(t *testing.T) {
+	dir := t.TempDir()
+	big := filepath.Join(dir, "big")
+	require.NoError(t, os.WriteFile(big, make([]byte, hostinventory.MaxFileBytes+1), 0o600))
+	data, err := readPolicyFile(big, 10)
+	require.ErrorIs(t, err, errPolicyFileTooLarge)
+	assert.Nil(t, data)
+	_, err = ParseHostInventoryPolicy(HostInventoryFlags{AllowListFile: big, AllowListSHA256: strings.Repeat("0", 64),
+		SignersFile: big, SignatureFile: big})
+	require.ErrorIs(t, err, errPolicyFileTooLarge)
+	p, err := ParseHostInventoryPolicy(HostInventoryFlags{AllowListFile: big, AllowListSHA256: strings.Repeat("0", 64)})
+	require.NoError(t, err)
+	require.ErrorIs(t, p.AllowListErr, errPolicyFileTooLarge)
+	exact := filepath.Join(dir, "exact")
+	require.NoError(t, os.WriteFile(exact, make([]byte, 10), 0o600))
+	data, err = readPolicyFile(exact, 10)
+	require.NoError(t, err)
+	assert.Len(t, data, 10)
+}
