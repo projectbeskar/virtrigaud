@@ -35,30 +35,35 @@ import (
 // bytes in the transport client's SendOperation. A refusal of a re-sent grant
 // (expired, under a rotated anchor) therefore always concerns a grant the
 // manager minted for that send, never one it kept. This guard lists, by
-// go/ast, in the non-test files of internal/ and cmd/, every reference to
-// MintOperationGrant, OperationEnvelope or GetOperationEnvelope (a call, a
-// type, a field, a method value) and every proto Clone, CloneOf or Merge
-// whose arguments name an envelope or a grant, and requires that they appear
-// only where allowed: the mint and the envelope only in SendOperation; the
-// shared verifier's reading of an envelope; the definition of
-// MintOperationGrant. It also requires that the controllers never name the
-// OperationGrant type (so they cannot hold one) and that
-// contracts.OperationSender takes no grant.
+// go/ast, in the non-test files of internal/ and cmd/, every place that
+// constructs a grant or an envelope, and requires that it is SendOperation:
+//
+//   - a reference to MintOperationGrant (a call or a method value; its
+//     definition aside);
+//   - a composite literal of OperationEnvelope or OperationGrant with
+//     content, or new() of one;
+//   - setting an envelope on a request: an OperationEnvelope key in a
+//     composite literal, or an assignment to an OperationEnvelope field;
+//   - a proto Clone, CloneOf or Merge whose arguments name an envelope or a
+//     grant.
+//
+// Reading an envelope (a parameter or result type, GetOperationEnvelope, the
+// verifiers' checks) constructs nothing and is not a site. It also requires
+// that the controllers never name the OperationGrant type (so they cannot
+// hold one) and that contracts.OperationSender takes no grant.
 
 // grantSite is one file and enclosing function.
 type grantSite struct{ file, function string }
 
-// allowedGrantSites are the only places that may name a grant mint or an
+// allowedGrantSites are the only places that may construct a grant or an
 // envelope, and why.
 var allowedGrantSites = map[grantSite]string{
 	{"internal/transport/grpc/client_operation.go", "SendOperation"}: "mints the grant and builds the envelope of every send",
-	{"internal/operation/grant.go", "MintOperationGrant"}:            "the definition",
-	{"internal/operation/grantverify/verify.go", "checkSizes"}:       "the shared verifier reads an envelope (agent side)",
-	{"internal/operation/grantverify/verify.go", "envelopeOf"}:       "the shared verifier reads an envelope (agent side)",
+	{"internal/operation/grant.go", "MintOperationGrant"}:            "the mint itself builds the grant it returns",
 }
 
-// guardedNames are the identifiers a reference to which is a grant site.
-var guardedNames = map[string]bool{"MintOperationGrant": true, "OperationEnvelope": true, "GetOperationEnvelope": true}
+// grantTypes are the message types whose construction is a site.
+var grantTypes = map[string]bool{"OperationEnvelope": true, "OperationGrant": true}
 
 // cloneFuncs are the proto calls that copy a message.
 var cloneFuncs = map[string]bool{"Clone": true, "CloneOf": true, "Merge": true}
@@ -78,6 +83,17 @@ func isIdent(e ast.Expr, name string) bool {
 	return ok && id.Name == name
 }
 
+// typeName is the last name of a type expression (pkg.T or T), or "".
+func typeName(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.SelectorExpr:
+		return x.Sel.Name
+	}
+	return ""
+}
+
 // namesEnvelopeOrGrant reports whether e mentions an envelope or a grant.
 func namesEnvelopeOrGrant(e ast.Expr) bool {
 	found := false
@@ -89,6 +105,97 @@ func namesEnvelopeOrGrant(e ast.Expr) bool {
 		return !found
 	})
 	return found
+}
+
+// grantConstructionSites lists the grant and envelope construction sites of
+// one source file (see above), and whether it names the OperationGrant type.
+func grantConstructionSites(rel string, src []byte) (sites []grantSite, namesGrant bool, err error) {
+	f, err := parser.ParseFile(token.NewFileSet(), rel, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, false, err
+	}
+	var stack []ast.Node
+	add := func(suffix string) { sites = append(sites, grantSite{rel, enclosingFuncName(stack) + suffix}) }
+	ast.Inspect(f, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		switch x := n.(type) {
+		case *ast.Ident:
+			if x.Name == "OperationGrant" {
+				namesGrant = true
+			}
+			if x.Name == "MintOperationGrant" {
+				if fd, ok := stack[len(stack)-2].(*ast.FuncDecl); !ok || fd.Name != x {
+					add("")
+				}
+			}
+		case *ast.CompositeLit:
+			t := x.Type
+			if u, ok := t.(*ast.UnaryExpr); ok {
+				t = u.X
+			}
+			if grantTypes[typeName(t)] && len(x.Elts) > 0 {
+				add("")
+			}
+		case *ast.KeyValueExpr:
+			if isIdent(x.Key, "OperationEnvelope") {
+				add("")
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "OperationEnvelope" {
+					add("")
+				}
+			}
+		case *ast.CallExpr:
+			if isIdent(x.Fun, "new") && len(x.Args) == 1 && grantTypes[typeName(x.Args[0])] {
+				add("")
+			}
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && cloneFuncs[sel.Sel.Name] && isIdent(sel.X, "proto") {
+				for _, arg := range x.Args {
+					if namesEnvelopeOrGrant(arg) {
+						add(" (clone)")
+					}
+				}
+			}
+		}
+		return true
+	})
+	return sites, namesGrant, nil
+}
+
+// TestGrantMintSites_GuardCatchesConstruction: the guard flags each kind of
+// construction outside SendOperation and not a verifier that only reads.
+func TestGrantMintSites_GuardCatchesConstruction(t *testing.T) {
+	src := []byte(`package p
+
+func Mint(ctx context.Context) { _, _ = operation.MintOperationGrant(ctx, s, r) }
+func Ref() { f := operation.MintOperationGrant; _ = f }
+func Literal() { _ = &providerv1.OperationEnvelope{Request: b} }
+func GrantLiteral() { _ = providerv1.OperationGrant{Body: b} }
+func New() { _ = new(providerv1.OperationEnvelope) }
+func Attach() { _ = &providerv1.CreateRequest{OperationEnvelope: env} }
+func Assign(r *providerv1.PowerRequest) { r.OperationEnvelope = env }
+func Clone(r *providerv1.PowerRequest) { _ = proto.Clone(r.GetOperationEnvelope()) }
+func Reader(outer proto.Message) (*providerv1.OperationEnvelope, error) {
+	env := outer.(*providerv1.PowerRequest).GetOperationEnvelope()
+	_ = (&providerv1.OperationEnvelope{}).ProtoReflect().Descriptor().FullName()
+	return env, nil
+}
+`)
+	sites, _, err := grantConstructionSites("internal/x/x.go", src)
+	require.NoError(t, err)
+	got := map[string]bool{}
+	for _, s := range sites {
+		got[s.function] = true
+	}
+	for _, fn := range []string{"Mint", "Ref", "Literal", "GrantLiteral", "New", "Attach", "Assign", "Clone (clone)"} {
+		require.True(t, got[fn], "the guard misses construction in %s", fn)
+	}
+	require.False(t, got["Reader"], "reading an envelope is not construction")
 }
 
 func TestGrantMintSites_OnlySendOperation(t *testing.T) {
@@ -111,36 +218,14 @@ func TestGrantMintSites_OnlySendOperation(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			f, err := parser.ParseFile(token.NewFileSet(), path, src, parser.SkipObjectResolution)
+			found, namesGrant, err := grantConstructionSites(rel, src)
 			if err != nil {
 				return err
 			}
-			var stack []ast.Node
-			ast.Inspect(f, func(n ast.Node) bool {
-				if n == nil {
-					stack = stack[:len(stack)-1]
-					return true
-				}
-				stack = append(stack, n)
-				switch x := n.(type) {
-				case *ast.Ident:
-					if guardedNames[x.Name] {
-						sites = append(sites, grantSite{rel, enclosingFuncName(stack)})
-					}
-					if strings.HasPrefix(rel, "internal/controller/") && x.Name == "OperationGrant" {
-						controllerNamesGrant = append(controllerNamesGrant, rel)
-					}
-				case *ast.CallExpr:
-					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && cloneFuncs[sel.Sel.Name] && isIdent(sel.X, "proto") {
-						for _, arg := range x.Args {
-							if namesEnvelopeOrGrant(arg) {
-								sites = append(sites, grantSite{rel, enclosingFuncName(stack) + " (clone)"})
-							}
-						}
-					}
-				}
-				return true
-			})
+			sites = append(sites, found...)
+			if namesGrant && strings.HasPrefix(rel, "internal/controller/") {
+				controllerNamesGrant = append(controllerNamesGrant, rel)
+			}
 			return nil
 		})
 		require.NoError(t, err)
@@ -148,7 +233,7 @@ func TestGrantMintSites_OnlySendOperation(t *testing.T) {
 	seen := map[grantSite]bool{}
 	for _, s := range sites {
 		if _, ok := allowedGrantSites[s]; !ok {
-			t.Errorf("%s: %s names a grant mint or an operation envelope; only the transport client's SendOperation may build one", s.file, s.function)
+			t.Errorf("%s: %s constructs a grant or an operation envelope; only the transport client's SendOperation may", s.file, s.function)
 		}
 		seen[s] = true
 	}
