@@ -558,21 +558,40 @@ needed: before the VM is released without a Delete, the host is asked about that
 `op_id` again, which needs its identity and intent digest, never its request. So when such
 a Create goes `Terminal`, the manager writes a redacted intent and deletes the full one:
 
-- name `vrtg-opr-<opID>`, same type, labels, annotations and owner as the full intent;
+- name `vrtg-opr-<opID>`, same type, labels, annotations and owner (the Provider) as the
+  full intent, all taken from the authenticated intent, the VM and the Provider, never
+  copied from another read of the Secret;
 - data `identity`, `salt`, `digest` (SHA-256 of the salt and the exact request bytes) and
   `tag`, and no `request`: the request bytes, cloud-init user data included, are gone;
 - `tag` covers the same metadata and the identity, salt and digest under its own domain
   (`virtrigaud.io/operation-intent-redacted/v1` and a NUL byte), so a redacted intent never
   verifies as a full one, nor the converse; an edited field is refused as tampered.
 
-The redacted Secret is written first, then the full one is deleted with its UID and
-`resourceVersion` as preconditions (a conflict is retried with a fresh read). An intent
+The redacted Secret is written first, then the full one is deleted with the UID and
+`resourceVersion` of the read that authenticated as preconditions. On a conflict the full
+Secret is read and authenticated again; a Secret that does not authenticate is never
+deleted (it is kept as evidence) and never redacted. An intent
 Secret is immutable, so this is the only safe order: a crash in between leaves both, and the
-next reconcile of the VM finishes the redaction; nothing is lost. A redacted intent is
+next reconcile of the VM finishes the redaction; nothing is lost. A manager checks each
+such redaction once per process (so a settled VM costs no Secret reads), which also
+finishes a redaction interrupted at any time before. A redacted intent is
 read only to ask the host about the attempt (its digest binds the answer); it can never be
 sent: a re-send needs the full request, and an attempt in flight whose full intent is gone
 is held as `OperationIntentLost` without sending anything. The sweeper removes a redacted
-intent once a later Create replaces that marker or the VM is gone. The bytes are never logged or put in an event or condition. A request larger
+intent once a later Create replaces that marker or the VM is gone.
+
+**A blocked redaction.** If a Secret already at the redacted name is not this attempt's
+(it does not authenticate, or names another digest), or the full intent itself does not
+authenticate, nothing is redacted, the full intent is kept, and a Warning event
+`OperationIntentRedactionBlocked` on the VM names both Secrets (never their content), once
+per attempt. To recover, inspect both Secrets in the Provider's namespace, delete the wrong
+`vrtg-opr-<opID>` Secret (or, for a full intent that does not authenticate, treat it as a
+tampering incident), and the next reconcile redacts.
+
+**Deleted bytes.** Deleting a Secret, full intents included, does not erase its bytes at
+once: they stay in etcd until compaction and in any etcd backup taken meanwhile. In
+regulated deployments, enable encryption at rest for Secrets and control the retention of
+etcd backups. The bytes are never logged or put in an event or condition. A request larger
 than 768 KiB is not stored: the VM is held as `OperationRequestTooLarge` and nothing is
 sent.
 
