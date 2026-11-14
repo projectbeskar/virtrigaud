@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostinventory"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -217,16 +219,34 @@ func ParseHostInventoryPolicy(f HostInventoryFlags) (*HostInventoryPolicy, error
 	case f.SignatureFile != "" && f.SignersFile == "":
 		return nil, fmt.Errorf("--%s needs --%s (the keys that may sign the allow-list)", ComponentAllowListSignatureFileFlagName,
 			ComponentAllowListSignersFileFlagName)
+	case f.SignersFile != "" && f.SignatureFile == "":
+		return nil, fmt.Errorf("--%s needs --%s (the allow-list's detached signature)", ComponentAllowListSignersFileFlagName,
+			ComponentAllowListSignatureFileFlagName)
+	case f.AllowListSHA256 != "" && !sha256PinRE.MatchString(f.AllowListSHA256):
+		return nil, fmt.Errorf("--%s must be 64 lowercase hexadecimal characters", ComponentAllowListSHA256FlagName)
 	}
 	p.SkipAllowList = f.InsecureSkipAllowList
 	if err := p.parseOverrides(f); err != nil {
 		return nil, err
 	}
+	var signers []hostinventory.Signer
+	if f.SignersFile != "" {
+		pemData, err := fileReader(f.SignersFile)
+		if err != nil {
+			return nil, fmt.Errorf("read --%s: %w", ComponentAllowListSignersFileFlagName, err)
+		}
+		if signers, err = hostinventory.ParseSigners(pemData); err != nil {
+			return nil, fmt.Errorf("--%s: %w", ComponentAllowListSignersFileFlagName, err)
+		}
+	}
 	if configured {
-		p.loadAllowList(f)
+		p.loadAllowList(f, signers)
 	}
 	return p, nil
 }
+
+// sha256PinRE is the shape of the allow-list digest pin.
+var sha256PinRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // parseOverrides parses the flags that override a default.
 func (p *HostInventoryPolicy) parseOverrides(f HostInventoryFlags) error {
@@ -306,9 +326,11 @@ func parseNameList(value, flag string, valid func(string) bool) ([]string, error
 	return out, nil
 }
 
-// loadAllowList reads and checks the configured allow-list once. A failure
-// is recorded, never fatal.
-func (p *HostInventoryPolicy) loadAllowList(f HostInventoryFlags) {
+// loadAllowList reads and checks the configured allow-list once, against
+// the signers parsed at start (none: no signature is required). A failure is
+// recorded, never fatal: a missing file, a digest that differs from the pin, a
+// missing or non-verifying signature.
+func (p *HostInventoryPolicy) loadAllowList(f HostInventoryFlags, signers []hostinventory.Signer) {
 	fail := func(err error) { p.AllowListErr = fmt.Errorf("%w: %w", errAllowListNotLoaded, err) }
 	switch {
 	case f.AllowListFile == "":
@@ -323,22 +345,11 @@ func (p *HostInventoryPolicy) loadAllowList(f HostInventoryFlags) {
 		fail(fmt.Errorf("%w: the allow-list file cannot be read", hostinventory.ErrDigestMismatch))
 		return
 	}
-	opts := hostinventory.LoadOptions{Data: data, PinnedSHA256: f.AllowListSHA256}
-	if f.SignersFile != "" {
-		pemData, err := fileReader(f.SignersFile)
-		if err != nil {
-			fail(fmt.Errorf("%w: the signers file cannot be read", hostinventory.ErrUnverified))
+	opts := hostinventory.LoadOptions{Data: data, PinnedSHA256: f.AllowListSHA256, Signers: signers}
+	if len(signers) > 0 {
+		if opts.Signature, err = fileReader(f.SignatureFile); err != nil {
+			fail(fmt.Errorf("%w: the signature file cannot be read", hostinventory.ErrUnverified))
 			return
-		}
-		if opts.Signers, err = hostinventory.ParseSigners(pemData); err != nil {
-			fail(fmt.Errorf("%w: %w", hostinventory.ErrUnverified, err))
-			return
-		}
-		if f.SignatureFile != "" {
-			if opts.Signature, err = fileReader(f.SignatureFile); err != nil {
-				fail(fmt.Errorf("%w: the signature file cannot be read", hostinventory.ErrUnverified))
-				return
-			}
 		}
 	}
 	res, err := hostinventory.Load(opts)
@@ -360,13 +371,32 @@ func (p *HostInventoryPolicy) LogStartup(log logr.Logger) {
 	if len(p.overridden) > 0 {
 		log.Info("Host inventory policy overrides", p.overridden...)
 	}
+	if devgate.Compiled {
+		// Release builds publish nothing new.
+		metrics.SetComponentAllowList(p.allowListState(), p.AllowListSHA256())
+	}
 	switch {
 	case p.AllowListErr != nil:
 		log.Error(p.AllowListErr, "The component allow-list is not in force: no Provider whose type runs a per-host agent is served and none of their hosts is ready")
 	case p.AllowList != nil:
-		log.Info("Component allow-list loaded", "sha256", p.AllowList.SHA256(), "signedBy", p.AllowListSignedBy)
+		log.Info("Component allow-list loaded", "audit", "component-allow-list", "sha256", p.AllowList.SHA256(),
+			"signedBy", p.AllowListSignedBy)
 	case p.SkipAllowList:
 		log.Info("WARNING: --" + InsecureSkipComponentAllowListFlagName + " is set: host components are not compared with an " +
 			"allow-list; this manager is not for production use")
+	}
+}
+
+// allowListState is the allow-list state of the startup metric.
+func (p *HostInventoryPolicy) allowListState() string {
+	switch {
+	case p.AllowListErr != nil:
+		return metrics.AllowListNotInForce
+	case p.AllowList != nil:
+		return metrics.AllowListLoaded
+	case p.SkipAllowList:
+		return metrics.AllowListSkipped
+	default:
+		return metrics.AllowListNotConfigured
 	}
 }

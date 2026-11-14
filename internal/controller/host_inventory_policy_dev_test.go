@@ -37,6 +37,7 @@ import (
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/projectbeskar/virtrigaud/internal/hostinventory"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -79,7 +80,7 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(d[:])
 }
 
-const policyAllowList = `{"version":1,"components":[{"name":"cloud-hypervisor","version":"1.0.0","alternatives":[{"artifactDigest":"none","files":[{"name":"ch","digest":"sha256:` +
+const policyAllowList = `{"version":1,"required":["cloud-hypervisor"],"components":[{"name":"cloud-hypervisor","version":"1.0.0","alternatives":[{"artifactDigest":"none","files":[{"name":"ch","digest":"sha256:` +
 	"0000000000000000000000000000000000000000000000000000000000000001" + `"}]}]}]}`
 
 // The allow-list is read once at start with its pinned digest; changing the
@@ -98,6 +99,23 @@ func TestParseHostInventoryPolicy_LoadsOnce(t *testing.T) {
 	var logged []string
 	p.LogStartup(funcr.New(func(prefix, args string) { logged = append(logged, args) }, funcr.Options{}))
 	assert.Contains(t, strings.Join(logged, "\n"), sha256Hex(f.data))
+	// And in the startup metric.
+	mfs, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	found := false
+	for _, mf := range mfs {
+		if mf.GetName() != "virtrigaud_component_allow_list" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			found = found || (labels["state"] == "loaded" && labels["sha256"] == sha256Hex(f.data) && m.GetGauge().GetValue() == 1)
+		}
+	}
+	assert.True(t, found, "the allow-list digest is published at start")
 }
 
 // The digest pin: an allow-list object deleted and recreated under the same
@@ -133,7 +151,8 @@ func TestParseHostInventoryPolicy_DigestPin(t *testing.T) {
 
 // Signed allow-lists: with signers configured, a signature by the release
 // identity or by an operator identity in the set puts it in force; a
-// signature by an identity outside the set, or none, does not.
+// signature by an identity outside the set, or a signature file that cannot
+// be read, does not; no signature file at all stops the manager.
 func TestParseHostInventoryPolicy_Signature(t *testing.T) {
 	release, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	operator, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -146,10 +165,13 @@ func TestParseHostInventoryPolicy_Signature(t *testing.T) {
 		"release identity":  {signer: release, ok: true},
 		"operator identity": {signer: operator, ok: true},
 		"outside the set":   {signer: outsider},
-		"unsigned":          {},
+		"signature missing": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := writePolicyFiles(t, data, tc.signer, &release.PublicKey, &operator.PublicKey)
+			if f.signature == "" {
+				f.signature = filepath.Join(f.dir, "absent.sig")
+			}
 			p, err := ParseHostInventoryPolicy(HostInventoryFlags{AllowListFile: f.allowList, AllowListSHA256: sha256Hex(data),
 				SignersFile: f.signers, SignatureFile: f.signature})
 			require.NoError(t, err)
@@ -206,4 +228,14 @@ func TestParseHostInventoryPolicy_Overrides(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, none.RequiredFeatures)
 	assert.False(t, errors.Is(none.AllowListErr, hostinventory.ErrDigestMismatch), "no allow-list configured is not an error")
+}
+
+// A signers file that is not PEM public keys stops the manager.
+func TestParseHostInventoryPolicy_BadSignersFile(t *testing.T) {
+	f := writePolicyFiles(t, []byte(policyAllowList), nil)
+	bad := filepath.Join(f.dir, "signers.pem")
+	require.NoError(t, os.WriteFile(bad, []byte("not a key"), 0o600))
+	_, err := ParseHostInventoryPolicy(HostInventoryFlags{AllowListFile: f.allowList, AllowListSHA256: sha256Hex(f.data),
+		SignersFile: bad, SignatureFile: filepath.Join(f.dir, "x.sig")})
+	require.ErrorIs(t, err, hostinventory.ErrInvalid)
 }
