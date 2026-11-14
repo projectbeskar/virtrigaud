@@ -88,6 +88,9 @@ const (
 	// CauseAgentTimeout: the agent did not answer a read within the
 	// Provider's call deadline.
 	CauseAgentTimeout = "AgentTimeout"
+	// CauseInventoryStale: the Provider applied no valid host inventory
+	// within its fail-closed bound, so it refuses every host.
+	CauseInventoryStale = "InventoryStale"
 )
 
 // hostUnavailable is the host-scoped refusal of a call to host:
@@ -98,6 +101,9 @@ const (
 func hostUnavailable(host string, fronted bool, cause string) error {
 	md := map[string]string{MetadataCause: cause}
 	msg := "the host is not fronted by this Provider"
+	if cause == CauseInventoryStale {
+		msg = "no valid host inventory was applied within the Provider's fail-closed bound; every host is refused"
+	}
 	if fronted {
 		md[contracts.HostUnavailableHostKey] = host
 		msg = fmt.Sprintf("host %q is unavailable (%s)", host, cause)
@@ -300,6 +306,11 @@ func (p *Provider) handle(ctx context.Context, method string, raw []byte) (proto
 	if err := proto.Unmarshal(raw, decoded); err != nil {
 		return nil, status.Error(codes.InvalidArgument, "the request does not decode")
 	}
+	if p.inventoryFailedClosed() {
+		// No host is known to be still authorised: refuse before routing,
+		// without dialing and without echoing a host id.
+		return nil, hostUnavailable("", false, CauseInventoryStale)
+	}
 	if r.mutating {
 		return p.mutate(ctx, r, raw, decoded)
 	}
@@ -384,6 +395,9 @@ func (p *Provider) mutate(ctx context.Context, r route, raw []byte, decoded prot
 // breaker and the Provider's own call deadline, and maps a failure that is
 // not the agent's own answer.
 func (p *Provider) forward(ctx context.Context, host, method string, req, resp proto.Message, mutating bool) error {
+	if p.inventoryFailedClosed() {
+		return hostUnavailable(host, false, CauseInventoryStale)
+	}
 	e, ok := p.pool.get(host)
 	if !ok {
 		return hostUnavailable(host, false, CauseNotFronted)

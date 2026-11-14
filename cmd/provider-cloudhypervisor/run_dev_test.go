@@ -75,8 +75,12 @@ func TestHostsSecretFlags(t *testing.T) {
 	if code := realMain(append(base, "--hosts-secret-namespace=infra"), &out, &errOut); code != exitUsage {
 		t.Errorf("namespace without a Secret: exit %d\n%s", code, errOut.String())
 	}
+	if _, err := parseFlags(append(base, "--hosts-secret=ch-hosts", "--inventory-fail-closed-after=30s"), &errOut); err == nil ||
+		!strings.Contains(err.Error(), "at least") {
+		t.Errorf("a fail-closed bound below the minimum: %v", err)
+	}
 	f, err := parseFlags(append(base, "--hosts-secret=ch-hosts"), &errOut)
-	if err != nil || f.hostsSecret != "ch-hosts" || f.hostsFileSet {
+	if err != nil || f.hostsSecret != "ch-hosts" || f.hostsFileSet || f.failClosedAfter != 5*time.Minute {
 		t.Errorf("--hosts-secret: %+v %v", f, err)
 	}
 

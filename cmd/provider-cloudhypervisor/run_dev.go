@@ -29,11 +29,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
+	obsmetrics "github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/cloudhypervisor"
 	"github.com/projectbeskar/virtrigaud/internal/version"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
@@ -48,6 +51,10 @@ const exitUsage = 2
 // --hosts-secret-namespace.
 const envProviderNamespace = "PROVIDER_NAMESPACE"
 
+// minInventoryFailClosedAfter is the shortest --inventory-fail-closed-after
+// accepted: two inventory reload intervals.
+const minInventoryFailClosedAfter = 2 * cloudhypervisor.DefaultInventoryReloadInterval
+
 // serviceAccountNamespaceFile is where Kubernetes mounts the pod's namespace
 // with its ServiceAccount token.
 const serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
@@ -59,6 +66,7 @@ type flags struct {
 	hostsFileSet          bool
 	hostsSecret           string
 	hostsSecretNamespace  string
+	failClosedAfter       time.Duration
 	clientCert, clientKey string
 	providerUID           string
 }
@@ -73,6 +81,8 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.hostsFile, "hosts-file", filepath.Join(hostsecret.MountPath, hostsecret.SecretDataKey), "the mounted host inventory")
 	fs.StringVar(&f.hostsSecret, "hosts-secret", "", "name of the host inventory Secret to follow through the Kubernetes API instead of --hosts-file "+
 		"(needs get and watch on that Secret only)")
+	fs.DurationVar(&f.failClosedAfter, "inventory-fail-closed-after", cloudhypervisor.DefaultInventoryFailClosedAfter,
+		"with --hosts-secret: refuse every host once no valid inventory was applied for this long (at least "+minInventoryFailClosedAfter.String()+")")
 	fs.StringVar(&f.hostsSecretNamespace, "hosts-secret-namespace", "", "namespace of --hosts-secret; defaults to $"+envProviderNamespace+
 		", then to the pod's namespace")
 	fs.StringVar(&f.clientCert, "agent-client-cert", "", "PEM certificate the Provider presents to agents (required)")
@@ -94,6 +104,9 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	}
 	if f.hostsSecret == "" && f.hostsSecretNamespace != "" {
 		return flags{}, errors.New("--hosts-secret-namespace needs --hosts-secret")
+	}
+	if f.failClosedAfter < minInventoryFailClosedAfter {
+		return flags{}, fmt.Errorf("--inventory-fail-closed-after must be at least %s", minInventoryFailClosedAfter)
 	}
 	if f.clientCert == "" || f.clientKey == "" {
 		return flags{}, errors.New("--agent-client-cert and --agent-client-key are required")
@@ -138,7 +151,8 @@ func run(ctx context.Context, f flags, log *slog.Logger) error {
 	default:
 		return fmt.Errorf("resolve the manager TLS: %w", err)
 	}
-	opts := cloudhypervisor.Options{ClientCertificate: client, ProviderUID: f.providerUID, Logger: log}
+	opts := cloudhypervisor.Options{ClientCertificate: client, ProviderUID: f.providerUID, Logger: log,
+		InventoryFailClosedAfter: f.failClosedAfter}
 	var p *cloudhypervisor.Provider
 	if f.hostsSecret != "" {
 		p, err = newFromSecret(ctx, f, opts, log)
@@ -155,6 +169,7 @@ func run(ctx context.Context, f flags, log *slog.Logger) error {
 	cfg.HealthPort = f.healthPort
 	cfg.Logger = log
 	cfg.TLS = tlsResolution.TLS
+	cfg.MetricsHandler = promhttp.HandlerFor(obsmetrics.GetRegistry(), promhttp.HandlerOpts{})
 	cfg.Middleware = &middleware.Config{
 		Logging:  &middleware.LoggingConfig{Enabled: true, Logger: log},
 		Recovery: &middleware.RecoveryConfig{Enabled: true, Logger: log},

@@ -94,6 +94,14 @@ type Options struct {
 	// watch cycle of NewFromSecret (each cycle starts from a fresh read of
 	// the Secret); zero uses DefaultInventoryReloadInterval.
 	InventoryReloadInterval time.Duration
+	// InventoryFailClosedAfter is, for NewFromSecret, how long the Provider
+	// keeps routing with its last good inventory while it can apply no
+	// newer one (the API server unreachable, or an invalid document): past
+	// it, every host's connection is closed and every call refused
+	// (HOST_UNAVAILABLE, cause InventoryStale) until a valid inventory is
+	// applied. Zero uses DefaultInventoryFailClosedAfter; it must be at
+	// least two reload intervals.
+	InventoryFailClosedAfter time.Duration
 	// DialContext, when set, opens the connections to agents.
 	DialContext func(ctx context.Context, addr string) (net.Conn, error)
 	// Now is the clock agent certificates are judged at; nil uses time.Now.
@@ -295,8 +303,9 @@ func (p *Provider) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoR
 
 // Validate implements providerv1.ProviderServer: the Provider itself is
 // healthy while it runs; a host's health is reported per host (ListHosts).
-// Its message says when the inventory file is not watched, and when the
-// inventory Secret has not been read for a while.
+// Its message says when the inventory file is not watched, and when no
+// inventory was applied from the Secret for a while; it is not Ok while the
+// Provider refuses every host for a stale inventory (fail-closed).
 func (p *Provider) Validate(context.Context, *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
 	msg := fmt.Sprintf("fronting %d hosts", len(p.pool.ids()))
 	if p.unwatched {
@@ -304,7 +313,7 @@ func (p *Provider) Validate(context.Context, *providerv1.ValidateRequest) (*prov
 			p.opts.InventoryReloadInterval)
 	}
 	msg += p.secretStaleness()
-	return &providerv1.ValidateResponse{Ok: true, Message: msg}, nil
+	return &providerv1.ValidateResponse{Ok: !p.inventoryFailedClosed(), Message: msg}, nil
 }
 
 // ListHosts implements providerv1.ProviderServer: every fronted host, from
