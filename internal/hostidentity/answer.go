@@ -142,6 +142,10 @@ type AnswerExpectation struct {
 	EnrolmentID []byte
 	// Nonce is the 16-byte nonce the manager drew for this request.
 	Nonce []byte
+	// InventoryVersion is the inventory version the manager sent in a
+	// GetHostInfo request (0: it asked for no inventory). Only a HostAnswer
+	// uses it: its inventory must echo it (VerifyInventory).
+	InventoryVersion uint32
 	// Now is the manager's clock.
 	Now time.Time
 }
@@ -198,8 +202,10 @@ func refuse(format string, args ...any) error {
 // verifies; the body decodes with no unknown field in it or any nested
 // message, no undefined enum value, and every field rule of its type; the
 // nonce is exp.Nonce; the Provider UID, host, installation and enrolment are
-// exp's and the certificate's record's. Nothing is decoded before the
-// signature verifies.
+// exp's and the certificate's record's; last, a HostAnswer's inventory passes
+// VerifyInventory for exp.InventoryVersion. Nothing is decoded before the
+// signature verifies, and no inventory is judged before everything else
+// passed.
 func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedAnswer, error) {
 	if blob == nil {
 		return VerifiedAnswer{}, refuse("no signed answer")
@@ -294,6 +300,17 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		return VerifiedAnswer{}, refuse("the answer names another enrolment")
 	case out.Host != nil && (out.Host.GetMode() != providerv1.AgentMode_AGENT_MODE_IDENTITY || rec.Mode != ModeIdentity):
 		return VerifiedAnswer{}, refuse("the answer's mode is not the certificate's identity mode")
+	}
+	// The host inventory, judged only once everything else passed, so an
+	// inventory fault is known to be the agent's (or, for the echo, the
+	// relay's) and nobody else's.
+	if out.Host != nil {
+		if exp.InventoryVersion > InventoryVersion {
+			return VerifiedAnswer{}, refuse("the request asked for inventory version %d, above %d", exp.InventoryVersion, InventoryVersion)
+		}
+		if err := VerifyInventory(out.Host.GetInventory(), exp.InventoryVersion); err != nil {
+			return VerifiedAnswer{}, err
+		}
 	}
 	enc, err := proto.MarshalOptions{Deterministic: true}.Marshal(blob)
 	if err != nil {
@@ -515,8 +532,8 @@ func checkVMAnswer(a *providerv1.VMAnswer) error {
 	return nil
 }
 
-// checkHostAnswer checks the field rules of a HostAnswer. The manager asks
-// for no inventory, so an answer that carries one is refused.
+// checkHostAnswer checks the field rules of a HostAnswer other than its
+// inventory (VerifyInventory, checked last).
 func checkHostAnswer(a *providerv1.HostAnswer) error {
 	gv := a.GetGrantVersions()
 	switch {
@@ -528,8 +545,6 @@ func checkHostAnswer(a *providerv1.HostAnswer) error {
 		return refuse("the agent mode is unspecified")
 	case len(a.GetStagedCertificateSha256()) != 0 && len(a.GetStagedCertificateSha256()) != sha256.Size:
 		return refuse("the staged certificate digest is malformed")
-	case a.GetInventory() != nil:
-		return refuse("an inventory the request did not ask for")
 	}
 	for i, v := range gv {
 		if v == 0 || (i > 0 && v <= gv[i-1]) {
