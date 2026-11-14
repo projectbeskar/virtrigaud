@@ -91,7 +91,21 @@ type IdentityConfig struct {
 	// with (a grant naming another is refused). Empty uses a fixed one; a
 	// manager test sets the uid of the Provider object it created.
 	ProviderUID string
+	// TrustDomain and HostNamespace shape the URI identity of each host
+	// certificate (spiffe://<TrustDomain>/virtrigaud/host/<HostNamespace>/<host>);
+	// empty uses HostTrustDomain and HostNamespace. A manager test sets the
+	// namespace of its Host objects.
+	TrustDomain   string
+	HostNamespace string
 }
+
+// Defaults of the host certificates' URI identities.
+const (
+	// HostTrustDomain is the default trust domain.
+	HostTrustDomain = "example.test"
+	// HostNamespace is the default namespace of the hosts.
+	HostNamespace = "hosts"
+)
 
 // identityMode is the fake's operation-identity state that is fixed when the
 // fake is made: the verifiers its hosts use and the identity they expect.
@@ -147,7 +161,14 @@ func newIdentityMode(cfg IdentityConfig, hosts []string) (*identityMode, error) 
 		}
 		m.verifiers[h], m.enrolments[h] = v, enrolment
 	}
-	if m.hostKeys, err = newHostKeys(hosts); err != nil {
+	td, ns := cfg.TrustDomain, cfg.HostNamespace
+	if td == "" {
+		td = HostTrustDomain
+	}
+	if ns == "" {
+		ns = HostNamespace
+	}
+	if m.hostKeys, err = newHostKeys(hosts, td, ns, providerUID, cfg.Signer.InstallID(), m.enrolments); err != nil {
 		return nil, fmt.Errorf("fake: host keys: %w", err)
 	}
 	return m, nil

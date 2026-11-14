@@ -214,7 +214,7 @@ var _ = Describe("Operation identity: power, Reconfigure and serialisation again
 			var fired atomic.Bool
 			r := &VirtualMachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), APIReader: k8sClient,
 				RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(100),
-				OperationEnrolments: e.enrol, OperationIntentAuth: e.auth,
+				HostAnswers: e.hostAnswers(ctx, e.trust), OperationIntentAuth: e.auth,
 				operationCrashHook: func(_ context.Context, p operationCrashPoint) bool {
 					return p == point && fired.CompareAndSwap(false, true)
 				}}

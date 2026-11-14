@@ -130,8 +130,11 @@ func (h *testHost) rollBack(by uint64) {
 // staticTrust is a HostTrustSource over test hosts, with store states in
 // memory.
 type staticTrust struct {
-	mu     sync.Mutex
-	hosts  map[string]*testHost
+	mu    sync.Mutex
+	hosts map[string]*testHost
+	// trusts are host trusts that come with no testHost (the envtest
+	// fake's hosts).
+	trusts map[string]HostTrust
 	stores map[string]HostStoreState
 	writes int
 }
@@ -139,6 +142,9 @@ type staticTrust struct {
 func (s *staticTrust) HostTrust(_ context.Context, _ *infravirtrigaudiov1beta1.Provider, hostID string) (HostTrust, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if t, ok := s.trusts[hostID]; ok {
+		return t, nil
+	}
 	h, ok := s.hosts[hostID]
 	if !ok {
 		return HostTrust{}, operation.ErrNoEnrolment
