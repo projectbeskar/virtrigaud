@@ -98,7 +98,8 @@ const (
 
 	// ProviderMismatchReason: the request came from a Provider other than the
 	// one the host is enrolled with, and was refused before any other check.
-	// Breaker-exempt. A definite not-performed of this request.
+	// Breaker-exempt. A definite not-performed of this delivery only: it says
+	// nothing about an earlier delivery of the same op_id, which may have run.
 	ProviderMismatchReason = "PROVIDER_MISMATCH"
 
 	// UnattestedReason: the host's agent has not yet proved the continuity of
@@ -147,14 +148,17 @@ const (
 	// GrantUnauthenticatedReason: the operation grant's signature, certificate
 	// chain, certificate validity or authority generation did not verify, and the
 	// request was refused. Breaker-exempt. A definite not-performed of this
-	// request.
+	// delivery only: it says nothing about an earlier delivery of the same
+	// op_id, which may have run (a grant that expired or whose anchor rotated
+	// since is refused before the host looks the op_id up).
 	GrantUnauthenticatedReason = "GRANT_UNAUTHENTICATED"
 
 	// GrantMismatchReason: the operation grant is authentic but does not fit
 	// this call (installation, Provider, host, enrolment, grant kind, operation
 	// kind, RPC, request type, grant version, or a field that the grant version
 	// does not define), and the request was refused. Breaker-exempt. A definite
-	// not-performed of this request.
+	// not-performed of this delivery only: it says nothing about an earlier
+	// delivery of the same op_id, which may have run.
 	GrantMismatchReason = "GRANT_MISMATCH"
 
 	// NonceConsumedReason: the grant's single-use nonce was already used, and this
@@ -256,7 +260,12 @@ func PartAReasons() []string {
 // cancellation's, not the operation's), and every other operation-grant
 // reason. For an operation-grant reason the classification holds only for an
 // answer that the host signed and bound to the request; an unsigned ErrorInfo
-// relayed by a Provider is that Provider's claim.
+// relayed by a Provider is that Provider's claim. Every one of them is
+// definite for this delivery only: it says nothing about an earlier delivery
+// of the same op_id, which may have run. A refusal of a mutating call carries
+// no signed answer, so for a Provider whose type requires operation identity
+// the manager never decides an attempt on any of them; it asks the host about
+// the op_id instead.
 func IsDefiniteNotPerformedReason(reason string) bool {
 	switch reason {
 	case ProviderMismatchReason, DigestMismatchReason, DeadlineExceededNotPerformedReason,
