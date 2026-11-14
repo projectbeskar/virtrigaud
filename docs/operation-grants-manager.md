@@ -581,12 +581,16 @@ is held as `OperationIntentLost` without sending anything. The sweeper removes a
 intent once a later Create replaces that marker or the VM is gone.
 
 **A blocked redaction.** If a Secret already at the redacted name is not this attempt's
-(it does not authenticate, or names another digest), or the full intent itself does not
-authenticate, nothing is redacted, the full intent is kept, and a Warning event
+(it does not authenticate, or names another digest), the full intent itself does not
+authenticate, or the full intent is not gone after its delete (a finalizer holds it under
+a deletion timestamp, with its request bytes), the redaction is not done, the full intent
+is kept and tried again on the next reconcile, and a Warning event
 `OperationIntentRedactionBlocked` on the VM names both Secrets (never their content), once
 per attempt. To recover, inspect both Secrets in the Provider's namespace, delete the wrong
-`vrtg-opr-<opID>` Secret (or, for a full intent that does not authenticate, treat it as a
-tampering incident), and the next reconcile redacts.
+`vrtg-opr-<opID>` Secret, or remove the finalizer that holds the full intent (or, for a
+full intent that does not authenticate, treat it as a tampering incident), and the next
+reconcile redacts. The manager keeps one in-memory redaction entry per VM, dropped with
+the VM.
 
 **Deleted bytes.** Deleting a Secret, full intents included, does not erase its bytes at
 once: they stay in etcd until compaction and in any etcd backup taken meanwhile. In
