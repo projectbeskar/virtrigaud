@@ -240,6 +240,8 @@ type signedHostStub struct {
 	hostHealth contracts.HostHealth
 	// hostQueries are the signed GetHostInfo queries received.
 	hostQueries []contracts.HostAnswerQuery
+	// opQueries are the signed TaskStatus queries received.
+	opQueries []contracts.OperationAnswerQuery
 }
 
 func newSignedHostStub(t testing.TB, h *testHost) *signedHostStub {
@@ -296,6 +298,7 @@ func (s *signedHostStub) operationAnswer(q contracts.OperationAnswerQuery,
 	read := contracts.SignedRead{Nonce: nonce}
 	s.amu.Lock()
 	s.answers++
+	s.opQueries = append(s.opQueries, q)
 	k := hex.EncodeToString(q.OpID)
 	p, ok := s.accepted[k]
 	ref := s.taskOf[k]

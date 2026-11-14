@@ -604,3 +604,13 @@ func (r *HostReconciler) auditInventory(ctx context.Context, host *infravirtriga
 			c.typ, c.cv.status, c.cv.reason, v.component, answerSHA, allowSHA)
 	}
 }
+
+// placementHeartbeatMaxAge is the scheduler's HeartbeatMaxAge for provider's
+// hosts: the maximum host inventory age for a Provider whose type runs a
+// per-host agent, 0 (no check) for every other Provider.
+func placementHeartbeatMaxAge(provider *infravirtrigaudiov1beta1.Provider, answers *HostAnswers) time.Duration {
+	if !hostInventoryInScope(provider) {
+		return 0
+	}
+	return answers.inventoryPolicy().maxAge()
+}

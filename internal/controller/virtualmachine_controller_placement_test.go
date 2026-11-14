@@ -97,6 +97,9 @@ func hostPoolCR(name, ns, providerName string) *infravirtrigaudiov1beta1.HostPoo
 
 // readyHost returns a schedulable, Ready host with generous allocatable capacity.
 func readyHost(name, ns, poolName, providerName string) *infravirtrigaudiov1beta1.Host {
+	// A fresh heartbeat: the hosts of a Provider whose type runs a per-host
+	// agent are placement candidates only while their last sync is recent.
+	heartbeat := metav1.Now()
 	return &infravirtrigaudiov1beta1.Host{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: infravirtrigaudiov1beta1.HostSpec{
@@ -108,6 +111,7 @@ func readyHost(name, ns, poolName, providerName string) *infravirtrigaudiov1beta
 			Health:               infravirtrigaudiov1beta1.HostHealthReady,
 			AllocatableCPU:       i32p(8),
 			AllocatableMemoryMiB: i64p(16384),
+			LastHeartbeatTime:    &heartbeat,
 		},
 	}
 }

@@ -559,6 +559,13 @@ func TestIdentityCreate_Holds(t *testing.T) {
 			stub := newIdentityStub()
 			r, req := identityFixture(t, stub)
 			r.clock = func() time.Time { return time.Now().Add(time.Hour) }
+			// The host's last sync is recent on the reconciler's clock (a
+			// host of this Provider type is placed only then).
+			host := &infravirtrigaudiov1beta1.Host{}
+			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "host-alpha"}, host))
+			hb := metav1.NewTime(r.clock())
+			host.Status.LastHeartbeatTime = &hb
+			require.NoError(t, r.Update(context.Background(), host))
 			stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
 				return contracts.OperationAnswer{ID: "vm-1", TaskRef: "task-1"}, nil
 			}

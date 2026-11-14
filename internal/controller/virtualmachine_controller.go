@@ -2360,6 +2360,12 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		// import lands on (ADR-0007 Addendum B, B7.4).
 		RequiredStorageBytes: importedDiskPlacementBytes(vm),
 		RequiredHost:         requiredHost,
+		// The hosts of a Provider whose type runs a per-host agent are
+		// rejected when their last successful sync is older than the
+		// maximum host inventory age (a stalled Host controller cannot keep
+		// a Ready health alive).
+		HeartbeatMaxAge: placementHeartbeatMaxAge(providerCR, r.HostAnswers),
+		Now:             r.now(),
 		// TODO(ADR-0007 D6): wire RequiredStoragePools and RequiredMachineType once
 		// there is an unambiguous mapping. A VM's disks carry no storage-pool name
 		// (DiskSpec.StorageClass is a k8s StorageClass, not a libvirt/NFS pool) and
