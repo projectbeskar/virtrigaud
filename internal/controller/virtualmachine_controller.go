@@ -384,6 +384,15 @@ type VirtualMachineReconciler struct {
 	// blockedRetryMax. Any answer of the provider resets it.
 	deleteTaskStatusRetry unschedulableBackoff
 
+	// redactedOps names (by op_id) the not-performed Creates whose intent
+	// this process saw redacted: they are not read again (a settled VM costs
+	// no reads). After a restart each is checked once, which also finishes a
+	// redaction a crash interrupted.
+	redactedOps sync.Map
+	// redactionWarned names (by op_id) the attempts whose blocked redaction
+	// was announced with a Warning event, once.
+	redactionWarned sync.Map
+
 	// HostAnswers is the manager's state of signed host answers (development
 	// builds only, with per-host agent enrolment): the trust of each host of
 	// a Provider that requires operation identity (its enrolment, which

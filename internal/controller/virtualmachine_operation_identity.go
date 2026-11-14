@@ -507,7 +507,7 @@ func (r *VirtualMachineReconciler) reconcileIdentityGate(ctx context.Context, vm
 	if stateLost(vm) {
 		return r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgOperationStateLost, operationHoldRecheckInterval), true, nil
 	}
-	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)
+	r.cleanupTerminalIntents(ctx, vm, providerCR)
 	if a := inFlightAttempt(vm); a != nil {
 		step, res, err := r.driveAttempt(ctx, vm, ia, a)
 		res, err = r.gateDriveStep(ctx, vm, ia, a, step, res, err)
@@ -1064,9 +1064,7 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 	case createNotPerformedLatest(&done):
 		// Kept for asking the host again, but only its identity and digest:
 		// the request bytes, cloud-init user data included, are dropped.
-		if err := r.redactIntent(ctx, vm, a.OpID, ia.providerCR.Namespace); err != nil {
-			logger.Info("Could not redact the operation-intent Secret; the next reconcile will", "error", err.Error())
-		}
+		r.ensureRedacted(ctx, ia.providerCR, vm, &done)
 	}
 	switch outcome {
 	case infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded:
@@ -1088,16 +1086,19 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 // cleanupTerminalIntents deletes the intent Secrets of vm's attempts that
 // became Terminal within operationIntentSweepGrace: a manager that stopped
 // between an attempt's Terminal write and its Secret delete leaves one behind.
-// Later ones are left to the sweeper, so a settled VM costs no reads.
-func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ns string) {
+// Later ones are left to the sweeper. The latest Create, when not performed,
+// has its intent redacted (ensureRedacted): checked once per manager process,
+// which finishes a redaction a crash interrupted whenever it happened, and
+// not read again. So a settled VM costs no reads.
+func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	provider *infravirtrigaudiov1beta1.Provider) {
+	ns := provider.Namespace
 	for _, a := range vm.Status.OperationAttempts {
 		if createNotPerformedLatest(&a) {
 			// A redaction interrupted (by a crash or a failed write) is
-			// finished here, whenever the VM is reconciled.
-			if err := r.redactIntent(ctx, vm, a.OpID, ns); err != nil {
-				log.FromContext(ctx).Info("Could not redact a not-performed Create's operation-intent Secret; retrying",
-					"error", err.Error())
-			}
+			// finished here; once this process has seen it done, it is not
+			// read again.
+			r.ensureRedacted(ctx, provider, vm, &a)
 			continue
 		}
 		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || r.now().Sub(a.LastTransitionTime.Time) > operationIntentSweepGrace ||
@@ -1109,6 +1110,39 @@ func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, v
 				"kind", a.Kind, "error", err.Error())
 		}
 	}
+}
+
+// eventReasonIntentRedactionBlocked is the Warning event of a redaction that
+// cannot be done (a Secret at the redacted intent's name that is not this
+// attempt's, or a full intent that does not authenticate).
+const eventReasonIntentRedactionBlocked = "OperationIntentRedactionBlocked"
+
+// ensureRedacted redacts the intent of a, a not-performed latest Create,
+// unless this process already saw it redacted (then it costs no read). A
+// blocked redaction is announced once per op_id with a Warning event that
+// names both Secrets and none of their content; the full intent stays.
+func (r *VirtualMachineReconciler) ensureRedacted(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) {
+	if _, done := r.redactedOps.Load(a.OpID); done {
+		return
+	}
+	err := r.redactIntent(ctx, provider, vm, a.OpID)
+	if err == nil {
+		r.redactedOps.Store(a.OpID, struct{}{})
+		return
+	}
+	log.FromContext(ctx).Info("Could not redact a not-performed Create's operation-intent Secret; retrying", "opID", a.OpID,
+		"error", err.Error())
+	if !errors.Is(err, errIntentTampered) && !errors.Is(err, errRedactionMismatch) {
+		return
+	}
+	if _, warned := r.redactionWarned.LoadOrStore(a.OpID, struct{}{}); warned {
+		return
+	}
+	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonIntentRedactionBlocked, fmt.Sprintf(
+		"The intent of %s attempt %d cannot be redacted: Secret %s or %s in the Provider's namespace is not this attempt's "+
+			"(or does not authenticate). The full intent is kept; inspect both, delete the wrong redacted Secret, and the next "+
+			"reconcile redacts (docs/operation-grants-manager.md)", a.Kind, a.Attempt, intentSecretName(a.OpID), redactedIntentName(a.OpID)))
 }
 
 // afterCreateSucceeded records what follows a successful Create once its id
@@ -1154,7 +1188,7 @@ func (r *VirtualMachineReconciler) identityDelete(ctx context.Context, vm *infra
 		}
 		return r.afterDeleteStep(ctx, vm, ia, a.Kind, step, res, err, force)
 	}
-	r.cleanupTerminalIntents(ctx, vm, providerCR.Namespace)
+	r.cleanupTerminalIntents(ctx, vm, providerCR)
 	if d := findAttempt(vm, contracts.OperationKindDelete); d != nil && d.Outcome == infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
 		return r.confirmDeleteRelease(ctx, vm, ia, d, force)
 	}

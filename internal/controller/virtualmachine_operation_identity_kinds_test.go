@@ -777,7 +777,7 @@ func TestIdentityDelete_SupersedesHeldPowerAttempt(t *testing.T) {
 	}
 	assert.Equal(t, 1, n)
 	assert.True(t, intentKeptAsEvidence(vm, p))
-	r.cleanupTerminalIntents(context.Background(), vm, clusteredNS)
+	r.cleanupTerminalIntents(context.Background(), vm, providerOf(t, r))
 	names = map[string]bool{}
 	for _, s := range intentSecrets(t, r) {
 		names[s.Name] = true

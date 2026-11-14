@@ -19,8 +19,10 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +30,9 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -147,14 +151,14 @@ func TestIntentRedaction_MACVerified(t *testing.T) {
 func TestIntentRedaction_DigestBothForms(t *testing.T) {
 	stub := newIdentityStub()
 	stub.userData = userDataCanary
-	_, r, _, s := preparedWithIntentStub(t, stub)
+	_, r, _, _ := preparedWithIntentStub(t, stub)
 	vm := idVM(t, r)
 	a := findAttempt(vm, contracts.OperationKindCreate)
 	p, found, err := r.loadIntent(context.Background(), vm, a.OpID, clusteredNS)
 	require.NoError(t, err)
 	require.True(t, found)
 	fullRef := refOf(p)
-	require.NoError(t, r.redactIntent(context.Background(), vm, a.OpID, s.Namespace))
+	require.NoError(t, r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID))
 	redRef, found, err := r.loadPollIntent(context.Background(), vm, a.OpID, clusteredNS)
 	require.NoError(t, err)
 	require.True(t, found)
@@ -194,10 +198,10 @@ func preparedWithIntentStub(t *testing.T, stub *identityStub) (*identityStub, *V
 // never sent either.
 func TestIntentRedaction_ResendFailsClosed(t *testing.T) {
 	stub := newIdentityStub()
-	stub, r, req, s := preparedWithIntentStub(t, stub)
+	stub, r, req, _ := preparedWithIntentStub(t, stub)
 	vm := idVM(t, r)
 	a := findAttempt(vm, contracts.OperationKindCreate)
-	require.NoError(t, r.redactIntent(context.Background(), vm, a.OpID, s.Namespace))
+	require.NoError(t, r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID))
 	sends := len(stub.sent())
 	reconcileN(t, r, req, 2)
 	assert.Len(t, stub.sent(), sends, "nothing is sent from a redacted intent")
@@ -226,15 +230,15 @@ func TestIntentRedaction_Idempotent(t *testing.T) {
 	vm := idVM(t, r)
 	a := findAttempt(vm, contracts.OperationKindCreate)
 	full := s.DeepCopy()
-	require.NoError(t, r.redactIntent(context.Background(), vm, a.OpID, s.Namespace))
-	require.NoError(t, r.redactIntent(context.Background(), vm, a.OpID, s.Namespace))
+	require.NoError(t, r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID))
+	require.NoError(t, r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID))
 	assert.Empty(t, secretsByPrefix(t, r, operationIntentSecretPrefix))
 	assert.Len(t, secretsByPrefix(t, r, redactedIntentSecretPrefix), 1)
 
 	// A crash between writing the redacted Secret and deleting the full one.
 	full.ResourceVersion, full.UID = "", ""
 	require.NoError(t, r.Create(context.Background(), full))
-	require.NoError(t, r.redactIntent(context.Background(), vm, a.OpID, s.Namespace))
+	require.NoError(t, r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID))
 	assert.Empty(t, secretsByPrefix(t, r, operationIntentSecretPrefix), "the interrupted redaction is finished")
 	assert.Len(t, secretsByPrefix(t, r, redactedIntentSecretPrefix), 1)
 }
@@ -257,11 +261,11 @@ func (c *conflictingDeleteClient) Delete(ctx context.Context, obj client.Object,
 // A conflict deleting the full intent is retried with a fresh read.
 func TestIntentRedaction_ConflictRetried(t *testing.T) {
 	stub := newIdentityStub()
-	_, r, _, s := preparedWithIntentStub(t, stub)
+	_, r, _, _ := preparedWithIntentStub(t, stub)
 	vm := idVM(t, r)
 	a := findAttempt(vm, contracts.OperationKindCreate)
 	r.Client = &conflictingDeleteClient{Client: r.Client, conflicts: 2}
-	require.NoError(t, r.redactIntent(context.Background(), vm, a.OpID, s.Namespace))
+	require.NoError(t, r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID))
 	assert.Empty(t, secretsByPrefix(t, r, operationIntentSecretPrefix))
 	assert.Len(t, secretsByPrefix(t, r, redactedIntentSecretPrefix), 1)
 }
@@ -286,4 +290,171 @@ func TestIntentRedaction_RetriedOnReconcile(t *testing.T) {
 	reconcileN(t, r, req, 1)
 	assert.Empty(t, secretsByPrefix(t, r, operationIntentSecretPrefix), "the next reconcile finished the redaction")
 	assert.Len(t, secretsByPrefix(t, r, redactedIntentSecretPrefix), 1)
+}
+
+// swapClient replaces the stored full intent Secret right after its first
+// read (a principal with Secret write access racing the redaction), and
+// counts the reads of intent Secrets.
+type swapClient struct {
+	client.Client
+	swap func()
+	// only, when set, limits the counted reads to the Secrets of this op_id.
+	only  string
+	mu    sync.Mutex
+	done  bool
+	reads int
+}
+
+func (c *swapClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	err := c.Client.Get(ctx, key, obj, opts...)
+	if _, ok := obj.(*corev1.Secret); ok && strings.HasPrefix(key.Name, "vrtg-op") {
+		c.mu.Lock()
+		if c.only == "" || strings.HasSuffix(key.Name, c.only) {
+			c.reads++
+		}
+		first := !c.done && c.swap != nil && strings.HasPrefix(key.Name, operationIntentSecretPrefix)
+		c.done = c.done || first
+		c.mu.Unlock()
+		if first && err == nil {
+			c.swap()
+		}
+	}
+	return err
+}
+
+func (c *swapClient) secretReads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reads
+}
+
+// A full intent swapped between its authenticated read and the redaction is
+// neither the source of the redacted Secret nor deleted: the redacted Secret
+// is built from the authenticated read alone (its identity and owner), and
+// the planted Secret, which does not authenticate, is kept as evidence.
+func TestIntentRedaction_SwapBetweenReadAndUse(t *testing.T) {
+	stub := newIdentityStub()
+	_, r, _, s := preparedWithIntentStub(t, stub)
+	vm := idVM(t, r)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	base := r.Client
+	sc := &swapClient{Client: base}
+	sc.swap = func() {
+		planted := &corev1.Secret{}
+		require.NoError(t, base.Get(context.Background(), client.ObjectKeyFromObject(s), planted))
+		var ident intentIdentity
+		require.NoError(t, json.Unmarshal(planted.Data[intentKeyIdentity], &ident))
+		ident.Identity.EnrolmentID = bytes.Repeat([]byte{0x66}, 16)
+		planted.Data[intentKeyIdentity], _ = json.Marshal(ident)
+		planted.OwnerReferences = nil
+		require.NoError(t, base.Update(context.Background(), planted))
+	}
+	r.Client, r.APIReader = sc, sc
+	err := r.redactIntent(context.Background(), providerOf(t, r), vm, a.OpID)
+	require.ErrorIs(t, err, errIntentTampered, "the re-read Secret does not authenticate")
+	r.Client, r.APIReader = base, nil
+
+	full := secretsByPrefix(t, r, operationIntentSecretPrefix)
+	require.Len(t, full, 1, "the planted Secret is kept as evidence")
+	assert.Nil(t, full[0].OwnerReferences, "it is the planted one")
+	red := secretsByPrefix(t, r, redactedIntentSecretPrefix)
+	require.Len(t, red, 1)
+	require.Len(t, red[0].OwnerReferences, 1)
+	assert.Equal(t, identityProviderUID, red[0].OwnerReferences[0].UID, "the redacted Secret's owner comes from the Provider")
+	ref, found, err := r.loadRedactedIntent(context.Background(), vm, a.OpID, s.Namespace)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.NotEqual(t, bytes.Repeat([]byte{0x66}, 16), ref.Identity.EnrolmentID, "the identity comes from the authenticated read")
+}
+
+// A Secret already at the redacted intent's name that is not this attempt's
+// blocks the redaction: the full intent is kept and a Warning event names
+// both Secrets, once.
+func TestIntentRedaction_BlockedIsAnnounced(t *testing.T) {
+	stub := newIdentityStub()
+	stub.userData = userDataCanary
+	r, req := identityFixture(t, stub)
+	rec := record.NewFakeRecorder(50)
+	r.Recorder = rec
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		return contracts.OperationAnswer{TaskRef: "create-task"}, nil
+	}
+	running := true
+	stub.onTask = func(string) (contracts.TaskStatus, error) {
+		if running {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedClean, IsCompleted: true}, nil
+	}
+	reconcileN(t, r, req, 1)
+	a := findAttempt(idVM(t, r), contracts.OperationKindCreate)
+	full := secretsByPrefix(t, r, operationIntentSecretPrefix)[0]
+	junk := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: redactedIntentName(a.OpID), Namespace: full.Namespace,
+		Labels: full.Labels, Annotations: full.Annotations}, Type: operationIntentSecretType,
+		Data: map[string][]byte{intentKeyDigest: bytes.Repeat([]byte{1}, 32)}}
+	require.NoError(t, r.Create(context.Background(), junk))
+	running = false
+	reconcileN(t, r, req, 3)
+	assert.Len(t, secretsByPrefix(t, r, operationIntentSecretPrefix), 1, "the full intent is kept")
+	warnings := 0
+	for len(rec.Events) > 0 {
+		ev := <-rec.Events
+		if strings.Contains(ev, eventReasonIntentRedactionBlocked) {
+			warnings++
+			assert.Contains(t, ev, intentSecretName(a.OpID))
+			assert.Contains(t, ev, redactedIntentName(a.OpID))
+			assert.NotContains(t, ev, "cloud-config")
+		}
+	}
+	assert.Equal(t, 1, warnings, "announced once")
+
+	// The operator removes the wrong Secret; the next reconcile redacts.
+	require.NoError(t, r.Delete(context.Background(), junk))
+	reconcileN(t, r, req, 1)
+	assert.Empty(t, secretsByPrefix(t, r, operationIntentSecretPrefix))
+	assert.Len(t, secretsByPrefix(t, r, redactedIntentSecretPrefix), 1)
+}
+
+// A not-performed Create whose intent this process saw redacted costs no
+// Secret read on later reconciles, also past the sweep window (the VM's
+// later attempts, with other op_ids, are not counted); a restarted manager
+// checks it once.
+func TestIntentRedaction_SettledVMCostsNoReads(t *testing.T) {
+	_, r, req, c := redactedNotPerformedCreate(t)
+	now := c.LastTransitionTime.Time.Add(time.Second) // within the backoff: c stays the latest Create
+	r.clock = func() time.Time { return now }
+	base := r.Client
+	sc := &swapClient{Client: base, only: c.OpID}
+	r.Client, r.APIReader = sc, sc
+	reconcileN(t, r, req, 3)
+	assert.Zero(t, sc.secretReads(), "no intent Secret is read once the redaction is known done")
+
+	r.redactedOps = sync.Map{} // a restarted manager
+	reconcileN(t, r, req, 3)
+	assert.Equal(t, 1, sc.secretReads(), "checked once after a restart, then not again")
+
+	now = now.Add(operationIntentSweepGrace + time.Hour)
+	reconcileN(t, r, req, 3)
+	assert.Equal(t, 1, sc.secretReads(), "nothing more past the sweep window")
+}
+
+// An intent under a predecessor enrolment is held for the release without a
+// Delete, even when the host signs FAILED_CLEAN for it.
+func TestIntentRedaction_PredecessorIntentHeld(t *testing.T) {
+	stub, r, req, _ := redactedNotPerformedCreate(t)
+	p := providerOf(t, r)
+	old := stub.signed.host
+	h2 := newTestHost(t, p, "host-alpha", bytes.Repeat([]byte{0x45}, 16), old.trust.Enrolment.Epoch)
+	h2.trust.Predecessors = [][]byte{old.trust.Enrolment.EnrolmentID}
+	trust, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	trust.mu.Lock()
+	trust.hosts["host-alpha"] = h2
+	trust.mu.Unlock()
+	stub.signed.host = h2
+	stub.signed.predecessors = [][]byte{old.trust.Enrolment.EnrolmentID}
+	markDeleted(t, r, nil)
+	reconcileN(t, r, req, 2)
+	assert.False(t, vmGone(t, r), "a predecessor's not-performed Create does not release the VM")
+	assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(idVM(t, r)))
 }

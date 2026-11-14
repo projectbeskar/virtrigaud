@@ -28,9 +28,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
@@ -100,36 +102,46 @@ func ownRedactedIntent(s *corev1.Secret, opID string, vmUID types.UID) bool {
 		s.Labels[operationIntentLabel] == operationIntentLabelTrue && s.Labels[operationIntentVMUIDLabel] == string(vmUID)
 }
 
-// buildRedactedIntentSecret is the redacted form of full, an intent Secret
-// verified in this reconcile that holds p: the same labels, annotations and
-// owner, the identity and salt copied, the digest computed from its request
-// bytes, and no request.
-func buildRedactedIntentSecret(full *corev1.Secret, p contracts.PreparedOperation, auth operation.IntentAuthenticator) *corev1.Secret {
+// buildRedactedIntentSecret is the redacted intent Secret of p, an intent
+// authenticated in this reconcile, for vm, in the namespace of provider and
+// owned by it. Everything in it comes from verified material: the decoded
+// identity, salt and request bytes of p (the digest is computed from them),
+// vm and provider; nothing is copied from a Secret read.
+func buildRedactedIntentSecret(provider *infravirtrigaudiov1beta1.Provider, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	p contracts.PreparedOperation, scheme *runtime.Scheme, auth operation.IntentAuthenticator) (*corev1.Secret, error) {
+	ident, err := json.Marshal(intentIdentity{Kind: p.Kind, Identity: p.Identity})
+	if err != nil {
+		return nil, fmt.Errorf("encode the attempt identity: %w", err)
+	}
 	immutable := true
 	s := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            redactedIntentName(hex.EncodeToString(p.Identity.OpID)),
-			Namespace:       full.Namespace,
-			Labels:          map[string]string{},
-			Annotations:     map[string]string{},
-			OwnerReferences: append([]metav1.OwnerReference(nil), full.OwnerReferences...),
+			Name:      redactedIntentName(hex.EncodeToString(p.Identity.OpID)),
+			Namespace: provider.Namespace,
+			Labels: map[string]string{
+				operationIntentLabel:      operationIntentLabelTrue,
+				operationIntentVMUIDLabel: string(vm.UID),
+				operationIntentKindLabel:  string(p.Kind),
+				managedByLabel:            managedByValue,
+			},
+			Annotations: map[string]string{
+				operationIntentVMNamespaceAnnotation: vm.Namespace,
+				operationIntentVMNameAnnotation:      vm.Name,
+			},
 		},
 		Type:      operationIntentSecretType,
 		Immutable: &immutable,
 		Data: map[string][]byte{
-			intentKeyIdentity: append([]byte(nil), full.Data[intentKeyIdentity]...),
+			intentKeyIdentity: ident,
 			intentKeySalt:     append([]byte(nil), p.DigestSalt...),
 			intentKeyDigest:   operation.IntentDigest(p.DigestSalt, p.RequestBytes),
 		},
 	}
-	for _, k := range []string{operationIntentLabel, operationIntentVMUIDLabel, operationIntentKindLabel, managedByLabel} {
-		s.Labels[k] = full.Labels[k]
-	}
-	for _, k := range []string{operationIntentVMNamespaceAnnotation, operationIntentVMNameAnnotation} {
-		s.Annotations[k] = full.Annotations[k]
-	}
 	s.Data[intentKeyTag] = auth.SealIntent(redactedIntentMAC(s))
-	return s
+	if err := controllerutil.SetControllerReference(provider, s, scheme); err != nil {
+		return nil, fmt.Errorf("set the Provider as the redacted intent Secret's owner: %w", err)
+	}
+	return s, nil
 }
 
 // loadRedactedIntent reads and authenticates the redacted intent Secret of
@@ -189,23 +201,27 @@ func (r *VirtualMachineReconciler) loadPollIntent(ctx context.Context, vm *infra
 // at its name that does not match the full one.
 var errRedactionMismatch = errors.New("a redacted operation-intent Secret with other content already exists")
 
-// redactIntent redacts the intent of attempt opID of vm in namespace ns:
-// writes its redacted form, then deletes the full Secret (with its UID and
-// resourceVersion as preconditions, a conflict retried with a fresh read).
+// redactIntent redacts the intent of attempt opID of vm, in the namespace of
+// provider: it writes the redacted form built from the full intent as
+// authenticated by one read, then deletes exactly that Secret (its UID and
+// resourceVersion as preconditions). On a conflict the full Secret is read
+// and authenticated again before the next try; a Secret that does not
+// authenticate is never deleted (it is kept as evidence) and never redacted.
 // It is idempotent: with no full Secret there is nothing to do, and a
 // redacted Secret already written (by an interrupted redaction) is accepted
-// when it holds the same identity, salt and digest. A full Secret that does
-// not authenticate is kept as evidence and not redacted.
-func (r *VirtualMachineReconciler) redactIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) error {
-	p, found, err := r.loadIntent(ctx, vm, opID, ns)
+// when it names the same attempt and digest.
+func (r *VirtualMachineReconciler) redactIntent(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, opID string) error {
+	ns := provider.Namespace
+	p, full, found, err := r.loadIntentSecret(ctx, vm, opID, ns)
 	if err != nil || !found {
 		return err
 	}
-	full := &corev1.Secret{}
-	if err := r.intentReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: intentSecretName(opID)}, full); err != nil {
-		return client.IgnoreNotFound(err)
+	want := refOf(p)
+	red, err := buildRedactedIntentSecret(provider, vm, p, r.ownerScheme(), r.OperationIntentAuth)
+	if err != nil {
+		return err
 	}
-	red := buildRedactedIntentSecret(full, p, r.OperationIntentAuth)
 	if err := r.Create(ctx, red); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("create the redacted operation-intent Secret: %w", err)
@@ -214,22 +230,34 @@ func (r *VirtualMachineReconciler) redactIntent(ctx context.Context, vm *infravi
 		if lerr != nil {
 			return lerr
 		}
-		want := refOf(p)
+		// The existing redacted Secret authenticated under the redacted
+		// domain and its name fixes its op_id, so the same op_id and digest
+		// mean the same attempt and request: it is the redaction of this
+		// intent.
 		if !ok || !bytes.Equal(existing.Digest, want.Digest) || !bytes.Equal(existing.Identity.OpID, want.Identity.OpID) {
 			return errRedactionMismatch
 		}
 	}
+	cur := full
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &corev1.Secret{}
-		if err := r.intentReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: intentSecretName(opID)}, cur); err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		if !ownIntent(cur, opID, vm.UID) {
-			return errIntentNotOurs
+		if cur == nil {
+			again, s, ok, lerr := r.loadIntentSecret(ctx, vm, opID, ns)
+			if lerr != nil {
+				return lerr
+			}
+			if !ok {
+				return nil
+			}
+			if !bytes.Equal(refOf(again).Digest, want.Digest) {
+				return errRedactionMismatch
+			}
+			cur = s
 		}
 		uid, rv := cur.UID, cur.ResourceVersion
-		if err := r.Delete(ctx, cur, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete the full operation-intent Secret: %w", err)
+		err := r.Delete(ctx, cur, client.Preconditions{UID: &uid, ResourceVersion: &rv})
+		cur = nil
+		if err != nil && !apierrors.IsNotFound(err) {
+			return err
 		}
 		return nil
 	})
