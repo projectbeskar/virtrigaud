@@ -249,6 +249,11 @@ func TestVerifyAnswerRefuses(t *testing.T) {
 			raw, _ := proto.Marshal(a)
 			return signRaw(t, f.pki.HostKey, f.cert, opType, raw)
 		}},
+		"non-canonical body (a singular field repeated)": {blob: func() *providerv1.SignedBlob {
+			raw, _ := proto.Marshal(f.opAnswer())
+			raw = protowire.AppendString(protowire.AppendTag(raw, 8, protowire.BytesType), "vm-uid-1")
+			return signRaw(t, f.pki.HostKey, f.cert, opType, raw)
+		}},
 		"undefined state": {blob: func() *providerv1.SignedBlob {
 			a := f.opAnswer()
 			a.State = 42

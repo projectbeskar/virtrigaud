@@ -254,6 +254,13 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	if err := checkMessage(body.ProtoReflect()); err != nil {
 		return VerifiedAnswer{}, err
 	}
+	// One encoding per answer: the body must be exactly the deterministic
+	// encoding of what it decodes to (the agent signs that encoding), so no
+	// repeated singular field or other non-canonical bytes ride along into
+	// the logged answer.
+	if canon, err := (proto.MarshalOptions{Deterministic: true}).Marshal(body); err != nil || !bytes.Equal(canon, blob.GetBody()) {
+		return VerifiedAnswer{}, refuse("the body is not canonically encoded")
+	}
 	switch {
 	case out.Operation != nil:
 		out.Context, err = out.Operation.GetContext(), checkOperationAnswer(out.Operation)
