@@ -120,6 +120,12 @@ type HostReconciler struct {
 	Scheme         *runtime.Scheme
 	RemoteResolver ProviderResolver
 
+	// HostAnswers, when set, is the manager's state of signed host answers
+	// (development builds): for a Provider whose type requires operation
+	// identity, the heartbeat asks the host for a signed host answer
+	// (host_controller_answer.go).
+	HostAnswers *HostAnswers
+
 	// publishedProvider maps a Host (namespace/name) to the Provider label its
 	// committed-capacity gauges were last published under, so a changed
 	// spec.providerRef, or the Host's deletion, drops the stale series. The
@@ -345,7 +351,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 
 	// 4. Cheap single-host refresh (NOT a full ListHosts). The host id is the Host
 	//    CR name (#315 render / #318 HostInfo.id).
-	info, err := providerInstance.GetHostInfo(ctx, host.Name)
+	info, err := r.getHostInfo(ctx, host, provider, providerInstance)
 	if err != nil {
 		return r.handleGetHostInfoError(ctx, host, base, provider, err)
 	}
