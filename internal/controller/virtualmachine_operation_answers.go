@@ -444,8 +444,12 @@ func (r *VirtualMachineReconciler) signedDeleteConfirmed(ctx context.Context, vm
 // again, for a request the manager makes now, that c was not performed:
 // FAILED_CLEAN, or RETIRED under the host's current enrolment, from c's
 // retained intent (redacted once that Create went Terminal: its identity and
-// intent digest are all the question needs). A missing or failing intent, or
-// any other answer, is not.
+// intent digest are all the question needs). A missing or failing intent, an
+// intent under a predecessor enrolment, or any other answer, is not.
+// checkIntentRequest is not needed here: the request is bound by the intent's
+// MAC (over the request bytes, or over their digest for a redacted intent)
+// and the host's answer must carry the same digest (bindsTo), and nothing is
+// sent from it.
 func (r *VirtualMachineReconciler) signedNotPerformed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	c *infravirtrigaudiov1beta1.OperationAttempt) bool {
 	if c.OpID == "" {
@@ -455,8 +459,9 @@ func (r *VirtualMachineReconciler) signedNotPerformed(ctx context.Context, vm *i
 	if err != nil || !found {
 		return false
 	}
-	cerr := r.checkIntentIdentity(ctx, vm, ia, c, p.Kind, p.Identity)
-	if cerr != nil && !errors.Is(cerr, errIntentPredecessor) {
+	// An intent under a predecessor enrolment is held for this decision, as
+	// every predecessor attempt is after a re-enrolment.
+	if err := r.checkIntentIdentity(ctx, vm, ia, c, p.Kind, p.Identity); err != nil {
 		return false
 	}
 	poll := r.pollSigned(ctx, vm, ia, p)
