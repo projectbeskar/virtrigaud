@@ -128,7 +128,8 @@ func TestPinsHostTrust(t *testing.T) {
 func TestHostAnswers_StoreRegressionHoldsHost(t *testing.T) {
 	stub := newIdentityStub()
 	r, req := createdIdentityVM(t, stub)
-	trust := r.HostAnswers.Trust.(*staticTrust)
+	trust, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
 	stub.signed.host.rollBack(3)
 	stub.describeResp.PowerState = "Off"
 	setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
@@ -160,7 +161,8 @@ func TestHostAnswers_StoreRegressionHoldsHost(t *testing.T) {
 func TestHostAnswers_DefiniteAnswerPersistsPositionFirst(t *testing.T) {
 	stub := newIdentityStub()
 	r, _ := createdIdentityVM(t, stub)
-	trust := r.HostAnswers.Trust.(*staticTrust)
+	trust, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
 	st := trust.stores["host-alpha"]
 	assert.GreaterOrEqual(t, st.Current.Seq, uint64(3), "the position of the answer that closed the Create is persisted")
 	assert.Positive(t, trust.writes)

@@ -326,10 +326,14 @@ func (r *VirtualMachineReconciler) holdPredecessor(ctx context.Context, vm *infr
 			"re-enrolment, and the attempt is never re-sent; %s", a.Kind, a.Attempt, state, operationHoldRecovery), operationHoldRecheckInterval), nil
 }
 
-// vmAnswer asks the host of the Delete p whether the VM's placement it
-// names is deleted. deleted reports a verified, READY, bound DELETED answer;
-// sameOp that it names p's op_id as the Delete that deleted it.
-func (r *VirtualMachineReconciler) vmAnswer(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
+// authenticatedHostDeleted asks the host of the Delete p (its verified
+// intent) whether the VM's placement it names is deleted. deleted reports a
+// verified, READY answer, for a request the manager made now, that the
+// placement is DELETED, bound to the intent's VM UID and binding and signed
+// by the host the Delete was sent to under its current enrolment; sameOp
+// that it names p's op_id as the Delete that deleted it. NO_RECORD, another
+// binding, an unsigned exists=false or NotFound are never "deleted".
+func (r *VirtualMachineReconciler) authenticatedHostDeleted(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	p *contracts.PreparedOperation) (deleted, sameOp bool, read contracts.SignedRead, v hostidentity.VerifiedAnswer) {
 	id := p.Identity
 	hr, err := r.HostAnswers.begin(ctx, ia.providerCR, id.HostID)
@@ -353,16 +357,6 @@ func (r *VirtualMachineReconciler) vmAnswer(ctx context.Context, vm *infravirtri
 	return true, bytes.Equal(v.VM.GetDeleteOpId(), id.OpID), read, v
 }
 
-// authenticatedHostDeleted reports whether the host of the Delete attempt a
-// (verified intent p) signed, for a request the manager made, that the VM's
-// placement is DELETED: bound to the VM's UID and its binding, signed by the
-// host the Delete was sent to under its current enrolment.
-func (r *VirtualMachineReconciler) authenticatedHostDeleted(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, p *contracts.PreparedOperation) bool {
-	deleted, _, _, _ := r.vmAnswer(ctx, vm, ia, p)
-	return deleted
-}
-
 // deleteByVMAnswer settles the Delete attempt a when its host signs that the
 // VM's placement is DELETED: by this Delete (the attempt closes Succeeded and
 // the finalizer follows), or by another Delete of the same placement on that
@@ -370,7 +364,7 @@ func (r *VirtualMachineReconciler) authenticatedHostDeleted(ctx context.Context,
 // false when the host does not sign that.
 func (r *VirtualMachineReconciler) deleteByVMAnswer(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, p *contracts.PreparedOperation) (attemptStep, ctrl.Result, bool) {
-	deleted, sameOp, read, v := r.vmAnswer(ctx, vm, ia, p)
+	deleted, sameOp, read, v := r.authenticatedHostDeleted(ctx, vm, ia, p)
 	if !deleted {
 		return stepWaiting, ctrl.Result{}, false
 	}
@@ -404,7 +398,7 @@ func (r *VirtualMachineReconciler) signedDeleteConfirmed(ctx context.Context, vm
 	if poll.verdict == answerRegressed {
 		return false
 	}
-	deleted, _, read, v := r.vmAnswer(ctx, vm, ia, &p)
+	deleted, _, read, v := r.authenticatedHostDeleted(ctx, vm, ia, &p)
 	if deleted {
 		auditSignedDecision(ctx, read, v, "Delete release confirmed by a deleted placement", d.OpID, fmtID(v.VM.GetDeleteOpId()))
 	}

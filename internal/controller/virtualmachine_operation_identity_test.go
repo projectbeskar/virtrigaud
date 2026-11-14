@@ -701,7 +701,9 @@ func TestIdentityCreate_HintMismatchHolds(t *testing.T) {
 func TestIdentityCreate_NoEnrolmentOrSender(t *testing.T) {
 	stub := newIdentityStub()
 	r, req := identityFixture(t, stub)
-	r.HostAnswers.Trust.(*staticTrust).hosts = map[string]*testHost{}
+	trust, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	trust.hosts = map[string]*testHost{}
 	reconcileN(t, r, req, 2)
 	assert.Equal(t, k8s.ReasonOperationEnrolmentUnavailable, readyReason(idVM(t, r)))
 	assert.Empty(t, stub.sent())

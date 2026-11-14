@@ -496,8 +496,11 @@ func TestAgentIdentity_StoreRestoredWithAnchorHoldsHost(t *testing.T) {
 
 	provider := &infravirtrigaudiov1beta1.Provider{}
 	require.NoError(t, e.r.Get(context.Background(), client.ObjectKey{Namespace: trusttest.HostNS, Name: "prov-cluster"}, provider))
-	cli := e.r.RemoteResolver.(*stubResolver).provider.(ownerFilterClient).Client
-	_, _, verdict, err := e.r.HostAnswers.RefreshHostAnswer(context.Background(), provider, cli, agentHost)
+	res, ok := e.r.RemoteResolver.(*stubResolver)
+	require.True(t, ok)
+	reader, ok := res.provider.(contracts.HostAnswerReader)
+	require.True(t, ok)
+	_, _, verdict, err := e.r.HostAnswers.RefreshHostAnswer(context.Background(), provider, reader, agentHost)
 	require.NoError(t, err)
 	assert.Equal(t, answerRegressed, verdict, "the restored store is below the position the manager verified")
 

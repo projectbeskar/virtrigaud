@@ -226,12 +226,12 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		return VerifiedAnswer{}, refuse("body type %q is not the one this request answers with", blob.GetBodyType())
 	}
 	// V-4, V-5, V-6 signer certificate.
-	leaf, rec, pin, err := verifySigner(blob.GetSignerCertificate(), exp)
+	pub, rec, pin, err := verifySigner(blob.GetSignerCertificate(), exp)
 	if err != nil {
 		return VerifiedAnswer{}, err
 	}
 	// V-7 signature.
-	if err := verifyAnswerSignature(leaf.PublicKey.(*ecdsa.PublicKey), blob); err != nil { //nolint:forcetypeassert // checked in verifySigner
+	if err := verifyAnswerSignature(pub, blob); err != nil {
 		return VerifiedAnswer{}, err
 	}
 	// V-8 body.
@@ -296,9 +296,9 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	return out, nil
 }
 
-// verifySigner checks the signer certificate (V-4..V-6) and returns it, its
-// enrolment record and its key pin.
-func verifySigner(der []byte, exp AnswerExpectation) (*x509.Certificate, Record, string, error) {
+// verifySigner checks the signer certificate (V-4..V-6) and returns its key,
+// its enrolment record and its key pin.
+func verifySigner(der []byte, exp AnswerExpectation) (*ecdsa.PublicKey, Record, string, error) {
 	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
 		return nil, Record{}, "", refuse("the signer certificate is not one DER certificate")
@@ -325,7 +325,7 @@ func verifySigner(der []byte, exp AnswerExpectation) (*x509.Certificate, Record,
 	if err != nil || !slices.Contains(exp.Pins, pin) {
 		return nil, Record{}, "", refuse("the signer key is not pinned for the host")
 	}
-	return leaf, rec, pin, nil
+	return pub, rec, pin, nil
 }
 
 // verifyAnswerSignature checks V-7: a low-S, exactly DER encoded ECDSA
