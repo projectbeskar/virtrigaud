@@ -383,6 +383,14 @@ spec:
                       type: object
                     maxItems: 32
                     type: array
+                  enrolmentID:
+                    description: |-
+                      EnrolmentID is the enrolment of the host's agent whose answer carried
+                      the inventory: 32 lowercase hexadecimal characters. The mirror is
+                      cleared when the host's current enrolment differs.
+                    maxLength: 32
+                    pattern: ^[0-9a-f]{32}$
+                    type: string
                   features:
                     description: Features are the feature probe results, sorted by
                       name.

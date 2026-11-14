@@ -158,6 +158,9 @@ const (
 	// HostReasonComponentsAgentNotReady: the agent reports a state other than
 	// ready.
 	HostReasonComponentsAgentNotReady = "AgentNotReady"
+	// HostReasonComponentsNoneReported: the verified inventory lists no host
+	// component at all.
+	HostReasonComponentsNoneReported = "NoComponentsReported"
 	// HostReasonComponentsUnexpectedExtension: a system extension no
 	// component declares is merged on the host.
 	HostReasonComponentsUnexpectedExtension = "UnexpectedExtension"
@@ -500,7 +503,9 @@ type HostInventoryExtension struct {
 }
 
 // HostAgentInventoryStatus is the host inventory the manager last verified
-// in a signed host answer of the host's agent. It is an output only: no
+// in a signed host answer of the host's agent (see ObservedTime for when). It
+// is cleared when the host's enrolment changes or its Provider no longer runs
+// a per-host agent. It is an output only: no
 // controller, the scheduler included, reads it back to decide anything; the
 // conditions and health are computed from the verified answer itself. It is
 // a statement by the host's agent, signed so the Provider cannot alter it,
@@ -518,6 +523,14 @@ type HostAgentInventoryStatus struct {
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
 	// +kubebuilder:validation:MaxLength=64
 	AnswerSHA256 string `json:"answerSHA256,omitempty"`
+
+	// EnrolmentID is the enrolment of the host's agent whose answer carried
+	// the inventory: 32 lowercase hexadecimal characters. The mirror is
+	// cleared when the host's current enrolment differs.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	// +kubebuilder:validation:MaxLength=32
+	EnrolmentID string `json:"enrolmentID,omitempty"`
 
 	// AllowListSHA256 is the SHA-256 of the component allow-list the
 	// manager compared the inventory with; empty when it has none.
