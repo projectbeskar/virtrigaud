@@ -122,6 +122,8 @@ var (
 	_ clustered.PlacementTracker        = (*Target)(nil)
 	_ clustered.HostAnswerTarget        = (*Target)(nil)
 	_ clustered.GRPCServerTarget        = (*Target)(nil)
+	_ clustered.HostBlackholer          = (*Target)(nil)
+	_ clustered.HostRemover             = (*Target)(nil)
 )
 
 // New starts one agent process per host, a loopback proxy in front of each,
@@ -250,8 +252,11 @@ func (t *Target) front(ct clustered.T, h *Host, hostURI string, key *ecdsa.Priva
 
 // newProvider returns a new clustered Provider over the Target's inventory.
 func (t *Target) newProvider() (*cloudhypervisor.Provider, error) {
+	t.mu.Lock()
+	inv := t.inv
+	t.mu.Unlock()
 	return cloudhypervisor.New(cloudhypervisor.Options{ClientCertificate: t.clientCert, ProviderUID: trusttest.ProviderUID,
-		APIVersion: t.apiVersion, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, t.inv)
+		APIVersion: t.apiVersion, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, inv)
 }
 
 // Provider returns the Target's current clustered Provider.
@@ -312,10 +317,10 @@ func (t *Target) Capabilities() clustered.Capabilities {
 	why := "the per-host agent target exercises the operation path only"
 	return clustered.Capabilities{
 		Features: []clustered.Feature{clustered.FeatureOperationIdentity, clustered.FeatureOperationIdentityRequired,
-			clustered.FeatureAsyncTasks, clustered.FeatureCreate, clustered.FeatureScriptedOutcomes, clustered.FeatureHostAnswers},
+			clustered.FeatureAsyncTasks, clustered.FeatureCreate, clustered.FeatureScriptedOutcomes, clustered.FeatureHostAnswers,
+			clustered.FeatureHostInventory, clustered.FeatureHostBlackhole, clustered.FeatureHostRemoval},
 		Reasons: map[clustered.Feature]string{
-			clustered.FeatureVMNotOwnedReason: why, clustered.FeatureHostInventory: why, clustered.FeatureCreateOwnerRebind: why,
-			clustered.FeatureHostBlackhole: why, clustered.FeatureHostFaults: why, clustered.FeatureHostRemoval: why,
+			clustered.FeatureVMNotOwnedReason: why, clustered.FeatureCreateOwnerRebind: why, clustered.FeatureHostFaults: why,
 			clustered.FeatureUnreadableStamp: why, clustered.FeatureProviderNotReady: why,
 		},
 	}
@@ -366,6 +371,34 @@ func (t *Target) Restart() error {
 	t.prov = prov
 	t.mu.Unlock()
 	return old.Close()
+}
+
+// SetHostBlackholed implements clustered.HostBlackholer: the host's proxy
+// accepts connections and forwards nothing.
+func (t *Target) SetHostBlackholed(host string, blackholed bool) error {
+	px, ok := t.proxies[host]
+	if !ok {
+		return fmt.Errorf("no host %q", host)
+	}
+	px.setBlackhole(blackholed)
+	return nil
+}
+
+// RemoveHost implements clustered.HostRemover: the host leaves the
+// Provider's inventory, as an inventory reload would remove it; its agent
+// keeps running.
+func (t *Target) RemoveHost(host string) error {
+	t.mu.Lock()
+	kept := t.inv.Hosts[:0:0]
+	for _, h := range t.inv.Hosts {
+		if h.ID != host {
+			kept = append(kept, h)
+		}
+	}
+	t.inv.Hosts = kept
+	inv, prov := t.inv, t.prov
+	t.mu.Unlock()
+	return prov.Reconcile(inv)
 }
 
 // SetHostReachable implements clustered.Target: the host's proxy cuts every

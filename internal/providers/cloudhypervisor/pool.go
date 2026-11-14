@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -129,6 +130,43 @@ func (e *hostEntry) watch(ctx context.Context) {
 			e.mu.Lock()
 			e.epoch++
 			e.mu.Unlock()
+		}
+	}
+}
+
+// awaitConnection gives the connection to the agent up to limit to become
+// READY. It reports false only when a connection attempt is still under way
+// at limit (an agent that accepts connections and never completes the
+// handshake): nothing can be sent. Otherwise the call proceeds: on a READY
+// connection, or failing fast with the error of the attempt that failed. A
+// connection that failed before is retried at once rather than after its
+// backoff (and the call waits for that attempt), so that a host that came
+// back is reached by the next call; while a failed connection retries, its
+// state stays TRANSIENT_FAILURE until it is READY.
+func (e *hostEntry) awaitConnection(ctx context.Context, limit time.Duration) bool {
+	s := e.conn.GetState()
+	switch s {
+	case connectivity.Ready, connectivity.Shutdown:
+		return true
+	case connectivity.TransientFailure:
+		e.conn.ResetConnectBackoff()
+	case connectivity.Idle:
+		e.conn.Connect()
+	}
+	cctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	for {
+		if !e.conn.WaitForStateChange(cctx, s) {
+			// Still TRANSIENT_FAILURE: the retry failed too; fail fast with
+			// its error. Still CONNECTING: nothing was established.
+			return s == connectivity.TransientFailure
+		}
+		s = e.conn.GetState()
+		switch s {
+		case connectivity.Ready, connectivity.Shutdown, connectivity.TransientFailure:
+			return true
+		case connectivity.Idle:
+			e.conn.Connect()
 		}
 	}
 }

@@ -42,6 +42,10 @@ import (
 // ProviderType is the Provider type this package serves.
 const ProviderType = "cloudhypervisor"
 
+// DefaultConnectTimeout is how long a call waits for a connection to an
+// agent before the host is answered unavailable.
+const DefaultConnectTimeout = 2 * time.Second
+
 // listHostsHelloTimeout bounds the Hello ListHosts makes to a host that has
 // none on its current connection.
 const listHostsHelloTimeout = 5 * time.Second
@@ -61,6 +65,9 @@ type Options struct {
 	// Breaker configures each host's circuit breaker; nil uses
 	// DefaultBreakerThreshold and DefaultBreakerReset.
 	Breaker *resilience.Config
+	// ConnectTimeout bounds how long a call waits for a connection to an
+	// agent; zero uses DefaultConnectTimeout.
+	ConnectTimeout time.Duration
 	// DialContext, when set, opens the connections to agents.
 	DialContext func(ctx context.Context, addr string) (net.Conn, error)
 	// Now is the clock agent certificates are judged at; nil uses time.Now.
@@ -90,6 +97,9 @@ func New(opts Options, inv hostsecret.Inventory) (*Provider, error) {
 	}
 	if opts.APIVersion == 0 {
 		opts.APIVersion = APIVersion
+	}
+	if opts.ConnectTimeout == 0 {
+		opts.ConnectTimeout = DefaultConnectTimeout
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now

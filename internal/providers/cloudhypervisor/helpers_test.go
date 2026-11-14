@@ -105,6 +105,7 @@ type countingListener struct {
 	net.Listener
 	accepted atomic.Int32
 	open     atomic.Int32
+	refuse   atomic.Bool
 	mu       sync.Mutex
 	conns    map[*countedConn]struct{}
 }
@@ -127,6 +128,10 @@ func (c *countedConn) Close() error {
 
 func (l *countingListener) Accept() (net.Conn, error) {
 	c, err := l.Listener.Accept()
+	for err == nil && l.refuse.Load() {
+		_ = c.Close()
+		c, err = l.Listener.Accept()
+	}
 	if err != nil {
 		return nil, err
 	}

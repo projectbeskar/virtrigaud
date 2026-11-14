@@ -19,6 +19,7 @@ limitations under the License.
 package cloudhypervisor
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -238,7 +239,9 @@ func TestTaskReferences(t *testing.T) {
 	_, err = client.TaskStatus(ctx(t), &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: "not-host-encoded"}})
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 	_, err = client.TaskStatus(ctx(t), &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: clustered.EncodeHostTaskRef("host-zzz", "t")}})
-	requireHostUnavailable(t, err, CauseNotFronted)
+	assert.Equal(t, codes.NotFound, status.Code(err), "a task of a host the Provider does not front was not issued by it")
+	_, err = client.Describe(ctx(t), &providerv1.DescribeRequest{Id: "vm-1"})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "a read names its host")
 }
 
 // TestHelloVersionWindow: an agent of the Provider's API version or the one
@@ -300,7 +303,8 @@ func TestOneHostDownOthersUnaffected(t *testing.T) {
 	p := newPKI(t)
 	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
 	b := newFakeAgent(t, p, "host-b", fakeAgentOptions{})
-	prov := newProvider(t, p, Options{Breaker: &resilience.Config{FailureThreshold: 2, ResetTimeout: time.Hour, HalfOpenMaxCalls: 1}}, a, b)
+	prov := newProvider(t, p, Options{ConnectTimeout: 300 * time.Millisecond,
+		Breaker: &resilience.Config{FailureThreshold: 2, ResetTimeout: time.Hour, HalfOpenMaxCalls: 1}}, a, b)
 	client := providerv1.NewProviderClient(served(t, prov))
 
 	b.srv.Stop()
@@ -447,4 +451,51 @@ func refusalErr(code codes.Code, reason string) error {
 		return status.Error(code, "refused")
 	}
 	return st.Err()
+}
+
+// TestHostRecovery: a host that comes back is reached by the next call, not
+// after the connection's backoff.
+func TestHostRecovery(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	client := providerv1.NewProviderClient(served(t, newProvider(t, p, Options{ConnectTimeout: time.Second}, a)))
+	a.lis.refuse.Store(true)
+	for i := 0; i < 3; i++ {
+		_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		requireHostUnavailable(t, err, CauseAgentUnreachable)
+	}
+	a.lis.refuse.Store(false)
+	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	require.NoError(t, err, "the first call after the host is back reaches it")
+}
+
+// TestBlackholedHostBounded: an agent that accepts connections and never
+// completes the handshake is answered unavailable within the connect
+// timeout.
+func TestBlackholedHostBounded(t *testing.T) {
+	p := newPKI(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	e := a.entry()
+	e.Endpoint = "grpc://" + l.Addr().String()
+	prov, err := New(Options{ClientCertificate: p.client, ConnectTimeout: 200 * time.Millisecond, Logger: quiet()},
+		hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion, Hosts: []hostsecret.Host{e}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = prov.Close() })
+	client := providerv1.NewProviderClient(served(t, prov))
+	start := time.Now()
+	_, err = client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	requireHostUnavailable(t, err, CauseAgentUnreachable)
+	assert.Less(t, time.Since(start), 5*time.Second)
 }

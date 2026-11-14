@@ -241,7 +241,7 @@ func hostOfMutation(r route, outer proto.Message) (string, error) {
 		return "", status.Error(codes.InvalidArgument, "operation_envelope.request does not decode as the method's request")
 	}
 	h, ok := inner.(interface{ GetTargetHostId() string })
-	if !ok || h.GetTargetHostId() == "" {
+	if !ok || strings.TrimSpace(h.GetTargetHostId()) == "" {
 		return "", status.Error(codes.InvalidArgument, "the request inside operation_envelope names no target_host_id")
 	}
 	return h.GetTargetHostId(), nil
@@ -262,9 +262,12 @@ func (p *Provider) handle(ctx context.Context, method string, raw []byte) (proto
 	if r.mutating {
 		return p.mutate(ctx, r, raw, decoded)
 	}
-	host, forward, err := readRoute(decoded, raw)
+	host, forward, err := readRoute(decoded, raw, func(h string) bool { _, ok := p.pool.get(h); return ok })
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(host) == "" {
+		return nil, status.Error(codes.InvalidArgument, "the request names no host")
 	}
 	out := &emptypb.Empty{}
 	if err := p.forward(ctx, host, method, rawFrame(forward), out, false); err != nil {
@@ -276,7 +279,7 @@ func (p *Provider) handle(ctx context.Context, method string, raw []byte) (proto
 // readRoute returns the host a read is routed to and the bytes to forward:
 // the request unchanged, except for a TaskStatus that names a host-encoded
 // task, which is forwarded with the agent's own task reference.
-func readRoute(decoded proto.Message, raw []byte) (string, []byte, error) {
+func readRoute(decoded proto.Message, raw []byte, fronted func(string) bool) (string, []byte, error) {
 	switch req := decoded.(type) {
 	case *providerv1.DescribeRequest:
 		return req.GetTargetHostId(), raw, nil
@@ -292,6 +295,11 @@ func readRoute(decoded proto.Message, raw []byte) (string, []byte, error) {
 		host, inner, err := clustered.ParseHostTaskRef(req.GetTask().GetId())
 		if err != nil {
 			return "", nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		if !fronted(string(host)) {
+			// Not a reference this Provider issued: never dialed.
+			return "", nil, status.Error(codes.NotFound,
+				"the task's host is not fronted by this Provider; the task reference was not issued by it")
 		}
 		b, err := proto.Marshal(&providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: inner}})
 		if err != nil {
@@ -349,6 +357,8 @@ func mapCallError(ctx context.Context, host string, mutating bool, cs *callState
 		return nil
 	case errors.Is(err, errBreakerOpen):
 		return hostUnavailable(host, true, CauseBreakerOpen)
+	case errors.Is(err, errNotConnected):
+		return hostUnavailable(host, true, CauseAgentUnreachable)
 	case cs.answered.Load():
 		return err
 	case ctx.Err() != nil:
@@ -374,8 +384,15 @@ func notSentCause(err error) string {
 func (p *pool) invoke(ctx context.Context, e *hostEntry, method string, req, resp any, opts ...grpc.CallOption) (*callState, error) {
 	ctx, cs := withCallState(ctx)
 	err := guard(ctx, e.breaker, func(ctx context.Context) (bool, error) {
+		if !e.awaitConnection(ctx, p.opts.ConnectTimeout) {
+			return false, errNotConnected
+		}
 		err := e.conn.Invoke(ctx, method, req, resp, opts...)
 		return cs.answered.Load(), err
 	})
 	return cs, err
 }
+
+// errNotConnected is returned by invoke when no connection to the agent was
+// made within the connect timeout: nothing was sent.
+var errNotConnected = errors.New("no connection to the agent")
