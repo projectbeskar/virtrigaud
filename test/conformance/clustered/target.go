@@ -43,6 +43,8 @@ import (
 	"crypto/x509"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -279,6 +281,17 @@ type Target interface {
 	// configuration alone. The state of the hosts (VMs, owner stamps, host
 	// reachability) is kept. Afterwards Server returns the new service.
 	Restart() error
+}
+
+// GRPCServerTarget is implemented by a Target whose Provider registers its
+// own gRPC service description (for example one that reads its requests as
+// raw bytes) instead of the generated one. The suite serves the server it
+// returns in place of a plain grpc.Server with Server() registered; it is
+// called for every start of the Provider.
+type GRPCServerTarget interface {
+	// NewGRPCServer returns a new, not yet serving, gRPC server with the
+	// Provider registered on it.
+	NewGRPCServer() *grpc.Server
 }
 
 // CreateTemplater is implemented by a Target whose Create needs more than a

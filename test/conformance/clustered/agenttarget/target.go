@@ -29,12 +29,15 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -44,10 +47,13 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
+	clusteredref "github.com/projectbeskar/virtrigaud/internal/clustered"
+	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
+	"github.com/projectbeskar/virtrigaud/internal/providers/cloudhypervisor"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/test/conformance/clustered"
 )
@@ -71,6 +77,9 @@ type Config struct {
 	// StepDeadline is the hosts' step deadline; zero uses
 	// DefaultStepDeadline.
 	StepDeadline time.Duration
+	// ProviderAPIVersion is the agent API version the Provider speaks; zero
+	// uses the Provider's own. A test sets it to stand for another release.
+	ProviderAPIVersion uint32
 }
 
 // fatalT adapts a clustered.T to the test helpers that need Fatalf.
@@ -92,9 +101,13 @@ type Target struct {
 	placements *clustered.Placements
 	deadline   time.Duration
 
+	clientCert tls.Certificate
+	apiVersion uint32
+	inv        hostsecret.Inventory
+	proxies    map[string]*proxy
+
 	mu      sync.Mutex
-	r       *router
-	down    map[string]bool
+	prov    *cloudhypervisor.Provider
 	tasks   map[string][]string
 	scripts map[string]fake.Script
 	// seeded maps host/name of a seeded VM to its owner UID.
@@ -108,10 +121,15 @@ var (
 	_ clustered.OutcomeScripter         = (*Target)(nil)
 	_ clustered.PlacementTracker        = (*Target)(nil)
 	_ clustered.HostAnswerTarget        = (*Target)(nil)
+	_ clustered.GRPCServerTarget        = (*Target)(nil)
+	_ clustered.HostBlackholer          = (*Target)(nil)
+	_ clustered.HostRemover             = (*Target)(nil)
 )
 
-// New starts one agent process per host and returns the Target. The
-// processes stop when t ends.
+// New starts one agent process per host, a loopback proxy in front of each,
+// and the clustered Provider for per-host agents
+// (internal/providers/cloudhypervisor) over an inventory of the proxies, and
+// returns the Target. The processes stop when t ends.
 func New(t clustered.T, cfg Config) (*Target, error) {
 	t.Helper()
 	ft := fatalT{t}
@@ -139,7 +157,8 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 	}
 	tg := &Target{t: t, byName: map[string]*Host{}, signer: sg, epoch: operation.Epoch{Counter: StartEpoch, Holder: holder},
 		hostCA: hostidentitytest.NewCA(ft), placements: clustered.NewPlacements(), deadline: cfg.StepDeadline,
-		down: map[string]bool{}, tasks: map[string][]string{}, scripts: map[string]fake.Script{}, seeded: map[string]string{}}
+		apiVersion: cfg.ProviderAPIVersion, inv: hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion},
+		proxies: map[string]*proxy{}, tasks: map[string][]string{}, scripts: map[string]fake.Script{}, seeded: map[string]string{}}
 	providerCA := hostidentitytest.NewCA(ft)
 	clientTLS, err := tg.providerTLS(ft, providerCA)
 	if err != nil {
@@ -193,13 +212,63 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		if h.State() != providerv1.AgentState_AGENT_STATE_READY {
 			return nil, fmt.Errorf("the agent %s started %s, not ready\n%s", name, h.State(), h.tail())
 		}
+		if err := tg.front(t, h, hostURI, key); err != nil {
+			return nil, err
+		}
 	}
-	tg.r = &router{t: tg}
+	tg.clientCert = clientTLS.Certificates[0]
+	prov, err := tg.newProvider()
+	if err != nil {
+		return nil, err
+	}
+	tg.prov = prov
+	t.Cleanup(func() {
+		tg.mu.Lock()
+		p := tg.prov
+		tg.mu.Unlock()
+		_ = p.Close()
+	})
 	return tg, nil
 }
 
-// providerTLS is the router's client TLS: the Provider identity certificate
-// and the host identity issuer as the only root.
+// front puts a proxy in front of h's agent and adds the host to the
+// Provider's inventory: the proxy's address, the host identity issuer, the
+// host's URI and the pin of its key.
+func (t *Target) front(ct clustered.T, h *Host, hostURI string, key *ecdsa.PrivateKey) error {
+	px, err := newProxy(h.Addr)
+	if err != nil {
+		return err
+	}
+	ct.Cleanup(px.Close)
+	pin, err := hostidentity.SPKIPin(key.Public())
+	if err != nil {
+		return err
+	}
+	t.proxies[h.Name] = px
+	t.inv.Hosts = append(t.inv.Hosts, hostsecret.Host{ID: h.Name, Endpoint: hostsecret.AgentEndpointScheme + px.Addr(),
+		Credentials: hostsecret.Credentials{AgentTLS: &hostsecret.AgentTLS{CABundle: t.hostCA.PEM, ExpectedSAN: hostURI, KeyPins: []string{pin}}}})
+	return nil
+}
+
+// newProvider returns a new clustered Provider over the Target's inventory.
+func (t *Target) newProvider() (*cloudhypervisor.Provider, error) {
+	t.mu.Lock()
+	inv := t.inv
+	t.mu.Unlock()
+	return cloudhypervisor.New(cloudhypervisor.Options{ClientCertificate: t.clientCert, ProviderUID: trusttest.ProviderUID,
+		APIVersion: t.apiVersion, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, inv)
+}
+
+// Provider returns the Target's current clustered Provider.
+func (t *Target) Provider() *cloudhypervisor.Provider {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.prov
+}
+
+// providerTLS is the client TLS of the Target's own connections to the
+// agents: the Provider identity certificate and the host identity issuer as
+// the only root. The Provider presents the same certificate.
 func (t *Target) providerTLS(ft fatalT, providerCA *hostidentitytest.CA) (*tls.Config, error) {
 	key := hostidentitytest.NewKey(ft)
 	csr := hostidentitytest.NewCSR(ft, key, hostidentitytest.CSROptions{URIs: []string{trusttest.ProviderURI(trusttest.ProviderUID)}})
@@ -233,19 +302,7 @@ func (t *Target) providerTLS(ft fatalT, providerCA *hostidentitytest.CA) (*tls.C
 // Host returns the agent process of host.
 func (t *Target) Host(name string) *Host { return t.byName[name] }
 
-// reach returns the agent of host, or the host-scoped refusal.
-func (t *Target) reach(host string) (*Host, error) {
-	t.mu.Lock()
-	down := t.down[host]
-	t.mu.Unlock()
-	h := t.byName[host]
-	if h == nil || down || !h.Running() {
-		return nil, hostUnavailable(host)
-	}
-	return h, nil
-}
-
-// recordTask remembers a task the router returned, for FinishTasks.
+// recordTask remembers a task the Provider returned, for FinishTasks.
 func (t *Target) recordTask(host, inner string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -260,10 +317,10 @@ func (t *Target) Capabilities() clustered.Capabilities {
 	why := "the per-host agent target exercises the operation path only"
 	return clustered.Capabilities{
 		Features: []clustered.Feature{clustered.FeatureOperationIdentity, clustered.FeatureOperationIdentityRequired,
-			clustered.FeatureAsyncTasks, clustered.FeatureCreate, clustered.FeatureScriptedOutcomes, clustered.FeatureHostAnswers},
+			clustered.FeatureAsyncTasks, clustered.FeatureCreate, clustered.FeatureScriptedOutcomes, clustered.FeatureHostAnswers,
+			clustered.FeatureHostInventory, clustered.FeatureHostBlackhole, clustered.FeatureHostRemoval},
 		Reasons: map[clustered.Feature]string{
-			clustered.FeatureVMNotOwnedReason: why, clustered.FeatureHostInventory: why, clustered.FeatureCreateOwnerRebind: why,
-			clustered.FeatureHostBlackhole: why, clustered.FeatureHostFaults: why, clustered.FeatureHostRemoval: why,
+			clustered.FeatureVMNotOwnedReason: why, clustered.FeatureCreateOwnerRebind: why, clustered.FeatureHostFaults: why,
 			clustered.FeatureUnreadableStamp: why, clustered.FeatureProviderNotReady: why,
 		},
 	}
@@ -279,26 +336,79 @@ func (t *Target) Hosts() []string {
 }
 
 // Server implements clustered.Target.
-func (t *Target) Server() providerv1.ProviderServer {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.r
+func (t *Target) Server() providerv1.ProviderServer { return t.Provider() }
+
+// NewGRPCServer implements clustered.GRPCServerTarget: the Provider's own
+// service description (it reads forwarded requests as raw bytes), and an
+// interceptor that records the task references it returns, for FinishTasks.
+func (t *Target) NewGRPCServer() *grpc.Server {
+	srv := grpc.NewServer(grpc.UnaryInterceptor(t.recordTasks))
+	t.Provider().Register(srv)
+	return srv
 }
 
-// Restart implements clustered.Target: the router's memory is lost; the
-// hosts keep running.
+// recordTasks records the host-encoded task reference of a mutating call's
+// answer.
+func (t *Target) recordTasks(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	resp, err := handler(ctx, req)
+	if task, ok := resp.(interface{ GetTask() *providerv1.TaskRef }); ok && err == nil && task.GetTask().GetId() != "" {
+		if host, inner, perr := hostTask(task.GetTask().GetId()); perr == nil {
+			t.recordTask(host, inner)
+		}
+	}
+	return resp, err
+}
+
+// Restart implements clustered.Target: a new Provider process, whose memory
+// and connections are new; the hosts keep running.
 func (t *Target) Restart() error {
+	prov, err := t.newProvider()
+	if err != nil {
+		return err
+	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.r = &router{t: t}
+	old := t.prov
+	t.prov = prov
+	t.mu.Unlock()
+	return old.Close()
+}
+
+// SetHostBlackholed implements clustered.HostBlackholer: the host's proxy
+// accepts connections and forwards nothing.
+func (t *Target) SetHostBlackholed(host string, blackholed bool) error {
+	px, ok := t.proxies[host]
+	if !ok {
+		return fmt.Errorf("no host %q", host)
+	}
+	px.setBlackhole(blackholed)
 	return nil
 }
 
-// SetHostReachable implements clustered.Target.
-func (t *Target) SetHostReachable(host string, reachable bool) error {
+// RemoveHost implements clustered.HostRemover: the host leaves the
+// Provider's inventory, as an inventory reload would remove it; its agent
+// keeps running.
+func (t *Target) RemoveHost(host string) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.down[host] = !reachable
+	kept := t.inv.Hosts[:0:0]
+	for _, h := range t.inv.Hosts {
+		if h.ID != host {
+			kept = append(kept, h)
+		}
+	}
+	t.inv.Hosts = kept
+	inv, prov := t.inv, t.prov
+	t.mu.Unlock()
+	return prov.Reconcile(inv)
+}
+
+// SetHostReachable implements clustered.Target: the host's proxy cuts every
+// connection and refuses new ones, or accepts them again.
+func (t *Target) SetHostReachable(host string, reachable bool) error {
+	px, ok := t.proxies[host]
+	if !ok {
+		return fmt.Errorf("no host %q", host)
+	}
+	px.setDown(!reachable)
 	return nil
 }
 
@@ -498,7 +608,7 @@ func ParseTask(task string) (string, error) {
 }
 
 // FinishTasks implements clustered.TaskController: every operation the
-// router started runs to its end.
+// Provider started runs to its end.
 func (t *Target) FinishTasks() error {
 	t.mu.Lock()
 	tasks := map[string][]string{}
@@ -631,3 +741,9 @@ func (t *Target) StallNextStep(host string) error {
 
 // StepDeadline implements clustered.HostAnswerTarget.
 func (t *Target) StepDeadline() time.Duration { return t.deadline }
+
+// hostTask splits a host-encoded task reference the Provider returned.
+func hostTask(ref string) (string, string, error) {
+	host, inner, err := clusteredref.ParseHostTaskRef(ref)
+	return string(host), inner, err
+}
