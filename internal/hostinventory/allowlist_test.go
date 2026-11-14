@@ -130,9 +130,16 @@ func TestParseRefuses(t *testing.T) {
 		"file name is a path": fmt.Sprintf(`{"version":1,"components":[{"name":"ch","version":"1","alternatives":[{"artifactDigest":"none","files":[{"name":"/bin/ch","digest":%q}]}]}]}`, d),
 		"repeated file":       fmt.Sprintf(`{"version":1,"components":[{"name":"ch","version":"1","alternatives":[{"artifactDigest":"none","files":[{"name":"a","digest":%q},{"name":"a","digest":%q}]}]}]}`, d, d),
 		"repeated required":   `{"version":1,"required":["ch","ch"],"components":[]}`,
+		"no required":         `{"version":1,"required":[],"components":[]}`,
+		"required absent":     `{"version":1,"components":[]}`,
 		"oversized":           `{"version":1,"components":[]}` + strings.Repeat(" ", hostinventory.MaxFileBytes),
 	} {
 		t.Run(name, func(t *testing.T) {
+			// Every other case requires a component, so it is refused for
+			// its own rule.
+			if !strings.Contains(body, `"required"`) && name != "required absent" && strings.HasPrefix(body, `{"version":1,`) {
+				body = `{"version":1,"required":["ch"],` + strings.TrimPrefix(body, `{"version":1,`)
+			}
 			if _, err := hostinventory.Parse([]byte(body)); !errors.Is(err, hostinventory.ErrInvalid) {
 				t.Fatalf("Parse = %v, want ErrInvalid", err)
 			}

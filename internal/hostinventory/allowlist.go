@@ -169,7 +169,8 @@ func parseDigest(s string) ([]byte, bool) {
 }
 
 // Parse parses an allow-list file: JSON with no unknown field, format
-// version 1, every name, version and digest in its shape, no repeated entry,
+// version 1, at least one required component, every name, version and digest
+// in its shape, no repeated entry,
 // alternative file name or required component, and within the bounds.
 func Parse(data []byte) (*AllowList, error) {
 	if len(data) > MaxFileBytes {
@@ -189,6 +190,11 @@ func Parse(data []byte) (*AllowList, error) {
 	}
 	if len(f.Components) > MaxEntries || len(f.Required) > MaxRequired {
 		return nil, invalidf("more than %d entries or %d required components", MaxEntries, MaxRequired)
+	}
+	// An allow-list that requires nothing would accept a host that reports
+	// no component at all.
+	if len(f.Required) == 0 {
+		return nil, invalidf("no required component")
 	}
 	a := &AllowList{sha: sha256.Sum256(data), entries: make(map[entryKey][]match, len(f.Components))}
 	for _, r := range f.Required {
