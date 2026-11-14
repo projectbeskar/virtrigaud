@@ -48,7 +48,9 @@ must carry agent TLS material and nothing else
   SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
 
 An entry that fails these rules, or shares its id with another entry, is not
-routed and is logged by id only. A reload that removes a host, or changes its
+routed. It is logged when it is first refused, or refused for another
+reason, not at every reload; a malformed id is logged only as a short digest.
+A reload that removes a host, or changes its
 endpoint or TLS material, closes its connection before the reload returns
 (calls in flight on it fail); a change of labels alone keeps the connection.
 A file that turns unreadable or invalid keeps the last good host set. The
@@ -86,16 +88,22 @@ of version 2 or 1. An agent outside that window, or one that does not serve
 `Hello`, is not routed until its connection is replaced (cause
 `AgentIncompatible`); the Provider never adapts a request to an older agent.
 An answer that is missing or does not verify leaves the host unavailable
-(cause `AgentUnverified`), and the next call tries again.
+(cause `AgentUnverified`), and the next call tries again. The agent signs at
+most 1 `Hello` answer per second (burst 5) for one Provider identity, apart
+from its other answers; several Provider replicas that share one identity
+may therefore briefly get `AgentUnverified` after an agent restart, which
+clears on its own as the budget refills.
 
-A `Hello` is bound to the transport it was made on (by its local address).
 A client connection carries one transport only: once a transport began, its
 dialer refuses to dial again, so that no call, not even one gRPC retries
 transparently, reaches a new transport (a restarted agent, possibly of
-another version) without a new `Hello`. Before a call is sent, its transport
-is checked against the host's `Hello`; after it, a call found to have run on
-another transport drops that `Hello`. A caller that waits for another
-caller's `Hello` of the same host gives up when its own context ends.
+another version) without a new `Hello`. A `Hello` is bound to the connection
+it was made on, and so to that one transport, whatever its addresses; it is
+dropped when the transport ends or the connection is replaced. Before a call
+is sent, the Provider checks that the connection it holds is still the
+host's connection and that its transport had the `Hello`; otherwise it makes
+a new `Hello` first. A caller that waits for another caller's `Hello` of the
+same host gives up when its own context ends.
 
 A connection is replaced before the next call when its transport ended, is
 older than 30 minutes, or carries an agent certificate that has expired, so
@@ -195,7 +203,3 @@ agent processes with the fake executor
   other signed answer unchanged; verifying them is the manager's job.
 - The breaker thresholds, the connection and call timeouts, the keepalive
   and the maximum connection age are fixed (not flags).
-- A transport replaced in the instant between the check of a call's
-  transport and its send is caught only after the call (its `Hello` is then
-  dropped); a client connection never dials a second transport, which keeps
-  that window to a transport the same connection had verified.
