@@ -92,7 +92,10 @@ var _ = Describe("Placement index read directly from the informer (envtest)", fu
 			slices.Sort(out)
 			return out
 		}
+		// Wait until the cache holds every VirtualMachine created above, so
+		// that no event arrives between the direct read and the List below.
 		Eventually(func() []string { return names("prov-x", true) }).Should(Equal([]string{"a", "b"}))
+		Eventually(func() []string { return names("prov-y", true) }).Should(Equal([]string{"c"}))
 		for _, provider := range []string{"prov-x", "prov-y", "prov-none"} {
 			Expect(names(provider, true)).To(Equal(names(provider, false)), "Provider %s", provider)
 		}
