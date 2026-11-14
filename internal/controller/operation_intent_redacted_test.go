@@ -519,7 +519,9 @@ func TestIntentRedaction_FinalizerOnFullIntent(t *testing.T) {
 	assert.NotNil(t, stuck[0].DeletionTimestamp)
 	v, ok := r.redactions.Load(client.ObjectKeyFromObject(idVM(t, r)).String())
 	require.True(t, ok)
-	assert.False(t, v.(redactionState).done, "a stuck full intent is not done") //nolint:forcetypeassert // the map holds redactionState
+	st, ok := v.(redactionState)
+	require.True(t, ok)
+	assert.False(t, st.done, "a stuck full intent is not done")
 	warnings := 0
 	for len(rec.Events) > 0 {
 		if ev := <-rec.Events; strings.Contains(ev, eventReasonIntentRedactionBlocked) {
@@ -535,8 +537,10 @@ func TestIntentRedaction_FinalizerOnFullIntent(t *testing.T) {
 	reconcileN(t, r, req, 1)
 	assert.Empty(t, secretsByPrefix(t, r, operationIntentSecretPrefix))
 	v, _ = r.redactions.Load(client.ObjectKeyFromObject(idVM(t, r)).String())
-	assert.True(t, v.(redactionState).done)                                                 //nolint:forcetypeassert // the map holds redactionState
-	assert.False(t, v.(redactionState).warned, "a successful redaction clears the warning") //nolint:forcetypeassert // the map holds redactionState
+	st, ok = v.(redactionState)
+	require.True(t, ok)
+	assert.True(t, st.done)
+	assert.False(t, st.warned, "a successful redaction clears the warning")
 }
 
 // uidPreconditionClient enforces a Delete's UID precondition as the API
