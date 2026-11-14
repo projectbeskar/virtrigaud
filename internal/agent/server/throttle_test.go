@@ -158,6 +158,26 @@ func TestHandshakeSlots(t *testing.T) {
 	require.ErrorIs(t, a3.acquire(), errTooManyHandshakes)
 }
 
+// TestHandshakeSlotReleasedOnClose: closing a connection gives its slot back
+// at once, before the close is visible to the peer. gRPC's TLS credentials
+// close a connection whose handshake failed before ServerHandshake returns,
+// so a reconnecting client must not find the slot still held.
+func TestHandshakeSlotReleasedOnClose(t *testing.T) {
+	th := newThrottle(Throttle{MaxHandshakes: 1, PerSourceHandshakes: 1}, logr.Discard(), time.Now)
+	mk := func(remote string) *conn {
+		c1, c2 := net.Pipe()
+		t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
+		return &conn{Conn: addrConn{c1, remote}, t: th, source: sourceOf(addrConn{c1, remote})}
+	}
+	a, b := mk("10.0.0.1:1"), mk("10.0.0.2:1")
+	require.NoError(t, a.acquire())
+	require.ErrorIs(t, b.acquire(), errTooManyHandshakes, "the only slot is taken")
+	require.NoError(t, a.Close())
+	require.NoError(t, b.acquire(), "the closed connection's slot is free without waiting for release")
+	a.release() // the deferred release after a close is a no-op
+	require.ErrorIs(t, mk("10.0.0.3:1").acquire(), errTooManyHandshakes, "the slot was given back once")
+}
+
 // TestPeerIdentityFailsClosed: a caller without a verified client
 // certificate URI has no identity, so no signed answer is made for it.
 func TestPeerIdentityFailsClosed(t *testing.T) {

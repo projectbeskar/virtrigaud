@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/host_answers.go`: a manager that just started or took over signs nothing new for a host until a verified position of the host is persisted; the first answer of each attempt that shows its record is persisted; store-state writes are serialised per host, coalesced, and paced after a failure (1 s doubling to 1 min).
 - `internal/controller/grant_mint_sites_test.go`: the guard that only `SendOperation` mints a grant or builds an envelope covers, in `internal/` and `cmd/`, construction (literals, empty or not, `new`, attaching an envelope), field sets, proto copies, Unmarshal into an envelope or grant, and reflective sets; a verifier that only reads an envelope is not a site.
 
+### Fixed
+- `internal/agent/server/throttle.go`: closing a connection gives its handshake slot back before the close, so a client that reconnects after a failed handshake (gRPC closes it before the handshake call returns) no longer finds the slot still held; this made `TestStalledHandshakeReleasesItsSlot` flaky.
+
 ### Why
 Outcomes relayed by a Provider were unsigned claims: a lying or faulty Provider could make the manager mint a second attempt or release a VM that still runs. The manager now concludes only from answers the host signed for its own request, bound to the attempt's verified intent and checked against the host's pinned key and store history.
 

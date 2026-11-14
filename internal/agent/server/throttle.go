@@ -330,6 +330,15 @@ func (c *conn) acquire() error {
 	return nil
 }
 
+// Close gives the slot back before closing the connection. gRPC's TLS
+// credentials close a connection whose handshake failed before
+// ServerHandshake returns, so a client could otherwise see the close and
+// reconnect while the slot was still held.
+func (c *conn) Close() error {
+	c.release()
+	return c.Conn.Close()
+}
+
 // release gives the slot back; it is safe to call twice.
 func (c *conn) release() {
 	c.mu.Lock()

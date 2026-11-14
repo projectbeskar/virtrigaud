@@ -56,7 +56,7 @@ import (
 const (
 	// redactedIntentSecretPrefix starts the name of a redacted intent
 	// Secret: vrtg-opr-<op_id in hex>.
-	redactedIntentSecretPrefix = "vrtg-opr-"
+	redactedIntentSecretPrefix = "vrtg-opr-" // #nosec G101 -- a Secret name prefix, not a credential
 	// intentKeyDigest is the data key of a redacted intent's digest.
 	intentKeyDigest = "digest"
 )
