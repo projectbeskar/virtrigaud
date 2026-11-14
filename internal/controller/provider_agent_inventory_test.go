@@ -82,8 +82,11 @@ func hasInventoryVolume(spec corev1.PodSpec) bool {
 // other Provider is unchanged.
 func TestAgentProviderReadsInventorySecret(t *testing.T) {
 	ch := agentProvider("ch")
-	on := &ProviderReconciler{AgentProviderInventoryWatch: true}
+	on := &ProviderReconciler{AgentProviderInventoryWatch: map[types.NamespacedName]struct{}{
+		{Namespace: "default", Name: "ch"}: {}, {Namespace: "default", Name: "single"}: {},
+		{Namespace: "default", Name: "lv"}: {}, {Namespace: "default", Name: "mock"}: {}}}
 	off := &ProviderReconciler{}
+	other := &ProviderReconciler{AgentProviderInventoryWatch: map[types.NamespacedName]struct{}{{Namespace: "default", Name: "other"}: {}}}
 
 	spec := deploymentFor(t, on, ch)
 	require.NotNil(t, spec.AutomountServiceAccountToken)
@@ -96,13 +99,16 @@ func TestAgentProviderReadsInventorySecret(t *testing.T) {
 		assert.True(t, hasInventoryVolume(spec))
 	}
 
-	// Without the manager flag (no chart grant): no token, no arguments,
-	// the inventory stays mounted.
-	spec = deploymentFor(t, off, ch)
-	require.NotNil(t, spec.AutomountServiceAccountToken)
-	assert.False(t, *spec.AutomountServiceAccountToken)
-	assert.Equal(t, []string{"--port=9443", "--health-port=8080"}, spec.Containers[0].Args)
-	assert.True(t, hasInventoryVolume(spec))
+	// Not listed in the manager flag (no chart grant for it), with the flag
+	// empty or naming another Provider: no token, no arguments, the
+	// inventory stays mounted.
+	for _, r := range []*ProviderReconciler{off, other} {
+		spec = deploymentFor(t, r, ch)
+		require.NotNil(t, spec.AutomountServiceAccountToken)
+		assert.False(t, *spec.AutomountServiceAccountToken)
+		assert.Equal(t, []string{"--port=9443", "--health-port=8080"}, spec.Containers[0].Args)
+		assert.True(t, hasInventoryVolume(spec))
+	}
 
 	single := agentProvider("single")
 	single.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologySingle
@@ -117,14 +123,22 @@ func TestAgentProviderReadsInventorySecret(t *testing.T) {
 	assert.True(t, hasInventoryVolume(deploymentFor(t, on, libvirt)), "clustered libvirt keeps its mounted inventory")
 }
 
-// TestCheckAgentProviderInventoryWatch: the manager flag is refused by a
-// release build only.
-func TestCheckAgentProviderInventoryWatch(t *testing.T) {
-	require.NoError(t, CheckAgentProviderInventoryWatch(false))
-	if devgate.Compiled {
-		require.NoError(t, CheckAgentProviderInventoryWatch(true))
-	} else {
-		require.Error(t, CheckAgentProviderInventoryWatch(true))
+// TestParseAgentProviderInventoryWatch: the manager flag lists
+// namespace/name entries; a release build refuses any entry.
+func TestParseAgentProviderInventoryWatch(t *testing.T) {
+	got, err := ParseAgentProviderInventoryWatch("")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	got, err = ParseAgentProviderInventoryWatch(" infra/ch, b/ch2 ,")
+	if !devgate.Compiled {
+		require.Error(t, err)
+		return
+	}
+	require.NoError(t, err)
+	assert.Equal(t, map[types.NamespacedName]struct{}{{Namespace: "infra", Name: "ch"}: {}, {Namespace: "b", Name: "ch2"}: {}}, got)
+	for _, bad := range []string{"ch", "infra/", "/ch", "Infra/ch", "infra/c h", "a/b/c"} {
+		_, err := ParseAgentProviderInventoryWatch(bad)
+		assert.Error(t, err, bad)
 	}
 }
 
@@ -160,7 +174,15 @@ func TestRBAC_AgentProviderInventoryChartTemplate(t *testing.T) {
 		"--set", "experimental.agentProviderInventoryWatch.providers[0].namespace=infra",
 		"--set", "experimental.agentProviderInventoryWatch.providers[0].name=ch"}, on...)...).CombinedOutput()
 	require.NoError(t, err, string(mgr))
-	assert.Contains(t, string(mgr), "- --dev-agent-provider-inventory-watch")
+	assert.Contains(t, string(mgr), "- --dev-agent-provider-inventory-watch=infra/ch\n")
+	two, err := exec.Command(helm, append([]string{"template", "t", chart, // #nosec G204 -- test-controlled arguments
+		"--show-only", "templates/manager-deployment.yaml",
+		"--set", "experimental.agentProviderInventoryWatch.providers[0].namespace=infra",
+		"--set", "experimental.agentProviderInventoryWatch.providers[0].name=ch",
+		"--set", "experimental.agentProviderInventoryWatch.providers[1].namespace=b",
+		"--set", "experimental.agentProviderInventoryWatch.providers[1].name=ch2"}, on...)...).CombinedOutput()
+	require.NoError(t, err, string(two))
+	assert.Contains(t, string(two), "- --dev-agent-provider-inventory-watch=infra/ch,b/ch2\n", "the manager gets exactly the listed Providers")
 
 	for name, args := range map[string][]string{
 		"no development build": {"--set", "experimental.agentProviderInventoryWatch.enabled=true",

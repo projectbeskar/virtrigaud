@@ -226,14 +226,14 @@ func main() {
 			"objects. Empty (the default) caches Secrets in every namespace, which needs a cluster-wide Secret "+
 			"list/watch grant. Set it when the manager's Secret access is granted per namespace "+
 			"(Helm rbac.secrets.scope=namespaced); see docs/manager-secret-access.md.")
-	var agentProviderInventoryWatch bool
-	flag.BoolVar(&agentProviderInventoryWatch, controller.DevAgentProviderInventoryWatchFlagName, false,
-		"DEVELOPMENT ONLY. Make the Deployments of clustered cloudhypervisor Providers follow their host inventory Secret "+
-			"through the Kubernetes API (a ServiceAccount token, --hosts-secret, no inventory volume). Set it only when "+
-			"each such Provider's ServiceAccount is granted get and watch on its <provider>-hosts Secret (Helm "+
-			"experimental.agentProviderInventoryWatch, which sets this flag); without the grant the Provider stops at start "+
-			"with a 403. Honoured only by a manager built with the "+devgate.BuildTag+" build tag; a release build refuses "+
-			"to start when it is set.")
+	var agentProviderInventoryWatchFlag string
+	flag.StringVar(&agentProviderInventoryWatchFlag, controller.DevAgentProviderInventoryWatchFlagName, "",
+		"DEVELOPMENT ONLY. Comma-separated namespace/name of clustered cloudhypervisor Providers whose Deployments follow "+
+			"their host inventory Secret through the Kubernetes API (a ServiceAccount token, --hosts-secret, no inventory "+
+			"volume); other Providers keep the mounted file. List a Provider only when its ServiceAccount is granted get "+
+			"and watch on its <provider>-hosts Secret (Helm experimental.agentProviderInventoryWatch, which sets this flag "+
+			"from the same list); without the grant the Provider stops at start with a 403. Honoured only by a manager "+
+			"built with the "+devgate.BuildTag+" build tag; a release build refuses to start when it is set.")
 	var hostEnrolmentFlags controller.HostEnrolmentFlags
 	devOnly := "DEVELOPMENT ONLY. Honoured only by a manager built with the " + devgate.BuildTag +
 		" build tag; a release build refuses to start when it is set. "
@@ -310,7 +310,8 @@ func main() {
 		setupLog.Info("WARNING: a development operation-identity enrolment file is loaded; this manager is not for production use")
 	}
 
-	if err := controller.CheckAgentProviderInventoryWatch(agentProviderInventoryWatch); err != nil {
+	agentProviderInventoryWatch, err := controller.ParseAgentProviderInventoryWatch(agentProviderInventoryWatchFlag)
+	if err != nil {
 		setupLog.Error(err, "invalid --"+controller.DevAgentProviderInventoryWatchFlagName)
 		os.Exit(1)
 	}

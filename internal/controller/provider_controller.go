@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -212,14 +214,14 @@ type ProviderReconciler struct {
 	// runtime of a Provider of a development-only type it does not enable is
 	// never deployed or updated (refuseDisabledDevProviderType). Read only.
 	EnabledDevProviderTypes map[infravirtrigaudiov1beta1.ProviderType]struct{}
-	// AgentProviderInventoryWatch, set by
-	// --dev-agent-provider-inventory-watch (development builds only), makes
-	// the Deployment of a clustered per-host agent Provider follow its
+	// AgentProviderInventoryWatch lists, from
+	// --dev-agent-provider-inventory-watch (development builds only), the
+	// clustered per-host agent Providers whose Deployment follows its
 	// inventory Secret through the API: a ServiceAccount token, the
 	// --hosts-secret and --provider-uid arguments, and no inventory volume.
-	// Set it only together with the chart's
-	// experimental.agentProviderInventoryWatch grant for that Provider.
-	AgentProviderInventoryWatch bool
+	// List a Provider only together with the chart's
+	// experimental.agentProviderInventoryWatch grant for it.
+	AgentProviderInventoryWatch map[types.NamespacedName]struct{}
 
 	// HostEnrolment is the per-host agent enrolment configuration
 	// (development builds only; nil: none). The host-inventory render reads
@@ -1397,34 +1399,52 @@ func (r *ProviderReconciler) agentProviderArgs(provider *infravirtrigaudiov1beta
 
 // providerReadsInventorySecret reports whether the Provider's pod reads its
 // host inventory Secret through the API, and so gets a ServiceAccount token
-// and no inventory volume: only the clustered Provider for per-host agents,
-// in a development build, and only when the manager was started with
+// and no inventory volume: only a clustered Provider for per-host agents, in
+// a development build, and only when it is listed in the manager's
 // --dev-agent-provider-inventory-watch (AgentProviderInventoryWatch), which
 // states that the chart grants that Provider's ServiceAccount get and watch
-// on the Secret (experimental.agentProviderInventoryWatch). Without that
-// grant the Provider's first read is refused (403) and it stops, so the
-// manager never asks for it on its own.
+// on its Secret (experimental.agentProviderInventoryWatch.providers). An
+// unlisted Provider keeps the mounted file: without the grant its first read
+// would be refused (403) and it would stop.
 func (r *ProviderReconciler) providerReadsInventorySecret(provider *infravirtrigaudiov1beta1.Provider) bool {
-	return r.AgentProviderInventoryWatch && devgate.Compiled && providerRunsHostAgents(provider)
+	if !devgate.Compiled || !providerRunsHostAgents(provider) {
+		return false
+	}
+	_, listed := r.AgentProviderInventoryWatch[types.NamespacedName{Namespace: provider.Namespace, Name: provider.Name}]
+	return listed
 }
 
-// DevAgentProviderInventoryWatchFlagName is the manager flag that makes the
-// Deployments of clustered per-host agent Providers follow their inventory
-// Secret through the API (development builds only).
+// DevAgentProviderInventoryWatchFlagName is the manager flag that lists the
+// clustered per-host agent Providers (namespace/name, comma-separated) whose
+// Deployments follow their inventory Secret through the API (development
+// builds only).
 const DevAgentProviderInventoryWatchFlagName = "dev-agent-provider-inventory-watch"
 
 // errAgentProviderInventoryWatchRelease refuses the flag in a release build.
 var errAgentProviderInventoryWatchRelease = stderrors.New("--" + DevAgentProviderInventoryWatchFlagName +
 	" is honoured only by a manager built with the " + devgate.BuildTag + " build tag")
 
-// CheckAgentProviderInventoryWatch refuses --dev-agent-provider-inventory-watch
-// in a release build, so that a release manager never starts with a setting
-// it would ignore.
-func CheckAgentProviderInventoryWatch(on bool) error {
-	if on && !devgate.Compiled {
-		return errAgentProviderInventoryWatchRelease
+// ParseAgentProviderInventoryWatch parses --dev-agent-provider-inventory-watch:
+// comma-separated namespace/name entries, each a valid namespace and
+// Provider name. Empty is none. A release build refuses any entry, so that a
+// release manager never starts with a setting it would ignore.
+func ParseAgentProviderInventoryWatch(value string) (map[types.NamespacedName]struct{}, error) {
+	out := map[types.NamespacedName]struct{}{}
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if !devgate.Compiled {
+			return nil, errAgentProviderInventoryWatchRelease
+		}
+		ns, name, ok := strings.Cut(entry, "/")
+		if !ok || len(validation.IsDNS1123Label(ns)) != 0 || len(validation.IsDNS1123Subdomain(name)) != 0 {
+			return nil, fmt.Errorf("--%s: %q is not namespace/name", DevAgentProviderInventoryWatchFlagName, entry)
+		}
+		out[types.NamespacedName{Namespace: ns, Name: name}] = struct{}{}
 	}
-	return nil
+	return out, nil
 }
 
 // addTmpSizeLimitEnv gives a vSphere provider container the effective

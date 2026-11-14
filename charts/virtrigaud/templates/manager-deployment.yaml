@@ -72,12 +72,17 @@ spec:
         # list/watch Role in (rbac.secrets.scope=namespaced).
         - --secret-cache-namespaces={{ include "virtrigaud.secretCacheNamespaces" . }}
         {{- end }}
-        {{- if and .Values.rbac.create (((.Values.experimental | default dict).agentProviderInventoryWatch | default dict).enabled) }}
+        {{- $apiw := ((.Values.experimental | default dict).agentProviderInventoryWatch | default dict) }}
+        {{- if and .Values.rbac.create $apiw.enabled }}
         # Development builds only: the listed per-host agent Providers are
         # granted get/watch on their inventory Secret
-        # (agent-provider-inventory-rbac.yaml), so their Deployments may
-        # follow it through the API.
-        - --dev-agent-provider-inventory-watch
+        # (agent-provider-inventory-rbac.yaml), so their Deployments, and
+        # only theirs, may follow it through the API.
+        {{- $names := list }}
+        {{- range $apiw.providers }}
+        {{- $names = append $names (printf "%s/%s" .namespace .name) }}
+        {{- end }}
+        - --dev-agent-provider-inventory-watch={{ join "," $names }}
         {{- end }}
         {{- if .Values.webhooks.enabled }}
         # Webhook serving certs are mounted at this path; the manager's certwatcher
