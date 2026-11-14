@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/host_inventory_policy.go`: a signers file without a signature file, an unparsable signers file or a malformed digest pin stop the manager at start.
 - `internal/controller/provider_operation_identity.go`: the allow-list reason no longer replaces an earlier Provider `Ready=False` reason; it is added to its message.
 - `internal/controller/host_controller.go`, `internal/controller/host_inventory.go`: a deleted or vanished Host's inventory backoff, audit state and metric series are dropped.
+- `internal/controller/host_inventory.go`, `internal/controller/host_controller.go`: a heartbeat that ends without a host answer is audited like any other verdict (log line, Event, condition gauge); a Host leaving a Provider that runs a per-host agent loses its metric series and audit state.
+- `internal/obs/metrics/host_inventory.go`: setting a condition's series replaces every other series of that condition, so a failed status write cannot leave a stale one.
+- `internal/controller/host_inventory_policy.go`: policy files are read with a size bound and refused when larger, without being read whole.
 
 ### Added
 - `internal/obs/metrics/host_inventory.go`: `virtrigaud_host_inventory_condition` (per Host and condition, reason from a closed set) and `virtrigaud_component_allow_list` (the allow-list state and SHA-256 at start; development builds only).

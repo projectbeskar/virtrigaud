@@ -200,7 +200,9 @@ the SHA-256 of the file, as `cosign sign-blob --key` writes it; for Ed25519 a si
 over the file). It is verified offline against those keys only; no network is used. The
 fingerprint of the key that verified is logged. A signers file without a signature file,
 a signers file that does not parse, or a digest pin that is not 64 lowercase hexadecimal
-characters stops the manager at start.
+characters stops the manager at start. Policy files are read with a size bound (1 MiB for
+the allow-list, 64 KiB for the signers file, 1 KiB for the signature) and refused when
+larger, without being read whole.
 
 **When it cannot be put in force.** A configured allow-list that is missing, has no pin,
 does not have the pinned digest, or whose signature does not verify does not stop the
@@ -261,7 +263,14 @@ condition is True, 0 otherwise, one series per condition with its current reason
 the closed set above, anything else as `Other`), removed with the Host. Alert on changes
 of its `AgentInventoryVerified` series.
 
-When the Host is deleted, the manager also drops its inventory backoff and audit state.
+A heartbeat that ends without a host answer (a `GetHostInfo` error, or a Provider that
+cannot be reached) is audited the same way: its log line, Event and metric show
+`NoSignedAnswer`. Log lines and Events are written before the status write; if that write
+fails, the same transition can be logged again on the next heartbeat, so the trail errs
+towards logging a transition twice rather than missing one.
+
+When the Host is deleted, or its Provider no longer runs a per-host agent, the manager
+also drops its metric series and audit state (and, on deletion, its inventory backoff).
 
 ## Not done yet
 
