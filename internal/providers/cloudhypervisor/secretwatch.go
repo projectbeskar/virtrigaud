@@ -254,7 +254,7 @@ func (p *Provider) checkFailClosed() {
 func (p *Provider) recordInventoryMetrics() {
 	st := p.secret.snapshot()
 	age := p.opts.Now().Sub(st.applied)
-	obsmetrics.SetHostInventoryState(ProviderType, age.Seconds(), age >= secretStaleAfter*p.opts.InventoryReloadInterval, st.failedClosed)
+	obsmetrics.SetProviderHostInventoryState(ProviderType, age.Seconds(), age >= secretStaleAfter*p.opts.InventoryReloadInterval, st.failedClosed)
 }
 
 // followSecret runs watch cycles until ctx ends. Each cycle starts from a

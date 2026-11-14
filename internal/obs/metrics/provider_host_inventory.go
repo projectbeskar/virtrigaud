@@ -18,11 +18,11 @@ package metrics
 
 import "github.com/prometheus/client_golang/prometheus"
 
-// hostInventorySecondsSinceApply is the age of the host inventory a
+// providerHostInventorySecondsSinceApply is the age of the host inventory a
 // clustered Provider routes with: the time since it last applied a valid
 // inventory. Emitted by a Provider that follows its inventory through the
 // Kubernetes API; the only label is the provider type.
-var hostInventorySecondsSinceApply = registerer.NewGaugeVec(
+var providerHostInventorySecondsSinceApply = registerer.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "virtrigaud_provider_host_inventory_seconds_since_apply",
 		Help: "Seconds since the Provider last applied a valid host inventory, by provider type.",
@@ -30,9 +30,9 @@ var hostInventorySecondsSinceApply = registerer.NewGaugeVec(
 	[]string{"provider_type"},
 )
 
-// hostInventoryStale is 1 while the Provider's host inventory is stale (no
+// providerHostInventoryStale is 1 while the Provider's host inventory is stale (no
 // valid inventory applied for several reload intervals), else 0.
-var hostInventoryStale = registerer.NewGaugeVec(
+var providerHostInventoryStale = registerer.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "virtrigaud_provider_host_inventory_stale",
 		Help: "1 while the Provider has applied no valid host inventory for several reload intervals, else 0, by provider type.",
@@ -40,9 +40,9 @@ var hostInventoryStale = registerer.NewGaugeVec(
 	[]string{"provider_type"},
 )
 
-// hostInventoryFailedClosed is 1 while the Provider refuses every host
+// providerHostInventoryFailedClosed is 1 while the Provider refuses every host
 // because its host inventory is older than its fail-closed bound, else 0.
-var hostInventoryFailedClosed = registerer.NewGaugeVec(
+var providerHostInventoryFailedClosed = registerer.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "virtrigaud_provider_host_inventory_failed_closed",
 		Help: "1 while the Provider refuses every host because no valid host inventory was applied within its fail-closed bound, else 0, by provider type.",
@@ -50,16 +50,16 @@ var hostInventoryFailedClosed = registerer.NewGaugeVec(
 	[]string{"provider_type"},
 )
 
-// SetHostInventoryState records the age of the Provider's host inventory and
+// SetProviderHostInventoryState records the age of the Provider's host inventory and
 // whether it is stale and failed closed.
-func SetHostInventoryState(providerType string, secondsSinceApply float64, stale, failedClosed bool) {
-	hostInventorySecondsSinceApply.WithLabelValues(providerType).Set(secondsSinceApply)
-	hostInventoryStale.WithLabelValues(providerType).Set(boolGauge(stale))
-	hostInventoryFailedClosed.WithLabelValues(providerType).Set(boolGauge(failedClosed))
+func SetProviderHostInventoryState(providerType string, secondsSinceApply float64, stale, failedClosed bool) {
+	providerHostInventorySecondsSinceApply.WithLabelValues(providerType).Set(secondsSinceApply)
+	providerHostInventoryStale.WithLabelValues(providerType).Set(providerInventoryGaugeValue(stale))
+	providerHostInventoryFailedClosed.WithLabelValues(providerType).Set(providerInventoryGaugeValue(failedClosed))
 }
 
-// boolGauge is 1 for true and 0 for false.
-func boolGauge(b bool) float64 {
+// providerInventoryGaugeValue is 1 for true and 0 for false.
+func providerInventoryGaugeValue(b bool) float64 {
 	if b {
 		return 1
 	}
