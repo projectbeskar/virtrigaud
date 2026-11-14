@@ -83,16 +83,21 @@ func countsTowardHostBreaker(err error, answered, callerDone bool) bool {
 }
 
 // guard runs call through b. call returns whether the agent answered and
-// the call's error. guard returns errBreakerOpen when b refused the call, and
-// the call's own error otherwise; only a counted failure is recorded as one.
-func guard(ctx context.Context, b *resilience.CircuitBreaker, call func(context.Context) (answered bool, err error)) error {
+// the call's error; callerDone reports whether the caller had given up. guard
+// returns errBreakerOpen when b refused the call, and the call's own error
+// otherwise; only a counted failure is recorded as one. The expiry of the
+// Provider's own deadline in ctx counts; the caller's does not.
+func guard(ctx context.Context, b *resilience.CircuitBreaker, call func(context.Context) (answered bool, err error), callerDone func() bool) error {
 	ran := false
 	var callErr error
 	_ = b.Call(ctx, func(ctx context.Context) error {
 		ran = true
 		var answered bool
 		answered, callErr = call(ctx)
-		if countsTowardHostBreaker(callErr, answered, ctx.Err() != nil) {
+		if errors.Is(callErr, errHelloStale) {
+			return nil
+		}
+		if countsTowardHostBreaker(callErr, answered, callerDone()) {
 			return callErr
 		}
 		return nil

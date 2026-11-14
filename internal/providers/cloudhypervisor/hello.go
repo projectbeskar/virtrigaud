@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
@@ -107,23 +106,28 @@ func verifyHostAnswer(blob *providerv1.SignedBlob, leaf *x509.Certificate, nonce
 	return ha, nil
 }
 
-// helloed returns nil when the host's agent passed its Hello on the current
-// connection, making the Hello first when none was made on it. An
-// incompatible agent stays refused until the connection is replaced; a
-// Hello that could not be made or verified is tried again on the next call.
+// helloed returns nil when the host's agent passed its Hello on the
+// transport the connection runs on now, making the Hello first when none was
+// made on it. A Hello is bound to its transport by the transport's local
+// address, so a new transport (a reconnect, however quick, or a replaced
+// connection) is never served under an older Hello. An incompatible agent
+// stays refused on its transport; a Hello that could not be made or verified
+// is tried again on the next call. A caller waits for another caller's Hello
+// of the same host only until its own context ends.
 func (p *pool) helloed(ctx context.Context, e *hostEntry) error {
 	if made, err := e.currentHello(); made {
 		return err
 	}
-	e.helloMu.Lock()
-	defer e.helloMu.Unlock()
+	select {
+	case e.helloSlot <- struct{}{}:
+		defer func() { <-e.helloSlot }()
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	}
 	if made, err := e.currentHello(); made {
 		return err
 	}
-	e.mu.Lock()
-	epoch := e.epoch
-	e.mu.Unlock()
-	version, err := p.hello(ctx, e)
+	version, local, err := p.hello(ctx, e)
 	if err != nil && !errors.Is(err, errIncompatible) {
 		return err
 	}
@@ -132,7 +136,7 @@ func (p *pool) helloed(ctx context.Context, e *hostEntry) error {
 		outcome = hostUnavailable(e.id, true, CauseAgentIncompatible)
 	}
 	e.mu.Lock()
-	e.hello, e.helloEpoch, e.helloDone, e.apiVersion = outcome, epoch, true, version
+	e.hello, e.helloLocal, e.apiVersion = outcome, local, version
 	e.mu.Unlock()
 	return outcome
 }
@@ -145,40 +149,43 @@ var errIncompatible = errors.New("the agent's API version is not supported")
 // It returns errIncompatible for an agent that is too old or too new
 // (including one that does not serve Hello), and a host-scoped refusal when
 // the Hello could not be made or its answer not verified.
-func (p *pool) hello(ctx context.Context, e *hostEntry) (uint32, error) {
+func (p *pool) hello(ctx context.Context, e *hostEntry) (version uint32, local string, err error) {
 	nonce := make([]byte, nonceLen)
 	if _, err := rand.Read(nonce); err != nil {
-		return 0, status.Error(codes.Internal, "draw a nonce")
+		return 0, "", status.Error(codes.Internal, "draw a nonce")
 	}
 	var pr peer.Peer
 	resp := &agentv1.HelloResponse{}
 	cs, err := p.invoke(ctx, e, agentv1.AgentService_Hello_FullMethodName,
-		&agentv1.HelloRequest{AnswerNonce: nonce, CallerApiVersion: p.opts.APIVersion}, resp, grpc.Peer(&pr))
+		&agentv1.HelloRequest{AnswerNonce: nonce, CallerApiVersion: p.opts.APIVersion}, resp, &pr)
+	if pr.LocalAddr != nil {
+		local = pr.LocalAddr.String()
+	}
 	if err != nil {
 		if cs.answered.Load() && status.Code(err) == codes.Unimplemented {
 			p.log.Warn("agent does not serve Hello; not routed", "host", e.id)
-			return 0, errIncompatible
+			return 0, local, errIncompatible
 		}
 		if cs.answered.Load() {
 			p.log.Warn("agent refused the Hello; not routed", "host", e.id, "code", status.Code(err).String())
-			return 0, hostUnavailable(e.id, true, CauseAgentUnverified)
+			return 0, "", hostUnavailable(e.id, true, CauseAgentUnverified)
 		}
-		return 0, mapCallError(ctx, e.id, false, cs, err)
+		return 0, "", mapCallError(ctx, e.id, false, cs, err)
 	}
 	info, ok := pr.AuthInfo.(credentials.TLSInfo)
-	if !ok || len(info.State.PeerCertificates) == 0 {
-		return 0, hostUnavailable(e.id, true, CauseAgentUnverified)
+	if !ok || len(info.State.PeerCertificates) == 0 || local == "" {
+		return 0, "", hostUnavailable(e.id, true, CauseAgentUnverified)
 	}
 	ha, err := verifyHostAnswer(resp.GetHostAnswer(), info.State.PeerCertificates[0], nonce, e.id)
 	if err != nil {
 		p.log.Warn("agent's Hello answer not verified; not routed", "host", e.id, "error", err.Error())
-		return 0, hostUnavailable(e.id, true, CauseAgentUnverified)
+		return 0, "", hostUnavailable(e.id, true, CauseAgentUnverified)
 	}
 	v := ha.GetAgentApiVersion()
 	if !compatible(v, p.opts.APIVersion) {
 		p.log.Warn("agent API version outside the supported window; not routed", "host", e.id,
 			"agentAPIVersion", v, "providerAPIVersion", p.opts.APIVersion)
-		return v, fmt.Errorf("%w: agent %d, Provider %d", errIncompatible, v, p.opts.APIVersion)
+		return v, local, fmt.Errorf("%w: agent %d, Provider %d", errIncompatible, v, p.opts.APIVersion)
 	}
-	return v, nil
+	return v, local, nil
 }

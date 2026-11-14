@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -42,13 +43,24 @@ import (
 // ProviderType is the Provider type this package serves.
 const ProviderType = "cloudhypervisor"
 
-// DefaultConnectTimeout is how long a call waits for a connection to an
-// agent before the host is answered unavailable.
-const DefaultConnectTimeout = 2 * time.Second
+// Defaults of Options.
+const (
+	// DefaultConnectTimeout is how long a call waits for a connection to an
+	// agent before the host is answered unavailable.
+	DefaultConnectTimeout = 2 * time.Second
+	// DefaultCallTimeout is the longest a call to an agent may take.
+	DefaultCallTimeout = 20 * time.Second
+	// DefaultMaxConnectionAge is the age after which a connection to an
+	// agent is replaced.
+	DefaultMaxConnectionAge = 30 * time.Minute
+	// DefaultInventoryReloadInterval is how often the inventory file is
+	// re-read.
+	DefaultInventoryReloadInterval = 30 * time.Second
+)
 
 // listHostsHelloTimeout bounds the Hello ListHosts makes to a host that has
 // none on its current connection.
-const listHostsHelloTimeout = 5 * time.Second
+var listHostsHelloTimeout = 5 * time.Second
 
 // Options configures New.
 type Options struct {
@@ -68,6 +80,19 @@ type Options struct {
 	// ConnectTimeout bounds how long a call waits for a connection to an
 	// agent; zero uses DefaultConnectTimeout.
 	ConnectTimeout time.Duration
+	// CallTimeout is the longest a call to an agent may take, whatever the
+	// caller's deadline; zero uses DefaultCallTimeout. Its expiry counts
+	// toward the host's breaker.
+	CallTimeout time.Duration
+	// MaxConnectionAge is the age after which a connection to an agent is
+	// replaced, so that the agent is verified again; zero uses
+	// DefaultMaxConnectionAge. A connection is also replaced once the
+	// agent's certificate has expired.
+	MaxConnectionAge time.Duration
+	// InventoryReloadInterval is how often NewFromFile re-reads the
+	// inventory file, whether or not the file is watched; zero uses
+	// DefaultInventoryReloadInterval.
+	InventoryReloadInterval time.Duration
 	// DialContext, when set, opens the connections to agents.
 	DialContext func(ctx context.Context, addr string) (net.Conn, error)
 	// Now is the clock agent certificates are judged at; nil uses time.Now.
@@ -85,6 +110,12 @@ type Provider struct {
 	log     *slog.Logger
 	pool    *pool
 	watcher *inventoryfile.Watcher
+	// stopReload ends the periodic inventory re-read; reloadDone is closed
+	// when it has.
+	stopReload context.CancelFunc
+	reloadDone chan struct{}
+	// unwatched is set when the inventory file could not be watched.
+	unwatched bool
 }
 
 var _ providerv1.ProviderServer = (*Provider)(nil)
@@ -100,6 +131,15 @@ func New(opts Options, inv hostsecret.Inventory) (*Provider, error) {
 	}
 	if opts.ConnectTimeout == 0 {
 		opts.ConnectTimeout = DefaultConnectTimeout
+	}
+	if opts.CallTimeout == 0 {
+		opts.CallTimeout = DefaultCallTimeout
+	}
+	if opts.MaxConnectionAge == 0 {
+		opts.MaxConnectionAge = DefaultMaxConnectionAge
+	}
+	if opts.InventoryReloadInterval == 0 {
+		opts.InventoryReloadInterval = DefaultInventoryReloadInterval
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -121,11 +161,18 @@ func New(opts Options, inv hostsecret.Inventory) (*Provider, error) {
 func (p *Provider) Reconcile(inv hostsecret.Inventory) error { return p.pool.reconcile(inv) }
 
 // Close stops following the inventory file, if the Provider does, and
-// closes every connection to an agent.
+// closes every connection to an agent. It is not safe to call concurrently
+// with itself.
 func (p *Provider) Close() error {
 	var err error
+	if p.stopReload != nil {
+		p.stopReload()
+		<-p.reloadDone
+		p.stopReload = nil
+	}
 	if p.watcher != nil {
 		err = p.watcher.Close()
+		p.watcher = nil
 	}
 	p.pool.close()
 	return err
@@ -244,26 +291,44 @@ func (p *Provider) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoR
 
 // Validate implements providerv1.ProviderServer: the Provider itself is
 // healthy while it runs; a host's health is reported per host (ListHosts).
+// Its message says when the inventory file is not watched.
 func (p *Provider) Validate(context.Context, *providerv1.ValidateRequest) (*providerv1.ValidateResponse, error) {
-	return &providerv1.ValidateResponse{Ok: true, Message: fmt.Sprintf("fronting %d hosts", len(p.pool.ids()))}, nil
+	msg := fmt.Sprintf("fronting %d hosts", len(p.pool.ids()))
+	if p.unwatched {
+		msg += fmt.Sprintf("; the host inventory file is not watched: changes are picked up by its re-read every %s",
+			p.opts.InventoryReloadInterval)
+	}
+	return &providerv1.ValidateResponse{Ok: true, Message: msg}, nil
 }
 
 // ListHosts implements providerv1.ProviderServer: every fronted host, from
 // the inventory, READY when its agent passed its Hello on the current
-// connection and its breaker is not open. A host with no Hello on its
-// current connection gets one first, bounded by listHostsHelloTimeout.
+// transport and its breaker is not open. Hosts with no Hello on their
+// current transport get one first, all at once, within an overall
+// listHostsHelloTimeout.
 func (p *Provider) ListHosts(ctx context.Context, _ *providerv1.ListHostsRequest) (*providerv1.ListHostsResponse, error) {
-	resp := &providerv1.ListHostsResponse{}
+	var entries []*hostEntry
 	for _, id := range p.pool.ids() {
-		e, ok := p.pool.get(id)
-		if !ok {
+		if e, ok := p.pool.get(id); ok {
+			entries = append(entries, e)
+		}
+	}
+	hctx, cancel := context.WithTimeout(ctx, listHostsHelloTimeout)
+	var wg sync.WaitGroup
+	for _, e := range entries {
+		if made, _ := e.currentHello(); made {
 			continue
 		}
-		if made, _ := e.currentHello(); !made {
-			hctx, cancel := context.WithTimeout(ctx, listHostsHelloTimeout)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			_ = p.pool.helloed(hctx, e)
-			cancel()
-		}
+		}()
+	}
+	wg.Wait()
+	cancel()
+	resp := &providerv1.ListHostsResponse{}
+	for _, e := range entries {
 		health := providerv1.HostHealth_HOST_HEALTH_NOT_READY
 		if e.ready() {
 			health = providerv1.HostHealth_HOST_HEALTH_READY
@@ -274,7 +339,7 @@ func (p *Provider) ListHosts(ctx context.Context, _ *providerv1.ListHostsRequest
 			labels[k] = v
 		}
 		e.mu.Unlock()
-		resp.Hosts = append(resp.Hosts, &providerv1.HostInfo{Id: id, Health: health, Labels: labels})
+		resp.Hosts = append(resp.Hosts, &providerv1.HostInfo{Id: e.id, Health: health, Labels: labels})
 	}
 	return resp, nil
 }

@@ -24,10 +24,13 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/stats"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -81,6 +84,9 @@ const (
 	CauseAgentUnreachable = "AgentUnreachable"
 	// CauseBreakerOpen: the host's circuit breaker is open.
 	CauseBreakerOpen = "BreakerOpen"
+	// CauseAgentTimeout: the agent did not answer a read within the
+	// Provider's call deadline.
+	CauseAgentTimeout = "AgentTimeout"
 )
 
 // hostUnavailable is the host-scoped refusal of a call to host:
@@ -116,6 +122,18 @@ func identityRequired() error {
 	return withInfo.Err()
 }
 
+// grantMissing is the refusal of an envelope that carries no grant, or a
+// grant without a body, signature or signer chain, as the agent answers it.
+func grantMissing() error {
+	st := status.New(codes.FailedPrecondition, "the operation envelope carries no complete grant")
+	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{Reason: contracts.GrantUnauthenticatedReason,
+		Domain: contracts.ErrorInfoDomain})
+	if err != nil {
+		return st.Err()
+	}
+	return withInfo.Err()
+}
+
 // outerFieldSet is the refusal of a mutating call that sets an outer field
 // beside its operation envelope, as the agent answers it.
 func outerFieldSet() error {
@@ -140,9 +158,11 @@ func outerFieldSet() error {
 // callStateKey is the context key of a call's *callState.
 type callStateKey struct{}
 
-// callState is what the stats handler recorded about one call.
+// callState is what the stats handler recorded about one call, and whether
+// the Provider's own deadline for it expired.
 type callState struct {
 	begun, sent, answered atomic.Bool
+	timedOut              bool
 }
 
 // notSent reports whether the call provably never sent its request.
@@ -154,14 +174,22 @@ func withCallState(ctx context.Context) (context.Context, *callState) {
 	return context.WithValue(ctx, callStateKey{}, cs), cs
 }
 
-// callStatsHandler records the call state of each call.
-type callStatsHandler struct{}
+// connTagKey is the context key of a transport's tag information.
+type connTagKey struct{}
+
+// connStats is the stats handler of one client connection of an entry: it
+// records each call's state, and tells the entry when a transport began or
+// ended, by its local address.
+type connStats struct {
+	e   *hostEntry
+	gen uint64
+}
 
 // TagRPC implements stats.Handler.
-func (callStatsHandler) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context { return ctx }
+func (connStats) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) context.Context { return ctx }
 
 // HandleRPC implements stats.Handler.
-func (callStatsHandler) HandleRPC(ctx context.Context, s stats.RPCStats) {
+func (connStats) HandleRPC(ctx context.Context, s stats.RPCStats) {
 	cs, ok := ctx.Value(callStateKey{}).(*callState)
 	if !ok {
 		return
@@ -177,12 +205,23 @@ func (callStatsHandler) HandleRPC(ctx context.Context, s stats.RPCStats) {
 }
 
 // TagConn implements stats.Handler.
-func (callStatsHandler) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context {
-	return ctx
+func (connStats) TagConn(ctx context.Context, info *stats.ConnTagInfo) context.Context {
+	return context.WithValue(ctx, connTagKey{}, info)
 }
 
 // HandleConn implements stats.Handler.
-func (callStatsHandler) HandleConn(context.Context, stats.ConnStats) {}
+func (c connStats) HandleConn(ctx context.Context, s stats.ConnStats) {
+	info, ok := ctx.Value(connTagKey{}).(*stats.ConnTagInfo)
+	if !ok || info.LocalAddr == nil || c.e == nil {
+		return
+	}
+	switch s.(type) {
+	case *stats.ConnBegin:
+		c.e.transportBegan(c.gen, info.LocalAddr.String())
+	case *stats.ConnEnd:
+		c.e.transportEnded(c.gen, info.LocalAddr.String())
+	}
+}
 
 // route is how the Provider handles one forwarded method.
 type route struct {
@@ -235,6 +274,11 @@ func hostOfMutation(r route, outer proto.Message) (string, error) {
 			return "", outerFieldSet()
 		}
 		return "", status.Error(codes.InvalidArgument, "the request cannot carry an operation envelope")
+	}
+	if g := env.GetGrant(); g == nil || len(g.GetBody()) == 0 || len(g.GetSignature()) == 0 || len(g.GetSignerCertChain()) == 0 {
+		// Nothing a host could authenticate: refused as the host would
+		// refuse it, without dialing.
+		return "", grantMissing()
 	}
 	inner := r.newRequest()
 	if err := proto.Unmarshal(env.GetRequest(), inner); err != nil {
@@ -328,33 +372,64 @@ func (p *Provider) mutate(ctx context.Context, r route, raw []byte, decoded prot
 		return nil, clustered.OutcomeUnknownRetryStatus(fmt.Sprintf("host %q answered with a response that does not decode", host))
 	}
 	if t, ok := resp.(interface{ GetTask() *providerv1.TaskRef }); ok && t.GetTask() != nil {
-		t.GetTask().Id = clustered.EncodeHostTaskRef(clustered.HostID(host), t.GetTask().GetId())
+		ref := clustered.EncodeHostTaskRef(clustered.HostID(host), t.GetTask().GetId())
+		if len(ref) > clustered.HostTaskRefMaxLen {
+			// The agent accepted the call, but its task reference cannot be
+			// carried: the outcome is to be asked by op_id.
+			return nil, clustered.OutcomeUnknownRetryStatus(fmt.Sprintf("host %q answered with a task reference that is too long", host))
+		}
+		t.GetTask().Id = ref
 	}
 	return resp, nil
 }
 
 // forward sends req on method to host's agent, after its Hello, under its
-// breaker, and maps a failure that is not the agent's own answer.
+// breaker and the Provider's own call deadline, and maps a failure that is
+// not the agent's own answer.
 func (p *Provider) forward(ctx context.Context, host, method string, req, resp proto.Message, mutating bool) error {
 	e, ok := p.pool.get(host)
 	if !ok {
 		return hostUnavailable(host, false, CauseNotFronted)
 	}
-	if err := p.pool.helloed(ctx, e); err != nil {
-		return err
+	var (
+		pr  peer.Peer
+		cs  *callState
+		err error
+	)
+	for attempt := 0; attempt < helloAttempts; attempt++ {
+		if err = p.pool.helloed(ctx, e); err != nil {
+			return err
+		}
+		cs, err = p.pool.invokeChecked(ctx, e, method, req, resp, &pr, true)
+		if !errors.Is(err, errHelloStale) {
+			break
+		}
 	}
-	cs, err := p.pool.invoke(ctx, e, method, req, resp)
+	if errors.Is(err, errHelloStale) {
+		return hostUnavailable(host, true, CauseAgentUnverified)
+	}
+	if err == nil && pr.LocalAddr != nil {
+		// The call ran on another transport than the one its Hello was
+		// made on (the connection was replaced in between): the next call
+		// makes a new Hello.
+		e.forgetHello(pr.LocalAddr.String())
+	}
 	return mapCallError(ctx, host, mutating, cs, err)
 }
 
 // mapCallError maps the result of one call to host's agent: the agent's own
 // answer is returned unchanged; a call the breaker refused, or that never
 // reached the agent, is host-scoped and not performed; a mutating call that
-// was sent and got no answer may have been performed.
+// was sent and got no answer (the connection dropped, or the Provider's own
+// call deadline expired) may have been performed. Each is host-scoped, so
+// that the manager keeps it out of its Provider-wide breaker; only the
+// caller's own cancellation or deadline is answered as such.
 func mapCallError(ctx context.Context, host string, mutating bool, cs *callState, err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errors.Is(err, errEntryClosed):
+		return hostUnavailable(host, false, CauseNotFronted)
 	case errors.Is(err, errBreakerOpen):
 		return hostUnavailable(host, true, CauseBreakerOpen)
 	case errors.Is(err, errNotConnected):
@@ -367,6 +442,8 @@ func mapCallError(ctx context.Context, host string, mutating bool, cs *callState
 		return hostUnavailable(host, true, notSentCause(err))
 	case mutating:
 		return clustered.OutcomeUnknownRetryStatus(fmt.Sprintf("host %q stopped answering; the operation's outcome is unknown", host))
+	case cs.timedOut:
+		return hostUnavailable(host, true, CauseAgentTimeout)
 	}
 	return hostUnavailable(host, true, CauseAgentUnreachable)
 }
@@ -379,17 +456,70 @@ func notSentCause(err error) string {
 	return CauseAgentUnreachable
 }
 
-// invoke performs one call on e's connection under its breaker and returns
-// its call state.
-func (p *pool) invoke(ctx context.Context, e *hostEntry, method string, req, resp any, opts ...grpc.CallOption) (*callState, error) {
-	ctx, cs := withCallState(ctx)
-	err := guard(ctx, e.breaker, func(ctx context.Context) (bool, error) {
-		if !e.awaitConnection(ctx, p.opts.ConnectTimeout) {
+// callMargin is how much of the caller's remaining time the Provider keeps
+// for itself, so that its own deadline expires first and it can still
+// answer the caller with a host-scoped error.
+const callMargin = 500 * time.Millisecond
+
+// callContext returns the context of one call to an agent: its own deadline
+// is the Provider's call timeout, or the caller's deadline less callMargin
+// when that is sooner.
+func (p *pool) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	limit := p.opts.CallTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if rem := time.Until(dl) - callMargin; rem > 0 && rem < limit {
+			limit = rem
+		}
+	}
+	return context.WithTimeout(ctx, limit)
+}
+
+// invoke performs one call on e's connection under its breaker and the
+// Provider's own call deadline, and returns its call state. When pr is set,
+// it receives the call's peer. The expiry of the Provider's deadline counts
+// toward the host's breaker; the caller's own does not.
+func (p *pool) invoke(ctx context.Context, e *hostEntry, method string, req, resp any, pr *peer.Peer) (*callState, error) {
+	return p.invokeChecked(ctx, e, method, req, resp, pr, false)
+}
+
+// helloAttempts bounds how often forward makes a new Hello because the
+// connection moved to a new transport between the Hello and the call.
+const helloAttempts = 3
+
+// errHelloStale is returned by invokeChecked when the connection is READY on
+// another transport than the one the host's Hello was made on: nothing was
+// sent, and a new Hello is needed. It never counts toward the breaker.
+var errHelloStale = errors.New("the connection moved to a transport without a Hello")
+
+// invokeChecked is invoke; with requireHello, the call is sent only when the
+// READY connection's transport is the one the host's Hello was made on (a
+// transport replaced in the instant between this check and the send is
+// caught after the call, by forward).
+func (p *pool) invokeChecked(ctx context.Context, e *hostEntry, method string, req, resp any, pr *peer.Peer, requireHello bool) (*callState, error) {
+	cctx, cancel := p.callContext(ctx)
+	defer cancel()
+	cctx, cs := withCallState(cctx)
+	cc, err := e.connection()
+	if err != nil {
+		return cs, err
+	}
+	opts := []grpc.CallOption{}
+	if pr != nil {
+		opts = append(opts, grpc.Peer(pr))
+	}
+	err = guard(cctx, e.breaker, func(cctx context.Context) (bool, error) {
+		if !awaitConnection(cctx, cc, p.opts.ConnectTimeout) {
 			return false, errNotConnected
 		}
-		err := e.conn.Invoke(ctx, method, req, resp, opts...)
+		if requireHello && cc.GetState() == connectivity.Ready {
+			if made, _ := e.currentHello(); !made {
+				return false, errHelloStale
+			}
+		}
+		err := cc.Invoke(cctx, method, req, resp, opts...)
 		return cs.answered.Load(), err
-	})
+	}, func() bool { return ctx.Err() != nil })
+	cs.timedOut = err != nil && ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded)
 	return cs, err
 }
 

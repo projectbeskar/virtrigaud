@@ -171,6 +171,8 @@ type fakeAgent struct {
 	srv        *grpc.Server
 	apiVersion atomic.Uint32
 	hellos     atomic.Int32
+	// helloBlocks makes Hello wait until its caller gives up.
+	helloBlocks atomic.Bool
 
 	mu      sync.Mutex
 	calls   []captured
@@ -266,8 +268,12 @@ type helloServer struct {
 	f *fakeAgent
 }
 
-func (h *helloServer) Hello(_ context.Context, req *agentv1.HelloRequest) (*agentv1.HelloResponse, error) {
+func (h *helloServer) Hello(ctx context.Context, req *agentv1.HelloRequest) (*agentv1.HelloResponse, error) {
 	h.f.hellos.Add(1)
+	if h.f.helloBlocks.Load() {
+		<-ctx.Done()
+		return nil, status.Error(codes.Canceled, "gave up")
+	}
 	ha := &providerv1.HostAnswer{Context: &providerv1.AnswerContext{Nonce: req.GetAnswerNonce(), HostId: h.f.name},
 		AgentApiVersion: h.f.apiVersion.Load()}
 	blob, err := answer.Sign(h.f.key, h.f.leaf.Raw, ha)
@@ -349,5 +355,5 @@ func signedPower(t *testing.T, host string) *providerv1.PowerRequest {
 	inner, err := proto.Marshal(&providerv1.PowerRequest{Id: "vm-1", Op: providerv1.PowerOp_POWER_OP_ON, TargetHostId: host})
 	require.NoError(t, err)
 	return &providerv1.PowerRequest{OperationEnvelope: &providerv1.OperationEnvelope{Request: inner,
-		Grant: &providerv1.OperationGrant{Body: []byte("opaque"), Signature: []byte("sig")}}}
+		Grant: &providerv1.OperationGrant{Body: []byte("opaque"), Signature: []byte("sig"), SignerCertChain: [][]byte{[]byte("leaf")}}}}
 }

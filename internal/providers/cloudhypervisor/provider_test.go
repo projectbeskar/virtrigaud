@@ -164,7 +164,7 @@ func TestForwardedByteIdentical(t *testing.T) {
 
 	inner, err := proto.Marshal(&providerv1.PowerRequest{Id: "vm-1", Op: providerv1.PowerOp_POWER_OP_ON, TargetHostId: "host-a"})
 	require.NoError(t, err)
-	grant, err := proto.Marshal(&providerv1.OperationGrant{Body: []byte("opaque"), Signature: []byte("sig")})
+	grant, err := proto.Marshal(&providerv1.OperationGrant{Body: []byte("opaque"), Signature: []byte("sig"), SignerCertChain: [][]byte{[]byte("leaf")}})
 	require.NoError(t, err)
 	// The grant before the request (a marshal writes fields in number
 	// order), and the request's length as an over-long varint.

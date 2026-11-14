@@ -31,6 +31,8 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/stats"
 
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
@@ -48,6 +50,9 @@ type agentTrust struct {
 	pins        []string
 	providerUID string
 	now         func() time.Time
+	// accepted, when set, receives the expiry of every agent certificate a
+	// handshake accepts.
+	accepted func(notAfter time.Time)
 }
 
 // newAgentTrust builds the trust of host from its inventory entry, which
@@ -93,6 +98,9 @@ func (a *agentTrust) verify(chain []*x509.Certificate) error {
 	if err != nil || !slices.Contains(a.pins, pin) {
 		return fmt.Errorf("%w: its key is not pinned for this host", ErrAgentRefused)
 	}
+	if a.accepted != nil {
+		a.accepted(leaf.NotAfter)
+	}
 	return nil
 }
 
@@ -127,18 +135,28 @@ func agentAddress(endpoint string) (string, error) {
 	return addr, nil
 }
 
+// Keepalive of a connection to an agent: a ping every keepaliveTime, with
+// or without calls in flight, and the connection closed when a ping is not
+// answered within keepaliveTimeout, so that an agent that went silent on an
+// open connection is noticed. The agent accepts pings this often.
+const (
+	keepaliveTime    = 20 * time.Second
+	keepaliveTimeout = 10 * time.Second
+)
+
 // dialAgent returns a lazy client connection to an agent at endpoint: nothing
-// is dialed until the first call. The connection carries the call-state
-// stats handler (route.go) and, when dial is set, dials through it.
+// is dialed until the first call. The connection carries the stats handler
+// sh (route.go), keepalive pings and, when dial is set, dials through it.
 func dialAgent(endpoint string, trust *agentTrust, client tls.Certificate,
-	dial func(ctx context.Context, addr string) (net.Conn, error)) (*grpc.ClientConn, error) {
+	dial func(ctx context.Context, addr string) (net.Conn, error), sh stats.Handler) (*grpc.ClientConn, error) {
 	addr, err := agentAddress(endpoint)
 	if err != nil {
 		return nil, err
 	}
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(trust.tlsConfig(client))),
-		grpc.WithStatsHandler(callStatsHandler{}),
+		grpc.WithStatsHandler(sh),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: keepaliveTime, Timeout: keepaliveTimeout, PermitWithoutStream: true}),
 	}
 	if dial != nil {
 		opts = append(opts, grpc.WithContextDialer(dial))
