@@ -682,3 +682,42 @@ func auditSignedDecision(ctx context.Context, read contracts.SignedRead, v hosti
 	log.FromContext(ctx).Info("Signed decision", "decision", decision, "summary", summary, "signedAnswer", enc)
 	return summary
 }
+
+// NewHostAnswers returns the manager's state of signed host answers for the
+// enrolment configuration cfg (nil: none, and nothing is sent to a Provider
+// that requires operation identity). Grants are issued under an
+// identity-only epoch whose holder is the install id.
+func NewHostAnswers(c client.Client, cfg *HostEnrolmentConfig, installID []byte) *HostAnswers {
+	if cfg == nil || len(installID) != operation.IDLen {
+		return nil
+	}
+	return &HostAnswers{Trust: &PinsHostTrust{Client: c, Config: cfg,
+		Epoch: operation.Epoch{Counter: 1, Holder: bytes.Clone(installID)}}}
+}
+
+// grantAnchored is a signer that names its grant anchor (the development
+// signer).
+type grantAnchored interface {
+	Anchor() *x509.Certificate
+}
+
+// CheckHostAnswerTrust checks, at start-up, that the host-agent CA of cfg
+// and the grant anchor of signer share no certificate, key or issuer
+// (hostidentity.CheckHierarchySeparation). Nothing to check without either.
+func CheckHostAnswerTrust(cfg *HostEnrolmentConfig, signer operation.Signer) error {
+	if cfg == nil || signer == nil {
+		return nil
+	}
+	a, ok := signer.(grantAnchored)
+	if !ok || a.Anchor() == nil {
+		return nil
+	}
+	hostCAs, err := hostidentity.ParseCertificates(cfg.CABundle)
+	if err != nil {
+		return fmt.Errorf("host-agent CA bundle: %w", err)
+	}
+	if err := hostidentity.CheckHierarchySeparation(hostCAs, []*x509.Certificate{a.Anchor()}); err != nil {
+		return fmt.Errorf("host-agent CA and operation-grant anchor: %w", err)
+	}
+	return nil
+}

@@ -433,7 +433,9 @@ type identityAttempt struct {
 	providerCR *infravirtrigaudiov1beta1.Provider
 	instance   contracts.Provider
 	sender     contracts.OperationSender
-	vmClass    *infravirtrigaudiov1beta1.VMClass
+	// reader asks hosts for signed answers about the attempt.
+	reader  contracts.HostAnswerReader
+	vmClass *infravirtrigaudiov1beta1.VMClass
 	// deleteRef is the VM reference a Delete attempt must name (set by
 	// identityDelete); a stored Delete intent naming another is tampered.
 	deleteRef *contracts.VMRef
@@ -479,7 +481,13 @@ func (r *VirtualMachineReconciler) identityAttemptFor(ctx context.Context, vm *i
 			why+"; the manager never lowers the protection it requires: nothing is sent until the Provider advertises a match",
 			operationHoldRecheckInterval), false
 	}
-	return identityAttempt{providerCR: providerCR, instance: instance, sender: sender, result: &attemptResult{}}, ctrl.Result{}, true
+	reader, ok := instance.(contracts.HostAnswerReader)
+	if !ok || r.HostAnswers == nil {
+		return identityAttempt{}, r.holdOperation(ctx, vm, k8s.ReasonOperationHostAnswerUnavailable, msgHostAnswersUnavailable,
+			operationHoldRecheckInterval), false
+	}
+	return identityAttempt{providerCR: providerCR, instance: instance, sender: sender, reader: reader, result: &attemptResult{}},
+		ctrl.Result{}, true
 }
 
 // reconcileIdentityGate runs, for a VM of a Provider that requires operation
@@ -581,15 +589,9 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 		}
 		attemptNo = prev.Attempt + 1
 	}
-	if r.OperationEnrolments == nil {
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationEnrolmentUnavailable,
-			"no operation-identity enrolment is configured for this manager (a development build needs --"+
-				operation.DevEnrolmentFileFlagName+"); nothing is sent", operationHoldRecheckInterval), nil
-	}
-	enrol, err := r.OperationEnrolments.Enrolment(ia.providerCR.Namespace, ia.providerCR.Name, host)
-	if err != nil {
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationEnrolmentUnavailable,
-			fmt.Sprintf("no operation-identity enrolment is configured for host %s; nothing is sent", host), operationHoldRecheckInterval), nil
+	enrol, step, res, ok := r.grantEnrolment(ctx, vm, ia, host)
+	if !ok {
+		return step, res, nil
 	}
 	binding := bindingIDOf(vm)
 	newBinding := false
@@ -672,24 +674,23 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	return r.sendAttempt(ctx, vm, ia, &marker, prepared, true)
 }
 
-// driveAttempt is step 3 or 4 for the attempt a in flight: a Sent attempt
-// with a task is polled; any other is re-sent from its intent Secret with
-// the same bytes and op_id, once the Secret authenticates and matches a, vm
-// and the Provider (loadVerifiedIntent).
+// driveAttempt is step 3 or 4 for the attempt a in flight, once its intent
+// Secret authenticates and matches a, vm and the Provider
+// (loadVerifiedIntent): the host is asked about its op_id, and only a
+// verified signed answer moves it (driveSigned); it is re-sent from the
+// Secret with the same bytes and op_id only after the host signed that it
+// has no record of it.
 func (r *VirtualMachineReconciler) driveAttempt(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (attemptStep, ctrl.Result, error) {
-	prepared, step, res, ok := r.loadVerifiedIntent(ctx, vm, ia, a)
+	prepared, predecessor, step, res, ok := r.loadVerifiedIntent(ctx, vm, ia, a)
 	if !ok {
 		return step, res, nil
 	}
 	ia.noteResult(&prepared, nil)
-	if a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent && a.TaskRef != "" {
-		if !r.taskRefBound(vm, a) {
-			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval), nil
-		}
-		return r.pollAttempt(ctx, vm, ia, a)
+	if a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent && !r.taskRefBound(vm, a) {
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval), nil
 	}
-	return r.sendAttempt(ctx, vm, ia, a, prepared, false)
+	return r.driveSigned(ctx, vm, ia, a, prepared, predecessor, false)
 }
 
 // loadVerifiedIntent loads the intent of attempt a and checks it: it must
@@ -702,31 +703,34 @@ func (r *VirtualMachineReconciler) driveAttempt(ctx context.Context, vm *infravi
 // (with a Warning event), the Secret is kept as evidence, and nothing is
 // sent.
 func (r *VirtualMachineReconciler) loadVerifiedIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (contracts.PreparedOperation, attemptStep, ctrl.Result, bool) {
+	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (contracts.PreparedOperation, bool, attemptStep, ctrl.Result, bool) {
 	prepared, found, err := r.loadIntent(ctx, vm, a.OpID, ia.providerCR.Namespace)
 	switch {
 	case err != nil && errors.Is(err, operation.ErrNoIntentAuthenticator):
-		return prepared, stepHeld, r.holdOperationSignerUnavailable(ctx, vm), false
+		return prepared, false, stepHeld, r.holdOperationSignerUnavailable(ctx, vm), false
 	case err != nil && errors.Is(err, errIntentTampered):
-		return prepared, stepHeld, r.holdIntentTampered(ctx, vm, a, err), false
+		return prepared, false, stepHeld, r.holdIntentTampered(ctx, vm, a, err), false
 	case err != nil:
 		log.FromContext(ctx).Info("Cannot read the operation-intent Secret; retrying", "error", err.Error())
-		return prepared, stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, false
+		return prepared, false, stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, false
 	case !found:
-		return prepared, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), false
+		return prepared, false, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), false
 	}
-	if err := r.checkIntent(vm, ia, a, prepared); err != nil {
-		if errors.Is(err, errNoEnrolmentSource) {
-			return prepared, stepHeld, r.holdNoEnrolmentSource(ctx, vm), false
-		}
-		return prepared, stepHeld, r.holdIntentTampered(ctx, vm, a, err), false
+	err = r.checkIntent(ctx, vm, ia, a, prepared)
+	switch {
+	case err == nil:
+		return prepared, false, stepWaiting, ctrl.Result{}, true
+	case errors.Is(err, errIntentPredecessor):
+		return prepared, true, stepWaiting, ctrl.Result{}, true
+	case errors.Is(err, errNoEnrolmentSource):
+		return prepared, false, stepHeld, r.holdNoEnrolmentSource(ctx, vm), false
 	}
-	return prepared, stepWaiting, ctrl.Result{}, true
+	return prepared, false, stepHeld, r.holdIntentTampered(ctx, vm, a, err), false
 }
 
 // checkIntent cross-checks an authenticated intent against the state the
 // manager holds now (see loadVerifiedIntent).
-func (r *VirtualMachineReconciler) checkIntent(vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
+func (r *VirtualMachineReconciler) checkIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, p contracts.PreparedOperation) error {
 	id := p.Identity
 	switch {
@@ -745,24 +749,46 @@ func (r *VirtualMachineReconciler) checkIntent(vm *infravirtrigaudiov1beta1.Virt
 	case hex.EncodeToString(id.BindingID) != a.BindingID:
 		return fmt.Errorf("binding: %w", errIntentTampered)
 	}
-	if r.OperationEnrolments == nil {
+	if r.HostAnswers == nil {
 		return errNoEnrolmentSource
 	}
-	enrol, err := r.OperationEnrolments.Enrolment(ia.providerCR.Namespace, ia.providerCR.Name, a.HostID)
-	if err != nil || !bytes.Equal(enrol.EnrolmentID, id.EnrolmentID) || enrol.Epoch.Counter != id.Epoch.Counter ||
+	trust, err := r.HostAnswers.Trust.HostTrust(ctx, ia.providerCR, a.HostID)
+	if err != nil {
+		if errors.Is(err, operation.ErrNoEnrolment) {
+			return fmt.Errorf("enrolment: %w", errIntentTampered)
+		}
+		return errNoEnrolmentSource
+	}
+	enrol := trust.Enrolment
+	if !bytes.Equal(enrol.EnrolmentID, id.EnrolmentID) || enrol.Epoch.Counter != id.Epoch.Counter ||
 		!bytes.Equal(enrol.Epoch.Holder, id.Epoch.Holder) {
+		for _, pre := range trust.Predecessors {
+			if bytes.Equal(pre, id.EnrolmentID) {
+				if err := checkIntentRequest(vm, ia, a, p); err != nil {
+					return err
+				}
+				return errIntentPredecessor
+			}
+		}
 		return fmt.Errorf("enrolment: %w", errIntentTampered)
 	}
 	return checkIntentRequest(vm, ia, a, p)
 }
 
-// errNoEnrolmentSource is checkIntent's answer when no enrolment source is
-// loaded: the intent's enrolment cannot be checked, so nothing is sent.
-var errNoEnrolmentSource = errors.New("no operation-identity enrolment source is loaded")
+// errNoEnrolmentSource is checkIntent's answer when the host's enrolment
+// cannot be read: the intent's enrolment cannot be checked, so nothing is
+// sent.
+var errNoEnrolmentSource = errors.New("the host's operation-identity enrolment cannot be read")
 
-// msgNoEnrolmentSource is the hold of a manager with no enrolment source.
-var msgNoEnrolmentSource = "no operation-identity enrolment is configured for this manager (a development build needs --" +
-	operation.DevEnrolmentFileFlagName + "); nothing is sent"
+// errIntentPredecessor is checkIntent's answer for an intent issued under an
+// earlier enrolment that the host still holds frozen: the attempt may be
+// asked about by op_id, never re-sent.
+var errIntentPredecessor = errors.New("the intent names a predecessor enrolment of the host")
+
+// msgNoEnrolmentSource is the hold of a manager that cannot read the host's
+// enrolment.
+var msgNoEnrolmentSource = "the host's operation-identity enrolment cannot be read (a development build needs per-host agent " +
+	"enrolment, --" + DevHostEnrolmentNamespaceFlagName + "); nothing is sent"
 
 // holdNoEnrolmentSource holds vm when no enrolment source is loaded.
 func (r *VirtualMachineReconciler) holdNoEnrolmentSource(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) ctrl.Result {
@@ -788,15 +814,17 @@ func taskMessage(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaud
 		[]byte(vm.UID), []byte(taskRef), []byte(strconv.FormatBool(a.Honest)), []byte(strconv.FormatBool(a.RestartRequired)))
 }
 
-// taskRefBound reports whether a's task reference is the one the operator
-// recorded for it: its TaskTag verifies over a's op_id, kind, attempt, vm's
-// UID and the reference, and no other marker of vm names the same reference.
+// taskRefBound reports whether what a's Sent marker records (its task
+// reference, possibly empty, the provider's id and the Reconfigure flags) is
+// what the operator recorded for it: its TaskTag verifies over a's op_id,
+// kind, attempt, vm's UID, the reference and the flags, and no other marker
+// of vm names the same non-empty reference.
 func (r *VirtualMachineReconciler) taskRefBound(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt) bool {
-	if r.OperationIntentAuth == nil || a.TaskRef == "" {
+	if r.OperationIntentAuth == nil {
 		return false
 	}
 	for _, other := range vm.Status.OperationAttempts {
-		if other.Kind != a.Kind && other.TaskRef == a.TaskRef {
+		if a.TaskRef != "" && other.Kind != a.Kind && other.TaskRef == a.TaskRef {
 			return false
 		}
 	}
@@ -881,68 +909,44 @@ func (r *VirtualMachineReconciler) holdIntentTampered(ctx context.Context, vm *i
 	return r.holdOperation(ctx, vm, k8s.ReasonOperationIntentTampered, msgOperationIntentTampered, operationHoldRecheckInterval)
 }
 
-// sendAttempt sends prepared (the attempt a) and records the answer. first is
-// true only for the delivery made by the reconcile that wrote a as Prepared.
+// sendAttempt delivers prepared (the attempt a) and then asks the host about
+// it. The answer to a send, a success or a refusal, is the Provider's
+// unsigned claim: it never decides the attempt, whatever its reason (a
+// refusal of a mutating call carries no signed answer, and a grant or
+// Provider refusal is definite for that delivery only). It only records the
+// task reference, the provider's VM id (Create) and the Reconfigure flags on
+// the Sent marker; the attempt moves on the host's signed answer about its
+// op_id (driveSigned). first is true only for the delivery made by the
+// reconcile that wrote a as Prepared.
 func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation,
 	first bool) (attemptStep, ctrl.Result, error) {
-	logger := log.FromContext(ctx)
 	answer, err := ia.sender.SendOperation(ctx, prepared)
 	if r.operationCrashed(ctx, crashAfterSend) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	var sentAnswer *contracts.OperationAnswer
 	if err != nil {
-		return r.sendFailed(ctx, vm, ia, a, err, first)
+		log.FromContext(ctx).Info("The operation was not accepted; the host is asked about its op_id", "kind", a.Kind,
+			"attempt", a.Attempt, "first", first, "error", providerFailureDetail(err))
+		if contracts.HasErrorInfoReason(err, contracts.ProviderMismatchReason) {
+			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationProviderMismatch, msgOperationProviderMismatch,
+				operationHoldRecheckInterval), nil
+		}
+	} else {
+		ia.noteResult(nil, &answer)
+		sentAnswer = &answer
 	}
-	ia.noteResult(nil, &answer)
-	if answer.TaskRef == "" {
-		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded, "", answer.ID)
-	}
-	sent := *a
-	sent.Phase, sent.TaskRef, sent.LastTransitionTime = infravirtrigaudiov1beta1.OperationAttemptPhaseSent, answer.TaskRef, metav1.NewTime(r.now())
-	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate {
-		// The provider's VM id is kept on the marker (operator-written
-		// status), never in the Secret, until the Create Succeeded.
-		sent.ID = answer.ID
-	}
-	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
-		// The answer's flags decide what the task's success records; they
-		// are kept on the marker, under the task tag.
-		sent.Honest, sent.RestartRequired = answer.Honest, answer.RestartRequired
-	}
-	// The task reference is bound to this attempt, so an edited status cannot
-	// make another task (for example the Create's) confirm it.
-	sent.TaskTag = r.taskTag(vm, &sent, answer.TaskRef)
-	if err := r.writeIdentityStatus(ctx, vm, identityStatusWrite{attempts: withAttempt(vm, sent)}); err != nil {
-		logger.Info("The Sent marker was not written; the attempt is re-sent with the same op_id", "error", err.Error())
+	sent, werr := r.markSent(ctx, vm, a, sentAnswer)
+	if werr != nil {
+		log.FromContext(ctx).Info("The Sent marker was not written; the host is asked about the attempt again", "error", werr.Error())
 		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
-	return stepWaiting, r.operationInProgress(ctx, vm, &sent, operationPollInterval), nil
-}
-
-// sendFailed handles a send of the attempt a that failed with err. Only a
-// refusal of the first delivery with a reason that proves it was not
-// performed ends the attempt (Rejected); a refusal that proves nothing about
-// an earlier delivery holds it; anything else (a transport error, VM_BUSY,
-// UNATTESTED, ...) leaves it as it is, to be re-sent with the same op_id.
-// Every reason is the Provider's unsigned claim.
-func (r *VirtualMachineReconciler) sendFailed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt, err error, first bool) (attemptStep, ctrl.Result, error) {
-	log.FromContext(ctx).Info("The operation was not accepted", "kind", a.Kind, "attempt", a.Attempt, "first", first,
-		"error", providerFailureDetail(err))
-	switch {
-	case contracts.HasErrorInfoReason(err, contracts.ProviderMismatchReason):
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationProviderMismatch, msgOperationProviderMismatch, operationHoldRecheckInterval), nil
-	case a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete && contracts.IsNotFound(err):
-		// The host reports no such VM (or one it does not own): that does
-		// not confirm the Delete (deleteAbsentHolds).
-		return r.deleteAbsent(ctx, vm, ia, a)
-	case repeatableKind(contracts.OperationKind(a.Kind)) && !definiteRejection(err) && redeliveryRefusal(err) == "":
-		// A power operation or Reconfigure meets the host-level answers the
-		// unsigned path handles: an unavailable host, a VM missing on its
-		// host or not this VM's, an owner that cannot be told. The attempt
-		// stays as it is and is re-sent with the same op_id when the hold
-		// is re-checked.
+	if err != nil && repeatableKind(contracts.OperationKind(a.Kind)) {
+		// A host-level answer (an unavailable host, a VM missing on its host
+		// or not this VM's) is reported as such and paced as the unsigned
+		// path paces it; it decides nothing, and the host is asked about
+		// the op_id when the hold is re-checked.
 		ref := contracts.VMRef{ID: vm.Status.ID, HostID: a.HostID, Owner: vmOwnerIdentity(vm)}
 		errReason := errReasonProviderPower
 		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
@@ -954,130 +958,42 @@ func (r *VirtualMachineReconciler) sendFailed(ctx context.Context, vm *infravirt
 		if res, held := r.holdOwnerRefusal(ctx, vm, ref, err, string(a.Kind)); held {
 			return stepHeld, res, nil
 		}
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
-			fmt.Sprintf("%s attempt %d was not accepted; it is re-sent with the same identity: %s", a.Kind, a.Attempt, providerFailureDetail(err)),
-			vm.Generation)
-		r.updateStatus(ctx, vm)
-		return stepWaiting, ctrl.Result{RequeueAfter: max(blockedRetryMin, routedCallRetryAfter(ref, err))}, nil
-	case definiteRejection(err) && first:
-		return r.closeAttempt(ctx, vm, ia, a, infravirtrigaudiov1beta1.OperationAttemptOutcomeRejected, rejectionReason(err), "")
-	case redeliveryRefusal(err) != "":
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationOutcomeUnknown,
-			fmt.Sprintf("the host refused a re-delivery of %s attempt %d (%s), which proves nothing about an earlier delivery; "+
-				"the same attempt is re-sent periodically; %s", a.Kind, a.Attempt, redeliveryRefusal(err), operationHoldRecovery),
-			operationHoldRecheckInterval), nil
 	}
-	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
-		fmt.Sprintf("%s attempt %d was not accepted; it is re-sent with the same identity: %s", a.Kind, a.Attempt, providerFailureDetail(err)),
-		vm.Generation)
-	r.updateStatus(ctx, vm)
-	return stepWaiting, ctrl.Result{RequeueAfter: blockedRetryMin}, nil
+	return r.driveSigned(ctx, vm, ia, sent, prepared, false, true)
 }
 
-// definiteRejectionReasons are the refusals that prove the refused delivery
-// was not performed and name its own operation, so a refused FIRST delivery
-// ends the attempt. NONCE_CONSUMED and REQUEST_CONSUMED (this delivery only)
-// and PROVIDER_MISMATCH (held) are handled apart.
-var definiteRejectionReasons = []string{
-	contracts.GrantUnauthenticatedReason, contracts.GrantMismatchReason, contracts.DigestMismatchReason,
-	contracts.DeadlineExceededNotPerformedReason,
-}
-
-// definiteRejection reports whether err carries a definiteRejectionReasons
-// reason.
-func definiteRejection(err error) bool {
-	return rejectionReason(err) != ""
-}
-
-// rejectionReason is err's definiteRejectionReasons reason, or "".
-func rejectionReason(err error) string {
-	for _, reason := range definiteRejectionReasons {
-		if contracts.HasErrorInfoReason(err, reason) {
-			return reason
+// markSent writes a as Sent, recording what the answer to a send (nil: none)
+// carried: the task reference, bound to the attempt by its task tag, the
+// provider's VM id of a Create (kept on the marker, never in the Secret,
+// until the Create Succeeded) and the flags of a Reconfigure. A marker that
+// is already Sent keeps its transition time, so a re-send does not extend
+// the attempt's deadline, and a known value is not cleared by a send that
+// was not answered.
+func (r *VirtualMachineReconciler) markSent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	a *infravirtrigaudiov1beta1.OperationAttempt, answer *contracts.OperationAnswer) (*infravirtrigaudiov1beta1.OperationAttempt, error) {
+	sent := *a
+	if sent.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseSent {
+		sent.Phase, sent.LastTransitionTime = infravirtrigaudiov1beta1.OperationAttemptPhaseSent, metav1.NewTime(r.now())
+	}
+	if answer != nil {
+		if answer.TaskRef != "" {
+			sent.TaskRef = answer.TaskRef
+		}
+		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindCreate && answer.ID != "" {
+			sent.ID = answer.ID
+		}
+		if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
+			sent.Honest, sent.RestartRequired = answer.Honest, answer.RestartRequired
 		}
 	}
-	return ""
-}
-
-// redeliveryRefusalReasons are the refusals of a re-delivery that prove
-// nothing about an earlier delivery of the same attempt: the attempt is held.
-var redeliveryRefusalReasons = []string{
-	contracts.GrantUnauthenticatedReason, contracts.GrantMismatchReason, contracts.DigestMismatchReason,
-	contracts.DeadlineExceededNotPerformedReason, contracts.OpIDConflictReason, contracts.NonceConsumedReason,
-	contracts.RequestConsumedReason,
-}
-
-// redeliveryRefusal is err's redeliveryRefusalReasons reason, or "".
-func redeliveryRefusal(err error) string {
-	for _, reason := range redeliveryRefusalReasons {
-		if contracts.HasErrorInfoReason(err, reason) {
-			return reason
-		}
+	sent.TaskTag = r.taskTag(vm, &sent, sent.TaskRef)
+	if sent == *a {
+		return a, nil
 	}
-	return ""
-}
-
-// pollAttempt reads the task of the Sent attempt a (a plain read: it never
-// writes unless the task is over) and closes the attempt on a terminal
-// outcome.
-func (r *VirtualMachineReconciler) pollAttempt(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
-	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt) (attemptStep, ctrl.Result, error) {
-	st, err := ia.instance.TaskStatus(ctx, a.TaskRef)
-	if err != nil {
-		if contracts.IsUnknownToAgent(err) {
-			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationUnknownToAgent, msgOperationUnknownToAgent, operationHoldRecheckInterval), nil
-		}
-		log.FromContext(ctx).Info("Cannot read the operation's task status; asking again", "error", providerFailureDetail(err))
-		return stepWaiting, ctrl.Result{RequeueAfter: blockedRetryMin}, nil
+	if err := r.writeIdentityStatus(ctx, vm, identityStatusWrite{attempts: withAttempt(vm, sent)}); err != nil {
+		return nil, err
 	}
-	var outcome infravirtrigaudiov1beta1.OperationAttemptOutcome
-	running := st.Outcome == contracts.TaskOutcomeRunning || (st.Outcome == contracts.TaskOutcomeUnspecified && !st.IsCompleted)
-	if running && r.runningPastDeadline(a) {
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationOutcomeUnknown, fmt.Sprintf(
-			"%s attempt %d has been reported running for more than %s; its outcome is treated as unknown (it is still asked "+
-				"about, and a Delete of the VM supersedes it); %s", a.Kind, a.Attempt, sentAttemptDeadline, operationHoldRecovery),
-			operationHoldRecheckInterval), nil
-	}
-	switch st.Outcome {
-	case contracts.TaskOutcomeRunning:
-		return stepWaiting, r.operationInProgress(ctx, vm, a, operationPollInterval), nil
-	case contracts.TaskOutcomeSucceeded:
-		outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded
-	case contracts.TaskOutcomeFailedClean:
-		outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedClean
-	case contracts.TaskOutcomeRetired:
-		outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeRetired
-	case contracts.TaskOutcomeCancelled:
-		outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeCancelled
-	case contracts.TaskOutcomeFailedDirty:
-		outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedDirty
-	case contracts.TaskOutcomeUnknown:
-		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationOutcomeUnknown,
-			fmt.Sprintf("the Provider cannot tell what %s attempt %d did; it is asked again periodically; %s", a.Kind, a.Attempt,
-				operationHoldRecovery), operationHoldRecheckInterval), nil
-	default:
-		// An untyped answer: done without an error is a success; done with
-		// one cannot be told clean from dirty.
-		switch {
-		case !st.IsCompleted:
-			return stepWaiting, r.operationInProgress(ctx, vm, a, operationPollInterval), nil
-		case st.Error == "":
-			outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded
-		default:
-			return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationOutcomeUnknown,
-				fmt.Sprintf("the Provider reported %s attempt %d failed without saying whether anything was done; %s", a.Kind, a.Attempt,
-					operationHoldRecovery), operationHoldRecheckInterval), nil
-		}
-	}
-	if r.operationCrashed(ctx, crashAfterReply) {
-		return stepWaiting, ctrl.Result{}, errOperationCrashed
-	}
-	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {
-		// The flags of the answer that returned the task, as recorded on the
-		// Sent marker under its task tag (verified before this poll).
-		ia.noteResult(nil, &contracts.OperationAnswer{TaskRef: a.TaskRef, Honest: a.Honest, RestartRequired: a.RestartRequired})
-	}
-	return r.closeAttempt(ctx, vm, ia, a, outcome, st.OutcomeReason, a.ID)
+	return &sent, nil
 }
 
 // closeAttempt writes the attempt a Terminal with outcome (and, for a
@@ -1114,8 +1030,9 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
 	// A Delete that Succeeded keeps its intent Secret until the finalizer is
-	// released: it is the evidence a later release is checked against.
-	if a.Kind != infravirtrigaudiov1beta1.OperationAttemptKindDelete || outcome != infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded {
+	// released, and a Create that was not performed keeps it while it is the
+	// VM's latest: each is what a later release asks the host about again.
+	if !intentKeptAsEvidence(vm, &done) {
 		if err := r.deleteIntent(ctx, ia.providerCR.Namespace, a.OpID, vm.UID); err != nil {
 			logger.Info("Could not remove the operation-intent Secret; the sweeper will", "error", err.Error())
 		}
@@ -1202,6 +1119,14 @@ func (r *VirtualMachineReconciler) identityDelete(ctx context.Context, vm *infra
 		return r.confirmDeleteRelease(ctx, vm, ia, d, force)
 	}
 	if nothingCreated(vm) {
+		if c := findAttempt(vm, contracts.OperationKindCreate); c != nil && !r.signedNotPerformed(ctx, vm, ia, c) {
+			// The latest Create is recorded not performed, but the host does
+			// not sign that again: the stored outcome alone is not enough.
+			if force {
+				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOperationHeld)
+			}
+			return r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgCreateNotPerformedUnconfirmed, operationHoldRecheckInterval), nil
+		}
 		log.FromContext(ctx).Info("No Create of this VM was ever performed; releasing it without a Delete")
 		return r.removeFinalizer(ctx, vm)
 	}
@@ -1217,13 +1142,11 @@ var msgDeleteNotConfirmed = "the VM's Delete is recorded Succeeded, but its stor
 // confirmDeleteRelease releases the finalizer of a VM whose Delete attempt d
 // is recorded Succeeded but whose release was not made by the reconcile that
 // recorded it (a restart in between, or an edited status): the Delete's
-// intent Secret must authenticate and match d, and the Provider must confirm
-// the outcome: the task d names reports Succeeded, or, for a synchronous
-// Delete, a re-send of the same attempt (the host answers a known op_id from
-// its record) succeeds. Otherwise the VM is held (or released by
-// force-delete). The status itself is not authenticated: a principal that can
-// write it and can also make the Provider confirm a Delete it never ran can
-// still cause a release.
+// intent Secret must authenticate and match d, and the host must confirm it
+// again with a fresh signed answer: the Delete's op_id COMPLETED, or the
+// VM's placement DELETED (signedDeleteConfirmed). A task status, a re-send
+// or a Describe that finds no VM never does. Otherwise the VM is held (or
+// released by force-delete).
 func (r *VirtualMachineReconciler) confirmDeleteRelease(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ia identityAttempt, d *infravirtrigaudiov1beta1.OperationAttempt, force bool) (ctrl.Result, error) {
 	hold := func(res ctrl.Result) (ctrl.Result, error) {
@@ -1242,25 +1165,15 @@ func (r *VirtualMachineReconciler) confirmDeleteRelease(ctx context.Context, vm 
 		log.FromContext(ctx).Info("Cannot read the Delete's operation-intent Secret; retrying", "error", err.Error())
 		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
 	}
-	if cerr := r.checkIntent(vm, ia, d, prepared); cerr != nil {
-		if errors.Is(cerr, errNoEnrolmentSource) {
-			return hold(r.holdNoEnrolmentSource(ctx, vm))
-		}
+	cerr := r.checkIntent(ctx, vm, ia, d, prepared)
+	switch {
+	case cerr == nil, errors.Is(cerr, errIntentPredecessor):
+	case errors.Is(cerr, errNoEnrolmentSource):
+		return hold(r.holdNoEnrolmentSource(ctx, vm))
+	default:
 		return hold(r.holdIntentTampered(ctx, vm, d, cerr))
 	}
-	confirmed := false
-	if d.TaskRef != "" {
-		if !r.taskRefBound(vm, d) {
-			return hold(r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval))
-		}
-		st, terr := ia.instance.TaskStatus(ctx, d.TaskRef)
-		confirmed = terr == nil && (st.Outcome == contracts.TaskOutcomeSucceeded ||
-			(st.Outcome == contracts.TaskOutcomeUnspecified && st.IsCompleted && st.Error == ""))
-	} else {
-		answer, serr := ia.sender.SendOperation(ctx, prepared)
-		confirmed = serr == nil && answer.TaskRef == ""
-	}
-	if !confirmed {
+	if !r.signedDeleteConfirmed(ctx, vm, ia, d, prepared) {
 		return hold(r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgDeleteNotConfirmed, operationHoldRecheckInterval))
 	}
 	return r.releaseAfterDelete(ctx, vm, ia, d.OpID)

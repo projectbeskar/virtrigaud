@@ -384,11 +384,13 @@ type VirtualMachineReconciler struct {
 	// blockedRetryMax. Any answer of the provider resets it.
 	deleteTaskStatusRetry unschedulableBackoff
 
-	// OperationEnrolments returns the enrolment of a host of a Provider that
-	// requires operation identity (development builds only: the
-	// --dev-operation-enrolment-file stand-in). nil: no host has one, and
-	// nothing is sent to such a Provider. Every other Provider ignores it.
-	OperationEnrolments operation.EnrolmentSource
+	// HostAnswers is the manager's state of signed host answers (development
+	// builds only, with per-host agent enrolment): the trust of each host of
+	// a Provider that requires operation identity (its enrolment, which
+	// grants name, its pins and CA), its store positions and its last
+	// verified host answer. nil: nothing is sent to such a Provider. Every
+	// other Provider ignores it.
+	HostAnswers *HostAnswers
 	// OperationIntentAuth authenticates the intent Secrets of operation
 	// identity (operation.IntentAuthenticatorOf the manager's signer). nil:
 	// no intent is stored or loaded, and nothing is sent to a Provider that

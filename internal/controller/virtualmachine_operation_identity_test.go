@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -67,6 +68,9 @@ type identityStub struct {
 	// bigRequest makes BuildOperation return a request over the intent cap.
 	bigRequest bool
 	deletes    int // unsigned Deletes (must stay 0)
+	// signed is the host the stub's signed reads come from (set by
+	// identityFixture).
+	signed *signedHostStub
 }
 
 func newIdentityStub() *identityStub {
@@ -130,13 +134,41 @@ func (s *identityStub) SendOperation(_ context.Context, p contracts.PreparedOper
 	s.sends = append(s.sends, p)
 	on := s.onSend
 	s.mu.Unlock()
-	if on != nil {
-		return on(p)
-	}
+	answer := contracts.OperationAnswer{}
 	if p.Kind == contracts.OperationKindCreate {
-		return contracts.OperationAnswer{ID: "vm-1"}, nil
+		answer.ID = "vm-1"
 	}
-	return contracts.OperationAnswer{}, nil
+	var err error
+	if on != nil {
+		answer, err = on(p)
+	}
+	if err == nil && s.signed != nil {
+		s.signed.accept(p, answer.TaskRef)
+	}
+	return answer, err
+}
+
+func (s *identityStub) setSigned(h *signedHostStub) { s.signed = h }
+
+func (s *identityStub) OperationAnswer(_ context.Context, q contracts.OperationAnswerQuery) (contracts.TaskStatus, contracts.SignedRead, error) {
+	if s.signed == nil {
+		return contracts.TaskStatus{}, contracts.SignedRead{}, errors.New("no signed host")
+	}
+	return s.signed.operationAnswer(q, s.onTask)
+}
+
+func (s *identityStub) VMAnswer(_ context.Context, q contracts.VMAnswerQuery) (contracts.DescribeResponse, contracts.SignedRead, error) {
+	if s.signed == nil {
+		return contracts.DescribeResponse{}, contracts.SignedRead{}, errors.New("no signed host")
+	}
+	return s.signed.vmAnswer(q)
+}
+
+func (s *identityStub) HostAnswer(_ context.Context, hostID string, seq uint64) (contracts.HostInfo, contracts.SignedRead, error) {
+	if s.signed == nil {
+		return contracts.HostInfo{}, contracts.SignedRead{}, errors.New("no signed host")
+	}
+	return s.signed.hostAnswer(hostID, seq)
 }
 
 func (s *identityStub) TaskStatus(_ context.Context, ref string) (contracts.TaskStatus, error) {
@@ -164,6 +196,10 @@ func (s *identityStub) sent() []contracts.PreparedOperation {
 
 // identityFixture is a clustered cloudhypervisor Provider with one host
 // (host-alpha) and an enrolment for it, and an unbound VM with its finalizer.
+// identityProviderUID is the identity Provider's UID (a Kubernetes UID: host
+// certificates name it).
+const identityProviderUID = types.UID("0b7a1c3e-1111-4222-8333-944455556666")
+
 func identityFixture(t *testing.T, stub contracts.Provider) (*VirtualMachineReconciler, ctrl.Request) {
 	t.Helper()
 	vm := clusterVM("vm-id", clusteredNS, "prov-cluster")
@@ -172,7 +208,7 @@ func identityFixture(t *testing.T, stub contracts.Provider) (*VirtualMachineReco
 	vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff
 	providerCR := withRuntime(clusteredProviderCR("prov-cluster", clusteredNS))
 	providerCR.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
-	providerCR.UID = "uid-provider"
+	providerCR.UID = identityProviderUID
 	pool := hostPoolCR("pool-a", clusteredNS, providerCR.Name)
 	host := readyHost("host-alpha", clusteredNS, pool.Name, providerCR.Name)
 	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: stub}, vm, providerCR, pool, host,
@@ -186,9 +222,15 @@ func identityFixture(t *testing.T, stub contracts.Provider) (*VirtualMachineReco
 	auth, err := operation.NewIntentAuthenticator(intentKey)
 	require.NoError(t, err)
 	r.OperationIntentAuth = auth
-	r.OperationEnrolments = operation.StaticEnrolments{
-		Epoch: operation.Epoch{Counter: 2, Holder: holder},
-		Hosts: map[string]map[string][]byte{clusteredNS + "/prov-cluster": {"host-alpha": enrol}},
+	h := newTestHost(t, providerCR, "host-alpha", enrol, operation.Epoch{Counter: 2, Holder: holder})
+	if is, ok := stub.(interface {
+		setSigned(*signedHostStub)
+		contracts.HostAnswerReader
+	}); ok {
+		is.setSigned(newSignedHostStub(t, h))
+		withHostAnswers(t, r, providerCR, h, is)
+	} else {
+		r.HostAnswers = &HostAnswers{Trust: &staticTrust{hosts: map[string]*testHost{h.hostID: h}}}
 	}
 	return r, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: clusteredNS, Name: vm.Name}}
 }
@@ -304,7 +346,7 @@ func TestIdentityCreate_SyncSuccess(t *testing.T) {
 	assert.Zero(t, stub.creates, "no unsigned Create")
 
 	p := stub.sent()[0]
-	assert.Equal(t, "uid-provider", p.Identity.ProviderUID)
+	assert.Equal(t, string(identityProviderUID), p.Identity.ProviderUID)
 	assert.Equal(t, "uid-vm-id", p.Identity.VMUID)
 	assert.Equal(t, uint64(1), p.Identity.Attempt)
 	assert.Equal(t, uint64(2), p.Identity.Epoch.Counter)
@@ -332,7 +374,7 @@ func TestIdentityCreate_IntentSecretShape(t *testing.T) {
 	assert.Equal(t, "uid-vm-id", secret.Labels[operationIntentVMUIDLabel])
 	require.Len(t, secret.OwnerReferences, 1)
 	assert.Equal(t, "Provider", secret.OwnerReferences[0].Kind)
-	assert.Equal(t, types.UID("uid-provider"), secret.OwnerReferences[0].UID)
+	assert.Equal(t, identityProviderUID, secret.OwnerReferences[0].UID)
 
 	raw, err := json.Marshal(idVM(t, r).Status)
 	require.NoError(t, err)
@@ -340,8 +382,9 @@ func TestIdentityCreate_IntentSecretShape(t *testing.T) {
 	assert.NotContains(t, string(raw), string(p.RequestBytes), "the request never reaches the status")
 }
 
-// A transport error leaves the attempt Prepared; the next reconcile re-sends
-// the stored bytes with the same op_id and salt, never a new attempt.
+// A transport error moves nothing: the host is asked about the op_id, signs
+// that it has no record of it, and the next reconcile re-sends the stored
+// bytes with the same op_id and salt, never a new attempt.
 func TestIdentityCreate_TransportErrorResendsSameAttempt(t *testing.T) {
 	stub := newIdentityStub()
 	r, req := identityFixture(t, stub)
@@ -356,11 +399,13 @@ func TestIdentityCreate_TransportErrorResendsSameAttempt(t *testing.T) {
 	reconcileN(t, r, req, 1)
 	a := findAttempt(idVM(t, r), contracts.OperationKindCreate)
 	require.NotNil(t, a)
-	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, a.Phase)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, a.Phase)
+	assert.Equal(t, k8s.ReasonOperationAnswerUnverified, readyReason(idVM(t, r)))
 
 	reconcileN(t, r, req, 1)
 	sends := stub.sent()
 	require.Len(t, sends, 2)
+	assert.Equal(t, "vm-1", idVM(t, r).Status.ID, "closed on the host's signed COMPLETED")
 	assert.Len(t, stub.builds, 1, "built once")
 	assert.Equal(t, sends[0].Identity.OpID, sends[1].Identity.OpID)
 	assert.Equal(t, sends[0].RequestBytes, sends[1].RequestBytes)
@@ -401,10 +446,10 @@ func TestIdentityCreate_AsyncTask(t *testing.T) {
 	assert.Empty(t, intentSecrets(t, r))
 }
 
-// Clean not-performed outcomes end the attempt; a new attempt (new op_id,
-// attempt 2) follows only after the backoff. The outcome is the Provider's
-// unsigned claim: a lying Provider can make the manager mint a second
-// attempt (a stated residual until host-signed answers exist).
+// Clean not-performed outcomes, signed by the host and bound to the attempt,
+// end the attempt; a new attempt (new op_id, attempt 2) follows only after
+// the backoff. The not-performed Create keeps its intent Secret while it is
+// the latest, so a release without a Delete can ask the host again.
 func TestIdentityCreate_NotPerformedThenNewAttemptAfterBackoff(t *testing.T) {
 	for _, outcome := range []contracts.TaskOutcome{contracts.TaskOutcomeRetired, contracts.TaskOutcomeFailedClean, contracts.TaskOutcomeCancelled} {
 		t.Run(string(outcome), func(t *testing.T) {
@@ -424,7 +469,7 @@ func TestIdentityCreate_NotPerformedThenNewAttemptAfterBackoff(t *testing.T) {
 			require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, a.Phase)
 			assert.Equal(t, "never_received", a.OutcomeReason)
 			assert.Equal(t, k8s.ReasonOperationRetryBackoff, readyReason(vm))
-			assert.Empty(t, intentSecrets(t, r))
+			assert.Len(t, intentSecrets(t, r), 1, "the latest not-performed Create keeps its intent")
 
 			reconcileN(t, r, req, 1)
 			assert.Len(t, stub.sent(), 1, "no new attempt during the backoff")
@@ -440,6 +485,52 @@ func TestIdentityCreate_NotPerformedThenNewAttemptAfterBackoff(t *testing.T) {
 			assert.Equal(t, uint64(2), sends[1].Identity.Attempt)
 			assert.Equal(t, sends[0].Identity.BindingID, sends[1].Identity.BindingID, "same placement, same binding id")
 			assert.Equal(t, int64(2), findAttempt(idVM(t, r), contracts.OperationKindCreate).Attempt)
+		})
+	}
+}
+
+// A lying Provider: a not-performed outcome that the host did not sign (the
+// Provider strips the signed answer, or relays one signed for another
+// request or about another operation) never ends the attempt, so no second
+// attempt is ever minted; the attempt is asked about again.
+func TestIdentityCreate_LyingProviderMintsNoSecondAttempt(t *testing.T) {
+	for name, lie := range map[string]func(s *signedHostStub){
+		"unsigned RETIRED": func(s *signedHostStub) { s.unsigned = true },
+		"replayed answer":  func(s *signedHostStub) { s.replayNonce = bytes.Repeat([]byte{7}, 16) },
+		"answer about another operation": func(s *signedHostStub) {
+			s.editAnswer = func(a *providerv1.OperationAnswer) { a.Attempt++ }
+		},
+		"answer with another intent digest": func(s *signedHostStub) {
+			s.editAnswer = func(a *providerv1.OperationAnswer) { a.IntentDigest = bytes.Repeat([]byte{1}, 32) }
+		},
+		"answer for another VM": func(s *signedHostStub) {
+			s.editAnswer = func(a *providerv1.OperationAnswer) { a.VmUid = "uid-other-vm" }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := newIdentityStub()
+			r, req := identityFixture(t, stub)
+			now := time.Now()
+			r.clock = func() time.Time { return now }
+			stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+				return contracts.OperationAnswer{ID: "vm-1", TaskRef: "task-1"}, nil
+			}
+			stub.onTask = func(string) (contracts.TaskStatus, error) {
+				return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRetired, IsCompleted: true, OutcomeReason: "never_received"}, nil
+			}
+			lie(stub.signed)
+			for i := 0; i < 4; i++ {
+				reconcileN(t, r, req, 1)
+				now = now.Add(blockedRetryMax)
+			}
+			vm := idVM(t, r)
+			a := findAttempt(vm, contracts.OperationKindCreate)
+			require.NotNil(t, a)
+			assert.NotEqual(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, a.Phase, "never closed on an unsigned outcome")
+			assert.Equal(t, int64(1), a.Attempt)
+			assert.Len(t, stub.builds, 1, "no second attempt")
+			assert.Len(t, stub.sent(), 1, "never re-sent without a signed NO_RECORD")
+			assert.Equal(t, k8s.ReasonOperationAnswerUnverified, readyReason(vm))
 		})
 	}
 }
@@ -493,34 +584,6 @@ func TestIdentityCreate_SendRefusals(t *testing.T) {
 		assert.Equal(t, k8s.ReasonOperationProviderMismatch, readyReason(vm))
 		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, findAttempt(vm, contracts.OperationKindCreate).Phase)
 	})
-	t.Run("GRANT_MISMATCH on the first delivery ends the attempt", func(t *testing.T) {
-		stub := newIdentityStub()
-		r, req := identityFixture(t, stub)
-		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
-			return contracts.OperationAnswer{}, providerErr(codes.FailedPrecondition, contracts.GrantMismatchReason)
-		}
-		reconcileN(t, r, req, 1)
-		a := findAttempt(idVM(t, r), contracts.OperationKindCreate)
-		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeRejected, a.Outcome)
-		assert.Equal(t, contracts.GrantMismatchReason, a.OutcomeReason)
-		assert.Empty(t, intentSecrets(t, r))
-	})
-	t.Run("GRANT_MISMATCH on a re-delivery holds", func(t *testing.T) {
-		stub := newIdentityStub()
-		r, req := identityFixture(t, stub)
-		calls := 0
-		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
-			calls++
-			if calls == 1 {
-				return contracts.OperationAnswer{}, errors.New("deadline exceeded")
-			}
-			return contracts.OperationAnswer{}, providerErr(codes.FailedPrecondition, contracts.GrantMismatchReason)
-		}
-		reconcileN(t, r, req, 2)
-		vm := idVM(t, r)
-		assert.Equal(t, k8s.ReasonOperationOutcomeUnknown, readyReason(vm))
-		assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, findAttempt(vm, contracts.OperationKindCreate).Phase)
-	})
 	t.Run("VM_BUSY re-sends the same attempt", func(t *testing.T) {
 		stub := newIdentityStub()
 		r, req := identityFixture(t, stub)
@@ -538,6 +601,42 @@ func TestIdentityCreate_SendRefusals(t *testing.T) {
 		assert.Equal(t, sends[0].Identity.OpID, sends[1].Identity.OpID)
 		assert.Equal(t, "vm-1", idVM(t, r).Status.ID)
 	})
+}
+
+// No refusal of a mutating call decides an attempt, whatever its reason
+// (each is definite for that delivery only, and unsigned): the attempt is
+// never closed, no new attempt is minted, and the host is asked about the
+// op_id; it is re-sent with the same op_id only after the host signed that
+// it has no record of it.
+func TestIdentityCreate_NoRefusalDecidesAnAttempt(t *testing.T) {
+	for _, reason := range contracts.PartAReasons() {
+		t.Run(reason, func(t *testing.T) {
+			stub := newIdentityStub()
+			r, req := identityFixture(t, stub)
+			stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+				return contracts.OperationAnswer{}, providerErr(codes.FailedPrecondition, reason)
+			}
+			for i := 0; i < 3; i++ {
+				reconcileN(t, r, req, 1)
+				a := findAttempt(idVM(t, r), contracts.OperationKindCreate)
+				require.NotNil(t, a)
+				assert.NotEqual(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, a.Phase, "never closed on a refusal")
+				assert.Equal(t, int64(1), a.Attempt, "no new attempt")
+			}
+			sends := stub.sent()
+			require.NotEmpty(t, sends)
+			for _, p := range sends {
+				assert.Equal(t, sends[0].Identity.OpID, p.Identity.OpID, "only the same op_id is ever re-sent")
+			}
+			assert.Len(t, stub.builds, 1, "nothing new is minted")
+			assert.Len(t, intentSecrets(t, r), 1, "the intent is kept for the re-send")
+			if reason == contracts.ProviderMismatchReason {
+				assert.Equal(t, k8s.ReasonOperationProviderMismatch, readyReason(idVM(t, r)))
+				return
+			}
+			assert.GreaterOrEqual(t, stub.signed.answers, 3, "the host is asked about the op_id")
+		})
+	}
 }
 
 // A VM whose Create marker was removed (status loss) is held: no new op_id.
@@ -597,14 +696,22 @@ func TestIdentityCreate_HintMismatchHolds(t *testing.T) {
 	}
 }
 
-// No enrolment for the host, or no signing client: held, nothing sent.
+// No enrolment for the host, no signed host answers, or no signing client:
+// held, nothing sent.
 func TestIdentityCreate_NoEnrolmentOrSender(t *testing.T) {
 	stub := newIdentityStub()
 	r, req := identityFixture(t, stub)
-	r.OperationEnrolments = nil
+	r.HostAnswers.Trust.(*staticTrust).hosts = map[string]*testHost{}
 	reconcileN(t, r, req, 2)
 	assert.Equal(t, k8s.ReasonOperationEnrolmentUnavailable, readyReason(idVM(t, r)))
 	assert.Empty(t, stub.sent())
+
+	stub3 := newIdentityStub()
+	r3, req3 := identityFixture(t, stub3)
+	r3.HostAnswers = nil
+	reconcileN(t, r3, req3, 2)
+	assert.Equal(t, k8s.ReasonOperationHostAnswerUnavailable, readyReason(getVM(t, r3, "vm-id")))
+	assert.Empty(t, stub3.sent())
 
 	plain := &routingProvider{}
 	r2, req2 := identityFixture(t, plain)
@@ -735,18 +842,61 @@ func TestIdentityDelete_FailedDirtyHoldsUntilForce(t *testing.T) {
 
 // A VM whose Create was never performed is released without a Delete.
 func TestIdentityDelete_NothingCreatedReleasesWithoutDelete(t *testing.T) {
-	stub := newIdentityStub()
-	r, req := identityFixture(t, stub)
-	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
-		return contracts.OperationAnswer{}, providerErr(codes.FailedPrecondition, contracts.GrantUnauthenticatedReason)
+	notPerformed := func(t *testing.T) (*identityStub, *VirtualMachineReconciler, ctrl.Request) {
+		stub := newIdentityStub()
+		r, req := identityFixture(t, stub)
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "create-task"}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeFailedClean, IsCompleted: true, OutcomeReason: "no_capacity"}, nil
+		}
+		reconcileN(t, r, req, 1)
+		require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedClean,
+			findAttempt(idVM(t, r), contracts.OperationKindCreate).Outcome)
+		return stub, r, req
 	}
-	reconcileN(t, r, req, 1)
-	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeRejected,
-		findAttempt(idVM(t, r), contracts.OperationKindCreate).Outcome)
-	markDeleted(t, r, nil)
-	reconcileN(t, r, req, 1)
-	assert.True(t, vmGone(t, r))
-	assert.Len(t, stub.sent(), 1, "no Delete was sent")
+	t.Run("signed again: released", func(t *testing.T) {
+		stub, r, req := notPerformed(t)
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 1)
+		assert.True(t, vmGone(t, r))
+		assert.Len(t, stub.sent(), 1, "no Delete was sent")
+	})
+	t.Run("not signed again: held", func(t *testing.T) {
+		stub, r, req := notPerformed(t)
+		stub.signed.unsigned = true
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 2)
+		require.False(t, vmGone(t, r), "a stored not-performed outcome alone releases nothing")
+		assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(idVM(t, r)))
+		assert.Len(t, stub.sent(), 1, "no Delete was sent")
+		setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+		})
+		reconcileN(t, r, req, 1)
+		assert.True(t, vmGone(t, r), "force-delete releases it")
+	})
+	t.Run("edited to not performed: held", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := identityFixture(t, stub)
+		stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{TaskRef: "create-task"}, nil
+		}
+		stub.onTask = func(string) (contracts.TaskStatus, error) {
+			return contracts.TaskStatus{Outcome: contracts.TaskOutcomeRunning}, nil
+		}
+		reconcileN(t, r, req, 1)
+		// A tenant rewrites the running Create as Terminal/FailedClean.
+		vm := idVM(t, r)
+		a := findAttempt(vm, contracts.OperationKindCreate)
+		a.Phase, a.Outcome = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, infravirtrigaudiov1beta1.OperationAttemptOutcomeFailedClean
+		vm.Status.OperationAttempts = withAttempt(vm, *a)
+		require.NoError(t, r.Status().Update(context.Background(), vm))
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 2)
+		assert.False(t, vmGone(t, r), "the host signs EXECUTING, not a not-performed outcome")
+	})
 }
 
 // A Delete waits for the Create in flight (at most one operation per VM).
@@ -987,7 +1137,7 @@ func TestIdentityIntent_TamperedIsHeld(t *testing.T) {
 			vm := idVM(t, r)
 			assert.Equal(t, k8s.ReasonOperationIntentTampered, readyReason(vm))
 			assert.Len(t, stub.sent(), 1, "nothing is sent from a tampered intent")
-			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, findAttempt(vm, contracts.OperationKindCreate).Phase)
+			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseSent, findAttempt(vm, contracts.OperationKindCreate).Phase)
 			assert.Len(t, intentSecrets(t, r), 1, "the Secret is kept as evidence")
 			require.Len(t, rec.Events, 1, "one Warning event when the hold begins")
 			ev := <-rec.Events
@@ -1106,8 +1256,9 @@ func TestIdentityDelete_FabricatedSucceededMarkerHolds(t *testing.T) {
 }
 
 // A Delete recorded Succeeded by a manager that stopped before releasing the
-// finalizer is confirmed (its intent authenticates and a re-send of the same
-// attempt succeeds), then released and its intent Secret removed.
+// finalizer is confirmed (its intent authenticates and the host signs again
+// that its op_id COMPLETED), then released and its intent Secret removed.
+// Nothing is re-sent.
 func TestIdentityDelete_SucceededMarkerConfirmedAfterRestart(t *testing.T) {
 	stub := newIdentityStub()
 	r, req := createdIdentityVM(t, stub)
@@ -1124,9 +1275,7 @@ func TestIdentityDelete_SucceededMarkerConfirmedAfterRestart(t *testing.T) {
 	reconcileN(t, r, req, 1)
 	assert.True(t, vmGone(t, r))
 	assert.Empty(t, intentSecrets(t, r))
-	sends := stub.sent()
-	require.Len(t, sends, 3, "Create, Delete, and the confirming re-send of the same Delete attempt")
-	assert.Equal(t, sends[1].Identity.OpID, sends[2].Identity.OpID)
+	require.Len(t, stub.sent(), 2, "Create and Delete; the release is confirmed by a signed answer, not a re-send")
 }
 
 // The Provider controller announces a kept, disagreeing intent Secret once.
@@ -1184,8 +1333,10 @@ func asyncDeleteInFlight(t *testing.T) (*identityStub, *VirtualMachineReconciler
 	return stub, r, req, &deleteDone
 }
 
-// A Delete's task reference that is not bound to it is never polled or used
-// to confirm the Delete: the finalizer is kept.
+// A Delete's Sent marker whose task reference is not bound to it is held
+// while in flight. Recorded Succeeded, the task reference is not used at all:
+// the release asks the host about the Delete's op_id, and its fresh signed
+// COMPLETED (bound to the verified intent) is what releases the finalizer.
 func TestIdentityDelete_UnboundTaskRefHolds(t *testing.T) {
 	cases := map[string]func(t *testing.T, r *VirtualMachineReconciler, d *infravirtrigaudiov1beta1.OperationAttempt){
 		"the Create's task reference copied": func(_ *testing.T, _ *VirtualMachineReconciler, d *infravirtrigaudiov1beta1.OperationAttempt) {
@@ -1222,6 +1373,10 @@ func TestIdentityDelete_UnboundTaskRefHolds(t *testing.T) {
 				}
 				require.NoError(t, r.Status().Update(context.Background(), vm))
 				reconcileN(t, r, req, 2)
+				if terminal {
+					assert.True(t, vmGone(t, r), "released on the host's signed COMPLETED of the Delete's op_id")
+					return
+				}
 				assert.False(t, vmGone(t, r), "the finalizer is kept")
 				assert.Equal(t, k8s.ReasonOperationStateLost, readyReason(idVM(t, r)))
 			})
@@ -1240,11 +1395,11 @@ func TestIdentityDelete_BoundTaskRefReleases(t *testing.T) {
 	assert.True(t, vmGone(t, r))
 }
 
-// With no enrolment source loaded, an attempt in flight is held on the load
-// path too: nothing is re-sent.
+// With the host's enrolment unreadable, an attempt in flight is held on the
+// load path too: nothing is re-sent.
 func TestIdentityIntent_NoEnrolmentSourceHoldsOnLoad(t *testing.T) {
 	stub, r, req, _ := preparedWithIntent(t)
-	r.OperationEnrolments = nil
+	r.HostAnswers.Trust = unreadableTrust{}
 	reconcileN(t, r, req, 2)
 	assert.Equal(t, k8s.ReasonOperationEnrolmentUnavailable, readyReason(idVM(t, r)))
 	assert.Len(t, stub.sent(), 1, "nothing is re-sent")

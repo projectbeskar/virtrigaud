@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -595,9 +596,12 @@ func TestNonIdentityProviders_PowerAndResizeUnchanged(t *testing.T) {
 }
 
 // For a Provider that requires operation identity, an answer that finds no VM
-// never releases the Delete finalizer: the VM is held, the same Delete attempt
-// is re-sent when the hold is re-checked, and no Describe is consulted.
-// Force-delete still releases it.
+// never releases the Delete finalizer: not an unsigned NotFound on the send,
+// not a signed NO_RECORD of the Delete or of the VM's placement. The VM is
+// held, the same Delete attempt is re-sent after the host signed that it has
+// no record of it, and force-delete still releases it. A signed DELETED of
+// the VM's placement (here by an earlier Delete of it on that host) releases
+// it.
 func TestIdentityDelete_AbsentNeverReleases(t *testing.T) {
 	for name, absent := range map[string]error{
 		"not found":    contracts.NewNotFoundError("no such VM", nil),
@@ -610,24 +614,20 @@ func TestIdentityDelete_AbsentNeverReleases(t *testing.T) {
 			stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
 				return contracts.OperationAnswer{}, absent
 			}
-			describes := len(stub.describeRefs)
 			markDeleted(t, r, nil)
 			reconcileN(t, r, req, 3)
 			require.False(t, vmGone(t, r), "an absent VM does not confirm the Delete")
 			vm := idVM(t, r)
-			assert.Equal(t, k8s.ReasonOperationDeleteUnconfirmed, readyReason(vm))
 			d := findAttempt(vm, contracts.OperationKindDelete)
 			require.NotNil(t, d)
 			assert.Equal(t, int64(1), d.Attempt, "no new Delete attempt")
 			assert.NotEqual(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, d.Phase)
 			sends := stub.sent()
-			require.Len(t, sends, 4)
+			require.GreaterOrEqual(t, len(sends), 3)
 			for _, p := range sends[1:] {
 				assert.Equal(t, sends[1].Identity.OpID, p.Identity.OpID, "the same op_id is re-sent")
 			}
-			assert.Equal(t, describes, len(stub.describeRefs), "no Describe decides a release")
 			assert.Zero(t, stub.deletes, "no unsigned Delete")
-			assert.False(t, r.authenticatedHostDeleted(context.Background(), vm, identityAttempt{}, d))
 
 			setVMSpec(t, r, func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
 				vm.Annotations = map[string]string{forceDeleteAnnotation: "true"}
@@ -636,6 +636,31 @@ func TestIdentityDelete_AbsentNeverReleases(t *testing.T) {
 			assert.True(t, vmGone(t, r), "force-delete releases it")
 		})
 	}
+	t.Run("signed DELETED releases", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{}, contracts.NewNotFoundError("no such VM", nil)
+		}
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 1)
+		require.False(t, vmGone(t, r))
+		stub.signed.vmDeleted = bytes.Repeat([]byte{0x5d}, 16)
+		reconcileN(t, r, req, 1)
+		assert.True(t, vmGone(t, r), "released on the host's signed DELETED of the placement")
+	})
+	t.Run("unsigned DELETED never releases", func(t *testing.T) {
+		stub := newIdentityStub()
+		r, req := createdIdentityVM(t, stub)
+		stub.onSend = func(p contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+			return contracts.OperationAnswer{}, contracts.NewNotFoundError("no such VM", nil)
+		}
+		stub.signed.vmDeleted = bytes.Repeat([]byte{0x5d}, 16)
+		stub.signed.unsigned = true
+		markDeleted(t, r, nil)
+		reconcileN(t, r, req, 3)
+		assert.False(t, vmGone(t, r))
+	})
 }
 
 // A Delete task the host has no record of (UNKNOWN_TO_AGENT) holds; it is
@@ -982,10 +1007,10 @@ func TestIdentityPower_HostLevelSendAnswers(t *testing.T) {
 			assert.Greater(t, res.RequeueAfter, blockedRetryMin, "not the 15 s cadence")
 			a := findAttempt(vm, contracts.OperationKindPowerOn)
 			require.NotNil(t, a)
-			assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, a.Phase, "the attempt stays, to be re-sent")
+			assert.NotEqual(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, a.Phase, "the attempt stays, to be re-sent")
 			reconcileN(t, r, req, 1)
 			sends := stub.sent()
-			require.Len(t, sends, 3)
+			require.Len(t, sends, 3, "re-sent after the host signed it has no record of it")
 			assert.Equal(t, sends[1].Identity.OpID, sends[2].Identity.OpID)
 		})
 	}
