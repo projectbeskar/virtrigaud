@@ -226,6 +226,14 @@ func main() {
 			"objects. Empty (the default) caches Secrets in every namespace, which needs a cluster-wide Secret "+
 			"list/watch grant. Set it when the manager's Secret access is granted per namespace "+
 			"(Helm rbac.secrets.scope=namespaced); see docs/manager-secret-access.md.")
+	var agentProviderInventoryWatch bool
+	flag.BoolVar(&agentProviderInventoryWatch, controller.DevAgentProviderInventoryWatchFlagName, false,
+		"DEVELOPMENT ONLY. Make the Deployments of clustered cloudhypervisor Providers follow their host inventory Secret "+
+			"through the Kubernetes API (a ServiceAccount token, --hosts-secret, no inventory volume). Set it only when "+
+			"each such Provider's ServiceAccount is granted get and watch on its <provider>-hosts Secret (Helm "+
+			"experimental.agentProviderInventoryWatch, which sets this flag); without the grant the Provider stops at start "+
+			"with a 403. Honoured only by a manager built with the "+devgate.BuildTag+" build tag; a release build refuses "+
+			"to start when it is set.")
 	var hostEnrolmentFlags controller.HostEnrolmentFlags
 	devOnly := "DEVELOPMENT ONLY. Honoured only by a manager built with the " + devgate.BuildTag +
 		" build tag; a release build refuses to start when it is set. "
@@ -300,6 +308,11 @@ func main() {
 	}
 	if devOperationEnrolments != nil {
 		setupLog.Info("WARNING: a development operation-identity enrolment file is loaded; this manager is not for production use")
+	}
+
+	if err := controller.CheckAgentProviderInventoryWatch(agentProviderInventoryWatch); err != nil {
+		setupLog.Error(err, "invalid --"+controller.DevAgentProviderInventoryWatchFlagName)
+		os.Exit(1)
 	}
 
 	// Per-host agent enrolment, refused by a release build like the signer.
@@ -587,6 +600,9 @@ func main() {
 		TmpSizeLimitMax:         providerTmpSizeLimitMax,
 		Recorder:                mgr.GetEventRecorderFor("provider-controller"),
 		EnabledDevProviderTypes: enabledDevProviderTypes,
+		// Development builds only: per-host agent Providers follow their
+		// inventory Secret through the API.
+		AgentProviderInventoryWatch: agentProviderInventoryWatch,
 		// Development builds only: renders enrolled per-host agent hosts.
 		HostEnrolment:         hostEnrolment,
 		OperationSignerLoaded: devOperationSigner != nil,

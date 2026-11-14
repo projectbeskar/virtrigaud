@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	stderrors "errors"
 	"fmt"
 	"sync"
@@ -212,6 +213,14 @@ type ProviderReconciler struct {
 	// runtime of a Provider of a development-only type it does not enable is
 	// never deployed or updated (refuseDisabledDevProviderType). Read only.
 	EnabledDevProviderTypes map[infravirtrigaudiov1beta1.ProviderType]struct{}
+	// AgentProviderInventoryWatch, set by
+	// --dev-agent-provider-inventory-watch (development builds only), makes
+	// the Deployment of a clustered per-host agent Provider follow its
+	// inventory Secret through the API: a ServiceAccount token, the
+	// --hosts-secret and --provider-uid arguments, and no inventory volume.
+	// Set it only together with the chart's
+	// experimental.agentProviderInventoryWatch grant for that Provider.
+	AgentProviderInventoryWatch bool
 
 	// HostEnrolment is the per-host agent enrolment configuration
 	// (development builds only; nil: none). The host-inventory render reads
@@ -1025,7 +1034,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					// per-host agents in a development build, which watches
 					// its own inventory Secret (providerReadsInventorySecret).
 					ServiceAccountName:            r.getServiceAccountName(provider),
-					AutomountServiceAccountToken:  util.BoolPtr(providerReadsInventorySecret(provider)),
+					AutomountServiceAccountToken:  util.BoolPtr(r.providerReadsInventorySecret(provider)),
 					Containers:                    []corev1.Container{*container},
 					Volumes:                       volumes,
 					NodeSelector:                  provider.Spec.Runtime.NodeSelector,
@@ -1240,7 +1249,9 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	// provider does NOT read it yet — provider-side file-watch/hot-reload lands
 	// in a later PR; mounting an as-yet-unread volume is harmless. For
 	// topology=single nothing is mounted and the pod spec is unchanged (D9).
-	if isClusterTopology(provider) {
+	// A Provider that reads the Secret through the API gets no copy of it
+	// on disk.
+	if isClusterTopology(provider) && !r.providerReadsInventorySecret(provider) {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      hostInventoryVolumeName,
 			MountPath: hostsecret.MountPath,
@@ -1364,19 +1375,19 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		},
 	}
 
-	container.Args = append(container.Args, agentProviderArgs(provider)...)
+	container.Args = append(container.Args, r.agentProviderArgs(provider)...)
 
 	// Add volumes to pod spec (we'll need to modify the caller to handle this)
 	return container, nil
 }
 
 // agentProviderArgs returns the extra arguments of the clustered Provider
-// for per-host agents (development builds only): it follows its host
-// inventory Secret through the API (--hosts-secret), so that a revoked host
-// is refused within seconds, and refuses agents enrolled with another
-// Provider (--provider-uid). Nil for every other Provider.
-func agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
-	if !providerReadsInventorySecret(provider) {
+// for per-host agents when it follows its host inventory Secret through the
+// API (providerReadsInventorySecret): --hosts-secret, so that a revoked host
+// is refused within seconds, and --provider-uid, so that agents enrolled
+// with another Provider are refused. Nil otherwise.
+func (r *ProviderReconciler) agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
+	if !r.providerReadsInventorySecret(provider) {
 		return nil
 	}
 	return []string{
@@ -1386,12 +1397,35 @@ func agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
 }
 
 // providerReadsInventorySecret reports whether the Provider's pod reads its
-// host inventory Secret through the API, and so needs a ServiceAccount token:
-// only the clustered Provider for per-host agents, in a development build.
-// Its ServiceAccount is granted get and watch on that one Secret by the
-// chart (experimental.agentProviderInventoryWatch), never by the manager.
-func providerReadsInventorySecret(provider *infravirtrigaudiov1beta1.Provider) bool {
-	return devgate.Compiled && providerRunsHostAgents(provider)
+// host inventory Secret through the API, and so gets a ServiceAccount token
+// and no inventory volume: only the clustered Provider for per-host agents,
+// in a development build, and only when the manager was started with
+// --dev-agent-provider-inventory-watch (AgentProviderInventoryWatch), which
+// states that the chart grants that Provider's ServiceAccount get and watch
+// on the Secret (experimental.agentProviderInventoryWatch). Without that
+// grant the Provider's first read is refused (403) and it stops, so the
+// manager never asks for it on its own.
+func (r *ProviderReconciler) providerReadsInventorySecret(provider *infravirtrigaudiov1beta1.Provider) bool {
+	return r.AgentProviderInventoryWatch && devgate.Compiled && providerRunsHostAgents(provider)
+}
+
+// DevAgentProviderInventoryWatchFlagName is the manager flag that makes the
+// Deployments of clustered per-host agent Providers follow their inventory
+// Secret through the API (development builds only).
+const DevAgentProviderInventoryWatchFlagName = "dev-agent-provider-inventory-watch"
+
+// errAgentProviderInventoryWatchRelease refuses the flag in a release build.
+var errAgentProviderInventoryWatchRelease = errors.New("--" + DevAgentProviderInventoryWatchFlagName +
+	" is honoured only by a manager built with the " + devgate.BuildTag + " build tag")
+
+// CheckAgentProviderInventoryWatch refuses --dev-agent-provider-inventory-watch
+// in a release build, so that a release manager never starts with a setting
+// it would ignore.
+func CheckAgentProviderInventoryWatch(on bool) error {
+	if on && !devgate.Compiled {
+		return errAgentProviderInventoryWatchRelease
+	}
+	return nil
 }
 
 // addTmpSizeLimitEnv gives a vSphere provider container the effective
@@ -1428,7 +1462,7 @@ func (r *ProviderReconciler) buildPodVolumes(ctx context.Context, provider *infr
 	// topology=cluster provider, backed by the Provider-owned Secret rendered by
 	// reconcileHostInventorySecret. For topology=single no volume is added and
 	// the pod spec is unchanged (D9).
-	if isClusterTopology(provider) {
+	if isClusterTopology(provider) && !r.providerReadsInventorySecret(provider) {
 		volumes = append(volumes, corev1.Volume{
 			Name: hostInventoryVolumeName,
 			VolumeSource: corev1.VolumeSource{

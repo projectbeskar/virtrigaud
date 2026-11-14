@@ -65,6 +65,9 @@ func TestRevocationThroughSecretWatchEnvtest(t *testing.T) {
 	}
 	helm, err := exec.LookPath("helm")
 	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("helm is required in CI: the test applies the chart's RBAC")
+		}
 		t.Skip("helm not installed")
 	}
 	env := &envtest.Environment{}

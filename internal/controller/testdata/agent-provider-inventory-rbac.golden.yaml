@@ -1,0 +1,42 @@
+---
+# Source: virtrigaud/templates/agent-provider-inventory-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: virtrigaud-provider-infra-ch-inventory
+  namespace: infra
+  labels:
+    helm.sh/chart: virtrigaud-0.3.0
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/instance: t
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: provider-inventory-watch
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "watch"]
+  resourceNames:
+  - "ch-hosts"
+---
+# Source: virtrigaud/templates/agent-provider-inventory-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: virtrigaud-provider-infra-ch-inventory
+  namespace: infra
+  labels:
+    helm.sh/chart: virtrigaud-0.3.0
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/instance: t
+    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: provider-inventory-watch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: virtrigaud-provider-infra-ch-inventory
+subjects:
+- kind: ServiceAccount
+  name: virtrigaud-provider-infra-ch
+  namespace: infra
