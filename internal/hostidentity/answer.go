@@ -204,7 +204,7 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	if blob == nil {
 		return VerifiedAnswer{}, refuse("no signed answer")
 	}
-	// V-1 sizes.
+	// Sizes.
 	switch {
 	case len(blob.GetBodyType()) == 0 || len(blob.GetBodyType()) > MaxAnswerBodyTypeBytes:
 		return VerifiedAnswer{}, refuse("body type size")
@@ -217,24 +217,24 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	case proto.Size(blob) > MaxAnswerBlobBytes:
 		return VerifiedAnswer{}, refuse("signed answer size")
 	}
-	// V-2 no unknown field.
+	// No unknown field.
 	if len(blob.ProtoReflect().GetUnknown()) != 0 {
 		return VerifiedAnswer{}, refuse("the signed answer carries unknown fields")
 	}
-	// V-3 body type.
+	// Body type.
 	if !slices.Contains(answerBodyTypes, blob.GetBodyType()) || blob.GetBodyType() != exp.BodyType {
 		return VerifiedAnswer{}, refuse("body type %q is not the one this request answers with", blob.GetBodyType())
 	}
-	// V-4, V-5, V-6 signer certificate.
+	// Signer certificate: profile, names, chain and pin.
 	pub, rec, pin, err := verifySigner(blob.GetSignerCertificate(), exp)
 	if err != nil {
 		return VerifiedAnswer{}, err
 	}
-	// V-7 signature.
+	// Signature.
 	if err := verifyAnswerSignature(pub, blob); err != nil {
 		return VerifiedAnswer{}, err
 	}
-	// V-8 body.
+	// Body.
 	out := VerifiedAnswer{SignerPin: pin}
 	var body proto.Message
 	switch exp.BodyType {
@@ -270,11 +270,11 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		return VerifiedAnswer{}, err
 	}
 	out.Position = pos
-	// V-9 nonce.
+	// Nonce.
 	if len(exp.Nonce) != AnswerNonceLen || subtle.ConstantTimeCompare(out.Context.GetNonce(), exp.Nonce) != 1 {
 		return VerifiedAnswer{}, refuse("the answer does not carry this request's nonce")
 	}
-	// V-10 bindings to the manager's own state and the certificate.
+	// Bindings to the manager's own state and the certificate.
 	ctx := out.Context
 	switch {
 	case ctx.GetProviderUid() != exp.ProviderUID || rec.ProviderUID != exp.ProviderUID:
@@ -296,7 +296,7 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	return out, nil
 }
 
-// verifySigner checks the signer certificate (V-4..V-6) and returns its key,
+// verifySigner checks the signer certificate and returns its key,
 // its enrolment record and its key pin.
 func verifySigner(der []byte, exp AnswerExpectation) (*ecdsa.PublicKey, Record, string, error) {
 	leaf, err := x509.ParseCertificate(der)
@@ -328,7 +328,7 @@ func verifySigner(der []byte, exp AnswerExpectation) (*ecdsa.PublicKey, Record, 
 	return pub, rec, pin, nil
 }
 
-// verifyAnswerSignature checks V-7: a low-S, exactly DER encoded ECDSA
+// verifyAnswerSignature checks a low-S, exactly DER encoded ECDSA
 // signature over SHA-256 of the signature input.
 func verifyAnswerSignature(pub *ecdsa.PublicKey, blob *providerv1.SignedBlob) error {
 	sig := blob.GetSignature()

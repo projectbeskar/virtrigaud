@@ -20,6 +20,7 @@ before, and writes none of the status fields or Secrets described below.
 | Startup refusal | `cmd/manager/main.go` | `--dev-operation-signer-key-file` set: the manager logs `invalid --dev-operation-signer-key-file` and exits 1 before it connects to the cluster, like `--enable-dev-provider-types`. |
 | No sending | `internal/transport/grpc/client_operation.go` | `NewOperationIdentityClient` and `Client.SendOperation` return `operation.ErrNoSigner` and send nothing. |
 | Startup refusal | `cmd/manager/main.go` | `--dev-operation-enrolment-file` set: the manager logs `invalid --dev-operation-enrolment-file` and exits 1. |
+| No host answers | `cmd/manager/main.go`, `internal/controller/host_answers.go` | Signed host answers are verified only against per-host agent enrolment (`--dev-host-enrolment-*`), which a release build refuses: the VirtualMachine controller has no host-answer state, so nothing is sent to a Provider that requires operation identity. |
 | Type-gated path | `internal/runtime/remote/resolver.go`, `internal/controller/virtualmachine_operation_identity.go` | Only a Provider whose `spec.type` requires operation identity gets an operation-identity client and the attempt-marker code path. Without a signer (every release build) such a Provider is not resolved at all: its VMs report `Ready=False/OperationSignerUnavailable` and nothing is sent. Every other Provider keeps its behaviour: no `operation_envelope`, no marker, no intent Secret. |
 
 The tagged and untagged builds are both tested: `go test ./internal/operation/
@@ -121,10 +122,16 @@ verifier returns.
 **Grant-signing leaf profile.** The leaf must not be a CA, its key usage must be exactly
 `digitalSignature` (no `keyEncipherment`, no `keyCertSign`), and it must carry **no
 extended key usage at all**: a leaf with `serverAuth`, `clientAuth`, `anyExtendedKeyUsage`
-or any other EKU OID is refused. A TLS certificate issued under the same anchor therefore
-cannot sign grants. The issuer must be a CA with path length 0 and `keyCertSign`. A
-dedicated grant-signing EKU OID may replace the "no EKU" rule later. The anchor should
-still be dedicated to grant signing.
+or any other EKU OID is refused. The issuer must be a CA with path length 0 and
+`keyCertSign`. A dedicated grant-signing EKU OID may replace the "no EKU" rule later.
+
+**The grant anchor and the host-agent CA share nothing.** Leaf profiles alone do not keep
+the two hierarchies apart: whoever holds the host-agent sub-CA key could otherwise issue a
+leaf with no EKU that verifies as a grant signer. A development manager with per-host agent
+enrolment therefore refuses to start when any certificate of its host-agent CA bundle
+equals, shares a key with, or chains to its grant anchor, or the converse
+(`hostidentity.CheckHierarchySeparation`). Use a grant anchor that is not, and does not
+chain to, the host-agent sub-CA or any of its issuers.
 
 ## The development signer
 
@@ -249,8 +256,9 @@ stays and is re-sent with the same `op_id`.
 
 At most one attempt of any kind is in flight (`Prepared` or `Sent`) per VM. Each reconcile
 of a VM whose Provider requires operation identity first drives the attempt in flight, if
-there is one, to its end (re-sending it with the same `op_id` and bytes, or polling its
-task), and decides nothing else until it is `Terminal`. Then:
+there is one, to its end (asking its host about its `op_id`, and re-sending it with the
+same `op_id` and bytes only after the host signed that it has no record of it), and decides
+nothing else until it is `Terminal`. Then:
 
 1. a VM being deleted gets its `Delete` first; nothing else is started for it (a power
    operation or Reconfigure in flight when the deletion began is finished first, or
@@ -274,8 +282,8 @@ attempt that its host keeps reporting running for more than one hour, measured f
 outcome the controller cannot learn would otherwise block the VM's Delete for ever, and the
 only ways out (orphan-on-delete, force-delete) leave the VM on its host. So, for a VM being
 deleted, a power or Reconfigure attempt in flight that is held as `OperationUnknownToAgent`,
-`OperationOutcomeUnknown`, `OperationIntentLost`, `OperationIntentTampered` or
-`OperationStateLost` is written `Terminal` with outcome `Superseded`, a Warning event
+`OperationOutcomeUnknown`, `OperationIntentLost`, `OperationIntentTampered`,
+`OperationStateLost` or `OperationAnswerUnverified` is written `Terminal` with outcome `Superseded`, a Warning event
 `OperationSuperseded` names its kind, number and op_id, its intent Secret is kept in the
 Provider's namespace as evidence while the VM exists (the sweeper removes it only once the
 VM is gone), and the signed Delete follows. The VM is released only once that Delete is
@@ -290,27 +298,97 @@ VM. Nothing else supersedes a held attempt:
   the operator reports it off. The held attempt keeps blocking power changes; deleting the
   VM, or the acknowledgement below for a `FailedDirty` outcome, are the ways forward.
 
-### The development enrolment file
+### Signed host answers
 
-A grant names the host's enrolment identifier and an epoch. Until hosts prove their
-enrolment with a signed answer, a development manager reads them from the JSON file named
-by `--dev-operation-enrolment-file` (compiled only with `-tags virtrigaud_dev`; a release
-build refuses the flag):
+For a Provider that requires operation identity the manager acts on what a host did only
+through an answer the host's agent signed, for a request the manager made, and that
+verifies against the manager's own state. The Provider relays answers; it cannot make one
+mean something else. Every other Provider is unchanged: no request carries a nonce, and a
+`host_answer` field is ignored.
 
-```json
-{
-  "epoch": {"counter": 2, "holder": "<32 hexadecimal characters>"},
-  "providers": {
-    "<provider namespace>/<provider name>": {
-      "<host name>": "<32 hexadecimal characters: the host's enrolment id>"
-    }
-  }
-}
-```
+**Where the trust comes from.** Per-host agent enrolment (`--dev-host-enrolment-*`,
+[`host-agent-enrolment.md`](host-agent-enrolment.md)) is required. For each Host the
+manager reads, from the Host's pins Secret in the enrolment namespace, its current
+enrolment (the enrolment id, which grants name, and the Provider and installation it was
+issued for) and its key pins; the host-agent sub-CA is the enrolment CA bundle. Grants are
+issued under an identity-only epoch (counter 1, the install id as holder). The development
+enrolment file (`--dev-operation-enrolment-file`) cannot be combined with enrolment (two
+sources of trust for one host): a manager given both refuses to start. Without enrolment,
+the VMs of such a Provider report `Ready=False/OperationHostAnswerUnavailable` and nothing
+is sent; the enrolment file alone no longer lets anything be sent.
 
-Unknown fields are refused, the epoch counter counts from 1, and every identifier is 16
-bytes. The epoch carries identity only: no ordering or fencing meaning. A VM whose host has
-no enrolment reports `Ready=False/OperationEnrolmentUnavailable` and nothing is sent.
+**How a read asks.** The transport client draws a fresh 16-byte nonce from `crypto/rand`
+for each `TaskStatus`, `Describe` or `GetHostInfo` that asks for a signed answer (a failure
+to draw one sends nothing). The nonce lives only on the stack of that call: it is compared
+with the answer and dropped, never stored or re-used. A `TaskStatus` names the operation by
+`op_id`, `op_enrolment_id` and `target_host_id` from the attempt's verified intent and
+never carries a task reference. The client extracts the relayed `SignedBlob` from the
+response field, or from the one `SignedBlob` detail of an error status; none, two or more,
+an oversized one or one with unknown fields is no answer.
+
+**What is checked** (`hostidentity.VerifyAnswer`, a pure function with no Kubernetes
+import), in order, each failure being "no answer": sizes; no unknown field; the body type
+is the one the RPC answers with; the signer certificate is one DER ECDSA P-256 certificate
+with the agent certificate profile whose URI names are exactly the Host's URI identity
+(`spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>`) and one enrolment record; it
+chains to the host-agent sub-CA for server authentication at the manager's clock; its key
+is one of the Host's pins; the signature over the domain-separated body is a low-S, exactly
+DER encoded ECDSA signature that verifies; the body decodes with no unknown field and no
+undefined enum value in it or any nested message and meets every field rule; the nonce is
+the one drawn for this request; the Provider UID, host, installation and enrolment are the
+manager's and the certificate's. The signature input is built by the same function the
+agent signs with.
+
+**Store continuity.** Per host, the manager keeps the last verified position of the host's
+operation store and its last verified checkpoint, under the data key `store.json` of the
+Host's pins Secret, written with the read `resourceVersion` (a concurrent write fails; it
+never overwrites). A request names the position it holds; an answer whose store changed
+under the same enrolment, whose sequence number went down, or whose chain head or
+checkpoint differs from one the manager verified, holds the host: its VMs report
+`Ready=False/OperationHostStoreRegressed`, nothing it answers is acted on, nothing new is
+signed for it, and the Host reports `AgentStoreRegressed=True`. The hold is persisted with
+the enrolment it happened under and ends only with a new enrolment. Positions are raised
+after each verified answer and persisted at least every 30 s or 1024 commits, and always
+before a definite answer above the persisted position is acted on (a failed write is then
+no answer).
+
+**The host answer gate.** The Host controller's heartbeat (every 60 s) asks each Host of
+such a Provider for a signed host answer and records whether it verified
+(`AgentAnswerVerified`). The VirtualMachine controller signs nothing new for a host without
+a verified host answer under its current enrolment younger than two heartbeats, from an
+agent in state `READY` that implements grant version 1: such a VM reports
+`Ready=False/OperationHostAnswerUnavailable`. The gate concerns new operations only;
+attempts in flight are still asked about.
+
+**What an answer about an attempt decides.** Only a verified answer from a `READY` agent
+that binds to the attempt's verified intent (its `op_id` and enrolment, and for an answer
+from a record its kind, attempt number, VM UID, binding and the digest of its exact request
+bytes) is read:
+
+| The host signs | Result |
+|---|---|
+| `ACCEPTED`, `EXECUTING` | in flight; the one-hour deadline of power and Reconfigure attempts applies |
+| `COMPLETED` | `Succeeded` |
+| `FAILED_CLEAN` | `FailedClean` (not performed; a new attempt after the backoff) |
+| `RETIRED` under the host's current enrolment | `Retired` (not performed) |
+| `RETIRED` or `NO_RECORD` under an earlier enrolment | held as `OperationOutcomeUnknown`; never re-sent |
+| `FAILED_DIRTY` | `FailedDirty`, held |
+| `OUTCOME_UNKNOWN` | held as `OperationOutcomeUnknown` |
+| `NO_RECORD` under the current enrolment | the same `op_id` is re-sent under a fresh grant, then asked about again |
+| `UNKNOWN_TO_AGENT` | held as `OperationUnknownToAgent` |
+| an agent state other than `READY` | nothing is concluded (`QUARANTINED` holds) |
+| no verified answer (stripped, replayed, foreign, about another operation) | `Ready=False/OperationAnswerUnverified`; asked again |
+
+The answer to a send, success or refusal, never decides an attempt, whatever its reason:
+a refusal of a mutating call carries no signed answer, and a grant or Provider refusal is
+definite for that delivery only. The send only records, on the `Sent` marker, the task
+reference, the provider's VM id of a Create and the flags of a Reconfigure (bound to the
+attempt by its task tag). A Create the host signed `COMPLETED` whose id the manager never
+received is delivered once more with the same `op_id` (the host answers a known `op_id`
+from its record) to learn it. Every grant is minted by the send that carries it: the
+manager never stores, caches or re-sends a grant. Each closure on a signed answer writes a
+log line with the whole signed answer and an event `OperationSignedOutcome` with its
+SHA-256, the signer's key pin, the chain position, the enrolment and the op_ids.
 
 ### Attempt markers: `status.operationAttempts`
 
@@ -327,8 +405,8 @@ other Provider, and neither carries request bytes, a salt or a digest.
 | Phase | Meaning |
 |---|---|
 | `Prepared` | The attempt's identity and exact request are stored. It may or may not have been delivered. |
-| `Sent` | The Provider accepted the operation and returned a task; its outcome is not known yet. |
-| `Terminal` | The outcome is known: `Succeeded`, `FailedClean`, `FailedDirty`, `Retired`, `Cancelled`, or `Rejected` (the host refused the first delivery with a reason that proves it was not performed); or, for a held power or Reconfigure attempt of a VM being deleted, `Superseded` (its outcome is unknown; see "One attempt at a time"). |
+| `Sent` | The attempt was delivered at least once (whatever the Provider answered); its outcome is not known yet. |
+| `Terminal` | The host signed the outcome: `Succeeded`, `FailedClean`, `FailedDirty` or `Retired`; or, for a held power or Reconfigure attempt of a VM being deleted, `Superseded` (its outcome is unknown; see "One attempt at a time"). `Cancelled` and `Rejected` are no longer written for these Providers (there is no signed answer for them). |
 
 Every marker write is a JSON Patch on the status subresource whose `test` operations
 require the markers (and, where written, `status.placement` and `status.id`) to be exactly
@@ -340,21 +418,24 @@ as the reconcile read them. A write that fails sends nothing. The order of one a
    a power kind or `Reconfigure`, `Succeeded` and the same wait is over, or there is none. The
    `op_id` and digest salt are drawn once.
 2. Persist: the intent Secret (below), then the `Prepared` marker.
-3. Transmit: the stored bytes under a freshly minted grant. A re-send (after a transport
-   error, `VM_BUSY`, a lost reply or a manager restart) sends the same bytes with the same
-   `op_id`; a host answers a known `op_id` from its record and never executes it twice.
-4. Close: `Sent` with the task reference and its `taskTag`, then `Terminal` with the outcome, then the intent
-   Secret is deleted (a Delete's is kept until the finalizer is released). A successful
-   Create writes `Terminal`, `status.id` and the confirmed placement in one status write.
+3. Transmit: the stored bytes under a freshly minted grant, then `Sent`. A re-send sends
+   the same bytes with the same `op_id`, only after the host signed that it has no record
+   of it; a host answers a known `op_id` from its record and never executes it twice.
+4. Close: `Terminal` with the outcome the host signed, then the intent Secret is deleted (a
+   Delete's is kept until the finalizer is released, and the latest Create's, when it was
+   not performed, while it is the latest). A successful Create writes `Terminal`,
+   `status.id` and the confirmed placement in one status write.
 
 A VM's finalizer is released once a Delete attempt is `Terminal/Succeeded`, or when no
-Create of the VM was ever performed (it has no Create attempt, or its latest one was not
-performed, and no id is recorded). A Delete recorded `Succeeded` that the reconcile which
-recorded it did not release (a restart in between, or an edited status) releases the
-finalizer only when its intent Secret authenticates and matches it and the Provider
-confirms it: its task reports `Succeeded`, or, for a synchronous Delete, a re-send of the
-same attempt succeeds. A Delete waits for any attempt in flight. Orphan-on-delete and
-force-delete work as for every Provider.
+Create of the VM was ever performed: it has no Create attempt and no binding, or its latest
+Create is recorded not performed, no id is recorded, and the host signs that again, now,
+for that Create's `op_id` from its kept intent (`FAILED_CLEAN`, or `RETIRED` under its
+current enrolment); otherwise the VM is held as `OperationStateLost`. A Delete recorded
+`Succeeded` that the reconcile which recorded it did not release (a restart in between, or
+an edited status) releases the finalizer only when its intent Secret authenticates and
+matches it and the host confirms it again with a fresh signed answer (below). A Delete
+waits for any attempt in flight. Orphan-on-delete and force-delete work as for every
+Provider.
 
 ### Delete: an absent VM never releases the finalizer
 
@@ -365,25 +446,31 @@ operation identity it never does: "no such VM" is an unsigned claim that a misro
 restored or misbehaving host can make about a VM that still runs. The finalizer is
 released only by:
 
-- a confirmed Delete: a task bound to this Delete attempt (its `taskTag`) reports
-  `Succeeded`, or a re-send of the same `op_id` is answered with success;
-- no Create of the VM ever performed (no Create attempt, or only not-performed ones, and no
-  id);
+- a confirmed Delete: the host signs, for a request the manager made, that the Delete's
+  `op_id` is `COMPLETED`, or that the VM's placement is `DELETED` (a tombstone written by
+  the Delete that completed on that host, bound to the VM's UID and binding);
+- no Create of the VM ever performed, its not-performed outcome signed again (above);
 - orphan-on-delete or force-delete.
+
+A `DELETED` answer that names another Delete of the same placement on that host releases
+the finalizer too (only a Delete the manager signed for that placement can have written
+it); the current attempt is closed `Succeeded` only when it names the current attempt's
+`op_id`. A task status, a re-send, a `Describe` that finds no VM, a signed `NO_RECORD` of
+the Delete or of the placement, and any answer from an agent that is not `READY` never
+release the finalizer.
 
 So:
 
 | The host or Provider answers | Result |
 |---|---|
-| the Delete with "not found" or "not this VM's owner" (`NotFound`, `VM_NOT_OWNED`) | held as `OperationDeleteUnconfirmed`; the same attempt is re-sent every 5 minutes |
-| the Delete's task with `UNKNOWN_TO_AGENT` | held as `OperationUnknownToAgent`; no new Delete attempt |
-| the Delete's task with `Retired`, `FailedClean` or `Cancelled` | a new Delete attempt after the backoff (never a release) |
+| the Delete with "not found" or "not this VM's owner" (`NotFound`, `VM_NOT_OWNED`) | nothing is concluded; the host is asked about the Delete's `op_id` and the VM's placement |
+| a signed `UNKNOWN_TO_AGENT` or `OUTCOME_UNKNOWN` of the Delete, and no signed `DELETED` placement | held; no new Delete attempt |
+| a signed `FAILED_CLEAN` or current-enrolment `RETIRED` of the Delete | a new Delete attempt after the backoff (never a release) |
 | nothing, because the VM's Provider is gone, and a Create of the VM was or may have been performed | held as `OperationDeleteUnconfirmed` |
 
-No Describe is used to decide a release. An authenticated host answer that the VM is
-deleted (bound to the VM's UID and binding, signed by or bound to the host's enrolment)
-could release such a VM later; no such answer exists in the provider contract yet, and the
-controller's extension point for it (`authenticatedHostDeleted`) always answers no.
+No unsigned Describe is used to decide a release; the signed one asks about the placement
+of the verified Delete intent (its VM UID, binding and host), never about
+`status.placement`.
 
 ### Operations with no signed path
 
@@ -517,7 +604,9 @@ attempt:
 |---|---|---|
 | `OperationSignerUnavailable` | No operation signer (every release build). | Start a development manager with `--dev-operation-signer-key-file`. |
 | `OperationIdentityMismatch` | The Provider's advertised gates do not match its type. | Fix the Provider so it advertises `supports_` and `requires_operation_identity` and no fencing. |
-| `OperationEnrolmentUnavailable` | No enrolment for the VM's host. | Add the host to the enrolment file and restart the manager. |
+| `OperationEnrolmentUnavailable` | No current enrolment for the VM's host (its pins Secret has none, or it is another Provider's). | Enrol the host ([`host-agent-enrolment.md`](host-agent-enrolment.md)). |
+| `OperationHostAnswerUnavailable` | The manager cannot verify signed host answers (no per-host agent enrolment), or the host has no recent verified host answer from a `READY` agent. | Enable enrolment; make the host's agent answer (see its `AgentAnswerVerified` condition). |
+| `OperationHostStoreRegressed` | The host's operation store was replaced, rolled back or forked since the manager last verified it. | Re-enrol the host after checking it. |
 | `OperationStateLost` | The VM records a binding, an id, a confirmed host or a `Bound` placement without a successful Create marker, or a Delete recorded `Succeeded` that its intent and the Provider do not confirm (its status was edited or restored). | Operator. |
 | `OperationIntentLost` | A marker in flight names an intent Secret that does not exist (for example after an etcd restore that did not restore it). | Operator, or restore the Secret. |
 | `OperationIntentTampered` | An intent Secret does not authenticate, or names another VM, Provider, host, binding, attempt or target than its marker (also after the anchor key was rotated). The Secret is kept. | Operator: investigate who wrote Secrets in the Provider's namespace (the Secret is the evidence), check the host by hand, release the VM as below, then delete the Secret by hand: `kubectl -n <provider namespace> delete secret vrtg-op-<opID>`. The sweeper also keeps, and announces once with an `OperationIntentKept` Warning event on the Provider, an intent Secret whose VM annotations disagree with its VM-UID label; delete it by hand the same way once investigated. |
@@ -597,8 +686,20 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
 
 - No receipts, ledger marks, release, retire-if-unknown or cancel grants: only
   `GRANT_KIND_OPERATION` is minted or accepted.
-- Every Provider answer, including a typed task outcome or a grant refusal reason, is the
-  Provider's unsigned claim.
+- For a Provider that requires operation identity, only signed host answers decide; a
+  Create the host refused and never recorded stays in flight (its host keeps answering
+  `NO_RECORD` and refusing the re-send), so its VM is released only by orphan-on-delete or
+  force-delete until a later version can retire an operation the host never recorded.
+- Attempt markers carry no record of whether their outcome was signed: a `Terminal`
+  outcome written before signed answers existed (development clusters only) is read as it
+  is where no fresh signed answer is asked for (an unbound VM, or a VM whose Provider is
+  gone).
+- The manager asks no inventory in the signed host answer, and keeps no list of a host's
+  earlier enrolments yet: an attempt sent under one is held after a re-enrolment.
+- Store positions are mirrored nowhere in the Host's status; they live only in the pins
+  Secret.
+- The latest Create of a VM that was not performed keeps its intent Secret, cloud-init user
+  data included, while it is the VM's latest Create.
 - No fencing: the epoch fields carry identity only, with no ordering.
 - `authority_generation` is not yet bound to the generation the issuer certificate names;
   it is only checked to be at least 1, and a verifier refuses a configured minimum above 1
@@ -613,19 +714,15 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   further with an admission policy (above).
 - A superseded attempt's outcome stays unknown: if it still runs on the host after the
   Delete, only the host's own de-duplication by VM and binding stops it.
-- A Provider's typed outcomes and refusal reasons are unsigned claims: a Provider that
-  falsely answers `Retired` or `FailedClean` makes the controller mint a new attempt.
 - Attempt markers are not signed or authenticated: detected edits hold the VM, but a
   principal with `virtualmachines/status` write access can still cause a duplicate or a
   skipped operation (see above).
 - Intent Secrets of consumer VMs copy their user data into the Provider's namespace.
 - The `delete` verb on Secrets is not scoped to intent Secrets by RBAC.
-- `TaskStatus` is not bound to an op_id on the wire; the controller binds the task
-  reference on its side only.
 - In development builds the intent MAC key is derived from the anchor signing key.
-- A Delete releases the finalizer only when it is confirmed: a host that answers that the
-  VM is not there, or a Provider that is gone, holds the delete until an operator releases
-  it. There is no authenticated "deleted" answer yet.
+- A Delete releases the finalizer only when the host signs it: a host that answers that the
+  VM is not there without signing it, or a Provider that is gone, holds the delete until an
+  operator releases it.
 - A VM whose Create attempts were not performed stays on its pending host; it is never
   re-scheduled automatically.
 - A restore of the VM's status to before its first Create attempt, together with the loss

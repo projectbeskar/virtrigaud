@@ -491,11 +491,12 @@ func (r *VirtualMachineReconciler) reconfiguredResources(vm *infravirtrigaudiov1
 // supersedableHoldReasons are the holds of an attempt in flight whose outcome
 // the controller cannot learn.
 var supersedableHoldReasons = map[string]bool{
-	k8s.ReasonOperationUnknownToAgent: true,
-	k8s.ReasonOperationOutcomeUnknown: true,
-	k8s.ReasonOperationIntentLost:     true,
-	k8s.ReasonOperationIntentTampered: true,
-	k8s.ReasonOperationStateLost:      true,
+	k8s.ReasonOperationUnknownToAgent:   true,
+	k8s.ReasonOperationOutcomeUnknown:   true,
+	k8s.ReasonOperationIntentLost:       true,
+	k8s.ReasonOperationIntentTampered:   true,
+	k8s.ReasonOperationStateLost:        true,
+	k8s.ReasonOperationAnswerUnverified: true,
 }
 
 // supersedableByDelete reports whether the held attempt a in flight may be
