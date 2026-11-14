@@ -193,7 +193,7 @@ func TestVerifyInventoryEcho(t *testing.T) {
 			want: hostidentity.ErrInventoryInvalid},
 	} {
 		t.Run(name, func(t *testing.T) {
-			c := proto.Clone(inv).(*providerv1.HostInventory)
+			c, _ := proto.Clone(inv).(*providerv1.HostInventory)
 			if tc.edit != nil {
 				tc.edit(c)
 			}
@@ -221,7 +221,8 @@ func TestVerifyInventoryFieldRules(t *testing.T) {
 		// Ordering and uniqueness.
 		"components unordered": func(i *providerv1.HostInventory) { i.Components[0], i.Components[1] = i.Components[1], i.Components[0] },
 		"components repeated": func(i *providerv1.HostInventory) {
-			i.Components[1] = proto.Clone(i.Components[0]).(*providerv1.HostComponent)
+			c, _ := proto.Clone(i.Components[0]).(*providerv1.HostComponent)
+			i.Components[1] = c
 		},
 		"features unordered": func(i *providerv1.HostInventory) { i.Features[0], i.Features[2] = i.Features[2], i.Features[0] },
 		"extensions unordered": func(i *providerv1.HostInventory) {
