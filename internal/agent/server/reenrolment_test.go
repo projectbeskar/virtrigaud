@@ -127,8 +127,9 @@ func TestReenrolment_OldEnrolmentAnsweredUntilFreezeConfirmed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay of the retired op: %v", err)
 	}
-	if st := e.waitDone(retiredTask); st.GetOutcome() == providerv1.TaskOutcome_TASK_OUTCOME_SUCCEEDED {
-		t.Fatalf("the retired op's status after its replay: %v", st)
+	if st := e.waitDone(retiredTask); !st.GetDone() || st.GetOutcome() != providerv1.TaskOutcome_TASK_OUTCOME_RETIRED ||
+		st.GetOutcomeReason() != string(opstore.ReasonProviderChanged) {
+		t.Fatalf("the retired op's status after its replay: %v, want done, RETIRED, reason %s", st, opstore.ReasonProviderChanged)
 	}
 	if _, a, _ := e.signedStatus(open, nonce(3)); a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_RETIRED {
 		t.Fatalf("the retired op after its replay: %v", a)
