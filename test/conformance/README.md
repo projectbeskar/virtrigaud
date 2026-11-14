@@ -323,7 +323,10 @@ listed as not applicable.
 `go test -tags virtrigaud_dev ./test/conformance/clustered/agenttarget/`) runs every `identity.*`
 case against real per-host agent processes: two hosts, each a separate process of the test binary
 that runs the agent's start-up sequence, operation store, mutual TLS server and the development
-fake executor, behind a thin in-test router that routes and forwards only. The agent's results
+fake executor, behind the clustered Provider for per-host agents
+([`internal/providers/cloudhypervisor`](../../internal/providers/cloudhypervisor/)) over an inventory
+of loopback proxies in front of the agent processes (a proxy makes its host unreachable or a black
+hole, and survives an agent restart on another port). The agent's results
 are the last column above. One case is recorded as an expected failure of that target, not of the
 agent: the agent reaches `RETIRED` only through a re-enrolment freeze, which the agent process
 cannot do yet, so the target cannot script it. `identity.outcome-failed-dirty` sends a Create,
@@ -401,6 +404,27 @@ A Recommended case, not fixed by the change that added the suite. It is listed i
   `host` metadata of its ErrorInfo (`contracts.HostUnavailableHostKey`), where `Describe`, `Delete`,
   `Power`, `Reconfigure` and `TaskStatus` do. The manager reads the key only on the Delete path, so
   nothing reads it for a Create today.
+
+## Findings recorded against the clustered Provider for per-host agents
+
+`internal/providers/cloudhypervisor/conformance_clustered_test.go` runs the whole suite against the
+Provider and real agent processes (development builds only). Every case that applies and is not
+listed passes. The deviations, each pinned to its failure output in `chExpectedFailures`:
+
+- By design: the Provider reports `requires_operation_identity` and refuses every mutating call
+  without an operation grant (`IDENTITY_REQUIRED`) before it routes it. Every case that drives an
+  unsigned `Create`, `Delete`, `Power` or `Reconfigure` fails on that refusal (the routing,
+  owner-refusal, host-down, task, error-mapping, idempotency, restart and create cases that do);
+  the `identity.*` cases cover the signed path.
+- `ListVMs` is not served (a per-host agent does not list VMs), so the `list.*` cases, the
+  blackholed listing and the restart and idempotency cases that list fail on `Unimplemented`.
+- A per-host agent keys a VM by its owner's UID: the target cannot seed a VM without one
+  (`owner.describe-foreign`, `owner.mutate-foreign`, `owner.request-without-owner`,
+  `list.all-hosts`), and another VM of the same owner on the host answers for a name
+  (`route.correct-host`).
+- `tasks.forged-inner-ref`: the agent answers a task reference it never issued `InvalidArgument`,
+  not `NotFound`; the Provider relays the agent's answer.
+- `identity.outcome-retired`: as for the agent target, the agent process cannot re-enrol yet.
 
 ## Not covered
 

@@ -123,8 +123,13 @@ func (e *Env) startProvider() {
 	e.T.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(e.T, err, "listen on loopback")
-	srv := grpc.NewServer()
-	providerv1.RegisterProviderServer(srv, e.Target.Server())
+	var srv *grpc.Server
+	if g, ok := e.Target.(GRPCServerTarget); ok {
+		srv = g.NewGRPCServer()
+	} else {
+		srv = grpc.NewServer()
+		providerv1.RegisterProviderServer(srv, e.Target.Server())
+	}
 	go func() { _ = srv.Serve(lis) }()
 	e.srv = srv
 	e.addr = lis.Addr().String()

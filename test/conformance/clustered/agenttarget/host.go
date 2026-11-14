@@ -358,3 +358,11 @@ func copyFile(from, to string) error {
 
 // Effects reads the fake executor's effects log.
 func (h *Host) Effects() ([]fake.Effect, error) { return fake.Effects(h.FakeDir()) }
+
+// Addr is the address the agent process listens on now; it changes when the
+// process restarts.
+func (h *Host) Addr() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.addr
+}

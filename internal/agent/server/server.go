@@ -100,8 +100,10 @@ const (
 	// MaxConnectionAge.
 	MaxConnectionAgeGrace = time.Minute
 	// KeepaliveMinTime is the shortest keepalive ping interval a client may
-	// use; a client that pings more often is disconnected.
-	KeepaliveMinTime = 30 * time.Second
+	// use, with or without calls in flight; a client that pings more often is
+	// disconnected. The Provider pings every 20 seconds, so that it detects
+	// an agent that went silent on an open connection.
+	KeepaliveMinTime = 15 * time.Second
 )
 
 // Credentials is what the TLS server and the peer check use: the host's
@@ -246,6 +248,14 @@ type Options struct {
 	AnswersPerSecond float64
 	// AnswerBurst is the burst of the per-identity answer limit.
 	AnswerBurst int
+	// HelloAnswersPerSecond and HelloAnswerBurst limit the signed answers to
+	// Hello for one Provider identity, separately from AnswersPerSecond, so
+	// that reads at the answer limit cannot starve the Hello a Provider
+	// makes on each new connection. Zero fields take
+	// DefaultHelloAnswersPerSecond and DefaultHelloAnswerBurst.
+	HelloAnswersPerSecond float64
+	// HelloAnswerBurst is the burst of the per-identity Hello answer limit.
+	HelloAnswerBurst int
 	// Operations is the agent's operation path. Nil refuses every mutating
 	// method once the agent is ready (Unimplemented): a release build never
 	// sets it.
@@ -268,6 +278,13 @@ const (
 	DefaultAnswersPerSecond = 10.0
 	// DefaultAnswerBurst is the burst of signed answers for one identity.
 	DefaultAnswerBurst = 20
+	// DefaultHelloAnswersPerSecond is the sustained signed Hello answers per
+	// second for one Provider identity: a Provider makes one per new
+	// connection.
+	DefaultHelloAnswersPerSecond = 1.0
+	// DefaultHelloAnswerBurst is the burst of signed Hello answers for one
+	// identity.
+	DefaultHelloAnswerBurst = 5
 )
 
 // Server is the agent's gRPC server.
@@ -277,6 +294,7 @@ type Server struct {
 	mutating  map[string]bool
 	throttle  *throttle
 	answers   *sourceLimiter
+	hellos    *sourceLimiter
 	noAnswer  logGate
 	limited   logGate
 	providerS *providerService
@@ -301,6 +319,13 @@ func New(opts Options) (*Server, error) {
 		opts.AnswerBurst = DefaultAnswerBurst
 	}
 	s.answers = newSourceLimiter(opts.AnswersPerSecond, opts.AnswerBurst)
+	if opts.HelloAnswersPerSecond <= 0 {
+		opts.HelloAnswersPerSecond = DefaultHelloAnswersPerSecond
+	}
+	if opts.HelloAnswerBurst <= 0 {
+		opts.HelloAnswerBurst = DefaultHelloAnswerBurst
+	}
+	s.hellos = newSourceLimiter(opts.HelloAnswersPerSecond, opts.HelloAnswerBurst)
 	s.limited = logGate{every: refusalLogEvery}
 	s.opts = opts
 	so := []grpc.ServerOption{
@@ -308,7 +333,7 @@ func New(opts Options) (*Server, error) {
 		grpc.ConnectionTimeout(ConnectionTimeout),
 		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: MaxConnectionAge, MaxConnectionAgeGrace: MaxConnectionAgeGrace}),
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: KeepaliveMinTime}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: KeepaliveMinTime, PermitWithoutStream: true}),
 		grpc.ChainUnaryInterceptor(s.unaryGate),
 		grpc.ChainStreamInterceptor(s.streamGate),
 		grpc.MaxRecvMsgSize(4 << 20),
@@ -482,6 +507,18 @@ func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uin
 	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0)
 }
 
+// helloAnswer is hostAnswer for Hello, under the separate Hello answer limit.
+func (s *Server) helloAnswer(ctx context.Context, nonce []byte) *providerv1.SignedBlob {
+	return s.signAnswerUnder(ctx, s.hellos, nonce, 0, func(h answer.Host) (proto.Message, error) {
+		view, err := s.opts.Agent.HostView(ctx, 0)
+		if err != nil {
+			return nil, fmt.Errorf("the store cannot be read: %w", err)
+		}
+		h.View = view
+		return answer.HostAnswer(h)
+	})
+}
+
 // hostAnswerWithInventory is hostAnswer for a request that asked for the host
 // inventory in version inventoryVersion (0: it asked for none). See signWith
 // for what happens when the inventory cannot be signed.
@@ -505,11 +542,17 @@ func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, cont
 // (a GetHostInfo that asked for it), the host inventory; it reads the store
 // itself, in one read.
 func (s *Server) signAnswer(ctx context.Context, nonce []byte, inventoryVersion uint32, build func(answer.Host) (proto.Message, error)) *providerv1.SignedBlob {
+	return s.signAnswerUnder(ctx, s.answers, nonce, inventoryVersion, build)
+}
+
+// signAnswerUnder is signAnswer under the per-identity limit lim.
+func (s *Server) signAnswerUnder(ctx context.Context, lim *sourceLimiter, nonce []byte, inventoryVersion uint32,
+	build func(answer.Host) (proto.Message, error)) *providerv1.SignedBlob {
 	if len(nonce) == 0 {
 		return nil
 	}
 	id := peerIdentity(ctx)
-	if id == "" || !s.answers.allow(id, s.opts.Now()) {
+	if id == "" || !lim.allow(id, s.opts.Now()) {
 		if ok, n := s.limited.allow(s.opts.Now()); ok {
 			s.opts.Log.Info("no signed answer: the Provider is above its answer rate", "suppressedSinceLast", n)
 		}

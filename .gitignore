@@ -60,6 +60,7 @@ internal/providers/libvirt/_fixture_images_*/
 # name `go build` gives each one (never a glob that could match source)
 /cmd/alpha-to-beta-dryrun/alpha-to-beta-dryrun
 /cmd/manager/manager
+/cmd/provider-cloudhypervisor/provider-cloudhypervisor
 /cmd/provider-libvirt/provider-libvirt
 /cmd/provider-mock/provider-mock
 /cmd/provider-proxmox/provider-proxmox
