@@ -77,7 +77,7 @@ const (
 	crashAfterPrepared operationCrashPoint = "after-prepared"
 	// crashAfterSend: the operation was sent, its answer not recorded.
 	crashAfterSend operationCrashPoint = "after-send"
-	// crashAfterReply: a task's outcome was read, the marker not Terminal.
+	// crashAfterReply: a signed outcome was read, the marker not Terminal.
 	crashAfterReply operationCrashPoint = "after-reply"
 	// crashAfterTerminal: the marker is Terminal, the intent Secret not
 	// deleted.

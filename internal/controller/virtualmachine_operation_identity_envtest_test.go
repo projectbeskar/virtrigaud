@@ -74,7 +74,7 @@ type identityEnv struct {
 	// trust is what the manager trusts about the fake's hosts, with their
 	// persisted store state (it outlives a manager, as the pins Secret does).
 	trust *staticTrust
-	auth     operation.IntentAuthenticator
+	auth  operation.IntentAuthenticator
 	// deliveries counts the signed calls per full method, and opIDs records
 	// the op_id of every signed Create delivered.
 	deliveries sync.Map

@@ -290,6 +290,9 @@ func (r *VirtualMachineReconciler) learnCreateID(ctx context.Context, vm *infrav
 // audit record of the signed decision.
 func (r *VirtualMachineReconciler) closeSigned(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, poll opPoll, outcome infravirtrigaudiov1beta1.OperationAttemptOutcome) (attemptStep, ctrl.Result, error) {
+	if r.operationCrashed(ctx, crashAfterReply) {
+		return stepWaiting, ctrl.Result{}, errOperationCrashed
+	}
 	summary := auditSignedDecision(ctx, poll.read, poll.v, fmt.Sprintf("%s attempt %d closed %s", a.Kind, a.Attempt, outcome), a.OpID)
 	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonSignedOutcome, summary)
 	if a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindReconfigure {

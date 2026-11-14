@@ -17,9 +17,9 @@ limitations under the License.
 package main
 
 import (
-	"errors"
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
