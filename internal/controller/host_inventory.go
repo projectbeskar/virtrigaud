@@ -30,11 +30,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostinventory"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -66,6 +68,8 @@ const inventoryEventInterval = time.Minute
 
 // inventoryBackoff is the inventory backoff of one host.
 type inventoryBackoff struct {
+	// host is the Host (namespace and name), to forget it with the Host.
+	host     types.NamespacedName
 	failures int
 	until    time.Time
 	// enrolment and agentVersion are the host's when the backoff started or
@@ -106,7 +110,7 @@ func (h *HostAnswers) inventoryFault(provider *infravirtrigaudiov1beta1.Provider
 	k := hostAnswerKey(provider, hostID)
 	b := h.invBackoff[k]
 	if b == nil {
-		b = &inventoryBackoff{}
+		b = &inventoryBackoff{host: types.NamespacedName{Namespace: provider.Namespace, Name: hostID}}
 		h.invBackoff[k] = b
 	}
 	b.failures++
@@ -133,6 +137,18 @@ func (h *HostAnswers) inventoryAnswered(provider *infravirtrigaudiov1beta1.Provi
 		delete(h.invBackoff, k)
 	default:
 		b.enrolment, b.agentVersion = bytes.Clone(enrol), version
+	}
+}
+
+// forgetInventoryBackoff drops the inventory backoff of the Host key (a Host
+// lives in its Provider's namespace).
+func (h *HostAnswers) forgetInventoryBackoff(key types.NamespacedName) {
+	h.imu.Lock()
+	defer h.imu.Unlock()
+	for k, b := range h.invBackoff {
+		if b.host == key {
+			delete(h.invBackoff, k)
+		}
 	}
 }
 
@@ -287,6 +303,10 @@ func componentsCondition(p *HostInventoryPolicy, verified conditionVerdict, r *h
 	if !r.answer.Ready() {
 		return no(infravirtrigaudiov1beta1.HostReasonComponentsAgentNotReady, "",
 			fmt.Sprintf("the host's agent is %s", r.answer.Context.GetAgentState()))
+	}
+	if len(inv.GetComponents()) == 0 {
+		return no(infravirtrigaudiov1beta1.HostReasonComponentsNoneReported, "",
+			"the host inventory lists no component, so nothing on the host can be checked")
 	}
 	if e := inv.GetUnexpectedExtensions(); len(e) > 0 {
 		return no(infravirtrigaudiov1beta1.HostReasonComponentsUnexpectedExtension, "",
@@ -446,6 +466,7 @@ func inventoryMirror(p *HostInventoryPolicy, r *hostRefresh, inv *providerv1.Hos
 	at := metav1.NewTime(r.verifiedAt)
 	m := &infravirtrigaudiov1beta1.HostAgentInventoryStatus{
 		ObservedTime: &at, AnswerSHA256: hex.EncodeToString(r.answer.BlobSHA256[:]), AllowListSHA256: p.AllowListSHA256(),
+		EnrolmentID: hex.EncodeToString(r.answer.Context.GetEnrolmentId()),
 		InventoryVersion: int64(inv.GetInventoryVersion()), SupportedVersion: int64(inv.GetSupportedVersion()),
 		State: inventoryStateNames[inv.GetState()], StateReason: inv.GetStateReason(),
 		SnapshotAgeSeconds: int64(inv.GetSnapshotAgeSeconds()), ProcessIdentityTier: tierName(inv.GetProcessIdentityTier()),
@@ -484,6 +505,7 @@ func hostInventoryInScope(provider *infravirtrigaudiov1beta1.Provider) bool {
 // Unsigned host information can only make a host not ready, never ready.
 func (r *HostReconciler) applyHostInventory(ctx context.Context, host *infravirtrigaudiov1beta1.Host, obs inventoryObservation) {
 	if !obs.inScope {
+		clearHostInventory(host)
 		return
 	}
 	p := r.HostAnswers.inventoryPolicy()
@@ -491,6 +513,8 @@ func (r *HostReconciler) applyHostInventory(ctx context.Context, host *infravirt
 	before := slices.Clone(host.Status.Conditions)
 	if v.mirror != nil {
 		host.Status.AgentInventory = v.mirror
+	} else {
+		dropStaleInventoryMirror(host)
 	}
 	setHostCondition(host, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, v.verified.status, v.verified.reason, v.verified.message)
 	setHostCondition(host, infravirtrigaudiov1beta1.HostConditionComponentsReady, v.components.status, v.components.reason, v.components.message)
@@ -512,6 +536,7 @@ func (r *HostReconciler) applyHostInventory(ctx context.Context, host *infravirt
 // earlier heartbeat (the Provider's type is unknown, for example because the
 // Provider is gone).
 func withdrawHostInventory(host *infravirtrigaudiov1beta1.Host, inScope bool, why string) {
+	dropStaleInventoryMirror(host)
 	if !inScope && meta.FindStatusCondition(host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified) == nil {
 		return
 	}
@@ -522,6 +547,32 @@ func withdrawHostInventory(host *infravirtrigaudiov1beta1.Host, inScope bool, wh
 		"the host inventory is not verified ("+infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer+")")
 }
 
+// clearHostInventory removes the inventory mirror and conditions of a host
+// whose Provider does not run a per-host agent (it moved to another
+// Provider).
+func clearHostInventory(host *infravirtrigaudiov1beta1.Host) {
+	host.Status.AgentInventory = nil
+	meta.RemoveStatusCondition(&host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified)
+	meta.RemoveStatusCondition(&host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionComponentsReady)
+}
+
+// dropStaleInventoryMirror clears the inventory mirror when it was verified
+// under another enrolment than the host's current one (status.agent, the
+// mirror of the pins Secret; none: no current enrolment).
+func dropStaleInventoryMirror(host *infravirtrigaudiov1beta1.Host) {
+	m := host.Status.AgentInventory
+	if m == nil {
+		return
+	}
+	current := ""
+	if host.Status.Agent != nil {
+		current = host.Status.Agent.EnrolmentID
+	}
+	if m.EnrolmentID != current {
+		host.Status.AgentInventory = nil
+	}
+}
+
 // inventoryNow is the clock of the inventory verdicts.
 func (r *HostReconciler) inventoryNow() time.Time {
 	if r.HostAnswers != nil {
@@ -530,56 +581,177 @@ func (r *HostReconciler) inventoryNow() time.Time {
 	return time.Now()
 }
 
-// inventoryEventLimiter deduplicates the inventory Events of each host per
-// (condition, reason) and limits them to one per host per
-// inventoryEventInterval. The zero value is ready to use.
-type inventoryEventLimiter struct {
+// inventoryBlobLogInterval is the least time between two log lines of one
+// host that carry the whole signed answer; the lines in between carry its
+// SHA-256 only.
+const inventoryBlobLogInterval = 10 * time.Minute
+
+// maxSuppressedReasons bounds the reasons a summary Event lists.
+const maxSuppressedReasons = 8
+
+// reasonInventoryTransitionsSuppressed is the reason of the Event that
+// summarises the transitions of one condition suppressed within an Event
+// window.
+const reasonInventoryTransitionsSuppressed = "InventoryTransitionsSuppressed"
+
+// inventoryAudit is the audit state of the host inventory conditions, per
+// Host: the last observed reason and Event window of each condition, the
+// transitions suppressed within the window, and the last signed answer
+// logged in full. The zero value is ready to use.
+type inventoryAudit struct {
 	mu    sync.Mutex
-	hosts map[string]*hostEventState
+	hosts map[string]*hostAuditState
 }
 
-// hostEventState is the Events state of one host.
-type hostEventState struct {
-	last   map[string]string
-	lastAt time.Time
+// hostAuditState is the audit state of one Host.
+type hostAuditState struct {
+	conditions map[string]*conditionAuditState
+	// blobSHA and blobAt are the SHA-256 of the last signed answer logged in
+	// full and when.
+	blobSHA string
+	blobAt  time.Time
 }
 
-// allow reports whether an Event for host's condition with reason may be
-// emitted at now, and records it when it may.
-func (l *inventoryEventLimiter) allow(host, condition, reason string, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.hosts == nil {
-		l.hosts = map[string]*hostEventState{}
+// conditionAuditState is the audit state of one condition of one Host.
+type conditionAuditState struct {
+	// observed is the last reason observed (Event or not).
+	observed string
+	// eventAt is when the last Event of the condition was recorded.
+	eventAt time.Time
+	// suppressed are the reasons of the transitions observed since eventAt
+	// whose Event was suppressed (the count, and at most
+	// maxSuppressedReasons of them).
+	suppressed        int
+	suppressedReasons []string
+}
+
+// eventDecision says which Event, if any, one observation records.
+type eventDecision struct {
+	// transition: record the observed transition.
+	transition bool
+	// summary: record a summary of the suppressed transitions.
+	summary bool
+	// suppressed and reasons are the suppressed transitions being reported.
+	suppressed int
+	reasons    []string
+}
+
+// host returns the audit state of host. The caller holds a.mu.
+func (a *inventoryAudit) host(host string) *hostAuditState {
+	if a.hosts == nil {
+		a.hosts = map[string]*hostAuditState{}
 	}
-	s := l.hosts[host]
+	s := a.hosts[host]
 	if s == nil {
-		s = &hostEventState{last: map[string]string{}}
-		l.hosts[host] = s
+		s = &hostAuditState{conditions: map[string]*conditionAuditState{}}
+		a.hosts[host] = s
 	}
-	if s.last[condition] == reason || (!s.lastAt.IsZero() && now.Sub(s.lastAt) < inventoryEventInterval) {
+	return s
+}
+
+// observe records that host's condition has reason at now and decides the
+// Event: a transition (a reason other than the last observed one) is
+// recorded when the condition's last Event is at least inventoryEventInterval
+// old, and otherwise suppressed and counted; the first observation after the
+// window ends with suppressed transitions records them, as part of the
+// transition Event or as a summary Event. So recovering and failing again
+// within a window is never lost, and each condition records at most about
+// one Event per window.
+func (a *inventoryAudit) observe(host, condition, reason string, now time.Time) eventDecision {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cs := a.host(host).conditions[condition]
+	if cs == nil {
+		cs = &conditionAuditState{}
+		a.host(host).conditions[condition] = cs
+	}
+	open := cs.eventAt.IsZero() || now.Sub(cs.eventAt) >= inventoryEventInterval
+	changed := cs.observed != reason
+	cs.observed = reason
+	switch {
+	case changed && open:
+		d := eventDecision{transition: true, suppressed: cs.suppressed, reasons: cs.suppressedReasons}
+		cs.eventAt, cs.suppressed, cs.suppressedReasons = now, 0, nil
+		return d
+	case changed:
+		cs.suppressed++
+		if len(cs.suppressedReasons) < maxSuppressedReasons {
+			cs.suppressedReasons = append(cs.suppressedReasons, reason)
+		}
+		return eventDecision{}
+	case open && cs.suppressed > 0:
+		d := eventDecision{summary: true, suppressed: cs.suppressed, reasons: cs.suppressedReasons}
+		cs.eventAt, cs.suppressed, cs.suppressedReasons = now, 0, nil
+		return d
+	}
+	return eventDecision{}
+}
+
+// blob reports whether a log line of host may carry the whole signed answer
+// with SHA-256 sha at now: never one already logged in full, and at most one
+// per inventoryBlobLogInterval. It records it when it may.
+func (a *inventoryAudit) blob(host, sha string, now time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.host(host)
+	if sha == "" || s.blobSHA == sha || (!s.blobAt.IsZero() && now.Sub(s.blobAt) < inventoryBlobLogInterval) {
 		return false
 	}
-	s.last[condition], s.lastAt = reason, now
+	s.blobSHA, s.blobAt = sha, now
 	return true
 }
 
+// forget drops the audit state of host.
+func (a *inventoryAudit) forget(host string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.hosts, host)
+}
+
+// inventoryReasons is the closed set of reasons the inventory metric may
+// carry; anything else is published as metricReasonOther.
+var inventoryReasons = map[string]bool{
+	infravirtrigaudiov1beta1.HostReasonInventoryVerified: true, infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer: true,
+	infravirtrigaudiov1beta1.HostReasonInventoryMissing: true, infravirtrigaudiov1beta1.HostReasonInventoryInvalid: true,
+	infravirtrigaudiov1beta1.HostReasonInventoryPending: true, infravirtrigaudiov1beta1.HostReasonInventoryStale: true,
+	infravirtrigaudiov1beta1.HostReasonInventoryOverLimit: true, infravirtrigaudiov1beta1.HostReasonInventoryUnreadable: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsVerified: true, infravirtrigaudiov1beta1.HostReasonComponentsInventoryNotVerified: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsAgentNotReady: true, infravirtrigaudiov1beta1.HostReasonComponentsNoneReported: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsUnexpectedExtension: true, infravirtrigaudiov1beta1.HostReasonComponentsUnmanifested: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsManifestInvalid: true, infravirtrigaudiov1beta1.HostReasonComponentsManifestOriginNotAccepted: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsMissing: true, infravirtrigaudiov1beta1.HostReasonComponentsIncompatible: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsUnhealthy: true, infravirtrigaudiov1beta1.HostReasonComponentsAllowListNotConfigured: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsAllowListUnverified: true, infravirtrigaudiov1beta1.HostReasonComponentsDigestNotAllowListed: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsDigestsNotReported: true, infravirtrigaudiov1beta1.HostReasonComponentsRequiredAbsent: true,
+	infravirtrigaudiov1beta1.HostReasonComponentsFeatureMissing: true, infravirtrigaudiov1beta1.HostReasonComponentsIdentityTierNotAccepted: true,
+}
+
+// metricReasonOther is the metric reason of a reason outside the closed set.
+const metricReasonOther = "Other"
+
+// metricReason bounds a condition reason to the closed set.
+func metricReason(reason string) string {
+	if inventoryReasons[reason] {
+		return reason
+	}
+	return metricReasonOther
+}
+
 // auditInventory writes the audit record of one heartbeat's inventory
-// verdict: on a transition of either condition, one log line with the whole
-// signed answer; and one Event per (condition, reason) change, at most one
-// per host per inventoryEventInterval, naming the reason, the component, the
-// answer's and the allow-list's SHA-256.
+// verdict: on a transition of either condition, one log line naming it, the
+// component, and the SHA-256 of the signed answer and of the allow-list,
+// which also carries the whole signed answer once per answer and at most once
+// per host per inventoryBlobLogInterval; an Event per condition as observe
+// decides; and the condition metric.
 func (r *HostReconciler) auditInventory(ctx context.Context, host *infravirtrigaudiov1beta1.Host, before []metav1.Condition,
 	v inventoryVerdict, refresh *hostRefresh) {
-	answerSHA, blob := "", ""
+	answerSHA := ""
 	if refresh != nil && refresh.verdict == answerVerified {
 		answerSHA = hex.EncodeToString(refresh.answer.BlobSHA256[:])
-		if raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(blobOf(refresh.read.Answer)); err == nil {
-			blob = base64.StdEncoding.EncodeToString(raw)
-		}
 	}
 	allowSHA := r.HostAnswers.inventoryPolicy().AllowListSHA256()
 	key := host.Namespace + "/" + host.Name
+	now := r.inventoryNow()
 	for _, c := range []struct {
 		typ string
 		cv  conditionVerdict
@@ -588,20 +760,52 @@ func (r *HostReconciler) auditInventory(ctx context.Context, host *infravirtriga
 		{infravirtrigaudiov1beta1.HostConditionComponentsReady, v.components},
 	} {
 		old := meta.FindStatusCondition(before, c.typ)
-		if old == nil || old.Status != c.cv.status || old.Reason != c.cv.reason {
-			log.FromContext(ctx).Info("Host inventory condition changed", "host", host.Name, "condition", c.typ,
-				"status", c.cv.status, "reason", c.cv.reason, "component", v.component, "answerSHA256", answerSHA,
-				"allowListSHA256", allowSHA, "signedAnswer", blob)
+		previous := ""
+		if old != nil {
+			previous = metricReason(old.Reason)
 		}
-		if r.Recorder == nil || !r.inventoryEvents.allow(key, c.typ, c.cv.reason, r.inventoryNow()) {
+		metrics.SetHostInventoryCondition(host.Namespace, host.Name, c.typ, previous, metricReason(c.cv.reason), c.cv.status == metav1.ConditionTrue)
+		if old == nil || old.Status != c.cv.status || old.Reason != c.cv.reason {
+			kv := []any{"host", host.Name, "condition", c.typ, "status", c.cv.status, "reason", c.cv.reason, "component", v.component,
+				"answerSHA256", answerSHA, "allowListSHA256", allowSHA}
+			if r.inventoryEvents.blob(key, answerSHA, now) {
+				if raw, err := (proto.MarshalOptions{Deterministic: true}).Marshal(blobOf(refresh.read.Answer)); err == nil {
+					kv = append(kv, "signedAnswer", base64.StdEncoding.EncodeToString(raw))
+				}
+			}
+			log.FromContext(ctx).Info("Host inventory condition changed", kv...)
+		}
+		d := r.inventoryEvents.observe(key, c.typ, c.cv.reason, now)
+		if r.Recorder == nil || (!d.transition && !d.summary) {
 			continue
 		}
 		eventType := corev1.EventTypeNormal
 		if c.cv.status != metav1.ConditionTrue {
 			eventType = corev1.EventTypeWarning
 		}
-		r.Recorder.Eventf(host, eventType, c.cv.reason, "%s=%s (%s): component %q, answer sha256 %q, allow-list sha256 %q",
-			c.typ, c.cv.status, c.cv.reason, v.component, answerSHA, allowSHA)
+		suppressed := ""
+		if d.suppressed > 0 {
+			suppressed = fmt.Sprintf("; %d earlier transition(s) suppressed in the last %s (reasons %v)", d.suppressed, inventoryEventInterval, d.reasons)
+		}
+		if d.summary {
+			r.Recorder.Eventf(host, eventType, reasonInventoryTransitionsSuppressed,
+				"%s: %d transition(s) suppressed in the last %s (reasons %v); current reason %s (%s), allow-list sha256 %q",
+				c.typ, d.suppressed, inventoryEventInterval, d.reasons, c.cv.reason, c.cv.status, allowSHA)
+			continue
+		}
+		r.Recorder.Eventf(host, eventType, c.cv.reason, "%s=%s (%s): component %q, answer sha256 %q, allow-list sha256 %q%s",
+			c.typ, c.cv.status, c.cv.reason, v.component, answerSHA, allowSHA, suppressed)
+	}
+}
+
+// forgetHostInventory drops what the manager holds in memory about a Host's
+// inventory (its backoff, audit state and metric series), when the Host is
+// gone or deleted.
+func (r *HostReconciler) forgetHostInventory(key types.NamespacedName) {
+	r.inventoryEvents.forget(key.Namespace + "/" + key.Name)
+	metrics.DeleteHostInventoryConditions(key.Namespace, key.Name)
+	if r.HostAnswers != nil {
+		r.HostAnswers.forgetInventoryBackoff(key)
 	}
 }
 

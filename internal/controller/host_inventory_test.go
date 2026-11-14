@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,6 +36,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
@@ -123,14 +127,16 @@ func newInvFixture(t *testing.T, policy *HostInventoryPolicy) *invFixture {
 	providerCR.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
 	providerCR.UID = identityProviderUID
 	host := readyHost("host-alpha", clusteredNS, "pool-a", providerCR.Name)
-	host.Status = infravirtrigaudiov1beta1.HostStatus{}
+	enrol := make([]byte, operation.IDLen)
+	enrol[0] = 2
+	// The enrolment controller's mirror of the pins Secret.
+	host.Status = infravirtrigaudiov1beta1.HostStatus{Agent: &infravirtrigaudiov1beta1.HostAgentStatus{
+		Mode: infravirtrigaudiov1beta1.HostAgentModeIdentity, EnrolmentID: hex.EncodeToString(enrol)}}
 	s := coverageTestScheme(t)
 	fc := fake.NewClientBuilder().WithScheme(s).WithObjects(providerCR, host).
 		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
 		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.Host{}).Build()
-	enrol := make([]byte, operation.IDLen)
-	enrol[0] = 2
 	holder := make([]byte, operation.IDLen)
 	holder[0] = 1
 	h := newTestHost(t, providerCR, "host-alpha", enrol, operation.Epoch{Counter: 2, Holder: holder})
@@ -644,45 +650,120 @@ func TestEvaluateHostInventory_RequiredAbsent(t *testing.T) {
 	assert.Contains(t, v.components.message, "hypervisor-fw")
 }
 
-// Events are deduplicated per (host, condition, reason) and limited to one
-// per host per minute; a dropped Event is emitted on a later heartbeat.
-func TestInventoryEventLimiter(t *testing.T) {
-	var l inventoryEventLimiter
+// The audit decision: a transition is recorded when the condition's last
+// Event is at least a minute old; transitions within the window are counted
+// and reported once the window ends; each condition has its own window.
+func TestInventoryAuditObserve(t *testing.T) {
+	var a inventoryAudit
 	t0 := time.Now()
-	require.True(t, l.allow("ns/h", "A", "R1", t0))
-	assert.False(t, l.allow("ns/h", "A", "R1", t0.Add(2*time.Minute)), "same reason: deduplicated")
-	assert.False(t, l.allow("ns/h", "B", "R2", t0.Add(30*time.Second)), "within a minute of the last Event")
-	assert.True(t, l.allow("ns/other", "B", "R2", t0.Add(30*time.Second)), "another host has its own limit")
-	assert.True(t, l.allow("ns/h", "B", "R2", t0.Add(61*time.Second)), "the dropped Event comes on a later heartbeat")
-	assert.True(t, l.allow("ns/h", "A", "R3", t0.Add(3*time.Minute)))
+	require.True(t, a.observe("ns/h", "A", "R1", t0).transition)
+	assert.Equal(t, eventDecision{}, a.observe("ns/h", "A", "R1", t0.Add(2*time.Minute)), "no change: nothing")
+	assert.True(t, a.observe("ns/h", "B", "R2", t0.Add(time.Second)).transition, "each condition has its own window")
+	assert.True(t, a.observe("ns/other", "A", "R2", t0.Add(time.Second)).transition, "each host has its own state")
+	// Recover and fail again within the window of A's next Event.
+	require.True(t, a.observe("ns/h", "A", "R2", t0.Add(3*time.Minute)).transition)
+	assert.False(t, a.observe("ns/h", "A", "R1", t0.Add(3*time.Minute+10*time.Second)).transition)
+	assert.False(t, a.observe("ns/h", "A", "R2", t0.Add(3*time.Minute+20*time.Second)).transition)
+	d := a.observe("ns/h", "A", "R2", t0.Add(4*time.Minute+time.Second))
+	assert.True(t, d.summary, "the window ended with suppressed transitions")
+	assert.Equal(t, 2, d.suppressed)
+	assert.Equal(t, []string{"R1", "R2"}, d.reasons)
+	assert.Equal(t, eventDecision{}, a.observe("ns/h", "A", "R2", t0.Add(5*time.Minute)), "reported once")
+	// A transition after the window carries the suppressed ones with it.
+	require.Equal(t, eventDecision{}, a.observe("ns/h", "B", "R3", t0.Add(10*time.Second)))
+	d = a.observe("ns/h", "B", "R4", t0.Add(2*time.Minute))
+	assert.True(t, d.transition)
+	assert.Equal(t, 1, d.suppressed)
+	a.forget("ns/h")
+	assert.True(t, a.observe("ns/h", "A", "R2", t0.Add(5*time.Minute)).transition, "a forgotten host starts afresh")
 }
 
-// The heartbeat events: a host flapping between two states emits at most one
-// Event per minute.
-func TestHostInventory_EventsRateLimited(t *testing.T) {
+// Two outages inside one Event window are both visible in the Events: the
+// summary recorded when the window ends lists every suppressed transition.
+func TestHostInventory_TwoOutagesInOneWindow(t *testing.T) {
 	f := newInvFixture(t, testPolicy(t))
 	f.reconcile(t)
-	drain := func() int {
-		n := 0
-		for {
-			select {
-			case <-f.events.Events:
-				n++
-			default:
-				return n
-			}
-		}
-	}
-	require.Equal(t, 1, drain())
-	for range 5 {
+	require.Len(t, drainEvents(f.events), 2, "one Event per condition")
+	for _, unsigned := range []bool{true, false, true, false} {
 		f.clock.advance(5 * time.Second)
-		f.signed.unsigned = !f.signed.unsigned
+		f.signed.unsigned = unsigned
 		f.reconcile(t)
 	}
-	assert.Zero(t, drain(), "no Event within a minute of the last")
+	assert.Empty(t, drainEvents(f.events), "within the window")
 	f.clock.advance(time.Minute)
 	f.reconcile(t)
-	assert.Equal(t, 1, drain())
+	events := drainEvents(f.events)
+	require.Len(t, events, 2)
+	for _, e := range events {
+		assert.Contains(t, e, reasonInventoryTransitionsSuppressed)
+		assert.Contains(t, e, "4 transition(s)")
+	}
+	assert.Equal(t, 2, strings.Count(events[0]+events[1], infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer+" "),
+		"the AgentInventoryVerified summary names both outages: %v", events)
+}
+
+// A flapping Provider does not get the whole signed answer logged on every
+// transition: once per answer and at most once per host per interval.
+func TestHostInventory_SignedAnswerLoggedRarely(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	var mu sync.Mutex
+	blobs, lines := 0, 0
+	logger := funcr.New(func(_, args string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(args, "Host inventory condition changed") || strings.Contains(args, `"condition"`) {
+			lines++
+		}
+		if strings.Contains(args, `"signedAnswer"`) {
+			blobs++
+		}
+	}, funcr.Options{})
+	ctx := log.IntoContext(context.Background(), logger)
+	reconcile := func() {
+		_, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: clusteredNS, Name: "host-alpha"}})
+		require.NoError(t, err)
+	}
+	reconcile()
+	for i := 0; i < 10; i++ {
+		f.clock.advance(15 * time.Second)
+		f.signed.unsigned = i%2 == 0
+		reconcile()
+	}
+	mu.Lock()
+	assert.Equal(t, 1, blobs, "the whole signed answer is logged once")
+	assert.Greater(t, lines, 10, "every transition is still logged, with the answer's SHA-256")
+	mu.Unlock()
+	f.clock.advance(inventoryBlobLogInterval)
+	f.signed.unsigned = true
+	reconcile()
+	f.signed.unsigned = false
+	reconcile()
+	mu.Lock()
+	assert.Equal(t, 2, blobs, "a new answer after the interval is logged in full")
+	mu.Unlock()
+}
+
+// The metric carries one series per (host, condition) with the current
+// reason from the closed set, and is dropped with the Host.
+func TestHostInventory_ConditionMetric(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	// The registry is process-wide: start from no series of this host.
+	f.r.forgetHostInventory(types.NamespacedName{Namespace: clusteredNS, Name: "host-alpha"})
+	f.reconcile(t)
+	val := func(cond, reason string) float64 {
+		v, ok := inventoryMetric(t, "host-alpha", cond, reason)
+		require.True(t, ok, "series %s/%s", cond, reason)
+		return v
+	}
+	assert.Equal(t, 1.0, val(infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, infravirtrigaudiov1beta1.HostReasonInventoryVerified))
+	f.signed.unsigned = true
+	f.clock.advance(time.Second)
+	f.reconcile(t)
+	assert.Equal(t, 0.0, val(infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer))
+	assert.Equal(t, 2, seriesOf(t, "host-alpha"), "one series per condition: the previous reason's was replaced")
+	assert.Equal(t, metricReasonOther, metricReason("SomethingElse"))
+	f.r.forgetHostInventory(types.NamespacedName{Namespace: clusteredNS, Name: "host-alpha"})
+	assert.Zero(t, seriesOf(t, "host-alpha"))
 }
 
 // setComponentAllowListReadiness: a Provider whose type runs a per-host
@@ -755,4 +836,148 @@ func TestHostInventory_RedactionCanary(t *testing.T) {
 			assert.False(t, strings.Contains(e, canary), "Event %q carries %q", e, canary)
 		}
 	}
+}
+
+// inventoryMetrics gathers the host inventory condition series of host.
+func inventoryMetrics(t *testing.T, host string) []*dto.Metric {
+	t.Helper()
+	mfs, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var out []*dto.Metric
+	for _, mf := range mfs {
+		if mf.GetName() != "virtrigaud_host_inventory_condition" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "host" && l.GetValue() == host {
+					out = append(out, m)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// seriesOf counts the host inventory condition series of host.
+func seriesOf(t *testing.T, host string) int { return len(inventoryMetrics(t, host)) }
+
+// inventoryMetric returns the value of host's series for condition and reason.
+func inventoryMetric(t *testing.T, host, condition, reason string) (float64, bool) {
+	for _, m := range inventoryMetrics(t, host) {
+		labels := map[string]string{}
+		for _, l := range m.GetLabel() {
+			labels[l.GetName()] = l.GetValue()
+		}
+		if labels["condition"] == condition && labels["reason"] == reason {
+			return m.GetGauge().GetValue(), true
+		}
+	}
+	return 0, false
+}
+
+// An inventory that lists no component is not ready, whatever the
+// allow-list requires.
+func TestEvaluateHostInventory_NoComponents(t *testing.T) {
+	now := time.Now()
+	inv := goodInventory(contracts.HostAnswerQuery{InventoryVersion: 1})
+	inv.Components = nil
+	require.NoError(t, hostidentity.VerifyInventory(inv, 1))
+	for name, p := range map[string]*HostInventoryPolicy{
+		"with an allow-list": testPolicy(t),
+		"insecure flag": func() *HostInventoryPolicy {
+			p := DefaultHostInventoryPolicy()
+			p.SkipAllowList = true
+			return p
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := evaluateHostInventory(p, inventoryObservation{inScope: true, refresh: verifiedRefresh(inv, now)}, now)
+			assert.Equal(t, metav1.ConditionFalse, v.components.status)
+			assert.Equal(t, infravirtrigaudiov1beta1.HostReasonComponentsNoneReported, v.components.reason)
+		})
+	}
+}
+
+// The mirror is dropped when the host's enrolment changes before a new
+// inventory verifies, and the mirror and conditions are removed when the
+// host's Provider no longer runs a per-host agent.
+func TestHostInventory_MirrorClearedOnEnrolmentChangeAndLeaving(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	h := f.reconcile(t)
+	require.NotNil(t, h.Status.AgentInventory)
+	assert.Equal(t, h.Status.Agent.EnrolmentID, h.Status.AgentInventory.EnrolmentID)
+	// A failed heartbeat under the same enrolment keeps the last verified
+	// inventory (its observedTime says how old it is).
+	f.signed.unsigned = true
+	f.clock.advance(time.Second)
+	h = f.reconcile(t)
+	require.NotNil(t, h.Status.AgentInventory)
+	// The host is re-enrolled: the old enrolment's inventory goes.
+	h.Status.Agent.EnrolmentID = strings.Repeat("9", 32)
+	require.NoError(t, f.r.Status().Update(context.Background(), h))
+	f.clock.advance(time.Second)
+	h = f.reconcile(t)
+	assert.Nil(t, h.Status.AgentInventory)
+	// So does an error heartbeat.
+	h.Status.AgentInventory = &infravirtrigaudiov1beta1.HostAgentInventoryStatus{State: "Complete", EnrolmentID: strings.Repeat("1", 32)}
+	withdrawHostInventory(h, true, "x")
+	assert.Nil(t, h.Status.AgentInventory)
+
+	// Leaving: a heartbeat of a Provider that runs no per-host agent.
+	h.Status.AgentInventory = &infravirtrigaudiov1beta1.HostAgentInventoryStatus{State: "Complete"}
+	f.r.applyHostInventory(context.Background(), h, inventoryObservation{})
+	assert.Nil(t, h.Status.AgentInventory)
+	assert.Nil(t, meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified))
+	assert.Nil(t, meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionComponentsReady))
+	// And an error heartbeat of such a Provider.
+	h.Status.AgentInventory = &infravirtrigaudiov1beta1.HostAgentInventoryStatus{State: "Complete"}
+	setHostCondition(h, infravirtrigaudiov1beta1.HostConditionComponentsReady, metav1.ConditionTrue, "x", "")
+	lv := f.provider.DeepCopy()
+	lv.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeLibvirt
+	base := h.DeepCopy()
+	_, err := f.r.handleGetHostInfoError(context.Background(), h, base, lv, contracts.NewRetryableError("down", nil))
+	require.NoError(t, err)
+	assert.Nil(t, h.Status.AgentInventory)
+	assert.Nil(t, meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionComponentsReady))
+}
+
+// A deleted or vanished Host's backoff, audit state and metric series are
+// dropped.
+func TestHostInventory_ForgottenWithTheHost(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	f.signed.rawSign = true
+	f.signed.inventory = func(q contracts.HostAnswerQuery) *providerv1.HostInventory {
+		inv := goodInventory(q)
+		inv.Features[0].Name = "unlisted_probe"
+		return inv
+	}
+	f.reconcile(t)
+	require.Zero(t, f.r.HostAnswers.inventoryAsk(f.provider, "host-alpha"), "in a backoff")
+	require.NotZero(t, seriesOf(t, "host-alpha"))
+	h := &infravirtrigaudiov1beta1.Host{}
+	require.NoError(t, f.r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "host-alpha"}, h))
+	h.Finalizers = nil
+	require.NoError(t, f.r.Update(context.Background(), h))
+	require.NoError(t, f.r.Delete(context.Background(), h))
+	_, err := f.r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: clusteredNS, Name: "host-alpha"}})
+	require.NoError(t, err)
+	assert.EqualValues(t, hostidentity.InventoryVersion, f.r.HostAnswers.inventoryAsk(f.provider, "host-alpha"), "the backoff is gone")
+	assert.Zero(t, seriesOf(t, "host-alpha"))
+	f.r.inventoryEvents.mu.Lock()
+	assert.Empty(t, f.r.inventoryEvents.hosts)
+	f.r.inventoryEvents.mu.Unlock()
+}
+
+// The allow-list reason never hides an earlier Ready=False reason of the
+// Provider: it keeps the first and adds the allow-list to the message.
+func TestSetComponentAllowListReadiness_KeepsEarlierReason(t *testing.T) {
+	p := &infravirtrigaudiov1beta1.Provider{Spec: infravirtrigaudiov1beta1.ProviderSpec{Type: infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor}}
+	k8s.SetReadyCondition(&p.Status.Conditions, metav1.ConditionFalse, k8s.ReasonOperationSignerUnavailable, "no signer", 0)
+	setComponentAllowListReadiness(p, &HostInventoryPolicy{AllowListErr: fmt.Errorf("%w: %w", errAllowListNotLoaded, hostinventory.ErrDigestMismatch)})
+	c := meta.FindStatusCondition(p.Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, c)
+	assert.Equal(t, k8s.ReasonOperationSignerUnavailable, c.Reason)
+	assert.Contains(t, c.Message, "no signer")
+	assert.Contains(t, c.Message, k8s.ReasonAllowListDigestMismatch)
 }

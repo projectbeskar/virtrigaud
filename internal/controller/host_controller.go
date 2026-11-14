@@ -130,9 +130,9 @@ type HostReconciler struct {
 	// Recorder, when set, receives the host inventory Events (development
 	// builds; host_inventory.go).
 	Recorder record.EventRecorder
-	// inventoryEvents limits the host inventory Events. The zero value is
-	// ready to use.
-	inventoryEvents inventoryEventLimiter
+	// inventoryEvents is the audit state of the host inventory conditions
+	// (Events and signed-answer log lines). The zero value is ready to use.
+	inventoryEvents inventoryAudit
 
 	// publishedProvider maps a Host (namespace/name) to the Provider label its
 	// committed-capacity gauges were last published under, so a changed
@@ -171,6 +171,7 @@ func (r *HostReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resul
 		if apierrors.IsNotFound(err) {
 			// Host gone (its in-use finalizer was already released).
 			r.forgetCommitted(req.NamespacedName)
+			r.forgetHostInventory(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		metrics.RecordError(errReasonHostGet, metrics.ComponentManager)
@@ -259,6 +260,7 @@ func (r *HostReconciler) handleHostDeletion(ctx context.Context, host *infravirt
 	}
 	// Nothing is bound or pending on it any more: drop its series.
 	r.forgetCommitted(client.ObjectKeyFromObject(host))
+	r.forgetHostInventory(client.ObjectKeyFromObject(host))
 	metrics.DeleteHostCommitted(hostProviderKey(host).String(), host.Name)
 	return ctrl.Result{}, nil
 }
@@ -379,7 +381,11 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 // shorter backoff. None of them is a hard reconcile error — the Host must never
 // crash-loop on a bad or unreachable provider.
 func (r *HostReconciler) handleGetHostInfoError(ctx context.Context, host, base *infravirtrigaudiov1beta1.Host, provider *infravirtrigaudiov1beta1.Provider, err error) (ctrl.Result, error) {
-	withdrawHostInventory(host, hostInventoryInScope(provider), "the heartbeat's GetHostInfo failed, so there is no signed host answer")
+	if hostInventoryInScope(provider) {
+		withdrawHostInventory(host, true, "the heartbeat's GetHostInfo failed, so there is no signed host answer")
+	} else {
+		clearHostInventory(host)
+	}
 	switch {
 	case contracts.IsNotSupported(err):
 		// The Provider claims clustered topology but does not implement the
