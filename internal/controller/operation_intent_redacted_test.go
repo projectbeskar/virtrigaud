@@ -421,7 +421,7 @@ func TestIntentRedaction_BlockedIsAnnounced(t *testing.T) {
 // checks it once.
 func TestIntentRedaction_SettledVMCostsNoReads(t *testing.T) {
 	_, r, req, c := redactedNotPerformedCreate(t)
-	now := c.LastTransitionTime.Time.Add(time.Second) // within the backoff: c stays the latest Create
+	now := c.LastTransitionTime.Add(time.Second) // within the backoff: c stays the latest Create
 	r.clock = func() time.Time { return now }
 	base := r.Client
 	sc := &swapClient{Client: base, only: c.OpID}
