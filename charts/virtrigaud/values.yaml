@@ -341,7 +341,9 @@ experimental:
   # (provider-cloudhypervisor started with --hosts-secret, development
   # builds only). For each listed Provider, its own ServiceAccount gets get
   # and watch on its host inventory Secret <name>-hosts only (a Role with
-  # resourceNames). Off by default; see
+  # resourceNames), and the manager is started with
+  # --dev-agent-provider-inventory-watch so that it renders those Providers
+  # to read the Secret through the API. Off by default; see
   # docs/clustered-agent-provider-development.md.
   agentProviderInventoryWatch:
     enabled: false
