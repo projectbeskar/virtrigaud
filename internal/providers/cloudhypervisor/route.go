@@ -39,6 +39,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -163,6 +164,8 @@ type callStateKey struct{}
 type callState struct {
 	begun, sent, answered atomic.Bool
 	timedOut              bool
+	// gen is the generation of the connection the call used.
+	gen uint64
 }
 
 // notSent reports whether the call provably never sent its request.
@@ -174,12 +177,9 @@ func withCallState(ctx context.Context) (context.Context, *callState) {
 	return context.WithValue(ctx, callStateKey{}, cs), cs
 }
 
-// connTagKey is the context key of a transport's tag information.
-type connTagKey struct{}
-
 // connStats is the stats handler of one client connection of an entry: it
-// records each call's state, and tells the entry when a transport began or
-// ended, by its local address.
+// records each call's state, and tells the entry when the connection's
+// transport began or ended.
 type connStats struct {
 	e   *hostEntry
 	gen uint64
@@ -205,21 +205,18 @@ func (connStats) HandleRPC(ctx context.Context, s stats.RPCStats) {
 }
 
 // TagConn implements stats.Handler.
-func (connStats) TagConn(ctx context.Context, info *stats.ConnTagInfo) context.Context {
-	return context.WithValue(ctx, connTagKey{}, info)
-}
+func (connStats) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context { return ctx }
 
 // HandleConn implements stats.Handler.
-func (c connStats) HandleConn(ctx context.Context, s stats.ConnStats) {
-	info, ok := ctx.Value(connTagKey{}).(*stats.ConnTagInfo)
-	if !ok || info.LocalAddr == nil || c.e == nil {
+func (c connStats) HandleConn(_ context.Context, s stats.ConnStats) {
+	if c.e == nil {
 		return
 	}
 	switch s.(type) {
 	case *stats.ConnBegin:
-		c.e.transportBegan(c.gen, info.LocalAddr.String())
+		c.e.transportBegan(c.gen)
 	case *stats.ConnEnd:
-		c.e.transportEnded(c.gen, info.LocalAddr.String())
+		c.e.transportEnded(c.gen)
 	}
 }
 
@@ -392,7 +389,6 @@ func (p *Provider) forward(ctx context.Context, host, method string, req, resp p
 		return hostUnavailable(host, false, CauseNotFronted)
 	}
 	var (
-		pr  peer.Peer
 		cs  *callState
 		err error
 	)
@@ -400,19 +396,13 @@ func (p *Provider) forward(ctx context.Context, host, method string, req, resp p
 		if err = p.pool.helloed(ctx, e); err != nil {
 			return err
 		}
-		cs, err = p.pool.invokeChecked(ctx, e, method, req, resp, &pr, true)
+		cs, err = p.pool.invokeChecked(ctx, e, method, req, resp, nil, true)
 		if !errors.Is(err, errHelloStale) {
 			break
 		}
 	}
 	if errors.Is(err, errHelloStale) {
 		return hostUnavailable(host, true, CauseAgentUnverified)
-	}
-	if err == nil && pr.LocalAddr != nil {
-		// The call ran on another transport than the one its Hello was
-		// made on (the connection was replaced in between): the next call
-		// makes a new Hello.
-		e.forgetHello(pr.LocalAddr.String())
 	}
 	return mapCallError(ctx, host, mutating, cs, err)
 }
@@ -486,35 +476,54 @@ func (p *pool) invoke(ctx context.Context, e *hostEntry, method string, req, res
 // connection moved to a new transport between the Hello and the call.
 const helloAttempts = 3
 
-// errHelloStale is returned by invokeChecked when the connection is READY on
-// another transport than the one the host's Hello was made on: nothing was
-// sent, and a new Hello is needed. It never counts toward the breaker.
+// errHelloStale is returned by invokeChecked when the READY connection it
+// holds is not the one whose transport the host's Hello was made on (it was
+// replaced, or its transport ended): nothing was sent, and a new Hello is
+// needed. Found before the breaker is asked, it counts neither way; found
+// inside a half-open breaker, it counts as a failure.
 var errHelloStale = errors.New("the connection moved to a transport without a Hello")
 
 // invokeChecked is invoke; with requireHello, the call is sent only when the
-// READY connection's transport is the one the host's Hello was made on (a
-// transport replaced in the instant between this check and the send is
-// caught after the call, by forward).
+// connection it holds is still the entry's connection and its transport is
+// the one the host's Hello was made on. A connection carries at most one
+// transport, so a call that passes the check reaches that transport or
+// fails.
 func (p *pool) invokeChecked(ctx context.Context, e *hostEntry, method string, req, resp any, pr *peer.Peer, requireHello bool) (*callState, error) {
 	cctx, cancel := p.callContext(ctx)
 	defer cancel()
 	cctx, cs := withCallState(cctx)
-	cc, err := e.connection()
+	cc, gen, err := e.connection()
 	if err != nil {
 		return cs, err
 	}
+	cs.gen = gen
 	opts := []grpc.CallOption{}
 	if pr != nil {
 		opts = append(opts, grpc.Peer(pr))
 	}
+	// stale reports whether the call, on a READY connection, would go to a
+	// transport that is not the one the host's Hello was made on (the
+	// connection held here was replaced, or its transport ended).
+	stale := func() bool {
+		return requireHello && cc.GetState() == connectivity.Ready && !e.helloedFor(gen)
+	}
+	// Outside the breaker first, so that a stale Hello is neither a failure
+	// nor a success of the host. An open breaker is left to refuse the call
+	// without connecting; a half-open one checks inside, where a stale Hello
+	// counts as a failure (it never closes the breaker without a call).
+	connected := true
+	if e.breaker.GetState() != resilience.StateOpen {
+		connected = awaitConnection(cctx, cc, p.opts.ConnectTimeout)
+		if connected && stale() {
+			return cs, errHelloStale
+		}
+	}
 	err = guard(cctx, e.breaker, func(cctx context.Context) (bool, error) {
-		if !awaitConnection(cctx, cc, p.opts.ConnectTimeout) {
+		if !connected || !awaitConnection(cctx, cc, p.opts.ConnectTimeout) {
 			return false, errNotConnected
 		}
-		if requireHello && cc.GetState() == connectivity.Ready {
-			if made, _ := e.currentHello(); !made {
-				return false, errHelloStale
-			}
+		if stale() {
+			return false, errHelloStale
 		}
 		err := cc.Invoke(cctx, method, req, resp, opts...)
 		return cs.answered.Load(), err

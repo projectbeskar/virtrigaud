@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -335,4 +336,107 @@ func TestIncompleteGrantRefusedWithoutDialing(t *testing.T) {
 		assert.True(t, ok, "%v", err)
 	}
 	assert.Zero(t, a.lis.accepted.Load())
+}
+
+// TestHelloBoundToConnectionGeneration: once an old connection is replaced
+// (by age), the Hello made on the new one never vouches for a call that
+// still holds the old one, and the old connection's Hello is gone.
+func TestHelloBoundToConnectionGeneration(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	var offset atomic.Int64
+	now := func() time.Time { return time.Now().Add(time.Duration(offset.Load())) }
+	prov := newProvider(t, p, Options{MaxConnectionAge: time.Hour, Now: now}, a)
+	client := providerv1.NewProviderClient(served(t, prov))
+	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	require.NoError(t, err)
+	e, _ := prov.pool.get("host-a")
+	_, oldGen, err := e.connection()
+	require.NoError(t, err)
+	require.True(t, e.helloedFor(oldGen))
+
+	offset.Store(int64(2 * time.Hour))
+	_, err = client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	require.NoError(t, err)
+	_, newGen, err := e.connection()
+	require.NoError(t, err)
+	require.NotEqual(t, oldGen, newGen, "the old connection was replaced")
+	assert.True(t, e.helloedFor(newGen), "the new connection has its own Hello")
+	assert.False(t, e.helloedFor(oldGen), "a call holding the old connection is not vouched for by the new Hello")
+	assert.EqualValues(t, 2, a.hellos.Load())
+}
+
+// fixedAddrConn reports the same local address for every connection.
+type fixedAddrConn struct{ net.Conn }
+
+func (fixedAddrConn) LocalAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1} }
+
+// TestHelloNotKeyedByAddress: with a dialer whose connections all report one
+// local address, an agent that restarts as an incompatible release is still
+// never served under the earlier Hello.
+func TestHelloNotKeyedByAddress(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	dial := func(ctx context.Context, addr string) (net.Conn, error) {
+		var d net.Dialer
+		c, err := d.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		return fixedAddrConn{c}, nil
+	}
+	client := providerv1.NewProviderClient(served(t, newProvider(t, p, Options{DialContext: dial}, a)))
+	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	require.NoError(t, err)
+	before := len(a.received())
+	a.apiVersion.Store(answer.AgentAPIVersion + 1)
+	a.lis.dropAll()
+	refused := false
+	for i := 0; i < 50 && !refused; i++ {
+		_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		require.Error(t, err, "no call is served by the restarted agent")
+		info, ok := errorInfo(err, contracts.HostUnavailableReason)
+		refused = ok && info.GetMetadata()[MetadataCause] == CauseAgentIncompatible
+	}
+	assert.True(t, refused)
+	assert.Len(t, a.received(), before)
+	assert.GreaterOrEqual(t, a.hellos.Load(), int32(2), "the new transport got its own Hello")
+}
+
+// TestRefusedEntriesLoggedOnce: a refused entry is logged once, not at every
+// reload, and a malformed id is never logged verbatim.
+func TestRefusedEntriesLoggedOnce(t *testing.T) {
+	var buf syncBuffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	p := newPKI(t)
+	bad := hostsecret.Host{ID: "bad/../id", Endpoint: "grpc://x:1"}
+	inv := hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion, Hosts: []hostsecret.Host{bad}}
+	prov, err := New(Options{ClientCertificate: p.client, Logger: log}, inv)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = prov.Close() })
+	for i := 0; i < 3; i++ {
+		require.NoError(t, prov.Reconcile(inv))
+	}
+	out := buf.String()
+	assert.Equal(t, 1, strings.Count(out, "entry refused"), out)
+	assert.NotContains(t, out, "bad/../id")
+	assert.Contains(t, out, "invalid-id-")
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent writes.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

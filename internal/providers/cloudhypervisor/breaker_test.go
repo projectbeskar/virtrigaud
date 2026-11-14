@@ -19,13 +19,17 @@ limitations under the License.
 package cloudhypervisor
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/resilience"
 )
 
 // TestCountsTowardHostBreaker: only a host the Provider cannot reach counts;
@@ -46,4 +50,19 @@ func TestCountsTowardHostBreaker(t *testing.T) {
 	for _, code := range []codes.Code{codes.Internal, codes.Unknown, codes.NotFound, codes.InvalidArgument, codes.Unimplemented} {
 		assert.False(t, countsTowardHostBreaker(status.Error(code, "x"), true, false), "answered %s", code)
 	}
+}
+
+// TestStaleHelloNeverClosesTheBreaker: inside a half-open breaker a call
+// found to hold a stale Hello sent nothing, so it cannot close the breaker.
+func TestStaleHelloNeverClosesTheBreaker(t *testing.T) {
+	now := time.Now()
+	b := newHostBreaker("host-a", &resilience.Config{FailureThreshold: 1, ResetTimeout: time.Second, HalfOpenMaxCalls: 1,
+		Now: func() time.Time { return now }})
+	unreachable := func(context.Context) (bool, error) { return false, status.Error(codes.Unavailable, "down") }
+	_ = guard(context.Background(), b, unreachable, func() bool { return false })
+	require.Equal(t, resilience.StateOpen, b.GetState())
+	now = now.Add(2 * time.Second)
+	err := guard(context.Background(), b, func(context.Context) (bool, error) { return false, errHelloStale }, func() bool { return false })
+	require.ErrorIs(t, err, errHelloStale)
+	assert.NotEqual(t, resilience.StateClosed, b.GetState())
 }

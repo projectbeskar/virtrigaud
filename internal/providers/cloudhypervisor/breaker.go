@@ -95,7 +95,9 @@ func guard(ctx context.Context, b *resilience.CircuitBreaker, call func(context.
 		var answered bool
 		answered, callErr = call(ctx)
 		if errors.Is(callErr, errHelloStale) {
-			return nil
+			// Inside the breaker only when it is half-open: never let a call
+			// that sent nothing close it.
+			return callErr
 		}
 		if countsTowardHostBreaker(callErr, answered, callerDone()) {
 			return callErr

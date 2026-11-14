@@ -20,6 +20,8 @@ package cloudhypervisor
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
@@ -46,7 +48,21 @@ type pool struct {
 	mu         sync.Mutex
 	hosts      map[string]*hostEntry
 	unroutable []string
-	closed     bool
+	// refused are the entries the last reconcile refused, by logID, with
+	// why.
+	refused map[string]string
+	closed  bool
+}
+
+// logID is how a host id is logged: verbatim when it is a well-formed host
+// id, otherwise only as a short digest, so that a malformed id is never
+// echoed.
+func logID(id string) string {
+	if hostsecret.ValidHostID(id) {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "invalid-id-" + hex.EncodeToString(sum[:6])
 }
 
 // hostEntry is one fronted host: its inventory entry, its lazy connection,
@@ -73,16 +89,20 @@ type hostEntry struct {
 	gen     uint64
 	genUsed bool
 	closed  bool
-	// transport is the transport the current connection runs on, from the
-	// connection's stats events: its local address names it uniquely.
+	// transport is the transport of the current connection, from the
+	// connection's stats events. A connection carries at most one transport,
+	// so the connection's generation names the transport uniquely.
 	transport transportInfo
 	// leafNotAfter is the expiry of the agent certificate the last handshake
 	// accepted.
 	leafNotAfter time.Time
-	// hello is the outcome of the Hello made on the transport helloLocal:
-	// nil for a compatible agent, the refusal for an incompatible one.
-	hello      error
-	helloLocal string
+	// hello is the outcome of the Hello made on the transport of connection
+	// helloGen (helloDone): nil for a compatible agent, the refusal for an
+	// incompatible one. It is cleared when that transport ends and when the
+	// connection is replaced.
+	hello     error
+	helloGen  uint64
+	helloDone bool
 	// apiVersion is the agent's API version from the last verified Hello.
 	apiVersion uint32
 }
@@ -90,7 +110,7 @@ type hostEntry struct {
 // transportInfo is one established transport of an entry's connection.
 type transportInfo struct {
 	gen      uint64
-	local    string
+	live     bool
 	began    time.Time
 	notAfter time.Time
 }
@@ -175,24 +195,27 @@ func (e *hostEntry) accepted(notAfter time.Time) {
 	e.mu.Unlock()
 }
 
-// transportBegan records that connection gen established a transport whose
-// local address is local.
-func (e *hostEntry) transportBegan(gen uint64, local string) {
+// transportBegan records that connection gen established its transport.
+func (e *hostEntry) transportBegan(gen uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if gen != e.gen {
 		return
 	}
 	e.genUsed = true
-	e.transport = transportInfo{gen: gen, local: local, began: e.opts.Now(), notAfter: e.leafNotAfter}
+	e.transport = transportInfo{gen: gen, live: true, began: e.opts.Now(), notAfter: e.leafNotAfter}
 }
 
-// transportEnded records that the transport local of connection gen ended.
-func (e *hostEntry) transportEnded(gen uint64, local string) {
+// transportEnded records that the transport of connection gen ended, and
+// drops the Hello made on it.
+func (e *hostEntry) transportEnded(gen uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.transport.gen == gen && e.transport.local == local {
-		e.transport = transportInfo{}
+	if e.transport.gen == gen {
+		e.transport.live = false
+	}
+	if e.helloGen == gen {
+		e.hello, e.helloGen, e.helloDone = nil, 0, false
 	}
 }
 
@@ -201,30 +224,32 @@ func (e *hostEntry) transportEnded(gen uint64, local string) {
 // whose agent certificate has expired, is replaced first, so that the agent
 // is verified again by a new handshake. A closed entry returns
 // errEntryClosed.
-func (e *hostEntry) connection() (*grpc.ClientConn, error) {
+func (e *hostEntry) connection() (*grpc.ClientConn, uint64, error) {
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return nil, errEntryClosed
+		return nil, 0, errEntryClosed
 	}
 	t, now := e.transport, e.opts.Now()
-	ended := e.genUsed && t.local == ""
+	ended := e.genUsed && !t.live
 	stale := ended || !t.began.IsZero() && (now.Sub(t.began) >= e.opts.MaxConnectionAge || (!t.notAfter.IsZero() && !now.Before(t.notAfter)))
 	if !stale {
-		cc := e.conn
+		cc, gen := e.conn, e.gen
 		e.mu.Unlock()
-		return cc, nil
+		return cc, gen, nil
 	}
 	cc, err := e.dial(e.gen + 1)
 	if err != nil {
 		e.mu.Unlock()
-		return nil, err
+		return nil, 0, err
 	}
 	old := e.conn
 	e.conn, e.gen, e.genUsed, e.transport = cc, e.gen+1, false, transportInfo{}
+	e.hello, e.helloGen, e.helloDone = nil, 0, false
+	gen := e.gen
 	e.mu.Unlock()
 	_ = old.Close()
-	return cc, nil
+	return cc, gen, nil
 }
 
 // awaitConnection gives cc up to limit to become READY. It reports false
@@ -274,25 +299,40 @@ func (e *hostEntry) shutdown() {
 	_ = cc.Close()
 }
 
-// currentHello returns the outcome of the Hello made on the transport the
-// connection runs on now, if one was made on it.
+// currentHello returns the outcome of the Hello made on the transport of
+// the current connection, if one was made on it.
 func (e *hostEntry) currentHello() (made bool, outcome error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.helloLocal == "" || e.helloLocal != e.transport.local {
+	if !e.helloedLocked(e.gen) {
 		return false, nil
 	}
 	return true, e.hello
 }
 
-// forgetHello drops the Hello made on transport local, when a call found
-// the connection on another transport than the one its Hello was made on.
-func (e *hostEntry) forgetHello(local string) {
+// helloedFor reports whether connection gen is still the entry's connection,
+// its transport is live, and a Hello was made on that transport.
+func (e *hostEntry) helloedFor(gen uint64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.helloLocal != local {
-		e.helloLocal = ""
+	return e.helloedLocked(gen)
+}
+
+// helloedLocked is helloedFor; e.mu is held.
+func (e *hostEntry) helloedLocked(gen uint64) bool {
+	return gen == e.gen && e.helloDone && e.helloGen == gen && e.transport.gen == gen && e.transport.live
+}
+
+// recordHello records the outcome of a Hello made on the transport of
+// connection gen, unless that connection was replaced or its transport ended
+// meanwhile.
+func (e *hostEntry) recordHello(gen uint64, outcome error, version uint32) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if gen != e.gen || e.transport.gen != gen || !e.transport.live {
+		return
 	}
+	e.hello, e.helloGen, e.helloDone, e.apiVersion = outcome, gen, true, version
 }
 
 // ready reports whether the host's agent passed its Hello on the current
@@ -332,18 +372,19 @@ func (p *pool) reconcile(inv hostsecret.Inventory) error {
 	}
 	want := map[string]hostsecret.Host{}
 	unroutable := map[string]bool{}
+	refused := map[string]string{}
 	for _, id := range inv.UnroutableHostIDs {
 		unroutable[id] = true
 	}
 	for _, h := range inv.Hosts {
 		if count[h.ID] > 1 {
 			unroutable[h.ID] = true
-			p.log.Warn("host inventory: duplicate host id; not routed", "host", h.ID)
+			refused[logID(h.ID)] = "duplicate host id"
 			continue
 		}
 		if err := hostsecret.ValidateAgentHost(h); err != nil {
 			unroutable[h.ID] = true
-			p.log.Warn("host inventory: entry refused; not routed", "host", h.ID, "error", err.Error())
+			refused[logID(h.ID)] = err.Error()
 			continue
 		}
 		want[h.ID] = h
@@ -374,7 +415,7 @@ func (p *pool) reconcile(inv hostsecret.Inventory) error {
 		e, err := p.newEntry(h)
 		if err != nil {
 			unroutable[id] = true
-			p.log.Warn("host inventory: entry refused; not routed", "host", id, "error", err.Error())
+			refused[logID(id)] = err.Error()
 			continue
 		}
 		p.hosts[id] = e
@@ -384,7 +425,22 @@ func (p *pool) reconcile(inv hostsecret.Inventory) error {
 		p.unroutable = append(p.unroutable, id)
 	}
 	sort.Strings(p.unroutable)
+	previous := p.refused
+	p.refused = refused
 	p.mu.Unlock()
+
+	// A refused entry is logged when it is refused, or refused for another
+	// reason, not again at every reload.
+	for id, why := range refused {
+		if previous[id] != why {
+			p.log.Warn("host inventory: entry refused; not routed", "host", id, "error", why)
+		}
+	}
+	for id := range previous {
+		if _, still := refused[id]; !still {
+			p.log.Info("host inventory: an entry refused before is no longer refused", "host", id)
+		}
+	}
 
 	for _, e := range closing {
 		p.log.Info("host inventory: closing the connection of a removed or changed host", "host", e.id)
