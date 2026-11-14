@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-14 18:00] - Manager host inventory and readiness from the signed host answer (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/hostidentity/inventory.go`, `internal/hostidentity/answer.go`: `VerifyInventory`, the manager's own check of the host inventory in a signed host answer (the echo of the version asked for, the agent's version minimum, ordering, bounds, state consistency and the closed value sets of inventory version 1, pinned by test), run by `VerifyAnswer` after every other check passed. An inventory that does not echo the request (a relay changed it) and one that breaks a field rule (the agent's fault) are told apart.
+- `internal/providers/contracts/host_answer.go`, `internal/transport/grpc/client_answer.go`: `HostAnswerQuery`; a signed `GetHostInfo` can ask for the host inventory.
+- `api/infra.virtrigaud.io/v1beta1/host_types.go`: `Host.status.agentInventory` (an output-only mirror of the last verified inventory, bounded like the signed inventory, with each component's allow-list result) and the `AgentInventoryVerified` and `ComponentsReady` condition types and reasons. Additive; used only by development builds.
+- `internal/hostinventory/`: the component allow-list: a JSON file read once at start, an entry per component and version with alternatives (artifact digest or none, and the complete file set with per-file digests), exact matching, a pinned SHA-256 (`--component-allow-list-sha256`) and an optional detached signature by one of a configured set of ECDSA P-256 or Ed25519 keys, verified offline.
+- `internal/controller/host_inventory.go`, `internal/controller/host_inventory_policy.go`, `internal/controller/host_controller.go`, `internal/controller/host_controller_answer.go`, `internal/controller/host_answers.go`: every heartbeat of a host of a Provider whose type runs a per-host agent asks for the inventory; the manager sets `AgentInventoryVerified` and `ComponentsReady` from that heartbeat's verified answer alone and folds them into the host's health in the same status write (`Ready` only when the Provider reports the host ready and both are True, otherwise `NotReady` with `Ready=False/AgentInventoryNotReady`). A heartbeat without a verified answer, on any path including every `GetHostInfo` error, sets both False at once. An answer without the inventory is still used for everything else. An invalid inventory starts a backoff (1, 2, 4, then 5 minutes) during which it is not asked for. Without an allow-list hosts are not ready unless `--insecure-skip-component-allow-list` is set. Condition changes are logged with the whole signed answer and evented (deduplicated, one Event per Host per minute).
+- `internal/controller/provider_operation_identity.go`, `internal/controller/provider_controller.go`, `internal/k8s/conditions.go`: a Provider whose type runs a per-host agent reports `Ready=False/AllowListDigestMismatch` or `AllowListUnverified` while a configured allow-list is not in force.
+- `internal/scheduler/`, `internal/controller/virtualmachine_controller.go`: for the hosts of such a Provider the scheduler rejects a host whose last successful sync is older than the maximum inventory age (`host heartbeat stale`). Other Providers' hosts are unaffected.
+- `cmd/manager/main.go`: flags `--component-allow-list-file`, `--component-allow-list-sha256`, `--component-allow-list-signers-file`, `--component-allow-list-signature-file`, `--insecure-skip-component-allow-list`, `--host-inventory-max-age`, `--host-inventory-required-features`, `--host-inventory-accepted-origins`, `--host-inventory-accepted-tiers`; every override is logged at start. A release build refuses every one of them at start.
+- `test/conformance/clustered/fake/`: `WithHostInventory`, an inventory mode in which the identity fake's hosts report a fixed, complete inventory when asked.
+- Tests: the inventory field rules and value sets; the allow-list matches (artifact, file digest, extra and missing file, not listed, not checked), digest pin, signatures by keys in and outside the set, with the network disabled; every condition reason; the effective age; the echo without backoff; the backoff schedule and its end on a new agent version; an answer without inventory; no freeze window; every `GetHostInfo` error branch; the status mirror never read; Event deduplication and rate limit; a redaction canary; the status schema bounds against a real apiserver; the Host heartbeat over the real gRPC client against the fake; the scheduler skipping a not-ready or stale host of such a Provider while libvirt hosts are placed as before; a host flipping not ready never re-placing a VM with an open Create attempt; release builds refusing the flags.
+- `docs/host-inventory-manager.md`; `docs/operation-grants-manager.md`, `docs/per-host-agent-development.md`, `docs/clustered-provider-inventory.md`, `docs/operation-grants-wire-shape.md`, `docs/README.md`: cross-references.
+
+### Why
+The agent already reports a signed host inventory; the manager now verifies it, shows it on the Host, compares component digests with an allow-list and keeps the scheduler away from hosts that are not ready. It is a detective control: a host whose agent is compromised can still report anything.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (additive Host CRD status fields)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-14 12:00] - Manager acts on clustered agent outcomes only with verified signed answers (development builds only)
 **Author:** @wrkode (William Rizzo)
 
