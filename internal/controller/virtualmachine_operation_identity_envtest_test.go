@@ -71,8 +71,10 @@ type identityEnv struct {
 	provider *infravirtrigaudiov1beta1.Provider
 	target   *fake.Target
 	client   contracts.Provider
-	enrol    operation.StaticEnrolments
-	auth     operation.IntentAuthenticator
+	// trust is what the manager trusts about the fake's hosts, with their
+	// persisted store state (it outlives a manager, as the pins Secret does).
+	trust *staticTrust
+	auth  operation.IntentAuthenticator
 	// deliveries counts the signed calls per full method, and opIDs records
 	// the op_id of every signed Create delivered.
 	deliveries sync.Map
@@ -219,12 +221,17 @@ func newIdentityEnv(ctx context.Context) *identityEnv {
 	signer, err := operation.NewDevSigner(key, installID, nil)
 	Expect(err).NotTo(HaveOccurred())
 	target, err := fake.NewIdentity(fake.IdentityConfig{Anchor: signer.Anchor(), Signer: signer, Required: true,
-		ProviderUID: string(prov.UID)})
+		ProviderUID: string(prov.UID), HostNamespace: ns.Name})
 	Expect(err).NotTo(HaveOccurred())
 	e.target = target
 	e.auth = operation.IntentAuthenticatorOf(signer)
 	cfg := target.OperationIdentity()
-	e.enrol = operation.StaticEnrolments{Epoch: cfg.Epoch, Hosts: map[string]map[string][]byte{ns.Name + "/" + prov.Name: cfg.Enrolments}}
+	e.trust = &staticTrust{trusts: map[string]HostTrust{}}
+	for host, id := range cfg.Enrolments {
+		e.trust.trusts[host] = HostTrust{Enrolment: operation.Enrolment{EnrolmentID: id, Epoch: cfg.Epoch},
+			InstallID: signer.InstallID(), Pins: []string{target.HostKeyPin(host)}, Anchors: target.HostAnswerRoots(),
+			HostURI: target.HostURI(host), HostName: host}
+	}
 
 	serverTLS, clientTLS := testTLS()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -310,7 +317,7 @@ func (e *identityEnv) startManager(ctx context.Context, hook func(context.Contex
 	Expect((&VirtualMachineReconciler{
 		Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(),
 		RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(1000),
-		OperationEnrolments: e.enrol, OperationIntentAuth: e.auth, operationCrashHook: hook,
+		HostAnswers: e.hostAnswers(ctx, e.trust), OperationIntentAuth: e.auth, operationCrashHook: hook,
 	}).SetupWithManager(mgr)).To(Succeed())
 	done := make(chan struct{})
 	go func() {
@@ -322,6 +329,21 @@ func (e *identityEnv) startManager(ctx context.Context, hook func(context.Contex
 	stop = func() { once.Do(func() { cancel(); <-done }) }
 	DeferCleanup(stop)
 	return stop
+}
+
+// hostAnswers is a manager's fresh state of signed host answers over trust,
+// with a verified host answer of every host it trusts (what the Host
+// controller's heartbeat records).
+func (e *identityEnv) hostAnswers(ctx context.Context, trust *staticTrust) *HostAnswers {
+	h := &HostAnswers{Trust: trust}
+	reader, ok := e.client.(contracts.HostAnswerReader)
+	Expect(ok).To(BeTrue())
+	for host := range trust.trusts {
+		_, _, verdict, err := h.RefreshHostAnswer(ctx, e.provider, reader, host)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(verdict).To(Equal(answerVerified), "the fake host's answer verifies")
+	}
+	return h
 }
 
 func (e *identityEnv) createVM(ctx context.Context, name string) client.ObjectKey {
@@ -589,10 +611,10 @@ var _ = Describe("Operation identity: attempt markers against the instrumented f
 			Expect(mgr.Start(mgrCtx)).To(Succeed())
 		}()
 		Expect(mgr.GetCache().WaitForCacheSync(mgrCtx)).To(BeTrue())
-		reconciler := func(enrol operation.EnrolmentSource) *VirtualMachineReconciler {
+		reconciler := func(trust *staticTrust) *VirtualMachineReconciler {
 			r := &VirtualMachineReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(),
-				RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(1000), OperationEnrolments: enrol,
-				OperationIntentAuth: e.auth}
+				RemoteResolver: identityResolver{p: e.client}, Recorder: record.NewFakeRecorder(1000),
+				HostAnswers: e.hostAnswers(ctx, trust), OperationIntentAuth: e.auth}
 			r.placementIndex = indexer
 			return r
 		}
@@ -600,7 +622,7 @@ var _ = Describe("Operation identity: attempt markers against the instrumented f
 		req := ctrl.Request{NamespacedName: key}
 
 		By("placing the VM with no enrolment yet: its pending host is recorded and nothing is sent")
-		first := reconciler(nil)
+		first := reconciler(&staticTrust{})
 		Eventually(func(g Gomega) {
 			_, err := first.Reconcile(ctx, req)
 			g.Expect(err).NotTo(HaveOccurred())
@@ -621,7 +643,7 @@ var _ = Describe("Operation identity: attempt markers against the instrumented f
 			go func() {
 				defer GinkgoRecover()
 				defer wg.Done()
-				r := reconciler(e.enrol)
+				r := reconciler(e.trust)
 				<-start
 				_, _ = r.Reconcile(ctx, req)
 			}()

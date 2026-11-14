@@ -384,11 +384,19 @@ type VirtualMachineReconciler struct {
 	// blockedRetryMax. Any answer of the provider resets it.
 	deleteTaskStatusRetry unschedulableBackoff
 
-	// OperationEnrolments returns the enrolment of a host of a Provider that
-	// requires operation identity (development builds only: the
-	// --dev-operation-enrolment-file stand-in). nil: no host has one, and
-	// nothing is sent to such a Provider. Every other Provider ignores it.
-	OperationEnrolments operation.EnrolmentSource
+	// redactions holds, per VM (namespace/name), the redaction state of its
+	// latest not-performed Create: one entry per VM, overwritten by a new
+	// op_id, deleted with the VM's finalizer or once the VM is gone (see
+	// redactionState).
+	redactions sync.Map
+
+	// HostAnswers is the manager's state of signed host answers (development
+	// builds only, with per-host agent enrolment): the trust of each host of
+	// a Provider that requires operation identity (its enrolment, which
+	// grants name, its pins and CA), its store positions and its last
+	// verified host answer. nil: nothing is sent to such a Provider. Every
+	// other Provider ignores it.
+	HostAnswers *HostAnswers
 	// OperationIntentAuth authenticates the intent Secrets of operation
 	// identity (operation.IntentAuthenticatorOf the manager's signer). nil:
 	// no intent is stored or loaded, and nothing is sent to a Provider that
@@ -517,6 +525,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if err := r.Get(ctx, req.NamespacedName, vm); err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("VirtualMachine not found, assuming deleted")
+			r.redactions.Delete(req.String())
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to fetch VirtualMachine")
@@ -1615,6 +1624,7 @@ func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infr
 	r.forgetUnsavedCreate(vm.UID)
 	r.forgetDeleteTask(vm)
 	r.diskLimitWarned.Delete(string(vm.UID))
+	r.redactions.Delete(client.ObjectKeyFromObject(vm).String())
 
 	logger.Info("VirtualMachine deleted successfully")
 	return ctrl.Result{}, nil

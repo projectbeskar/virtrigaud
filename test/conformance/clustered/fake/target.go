@@ -338,6 +338,24 @@ func (t *Target) HostAnswerRoots() *x509.CertPool {
 	return t.ident.hostKeys.roots
 }
 
+// HostKeyPin returns the pin of host's answer-signing key ("" without
+// operation identity).
+func (t *Target) HostKeyPin(host string) string {
+	if t.ident == nil {
+		return ""
+	}
+	return t.ident.hostKeys.pins[host]
+}
+
+// HostURI returns the URI identity in host's certificate ("" without
+// operation identity).
+func (t *Target) HostURI(host string) string {
+	if t.ident == nil {
+		return ""
+	}
+	return t.ident.hostKeys.uris[host]
+}
+
 // CrashHost implements clustered.HostAnswerTarget: the host's records are on
 // the host and survive (unless the fake commits ForgetsOpsOnHostCrash).
 func (t *Target) CrashHost(host string) error {

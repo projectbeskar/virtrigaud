@@ -80,20 +80,19 @@ type releaseSite struct {
 // releaseSites is the reviewed enumeration: the number of calls of callee
 // in function of file.
 var releaseSites = map[releaseSite]int{
-	// Operation identity: attempts closed on a send answer, a refused first
-	// delivery and a task poll; for a Provider that requires signed host
-	// answers each closure will need a signed operation answer.
-	{"virtualmachine_operation_identity.go", "sendAttempt", "closeAttempt"}:        1, // synchronous success
-	{"virtualmachine_operation_identity.go", "sendFailed", "closeAttempt"}:         1, // refused first delivery
-	{"virtualmachine_operation_identity.go", "pollAttempt", "closeAttempt"}:        1, // typed or untyped task outcome
-	{"virtualmachine_operation_identity_kinds.go", "deleteAbsent", "closeAttempt"}: 1, // will need a signed VM answer (deleted)
+	// Operation identity: attempts are closed only on a verified, READY,
+	// bound signed answer the manager asked for: the operation's state
+	// (closeSigned), or a deleted placement naming the Delete's own op_id
+	// (deleteByVMAnswer). No send answer, refusal or task status closes one.
+	{"virtualmachine_operation_answers.go", "closeSigned", "closeAttempt"}:      1, // signed operation state
+	{"virtualmachine_operation_answers.go", "deleteByVMAnswer", "closeAttempt"}: 1, // signed DELETED of the placement
 
 	// Operation identity: finalizer releases.
-	{"virtualmachine_operation_identity.go", "identityDelete", "removeFinalizer"}:     1, // nothing was created
-	{"virtualmachine_operation_identity.go", "releaseAfterDelete", "removeFinalizer"}: 1, // inherits the Delete's evidence
+	{"virtualmachine_operation_identity.go", "identityDelete", "removeFinalizer"}:     1, // nothing created: no Create, or its not-performed outcome signed again
+	{"virtualmachine_operation_identity.go", "releaseAfterDelete", "removeFinalizer"}: 1, // a signed COMPLETED Delete or DELETED placement
 
 	// Operator overrides (force-delete or orphan-on-delete), audited.
-	{"virtualmachine_operation_identity.go", "identityDelete", "releaseLeavingHypervisorVM"}:       2,
+	{"virtualmachine_operation_identity.go", "identityDelete", "releaseLeavingHypervisorVM"}:       3,
 	{"virtualmachine_operation_identity.go", "confirmDeleteRelease", "releaseLeavingHypervisorVM"}: 1,
 	{"virtualmachine_operation_identity.go", "afterDeleteStep", "releaseLeavingHypervisorVM"}:      1,
 	// handleDeletion: under force-delete, or after retainForUnroutableDelete
@@ -131,7 +130,7 @@ var releaseSites = map[releaseSite]int{
 }
 
 // releaseSiteTotal is the number of calls releaseSites enumerates.
-const releaseSiteTotal = 39
+const releaseSiteTotal = 38
 
 // lastArgName returns the identifier or selector name of the last argument
 // of call, or "" when it is neither.

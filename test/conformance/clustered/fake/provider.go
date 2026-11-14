@@ -877,7 +877,13 @@ func (p *provider) GetHostInfo(_ context.Context, req *providerv1.GetHostInfoReq
 	if !hs.reachable {
 		health = providerv1.HostHealth_HOST_HEALTH_NOT_READY
 	}
-	return &providerv1.HostInfo{Id: req.HostId, Health: health}, nil
+	info := &providerv1.HostInfo{Id: req.HostId, Health: health}
+	if len(req.GetAnswerNonce()) != 0 && p.ident != nil {
+		if err := p.signedHostInfo(req, hs, info); err != nil {
+			return nil, err
+		}
+	}
+	return info, nil
 }
 
 // taskResponse asserts a known operation's recorded answer to a TaskResponse

@@ -20,7 +20,7 @@ kubelet mounts for them.
 | Provider TLS Secret (`spec.runtime.service.tls.secretRef`) | Provider's | chosen by the user | `get` | informer cache, so `list` and `watch` too | `internal/runtime/remote/resolver.go` (`validationKey`, `buildTLSConfig`); read on every Provider resolve |
 | Host credential Secrets of a clustered Provider (`Host.spec.credentialSecretRef`, otherwise the Provider's `spec.credentialSecretRef`) | Provider's (a reference to another namespace is not read) | chosen by the user | `get` | informer cache | `internal/controller/provider_hostinventory.go` (`resolveHostCredentials`) |
 | Host-inventory Secret of a clustered Provider | Provider's | `<provider>-hosts` | `get`, `create`, `update` (no `delete`: owned by the Provider and garbage-collected with it) | informer cache | `internal/controller/provider_hostinventory.go` (`reconcileHostInventorySecret`) |
-| Operation-intent Secrets (only for a Provider whose type requires operation identity; development builds only) | Provider's | `vrtg-op-<op_id>` | `create`, `get`, `list`, `delete` | `get`: API server (`APIReader`). `list` (the sweep): informer cache, by label, in the Provider's namespace | `internal/controller/operation_intent.go` |
+| Operation-intent Secrets (only for a Provider whose type requires operation identity; development builds only) | Provider's | `vrtg-op-<op_id>`, and `vrtg-opr-<op_id>` (redacted) | `create`, `get`, `list`, `delete` | `get`: API server (`APIReader`). `list` (the sweep): informer cache, by label, in the Provider's namespace | `internal/controller/operation_intent.go` |
 | Cloud-init user data and metadata (`spec.userData.cloudInit.secretRef`, `spec.metaData.cloudInit.secretRef`) | VirtualMachine's | chosen by the user | `get` | informer cache when it covers the namespace, otherwise API server (`APIReader`) | `internal/controller/cloudinit.go`, `secret_access.go` (`getWorkloadSecret`) |
 | S3 staging credentials (`spec.storage.s3.credentialsSecretRef`) | VMMigration's | chosen by the user | `get` | informer cache when it covers the namespace, otherwise API server (`APIReader`) | `internal/controller/vmmigration_controller.go` (`loadS3Credentials`) |
 | Per-host agent pins Secrets (the experimental per-host agent enrolment, development builds only, where present) | the enrolment namespace | derived from the Host's namespace and name | `get`, `list`, `watch`, `create`, `update`, `delete` | informer cache | granted by that feature's own Role, never by the rules on this page (the chart only adds the namespace to the informer) |
@@ -41,7 +41,7 @@ the namespaces where it is granted.
 
 - **`resourceNames`** would fit only fixed names. Every Secret above is named by
   a user (TLS, credentials, cloud-init, S3) or derived from an object
-  (`<provider>-hosts`, `vrtg-op-<op_id>`, the pins hash). A `create` rule cannot
+  (`<provider>-hosts`, `vrtg-op-<op_id>`, `vrtg-opr-<op_id>`, the pins hash). A `create` rule cannot
   use `resourceNames` at all.
 - **A label-selected informer** (`cache.Options.ByObject` with a label
   selector) caches less, but still needs `list` and `watch` on all Secrets in

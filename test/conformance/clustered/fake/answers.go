@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"net/url"
 	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -38,6 +39,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -54,15 +56,20 @@ const stepDeadlineReason = "step_deadline"
 // back.
 const rolledBackReason = "rolled_back"
 
-// hostKeys are the fake hosts' answer-signing keys under one issuer.
+// hostKeys are the fake hosts' answer-signing keys under one issuer, each
+// with a certificate of the agent profile: server authentication only, and
+// the host's URI identity with its enrolment record as its only names.
 type hostKeys struct {
 	roots *x509.CertPool
 	keys  map[string]*ecdsa.PrivateKey
 	certs map[string][]byte
+	pins  map[string]string
+	uris  map[string]string
 }
 
-// newHostKeys makes an issuer and a signing certificate for each host.
-func newHostKeys(hosts []string) (*hostKeys, error) {
+// newHostKeys makes an issuer and a signing certificate for each host,
+// enrolled with enrolments[host], providerUID and installID.
+func newHostKeys(hosts []string, trustDomain, namespace, providerUID string, installID []byte, enrolments map[string][]byte) (*hostKeys, error) {
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -79,21 +86,39 @@ func newHostKeys(hosts []string) (*hostKeys, error) {
 	if err != nil {
 		return nil, err
 	}
-	hk := &hostKeys{roots: x509.NewCertPool(), keys: map[string]*ecdsa.PrivateKey{}, certs: map[string][]byte{}}
+	hk := &hostKeys{roots: x509.NewCertPool(), keys: map[string]*ecdsa.PrivateKey{}, certs: map[string][]byte{},
+		pins: map[string]string{}, uris: map[string]string{}}
 	hk.roots.AddCert(ca)
 	for i, h := range hosts {
 		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			return nil, err
 		}
-		tmpl := &x509.Certificate{SerialNumber: big.NewInt(int64(i + 2)), Subject: pkix.Name{CommonName: h},
-			NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature,
-			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}}
+		hostURI, err := hostidentity.HostURI(trustDomain, namespace, h)
+		if err != nil {
+			return nil, err
+		}
+		rec := hostidentity.Record{EnrolmentID: enrolments[h], ProviderUID: providerUID, InstallID: installID, Mode: hostidentity.ModeIdentity}
+		var uris []*url.URL
+		for _, s := range hostidentity.RequestURIs(hostURI, rec) {
+			u, err := url.Parse(s)
+			if err != nil {
+				return nil, err
+			}
+			uris = append(uris, u)
+		}
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(int64(i + 2)), NotBefore: now.Add(-time.Hour),
+			NotAfter: now.Add(24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature,
+			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, URIs: uris}
 		der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &k.PublicKey, caKey)
 		if err != nil {
 			return nil, err
 		}
-		hk.keys[h], hk.certs[h] = k, der
+		pin, err := hostidentity.SPKIPin(&k.PublicKey)
+		if err != nil {
+			return nil, err
+		}
+		hk.keys[h], hk.certs[h], hk.pins[h], hk.uris[h] = k, der, pin, hostURI
 	}
 	return hk, nil
 }
@@ -124,12 +149,17 @@ func newAnswerState() *answerState {
 	return a
 }
 
+// headAt is the host's chain head at seq.
+func (a *answerState) headAt(seq uint64) []byte {
+	head := sha256.Sum256(binary.BigEndian.AppendUint64(append([]byte(nil), a.storeID[:]...), seq))
+	return head[:]
+}
+
 // position is the host's chain position: store id, sequence number, head.
 func (a *answerState) position() []byte {
-	head := sha256.Sum256(binary.BigEndian.AppendUint64(append([]byte(nil), a.storeID[:]...), a.seq))
 	out := append([]byte(nil), a.storeID[:]...)
 	out = binary.BigEndian.AppendUint64(out, a.seq)
-	return append(out, head[:]...)
+	return append(out, a.headAt(a.seq)...)
 }
 
 // attemptKey names a VM and kind in answerState.attempts.
@@ -144,7 +174,7 @@ func vmTombKey(vmUID string, binding []byte) string {
 
 // answerContext is the context of a signed answer of host for nonce. The
 // caller holds w.mu.
-func (p *provider) answerContext(host string, hs *hostState, nonce []byte) *providerv1.AnswerContext {
+func (p *provider) answerContext(host string, hs *hostState, nonce []byte, continuitySeq uint64) *providerv1.AnswerContext {
 	a := hs.answers
 	if a.firstNonce == nil {
 		a.firstNonce = append([]byte(nil), nonce...)
@@ -161,7 +191,27 @@ func (p *provider) answerContext(host string, hs *hostState, nonce []byte) *prov
 	if a.quarantine != "" {
 		ctx.AgentState, ctx.StateReason = providerv1.AgentState_AGENT_STATE_QUARANTINED, a.quarantine
 	}
+	if continuitySeq > 0 && continuitySeq <= a.seq {
+		ctx.ContinuityHead = a.headAt(continuitySeq)
+	}
 	return ctx
+}
+
+// signedHostInfo adds a signed HostAnswer to info for a GetHostInfo that
+// carries answer_nonce. The caller holds w.mu.
+func (p *provider) signedHostInfo(req *providerv1.GetHostInfoRequest, hs *hostState, info *providerv1.HostInfo) error {
+	if len(req.GetAnswerNonce()) != answer.NonceLen {
+		return status.Error(codes.InvalidArgument, "answer_nonce must be 16 bytes")
+	}
+	a := &providerv1.HostAnswer{Context: p.answerContext(req.GetHostId(), hs, req.GetAnswerNonce(), req.GetContinuitySeq()),
+		AgentVersion: "fake", AgentApiVersion: answer.AgentAPIVersion, GrantVersions: []uint32{answer.GrantVersion},
+		Mode: providerv1.AgentMode_AGENT_MODE_IDENTITY}
+	blob, err := p.sign(req.GetHostId(), a)
+	if err != nil {
+		return status.Errorf(codes.Internal, "sign: %v", err)
+	}
+	info.HostAnswer = blob
+	return nil
 }
 
 // sign signs body with host's key.
@@ -230,7 +280,7 @@ func (p *provider) signedTaskStatus(req *providerv1.TaskStatusRequest) (*provide
 	if p.v(AnswersAnotherOp) && hs.answers.lastOp != "" {
 		opHex = hs.answers.lastOp
 	}
-	a := &providerv1.OperationAnswer{Context: p.answerContext(host, hs, req.GetAnswerNonce()),
+	a := &providerv1.OperationAnswer{Context: p.answerContext(host, hs, req.GetAnswerNonce(), req.GetContinuitySeq()),
 		OpId: append([]byte(nil), req.GetOpId()...), OpEnrolmentId: append([]byte(nil), req.GetOpEnrolmentId()...)}
 	rec := p.ops(host, hs)[opHex]
 	switch {
@@ -278,7 +328,7 @@ func (p *provider) signedDescribe(req *providerv1.DescribeRequest) (*providerv1.
 		return nil, err
 	}
 	uid, binding := req.GetOwner().GetUid(), req.GetBindingId()
-	a := &providerv1.VMAnswer{Context: p.answerContext(host, hs, req.GetAnswerNonce()), VmUid: uid,
+	a := &providerv1.VMAnswer{Context: p.answerContext(host, hs, req.GetAnswerNonce(), req.GetContinuitySeq()), VmUid: uid,
 		BindingId: append([]byte(nil), binding...), Presence: providerv1.VMPresence_VM_PRESENCE_NO_RECORD}
 	var owned *vm
 	for _, v := range hs.vms {

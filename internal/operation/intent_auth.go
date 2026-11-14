@@ -44,6 +44,13 @@ const TaskAuthContext = "virtrigaud.io/operation-task/v2\x00"
 // that it differs from TaskAuthContext.
 const taskAuthContextV1 = "virtrigaud.io/operation-task/v1\x00"
 
+// RedactedIntentAuthContext is the domain-separation prefix of the message a
+// redacted intent's tag covers (RedactedIntentMessage): the identity, salt
+// and intent digest of an attempt whose request bytes were dropped. It
+// differs from IntentAuthContext from its 31st byte, so a redacted intent
+// never verifies as a full one, nor the converse.
+const RedactedIntentAuthContext = "virtrigaud.io/operation-intent-redacted/v1\x00"
+
 // IntentTagLen is the length of an intent tag (HMAC-SHA256).
 const IntentTagLen = sha256.Size
 
@@ -155,6 +162,13 @@ func TaskMessage(fields ...[]byte) []byte {
 // its bytes, so no two field lists encode alike.
 func IntentMessage(fields ...[]byte) []byte {
 	return framedMessage(IntentAuthContext, fields)
+}
+
+// RedactedIntentMessage is the canonical message a redacted intent tag
+// covers: RedactedIntentAuthContext followed by each field as in
+// IntentMessage.
+func RedactedIntentMessage(fields ...[]byte) []byte {
+	return framedMessage(RedactedIntentAuthContext, fields)
 }
 
 // framedMessage is prefix followed by each field as a 4-byte big-endian
