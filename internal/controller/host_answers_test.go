@@ -204,7 +204,7 @@ func TestHostReconciler_SignedHeartbeat(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: clusteredNS, Name: "prov-cluster"}, p))
 	hr := &HostReconciler{Client: r.Client, HostAnswers: r.HostAnswers}
 	host := &infravirtrigaudiov1beta1.Host{ObjectMeta: metav1.ObjectMeta{Name: "host-alpha", Namespace: clusteredNS}}
-	info, err := hr.getHostInfo(context.Background(), host, p, stub)
+	info, _, err := hr.getHostInfo(context.Background(), host, p, stub)
 	require.NoError(t, err)
 	assert.Equal(t, "host-alpha", info.ID)
 	c := meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentAnswer)
@@ -212,14 +212,14 @@ func TestHostReconciler_SignedHeartbeat(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, c.Status)
 
 	stub.signed.unsigned = true
-	_, err = hr.getHostInfo(context.Background(), host, p, stub)
+	_, _, err = hr.getHostInfo(context.Background(), host, p, stub)
 	require.NoError(t, err)
 	c = meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentAnswer)
 	assert.Equal(t, metav1.ConditionFalse, c.Status)
 
 	stub.signed.unsigned = false
 	stub.signed.host.rollBack(5)
-	_, err = hr.getHostInfo(context.Background(), host, p, stub)
+	_, _, err = hr.getHostInfo(context.Background(), host, p, stub)
 	require.NoError(t, err)
 	c = meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentStoreRegressed)
 	require.NotNil(t, c)
@@ -229,7 +229,7 @@ func TestHostReconciler_SignedHeartbeat(t *testing.T) {
 	plain := p.DeepCopy()
 	plain.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeLibvirt
 	fresh := &infravirtrigaudiov1beta1.Host{ObjectMeta: metav1.ObjectMeta{Name: "host-alpha", Namespace: clusteredNS}}
-	_, err = hr.getHostInfo(context.Background(), fresh, plain, stub)
+	_, _, err = hr.getHostInfo(context.Background(), fresh, plain, stub)
 	require.NoError(t, err)
 	assert.Empty(t, fresh.Status.Conditions, "no host answer condition for a non-identity Provider")
 }

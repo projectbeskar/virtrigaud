@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -125,6 +126,13 @@ type HostReconciler struct {
 	// identity, the heartbeat asks the host for a signed host answer
 	// (host_controller_answer.go).
 	HostAnswers *HostAnswers
+
+	// Recorder, when set, receives the host inventory Events (development
+	// builds; host_inventory.go).
+	Recorder record.EventRecorder
+	// inventoryEvents limits the host inventory Events. The zero value is
+	// ready to use.
+	inventoryEvents inventoryEventLimiter
 
 	// publishedProvider maps a Host (namespace/name) to the Provider label its
 	// committed-capacity gauges were last published under, so a changed
@@ -351,13 +359,15 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 
 	// 4. Cheap single-host refresh (NOT a full ListHosts). The host id is the Host
 	//    CR name (#315 render / #318 HostInfo.id).
-	info, err := r.getHostInfo(ctx, host, provider, providerInstance)
+	info, inventory, err := r.getHostInfo(ctx, host, provider, providerInstance)
 	if err != nil {
 		return r.handleGetHostInfoError(ctx, host, base, provider, err)
 	}
 
-	// 5. Map the live facts into status and stamp the heartbeat.
+	// 5. Map the live facts into status and stamp the heartbeat; for a host
+	//    with a per-host agent, fold its verified inventory in (same write).
 	r.applyHostInfo(host, info)
+	r.applyHostInventory(ctx, host, inventory)
 	log.FromContext(ctx).V(1).Info("Synced Host inventory",
 		"host", host.Name, "provider", provider.Name, "health", host.Status.Health)
 	return r.persist(ctx, host, base, hostHeartbeatInterval)
@@ -369,6 +379,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 // shorter backoff. None of them is a hard reconcile error — the Host must never
 // crash-loop on a bad or unreachable provider.
 func (r *HostReconciler) handleGetHostInfoError(ctx context.Context, host, base *infravirtrigaudiov1beta1.Host, provider *infravirtrigaudiov1beta1.Provider, err error) (ctrl.Result, error) {
+	withdrawHostInventory(host, hostInventoryInScope(provider), "the heartbeat's GetHostInfo failed, so there is no signed host answer")
 	switch {
 	case contracts.IsNotSupported(err):
 		// The Provider claims clustered topology but does not implement the
@@ -452,6 +463,7 @@ func mapHostHealth(h contracts.HostHealth) (infravirtrigaudiov1beta1.HostHealth,
 func (r *HostReconciler) setHostUnavailable(host *infravirtrigaudiov1beta1.Host, reason, msg string) {
 	host.Status.Health = infravirtrigaudiov1beta1.HostHealthUnknown
 	setHostReady(host, metav1.ConditionFalse, reason, msg)
+	withdrawHostInventory(host, false, "the heartbeat did not reach the host, so there is no signed host answer")
 }
 
 // setHostReady upserts the Host's Ready condition, stamping ObservedGeneration =

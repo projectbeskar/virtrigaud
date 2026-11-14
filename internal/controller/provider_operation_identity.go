@@ -17,10 +17,13 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/hostinventory"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -63,4 +66,24 @@ func setOperationIdentityReadiness(provider *infravirtrigaudiov1beta1.Provider, 
 			meta.RemoveStatusCondition(&provider.Status.Conditions, k8s.ConditionReady)
 		}
 	}
+}
+
+// setComponentAllowListReadiness records Ready=False on a Provider whose type
+// runs a per-host agent while a configured component allow-list is not in
+// force: with AllowListDigestMismatch when the file is missing or its
+// SHA-256 is not the pinned one, AllowListUnverified when its signature does
+// not verify. Its hosts are not ready meanwhile (ComponentsReady). Any other
+// Provider, or any Provider of a manager whose allow-list is in force or not
+// configured, is left as setOperationIdentityReadiness set it.
+func setComponentAllowListReadiness(provider *infravirtrigaudiov1beta1.Provider, policy *HostInventoryPolicy) {
+	if !hostInventoryInScope(provider) || !policy.allowListNotInForce() {
+		return
+	}
+	reason := k8s.ReasonAllowListDigestMismatch
+	if errors.Is(policy.AllowListErr, hostinventory.ErrUnverified) {
+		reason = k8s.ReasonAllowListUnverified
+	}
+	k8s.SetReadyCondition(&provider.Status.Conditions, metav1.ConditionFalse, reason,
+		"the manager's component allow-list is not in force (see the manager log for both digests); no host of this "+
+			"Provider is ready for placement until the manager is restarted with a matching allow-list", provider.Generation)
 }

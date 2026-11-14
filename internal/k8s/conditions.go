@@ -661,6 +661,16 @@ const (
 	// identity and the manager has no operation signer (every release build,
 	// or a development build started without one). Nothing is sent.
 	ReasonOperationSignerUnavailable = "OperationSignerUnavailable"
+	// ReasonAllowListDigestMismatch is Ready=False on a Provider whose type
+	// runs a per-host agent while the manager's configured component
+	// allow-list is missing or does not have its pinned SHA-256. Used only by
+	// development builds.
+	ReasonAllowListDigestMismatch = "AllowListDigestMismatch"
+	// ReasonAllowListUnverified is Ready=False on a Provider whose type runs
+	// a per-host agent while the signature of the manager's component
+	// allow-list does not verify under a configured signer. Used only by
+	// development builds.
+	ReasonAllowListUnverified = "AllowListUnverified"
 	// ReasonOperationEnrolmentUnavailable: no enrolment is configured for
 	// the VM's host, so no operation can be issued for it. Nothing is sent.
 	ReasonOperationEnrolmentUnavailable = "OperationEnrolmentUnavailable"
