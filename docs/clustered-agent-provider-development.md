@@ -273,6 +273,9 @@ agent processes with the fake executor
   so a revocation made during an API outage takes effect when the Provider
   reads the Secret again. The agent's certificate expiry still bounds an
   unreachable revocation.
+- The chart's optional NetworkPolicies give provider pods no egress to the
+  Kubernetes API server; with them enabled, a Provider started with
+  `--hosts-secret` needs an additional egress rule to the API server.
 - A Provider Deployment the manager renders does not yet carry the
   Provider's identity certificate (`--agent-client-cert`); deploy the
   Provider with it by other means until the Provider identity issuer exists.

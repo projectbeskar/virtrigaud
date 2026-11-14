@@ -251,7 +251,11 @@ verb satisfies `enrol`, so whoever holds one can enrol any Host in its scope.
 
 ## Not done yet
 
-Rotation, removing pins on revocation, and revoking at the CA are later work.
+Rotation and revoking at the CA are later work. A revoked Host's
+enrolment is retired and its pins removed, the Host is left out of the
+inventory, and a Provider that follows the inventory Secret through the API
+(`--hosts-secret`) closes its connection and refuses it within seconds
+([details](clustered-agent-provider-development.md#following-the-inventory-secret)).
 The agent side (key generation, CSR, certificate installation, deriving the
 enrolment record) is described in
 [`per-host-agent-development.md`](per-host-agent-development.md#enrolment); the
