@@ -331,6 +331,9 @@ func sweepOperationIntents(ctx context.Context, c client.Client, reader client.R
 	for i := range secrets.Items {
 		s := &secrets.Items[i]
 		opID, ok := strings.CutPrefix(s.Name, operationIntentSecretPrefix)
+		if !ok {
+			opID, ok = strings.CutPrefix(s.Name, redactedIntentSecretPrefix)
+		}
 		if !ok || s.Type != operationIntentSecretType || !metav1.IsControlledBy(s, provider) ||
 			now.Sub(s.CreationTimestamp.Time) < operationIntentSweepGrace {
 			continue

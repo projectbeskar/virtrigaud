@@ -739,9 +739,25 @@ func (r *VirtualMachineReconciler) loadVerifiedIntent(ctx context.Context, vm *i
 // manager holds now (see loadVerifiedIntent).
 func (r *VirtualMachineReconciler) checkIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, p contracts.PreparedOperation) error {
-	id := p.Identity
+	err := r.checkIntentIdentity(ctx, vm, ia, a, p.Kind, p.Identity)
+	if err != nil && !errors.Is(err, errIntentPredecessor) {
+		return err
+	}
+	if rerr := checkIntentRequest(vm, ia, a, p); rerr != nil {
+		return rerr
+	}
+	return err
+}
+
+// checkIntentIdentity is the part of checkIntent about the stored identity
+// of kind: it must name a's kind, attempt, op_id, host and binding, vm's UID,
+// the Provider's UID, and the host's current enrolment (or a predecessor one:
+// errIntentPredecessor). It is all a redacted intent can be checked against;
+// its request is bound by its digest instead.
+func (r *VirtualMachineReconciler) checkIntentIdentity(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
+	a *infravirtrigaudiov1beta1.OperationAttempt, kind contracts.OperationKind, id contracts.OperationAttemptIdentity) error {
 	switch {
-	case attemptKindOf(p.Kind) != a.Kind:
+	case attemptKindOf(kind) != a.Kind:
 		return fmt.Errorf("kind: %w", errIntentTampered)
 	case id.Attempt != uint64(a.Attempt): // #nosec G115 -- CRD minimum 1
 		return fmt.Errorf("attempt: %w", errIntentTampered)
@@ -771,15 +787,12 @@ func (r *VirtualMachineReconciler) checkIntent(ctx context.Context, vm *infravir
 		!bytes.Equal(enrol.Epoch.Holder, id.Epoch.Holder) {
 		for _, pre := range trust.Predecessors {
 			if bytes.Equal(pre, id.EnrolmentID) {
-				if err := checkIntentRequest(vm, ia, a, p); err != nil {
-					return err
-				}
 				return errIntentPredecessor
 			}
 		}
 		return fmt.Errorf("enrolment: %w", errIntentTampered)
 	}
-	return checkIntentRequest(vm, ia, a, p)
+	return nil
 }
 
 // errNoEnrolmentSource is checkIntent's answer when the host's enrolment
@@ -928,6 +941,10 @@ func (r *VirtualMachineReconciler) holdIntentTampered(ctx context.Context, vm *i
 func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ia identityAttempt, a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation,
 	first bool) (attemptStep, ctrl.Result, error) {
+	if len(prepared.RequestBytes) == 0 {
+		// Only a full intent can be sent; never an empty or partial request.
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), nil
+	}
 	answer, err := ia.sender.SendOperation(ctx, prepared)
 	if r.operationCrashed(ctx, crashAfterSend) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
@@ -1039,9 +1056,16 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 	// A Delete that Succeeded keeps its intent Secret until the finalizer is
 	// released, and a Create that was not performed keeps it while it is the
 	// VM's latest: each is what a later release asks the host about again.
-	if !intentKeptAsEvidence(vm, &done) {
+	switch {
+	case !intentKeptAsEvidence(vm, &done):
 		if err := r.deleteIntent(ctx, ia.providerCR.Namespace, a.OpID, vm.UID); err != nil {
 			logger.Info("Could not remove the operation-intent Secret; the sweeper will", "error", err.Error())
+		}
+	case createNotPerformedLatest(&done):
+		// Kept for asking the host again, but only its identity and digest:
+		// the request bytes, cloud-init user data included, are dropped.
+		if err := r.redactIntent(ctx, vm, a.OpID, ia.providerCR.Namespace); err != nil {
+			logger.Info("Could not redact the operation-intent Secret; the next reconcile will", "error", err.Error())
 		}
 	}
 	switch outcome {
@@ -1067,6 +1091,15 @@ func (r *VirtualMachineReconciler) closeAttempt(ctx context.Context, vm *infravi
 // Later ones are left to the sweeper, so a settled VM costs no reads.
 func (r *VirtualMachineReconciler) cleanupTerminalIntents(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ns string) {
 	for _, a := range vm.Status.OperationAttempts {
+		if createNotPerformedLatest(&a) {
+			// A redaction interrupted (by a crash or a failed write) is
+			// finished here, whenever the VM is reconciled.
+			if err := r.redactIntent(ctx, vm, a.OpID, ns); err != nil {
+				log.FromContext(ctx).Info("Could not redact a not-performed Create's operation-intent Secret; retrying",
+					"error", err.Error())
+			}
+			continue
+		}
 		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal || r.now().Sub(a.LastTransitionTime.Time) > operationIntentSweepGrace ||
 			intentKeptAsEvidence(vm, &a) {
 			continue
@@ -1180,7 +1213,7 @@ func (r *VirtualMachineReconciler) confirmDeleteRelease(ctx context.Context, vm 
 	default:
 		return hold(r.holdIntentTampered(ctx, vm, d, cerr))
 	}
-	if !r.signedDeleteConfirmed(ctx, vm, ia, d, prepared) {
+	if !r.signedDeleteConfirmed(ctx, vm, ia, d, refOf(prepared)) {
 		return hold(r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgDeleteNotConfirmed, operationHoldRecheckInterval))
 	}
 	return r.releaseAfterDelete(ctx, vm, ia, d.OpID)

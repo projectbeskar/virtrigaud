@@ -135,10 +135,11 @@ func showsRecord(s providerv1.OperationRecordState) bool {
 	return true
 }
 
-// bindsTo reports whether a verified OperationAnswer is about the attempt p:
-// its op_id and enrolment, and, for an answer from a record, its kind,
-// attempt, VM, binding and the digest of p's exact request bytes.
-func bindsTo(a *providerv1.OperationAnswer, p *contracts.PreparedOperation) bool {
+// bindsTo reports whether a verified OperationAnswer is about the attempt p
+// (from a full or a redacted intent): its op_id and enrolment, and, for an
+// answer from a record, its kind, attempt, VM, binding and the intent digest
+// of the attempt's exact request bytes.
+func bindsTo(a *providerv1.OperationAnswer, p intentRef) bool {
 	id := p.Identity
 	if !bytes.Equal(a.GetOpId(), id.OpID) || !bytes.Equal(a.GetOpEnrolmentId(), id.EnrolmentID) {
 		return false
@@ -151,14 +152,14 @@ func bindsTo(a *providerv1.OperationAnswer, p *contracts.PreparedOperation) bool
 	wire, ok := wireKinds[p.Kind]
 	return ok && a.GetKind() == int32(wire) && a.GetAttempt() == id.Attempt && a.GetVmUid() == id.VMUID &&
 		bytes.Equal(a.GetBindingId(), id.BindingID) &&
-		subtle.ConstantTimeCompare(a.GetIntentDigest(), operation.IntentDigest(p.DigestSalt, p.RequestBytes)) == 1
+		len(p.Digest) > 0 && subtle.ConstantTimeCompare(a.GetIntentDigest(), p.Digest) == 1
 }
 
 // pollSigned asks the host of attempt p about its op_id and returns the
 // verified, bound answer, or a verdict of no answer or a regressed host. A
 // verified answer that does not bind to p is no answer (and logged).
 func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
-	p *contracts.PreparedOperation) opPoll {
+	p intentRef) opPoll {
 	logger := log.FromContext(ctx)
 	host := p.Identity.HostID
 	opIDHex := hex.EncodeToString(p.Identity.OpID)
@@ -209,14 +210,15 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 // when this reconcile already delivered the attempt (no second delivery).
 func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation, predecessor, sent bool) (attemptStep, ctrl.Result, error) {
-	poll := r.pollSigned(ctx, vm, ia, &prepared)
+	ref := refOf(prepared)
+	poll := r.pollSigned(ctx, vm, ia, ref)
 	isDelete := a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete
 	switch poll.verdict {
 	case answerRegressed:
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationHostStoreRegressed, msgHostStoreRegressed, operationHoldRecheckInterval), nil
 	case answerNone:
 		if isDelete {
-			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, &prepared); done {
+			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, ref); done {
 				return step, res, nil
 			}
 		}
@@ -265,7 +267,7 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 		return r.closeSigned(ctx, vm, ia, a, poll, infravirtrigaudiov1beta1.OperationAttemptOutcomeRetired)
 	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_NO_RECORD:
 		if isDelete {
-			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, &prepared); done {
+			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, ref); done {
 				return step, res, nil
 			}
 		}
@@ -281,14 +283,14 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 		return r.sendAttempt(ctx, vm, ia, a, prepared, false)
 	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNKNOWN_TO_AGENT:
 		if isDelete {
-			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, &prepared); done {
+			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, ref); done {
 				return step, res, nil
 			}
 		}
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationUnknownToAgent, msgOperationUnknownToAgent, operationHoldRecheckInterval), nil
 	default: // OUTCOME_UNKNOWN
 		if isDelete {
-			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, &prepared); done {
+			if step, res, done := r.deleteByVMAnswer(ctx, vm, ia, a, ref); done {
 				return step, res, nil
 			}
 		}
@@ -307,7 +309,7 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 // under a predecessor enrolment (never re-sent): the VM is then held.
 func (r *VirtualMachineReconciler) learnCreateID(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation, noSend bool) (attemptStep, ctrl.Result, error) {
-	if !noSend {
+	if !noSend && len(prepared.RequestBytes) > 0 {
 		answer, err := ia.sender.SendOperation(ctx, prepared)
 		if err == nil && answer.ID != "" {
 			if _, werr := r.markSent(ctx, vm, a, &answer); werr == nil {
@@ -367,7 +369,7 @@ func (r *VirtualMachineReconciler) holdPredecessor(ctx context.Context, vm *infr
 // that it names p's op_id as the Delete that deleted it. NO_RECORD, another
 // binding, an unsigned exists=false or NotFound are never "deleted".
 func (r *VirtualMachineReconciler) authenticatedHostDeleted(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
-	p *contracts.PreparedOperation) (deleted, sameOp bool, read contracts.SignedRead, v hostidentity.VerifiedAnswer) {
+	p intentRef) (deleted, sameOp bool, read contracts.SignedRead, v hostidentity.VerifiedAnswer) {
 	id := p.Identity
 	hr, err := r.HostAnswers.begin(ctx, ia.providerCR, id.HostID)
 	if err != nil {
@@ -396,7 +398,7 @@ func (r *VirtualMachineReconciler) authenticatedHostDeleted(ctx context.Context,
 // host (the finalizer is released; the attempt is left as it is). done is
 // false when the host does not sign that.
 func (r *VirtualMachineReconciler) deleteByVMAnswer(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
-	a *infravirtrigaudiov1beta1.OperationAttempt, p *contracts.PreparedOperation) (attemptStep, ctrl.Result, bool) {
+	a *infravirtrigaudiov1beta1.OperationAttempt, p intentRef) (attemptStep, ctrl.Result, bool) {
 	deleted, sameOp, read, v := r.authenticatedHostDeleted(ctx, vm, ia, p)
 	if !deleted {
 		return stepWaiting, ctrl.Result{}, false
@@ -420,8 +422,8 @@ func fmtID(b []byte) string { return fmt.Sprintf("%x", b) }
 // intent p) confirms it with a fresh signed answer: the Delete's op_id
 // COMPLETED, or the VM's placement DELETED.
 func (r *VirtualMachineReconciler) signedDeleteConfirmed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
-	d *infravirtrigaudiov1beta1.OperationAttempt, p contracts.PreparedOperation) bool {
-	poll := r.pollSigned(ctx, vm, ia, &p)
+	d *infravirtrigaudiov1beta1.OperationAttempt, p intentRef) bool {
+	poll := r.pollSigned(ctx, vm, ia, p)
 	if poll.verdict == answerVerified && poll.v.Ready() &&
 		poll.state() == providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED &&
 		poll.v.Operation.GetKind() == int32(providerv1.OperationKind_OPERATION_KIND_DELETE) {
@@ -431,7 +433,7 @@ func (r *VirtualMachineReconciler) signedDeleteConfirmed(ctx context.Context, vm
 	if poll.verdict == answerRegressed {
 		return false
 	}
-	deleted, _, read, v := r.authenticatedHostDeleted(ctx, vm, ia, &p)
+	deleted, _, read, v := r.authenticatedHostDeleted(ctx, vm, ia, p)
 	if deleted {
 		auditSignedDecision(ctx, read, v, "Delete release confirmed by a deleted placement", d.OpID, fmtID(v.VM.GetDeleteOpId()))
 	}
@@ -441,24 +443,23 @@ func (r *VirtualMachineReconciler) signedDeleteConfirmed(ctx context.Context, vm
 // signedNotPerformed reports whether the host of the latest Create c signs
 // again, for a request the manager makes now, that c was not performed:
 // FAILED_CLEAN, or RETIRED under the host's current enrolment, from c's
-// retained intent. A missing or failing intent, or any other answer, is not.
+// retained intent (redacted once that Create went Terminal: its identity and
+// intent digest are all the question needs). A missing or failing intent, or
+// any other answer, is not.
 func (r *VirtualMachineReconciler) signedNotPerformed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	c *infravirtrigaudiov1beta1.OperationAttempt) bool {
 	if c.OpID == "" {
 		return false
 	}
-	p, found, err := r.loadIntent(ctx, vm, c.OpID, ia.providerCR.Namespace)
+	p, found, err := r.loadPollIntent(ctx, vm, c.OpID, ia.providerCR.Namespace)
 	if err != nil || !found {
 		return false
 	}
-	saved := ia.deleteRef
-	ia.deleteRef = nil // a Create's intent names no Delete target
-	cerr := r.checkIntent(ctx, vm, ia, c, p)
-	ia.deleteRef = saved
-	if cerr != nil {
+	cerr := r.checkIntentIdentity(ctx, vm, ia, c, p.Kind, p.Identity)
+	if cerr != nil && !errors.Is(cerr, errIntentPredecessor) {
 		return false
 	}
-	poll := r.pollSigned(ctx, vm, ia, &p)
+	poll := r.pollSigned(ctx, vm, ia, p)
 	if poll.verdict != answerVerified || !poll.v.Ready() {
 		return false
 	}

@@ -68,6 +68,8 @@ type identityStub struct {
 	// bigRequest makes BuildOperation return a request over the intent cap.
 	bigRequest bool
 	deletes    int // unsigned Deletes (must stay 0)
+	// userData is the cloud-init user data a Create carries.
+	userData []byte
 	// signed is the host the stub's signed reads come from (set by
 	// identityFixture).
 	signed *signedHostStub
@@ -100,7 +102,7 @@ func (s *identityStub) BuildOperation(_ context.Context, id contracts.OperationA
 	switch req.Kind {
 	case contracts.OperationKindCreate:
 		msg = &providerv1.CreateRequest{Name: req.Spec.Name, TargetHostId: id.HostID,
-			Owner: &providerv1.ObjectIdentity{Uid: id.VMUID}}
+			Owner: &providerv1.ObjectIdentity{Uid: id.VMUID}, UserData: s.userData}
 	case contracts.OperationKindPowerOn, contracts.OperationKindPowerOff, contracts.OperationKindReboot,
 		contracts.OperationKindShutdownGraceful:
 		row, _ := operation.RowFor(wireKinds[req.Kind])
