@@ -43,6 +43,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
+	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -1020,8 +1021,11 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					// no Kubernetes API token is projected into the pod at all:
 					// provider pods are gRPC servers that never call the API
 					// (credentials/TLS arrive as kubelet-mounted Secret volumes).
+					// The one exception is the clustered Provider for
+					// per-host agents in a development build, which watches
+					// its own inventory Secret (providerReadsInventorySecret).
 					ServiceAccountName:            r.getServiceAccountName(provider),
-					AutomountServiceAccountToken:  util.BoolPtr(false),
+					AutomountServiceAccountToken:  util.BoolPtr(providerReadsInventorySecret(provider)),
 					Containers:                    []corev1.Container{*container},
 					Volumes:                       volumes,
 					NodeSelector:                  provider.Spec.Runtime.NodeSelector,
@@ -1360,8 +1364,34 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		},
 	}
 
+	container.Args = append(container.Args, agentProviderArgs(provider)...)
+
 	// Add volumes to pod spec (we'll need to modify the caller to handle this)
 	return container, nil
+}
+
+// agentProviderArgs returns the extra arguments of the clustered Provider
+// for per-host agents (development builds only): it follows its host
+// inventory Secret through the API (--hosts-secret), so that a revoked host
+// is refused within seconds, and refuses agents enrolled with another
+// Provider (--provider-uid). Nil for every other Provider.
+func agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
+	if !providerReadsInventorySecret(provider) {
+		return nil
+	}
+	return []string{
+		"--hosts-secret=" + hostInventorySecretName(provider),
+		"--provider-uid=" + string(provider.UID),
+	}
+}
+
+// providerReadsInventorySecret reports whether the Provider's pod reads its
+// host inventory Secret through the API, and so needs a ServiceAccount token:
+// only the clustered Provider for per-host agents, in a development build.
+// Its ServiceAccount is granted get and watch on that one Secret by the
+// chart (experimental.agentProviderInventoryWatch), never by the manager.
+func providerReadsInventorySecret(provider *infravirtrigaudiov1beta1.Provider) bool {
+	return devgate.Compiled && providerRunsHostAgents(provider)
 }
 
 // addTmpSizeLimitEnv gives a vSphere provider container the effective

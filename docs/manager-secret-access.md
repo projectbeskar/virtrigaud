@@ -11,7 +11,12 @@ the RBAC each access needs, and the two ways the Helm chart can grant it:
   covers only the Provider namespaces.
 
 Provider pods have no Secret RBAC in either mode. They read only the files the
-kubelet mounts for them.
+kubelet mounts for them. The one exception is a development build of the
+clustered Provider for per-host agents started with `--hosts-secret`: its own
+ServiceAccount gets `get` and `watch` on its host-inventory Secret
+`<provider>-hosts` only (a Role with `resourceNames`, rendered by the chart
+from `experimental.agentProviderInventoryWatch`; the manager grants nothing).
+See [the Provider's documentation](clustered-agent-provider-development.md#following-the-inventory-secret).
 
 ## Every Secret the manager touches
 

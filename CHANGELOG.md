@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-14 18:00] - Clustered per-host agent Provider follows its inventory Secret through the API (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/cloudhypervisor/secretwatch.go`: `NewFromSecret`: the clustered Provider for per-host agents reads its host inventory Secret by name and watches it with a `metadata.name` field selector, so a host removed from the inventory (a revoked or deleted Host, or removed pins) has its connection closed and its calls refused within the watch latency instead of after the kubelet's Secret volume sync. Watch cycles of at most the reload interval, each from a fresh read; a failed read or watch retried with a backoff; the last good host set kept while the Secret cannot be read, reported by `Validate` after three intervals; a deleted Secret fronts no host; no Secret content in logs.
+- `cmd/provider-cloudhypervisor`: `--hosts-secret` and `--hosts-secret-namespace` (default `$PROVIDER_NAMESPACE`, then the pod's namespace), exclusive with `--hosts-file`; in-cluster credentials.
+- `charts/virtrigaud/templates/agent-provider-inventory-rbac.yaml`, `charts/virtrigaud/values.yaml`: `experimental.agentProviderInventoryWatch` renders, for each listed Provider, a Role and RoleBinding giving that Provider's own ServiceAccount `get` and `watch` on its `<provider>-hosts` Secret only (`resourceNames`, no `list`, no wildcard); rendering requires `developmentBuild: true`.
+- Tests: revocation against a real API server as the Provider's ServiceAccount with only the chart-rendered RBAC (another Secret, list and write refused), with the latency from the Secret write to connection closed and host refused measured over 20 rounds (p50 about 6 ms, max under 10 ms; bound 2 s); fake-clientset tests for deletion, invalid documents (no content logged), failed and stalled watches, start-up refusals; flag tests; chart rendering tests.
+
+### Changed
+- `internal/controller/provider_controller.go`: in a development build, the Deployment of a clustered `cloudhypervisor` Provider mounts its pod's ServiceAccount token and passes `--hosts-secret=<provider>-hosts` and `--provider-uid`; every other Provider pod is unchanged (no token, same arguments). The manager grants no RBAC for it.
+- `internal/clustered/inventoryfile/watch.go`: `DecodeInventory`, the schema-gated document parse shared by the file and the Secret paths.
+- `docs/clustered-agent-provider-development.md`, `docs/manager-secret-access.md`: the inventory Secret watch, its RBAC, measured latency and limits.
+
+### Why
+A revoked host must stop being reachable through the Provider within seconds; with a mounted Secret the bound was the kubelet's sync period (about a minute or more). Watching one named Secret needs a single narrowly scoped read grant, and clustered libvirt is unchanged.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-11-14 12:00] - Manager acts on clustered agent outcomes only with verified signed answers (development builds only)
 **Author:** @wrkode (William Rizzo)
 

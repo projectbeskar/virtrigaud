@@ -22,8 +22,10 @@ package.
 | `--port` | `9443` | gRPC port the manager connects to. |
 | `--health-port` | `8080` | HTTP health port. |
 | `--hosts-file` | `/etc/virtrigaud/hosts/hosts.json` | The mounted host inventory. |
+| `--hosts-secret` | (none) | Name of the host inventory Secret to follow through the Kubernetes API instead of the file (see [Following the inventory Secret](#following-the-inventory-secret)). Excludes `--hosts-file`. A Provider Deployment the manager renders sets it to `<provider>-hosts`. |
+| `--hosts-secret-namespace` | `$PROVIDER_NAMESPACE`, then the pod's namespace | Namespace of `--hosts-secret`. |
 | `--agent-client-cert`, `--agent-client-key` | (required) | PEM certificate and key the Provider presents to every agent: its Provider identity certificate. |
-| `--provider-uid` | (none) | UID of the Provider resource. When set, an agent whose certificate records an enrolment with another Provider is refused. Optional for now, with a warning in the log when unset; a deployment the manager renders must set it. |
+| `--provider-uid` | (none) | UID of the Provider resource. When set, an agent whose certificate records an enrolment with another Provider is refused. Optional for now, with a warning in the log when unset; a Provider Deployment the manager renders sets it. |
 
 The manager-facing TLS is the one of the other Providers (the mounted
 provider TLS material and its environment contract).
@@ -31,9 +33,10 @@ provider TLS material and its environment contract).
 ## Host inventory
 
 The hosts come from the host inventory document
-(`internal/clustered/hostsecret`), read from `--hosts-file` and followed as
-the file changes (`internal/clustered/inventoryfile`, shared with clustered
-libvirt): the Provider reads a file, never the Kubernetes API. Every entry
+(`internal/clustered/hostsecret`), read either from `--hosts-file` and
+followed as the file changes (`internal/clustered/inventoryfile`, shared with
+clustered libvirt), or, with `--hosts-secret`, from the inventory Secret
+through the Kubernetes API (next section). Every entry
 must carry agent TLS material and nothing else
 (`hostsecret.ValidateAgentHost`):
 
@@ -58,6 +61,74 @@ file is re-read every 30 seconds on its own, besides the watch on its
 directory; when the watch cannot be set up, the Provider logs it at error
 level and says it in its `Validate` answer, and the periodic re-read still
 follows the file.
+
+## Following the inventory Secret
+
+With `--hosts-secret`, the Provider reads its inventory Secret by name and
+watches it with a `metadata.name` field selector, using its pod's
+ServiceAccount token. Each change is applied as soon as the watch delivers
+it: a host the manager removed from the inventory (a revoked Host, a deleted
+Host, or one whose pins were removed) has its connection closed and every
+call for it refused (`HOST_UNAVAILABLE`, cause `HostNotFronted`) before the next
+call can reach it, without waiting for the kubelet to refresh a mounted
+Secret (which takes up to about a minute or more). The tests measure the
+time from the write that removes a host to its connection closed and its
+calls refused against a real API server, as the Provider's ServiceAccount
+with only the RBAC below: a few milliseconds (p50 about 6 ms, max under
+10 ms over 20 rounds on a development workstation), held to a bound of
+2 seconds. In a cluster, add the manager's re-render of the Secret after the
+Host change (one reconcile) and the API server's watch delivery.
+
+A watch cycle lasts at most 30 seconds and every cycle starts from a fresh
+read of the Secret, so a watch that goes silent without failing delays a
+change by at most about 31 seconds. A failed read or watch is retried with a
+backoff from 250 ms up to 30 seconds. While the Secret cannot be read, the
+last good host set is kept (as for an unreadable file), and once no read
+succeeded for 90 seconds the `Validate` answer says so. A Secret that cannot
+be read or parsed at start stops the Provider. A deleted Secret fronts no
+host. Secret content is never logged: log lines name the Secret and give a
+host count or a coarse reason.
+
+The Provider needs exactly `get` and `watch` on that one Secret and nothing
+else: no `list` (the watch names the Secret, which a `resourceNames` rule
+authorises), no other Secret and no write. The chart grants it, for the
+Providers you list, to each Provider's own ServiceAccount
+(`virtrigaud-provider-<namespace>-<name>`, created by the manager), with a
+Role and RoleBinding in the Provider's namespace:
+
+```yaml
+experimental:
+  agentProviderInventoryWatch:
+    enabled: true
+    developmentBuild: true   # explicit: the Provider image is a development build
+    providers:
+      - namespace: infra
+        name: ch
+```
+
+which renders, per Provider:
+
+```yaml
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "watch"]
+  resourceNames: ["ch-hosts"]
+```
+
+Rendering fails without `developmentBuild: true`, without a Provider, or with
+an entry that is not a valid namespace and name. The manager grants no RBAC
+itself (it holds no `roles` or `rolebindings` write). For this Provider only,
+and only in a development build, the Deployment the manager renders mounts
+the pod's ServiceAccount token (every other Provider pod still runs without
+one) and passes `--hosts-secret` and `--provider-uid`. Without the chart
+grant the read is refused and the Provider stops at start with the API
+error.
+
+What the token can reach is that Secret: the agent TLS material of the
+Provider's hosts (CA bundle, expected host URIs and key pins). It holds no
+private key; the inventory a per-host agent Provider reads carries no SSH
+material (`hostsecret.ValidateAgentHost`).
 
 ## Connections to agents
 
@@ -194,10 +265,17 @@ agent processes with the fake executor
 
 ## Limits
 
-- The inventory is a mounted file: a removed or revoked host stops being
-  routed when the file changes on the Provider's disk, which for a mounted
-  Secret is bounded by the kubelet's sync period. Watching the inventory
-  Secret through the API for a faster bound is a later change.
+- With `--hosts-file`, a removed or revoked host stops being routed when the
+  file changes on the Provider's disk, which for a mounted Secret is bounded
+  by the kubelet's sync period; use `--hosts-secret` for a bound in seconds.
+- With `--hosts-secret`, the bound holds while the API server is reachable.
+  While it is not, the last good host set is kept (reported by `Validate`),
+  so a revocation made during an API outage takes effect when the Provider
+  reads the Secret again. The agent's certificate expiry still bounds an
+  unreachable revocation.
+- A Provider Deployment the manager renders does not yet carry the
+  Provider's identity certificate (`--agent-client-cert`); deploy the
+  Provider with it by other means until the Provider identity issuer exists.
 - `ListVMs` is not served: a per-host agent does not list VMs yet.
 - The Provider verifies only the answer to its own `Hello`. It relays every
   other signed answer unchanged; verifying them is the manager's job.

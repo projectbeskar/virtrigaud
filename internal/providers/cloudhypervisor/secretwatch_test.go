@@ -264,3 +264,29 @@ func TestNewFromSecretRefusesAtStart(t *testing.T) {
 	_, err = NewFromSecret(ctx(t), fake.NewClientset().CoreV1().Secrets(testSecretNS), "", o)
 	require.Error(t, err)
 }
+
+// TestSecretWatchStalledWatchBounded: a watch that delivers nothing and never
+// fails delays a change by at most about one reload interval, because each
+// cycle ends and starts again from a fresh read.
+func TestSecretWatchStalledWatchBounded(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	b := newFakeAgent(t, p, "host-b", fakeAgentOptions{})
+	cs := fake.NewClientset(inventorySecret(t, a, b))
+	var mu sync.Mutex
+	stalled := 0
+	cs.PrependWatchReactor("secrets", func(k8stesting.Action) (bool, watch.Interface, error) {
+		mu.Lock()
+		stalled++
+		mu.Unlock()
+		return true, watch.NewFake(), nil // never delivers, never closes
+	})
+	prov := secretProvider(t, p, cs, Options{InventoryReloadInterval: time.Second})
+	require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return stalled > 0 }, testTimeout, 5*time.Millisecond)
+
+	start := time.Now()
+	_, err := cs.CoreV1().Secrets(testSecretNS).Update(ctx(t), inventorySecret(t, a), metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(prov.pool.ids()) == 1 }, testTimeout, 5*time.Millisecond)
+	assert.Less(t, time.Since(start), 2*time.Second+500*time.Millisecond, "bounded by the reload interval plus the client-side margin")
+}

@@ -180,11 +180,13 @@ func (p *Provider) followSecret(ctx context.Context, rv string) {
 // closing it) rather than by a failure.
 func (p *Provider) watchSecret(ctx context.Context, rv string) bool {
 	f := p.secret
+	// The API server ends the watch after timeout; the context ends it a
+	// second later should the server or the connection go silent.
 	timeout := int64(p.opts.InventoryReloadInterval / time.Second)
 	if timeout < 1 {
 		timeout = 1
 	}
-	wctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second+5*time.Second)
+	wctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second+time.Second)
 	defer cancel()
 	w, err := f.secrets.Watch(wctx, metav1.ListOptions{
 		FieldSelector:       fields.OneTermEqualSelector("metadata.name", f.name).String(),
@@ -201,7 +203,8 @@ func (p *Provider) watchSecret(ctx context.Context, rv string) bool {
 	defer w.Stop()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-wctx.Done():
+			// Shutdown, or the cycle's end without the server ending it.
 			return true
 		case ev, open := <-w.ResultChan():
 			if !open {

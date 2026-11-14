@@ -133,6 +133,11 @@ func isClusterTopology(provider *infravirtrigaudiov1beta1.Provider) bool {
 // host-inventory Secret: "<provider>-hosts". The Secret is namespaced (it lives
 // in the Provider's namespace), so the provider name alone is unique.
 func (r *ProviderReconciler) getHostInventorySecretName(provider *infravirtrigaudiov1beta1.Provider) string {
+	return hostInventorySecretName(provider)
+}
+
+// hostInventorySecretName is getHostInventorySecretName without a receiver.
+func hostInventorySecretName(provider *infravirtrigaudiov1beta1.Provider) string {
 	return provider.Name + "-hosts"
 }
 
