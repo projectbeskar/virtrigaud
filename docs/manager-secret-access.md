@@ -15,9 +15,9 @@ kubelet mounts for them. The one exception is a development build of the
 clustered Provider for per-host agents started with `--hosts-secret`: its own
 ServiceAccount gets `get` and `watch` on its host-inventory Secret
 `<provider>-hosts` only (a Role with `resourceNames`, rendered by the chart
-from `experimental.agentProviderInventoryWatch`, which also starts the
-manager with `--dev-agent-provider-inventory-watch`; the manager grants
-nothing). Such a pod no longer mounts the inventory Secret as a volume.
+from `experimental.agentProviderInventoryWatch`, which also passes the same
+Provider list to the manager's `--dev-agent-provider-inventory-watch`; the
+manager grants nothing). Such a pod no longer mounts the inventory Secret as a volume.
 See [the Provider's documentation](clustered-agent-provider-development.md#following-the-inventory-secret).
 
 ## Every Secret the manager touches
