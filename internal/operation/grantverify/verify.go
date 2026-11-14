@@ -340,6 +340,22 @@ func checkSizes(env *providerv1.OperationEnvelope) *Refusal {
 	return nil
 }
 
+// CheckOuter applies the outer-request rules alone, the first rules Verify
+// applies: outer has an operation_envelope field and it is set (otherwise
+// IDENTITY_REQUIRED, rule envelope_missing), and no other field of outer is
+// set and outer carries no unknown field (otherwise an INVALID_ARGUMENT
+// refusal, rule outer_field_set). It returns the envelope; nothing inside it
+// is checked, authenticated or decoded. It is for a router that must refuse
+// such a call before it forwards it and must not judge the grant, which only
+// the host that holds the pinned anchors can; the error is a *Refusal.
+func CheckOuter(outer proto.Message) (*providerv1.OperationEnvelope, error) {
+	env, refusal := envelopeOf(outer)
+	if refusal != nil {
+		return nil, refusal
+	}
+	return env, nil
+}
+
 // envelopeOf returns outer's operation_envelope after the outer-request
 // rules: the field exists and is set, and nothing else of outer is.
 func envelopeOf(outer proto.Message) (*providerv1.OperationEnvelope, *Refusal) {
