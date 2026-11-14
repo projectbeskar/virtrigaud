@@ -466,7 +466,7 @@ func inventoryMirror(p *HostInventoryPolicy, r *hostRefresh, inv *providerv1.Hos
 	at := metav1.NewTime(r.verifiedAt)
 	m := &infravirtrigaudiov1beta1.HostAgentInventoryStatus{
 		ObservedTime: &at, AnswerSHA256: hex.EncodeToString(r.answer.BlobSHA256[:]), AllowListSHA256: p.AllowListSHA256(),
-		EnrolmentID: hex.EncodeToString(r.answer.Context.GetEnrolmentId()),
+		EnrolmentID:      hex.EncodeToString(r.answer.Context.GetEnrolmentId()),
 		InventoryVersion: int64(inv.GetInventoryVersion()), SupportedVersion: int64(inv.GetSupportedVersion()),
 		State: inventoryStateNames[inv.GetState()], StateReason: inv.GetStateReason(),
 		SnapshotAgeSeconds: int64(inv.GetSnapshotAgeSeconds()), ProcessIdentityTier: tierName(inv.GetProcessIdentityTier()),
