@@ -295,7 +295,9 @@ one signature.
   answer" error.
 - Signed answers are limited per Provider identity (the verified client
   certificate's URI): 10 per second, burst 20; a read above that is answered
-  without a signed answer, and the signer is not asked.
+  without a signed answer, and the signer is not asked. Answers to `Hello`
+  have their own limit (1 per second, burst 5), so that reads at the limit
+  cannot starve the `Hello` a Provider makes on each new connection.
 
 This bounds what a peer that can connect costs; it authenticates nobody, and
 the signer's handshake budget (below) is shared with every peer that gets
@@ -314,7 +316,8 @@ is still what restricts those.
 Connections are closed after 30 minutes (and a minute of grace for running
 calls), so each is authenticated again with a new handshake. A handshake must
 finish within 10 seconds, a connection carries at most 64 concurrent calls,
-and a client may not send keepalive pings more often than every 30 seconds.
+and a client may not send keepalive pings more often than every 15 seconds
+(with or without calls in flight; the Provider pings every 20 seconds).
 
 ## What the agent serves
 

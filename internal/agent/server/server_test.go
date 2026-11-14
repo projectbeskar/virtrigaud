@@ -759,7 +759,7 @@ func TestAnswerRatePerProviderIdentity(t *testing.T) {
 	before := e.signs.n.Load()
 	signed := 0
 	for i := 0; i < 10; i++ {
-		resp, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(byte(i)), CallerApiVersion: 1})
+		resp, err := c.AgentStatus(ctx(t), &agentv1.AgentStatusRequest{AnswerNonce: nonce(byte(i))})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -773,5 +773,37 @@ func TestAnswerRatePerProviderIdentity(t *testing.T) {
 	// One signature for the TLS handshake and one per signed answer.
 	if got := e.signs.n.Load() - before; got != 4 {
 		t.Fatalf("the signer was asked for %d signatures, want 4", got)
+	}
+}
+
+// TestHelloHasItsOwnAnswerBudget: reads that used up the answer limit do not
+// starve Hello, whose signed answers have their own, smaller, limit.
+func TestHelloHasItsOwnAnswerBudget(t *testing.T) {
+	e := newEnvWith(t, server.Throttle{}, func(o *server.Options) {
+		o.AnswersPerSecond, o.AnswerBurst = 0.0001, 1
+		o.HelloAnswersPerSecond, o.HelloAnswerBurst = 0.0001, 2
+	})
+	c := agentv1.NewAgentServiceClient(e.dial(e.provider(), 0))
+	for i := 0; i < 3; i++ {
+		if _, err := c.AgentStatus(ctx(t), &agentv1.AgentStatusRequest{AnswerNonce: nonce(byte(i))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := c.AgentStatus(ctx(t), &agentv1.AgentStatusRequest{AnswerNonce: nonce(9)})
+	if err != nil || resp.GetHostAnswer() != nil {
+		t.Fatalf("the read answer limit is used up: %v", err)
+	}
+	signed := 0
+	for i := 0; i < 4; i++ {
+		resp, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(byte(20 + i)), CallerApiVersion: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetHostAnswer() != nil {
+			signed++
+		}
+	}
+	if signed != 2 {
+		t.Fatalf("%d signed Hello answers with a Hello burst of 2 after the read limit was used up", signed)
 	}
 }

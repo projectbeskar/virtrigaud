@@ -70,7 +70,8 @@ type agentService struct {
 }
 
 // Hello answers the first call of a connection with a signed HostAnswer that
-// states the agent's API version.
+// states the agent's API version, under its own answer limit (Options
+// HelloAnswersPerSecond) so that reads cannot starve it.
 func (a *agentService) Hello(ctx context.Context, req *agentv1.HelloRequest) (*agentv1.HelloResponse, error) {
 	if err := checkNonce(req.GetAnswerNonce(), true); err != nil {
 		return nil, err
@@ -78,7 +79,7 @@ func (a *agentService) Hello(ctx context.Context, req *agentv1.HelloRequest) (*a
 	if req.GetCallerApiVersion() == 0 {
 		return nil, status.Error(codes.InvalidArgument, "caller_api_version must be at least 1")
 	}
-	return &agentv1.HelloResponse{HostAnswer: a.s.hostAnswer(ctx, req.GetAnswerNonce(), 0)}, nil
+	return &agentv1.HelloResponse{HostAnswer: a.s.helloAnswer(ctx, req.GetAnswerNonce())}, nil
 }
 
 // AgentStatus answers with a signed HostAnswer.
