@@ -83,3 +83,22 @@ func TestFreezeConfirmationRelayed(t *testing.T) {
 	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
 	requireHostUnavailable(t, err, CauseNotFronted)
 }
+
+// TestFreezeConfirmationToAnAgentThatServesNoStatus: an agent that refuses
+// AgentStatus never confirms anything, and the calls to it still succeed and
+// do not trip its breaker.
+func TestFreezeConfirmationToAnAgentThatServesNoStatus(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	a.noStatus.Store(true)
+	h := a.entry()
+	h.FreezeConfirmation = &hostsecret.FreezeConfirmation{ForEnrolmentID: strings.Repeat("a1", 16), EnrolmentIDs: []string{strings.Repeat("b2", 16)}}
+	prov := newProvider(t, p, Options{})
+	require.NoError(t, prov.Reconcile(hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion, Hosts: []hostsecret.Host{h}}))
+	client := providerv1.NewProviderClient(served(t, prov))
+	for i := 0; i < 2*DefaultBreakerThreshold+1; i++ {
+		_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		require.NoError(t, err, "call %d", i)
+	}
+	assert.Empty(t, a.statusRequests())
+}

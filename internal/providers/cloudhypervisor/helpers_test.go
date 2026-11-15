@@ -173,6 +173,8 @@ type fakeAgent struct {
 	hellos     atomic.Int32
 	// helloBlocks makes Hello wait until its caller gives up.
 	helloBlocks atomic.Bool
+	// noStatus makes AgentStatus Unimplemented (an agent that serves none).
+	noStatus atomic.Bool
 
 	mu       sync.Mutex
 	statuses []*agentv1.AgentStatusRequest
@@ -286,6 +288,9 @@ func (h *helloServer) Hello(ctx context.Context, req *agentv1.HelloRequest) (*ag
 
 // AgentStatus records a freeze confirmation the Provider relays.
 func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusRequest) (*agentv1.AgentStatusResponse, error) {
+	if h.f.noStatus.Load() {
+		return nil, status.Error(codes.Unimplemented, "not served")
+	}
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
 	h.f.statuses = append(h.f.statuses, proto.Clone(req).(*agentv1.AgentStatusRequest))
