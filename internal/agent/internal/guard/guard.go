@@ -152,6 +152,12 @@ const (
 	// EnrolLoaderCheck: the installed file is confirmed with the daemon's own
 	// loader, and removed or restored when the loader refuses it.
 	EnrolLoaderCheck Name = "enrol-loader-check"
+	// EnrolEpochAhead: a replacing certificate is installed only when its
+	// start epoch is after the host's last start epoch.
+	EnrolEpochAhead Name = "enrol-epoch-ahead"
+	// ReenrolEpochAhead: the daemon re-enrols only at a certificate's start
+	// epoch that is after the store's last start epoch.
+	ReenrolEpochAhead Name = "reenrol-epoch-ahead"
 )
 
 // All lists every guard, in a fixed order.
@@ -165,6 +171,6 @@ func All() []Name {
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
 		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun, InventoryValidate, InventoryOnlyWhenAsked,
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
-		EnrolLoaderCheck,
+		EnrolLoaderCheck, EnrolEpochAhead, ReenrolEpochAhead,
 	}
 }

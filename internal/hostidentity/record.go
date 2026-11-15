@@ -48,6 +48,12 @@ const (
 	// first enrolment's names are unchanged.
 	URIEpochPrefix = "urn:virtrigaud:epoch:"
 
+	// AnnotationStartEpochFloor is the Host annotation that raises the start
+	// epoch of the next record the manager draws for a Host that holds no
+	// enrolment state (a re-created Host), so that a host whose store has
+	// already started a later epoch can enrol it again.
+	AnnotationStartEpochFloor = "enrolment.virtrigaud.io/start-epoch-floor"
+
 	// FirstStartEpoch is the start epoch of a record without an epoch URI.
 	FirstStartEpoch = 1
 	// MaxStartEpoch bounds the start epoch a record may carry.

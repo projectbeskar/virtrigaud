@@ -28,6 +28,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
@@ -74,8 +76,42 @@ type InstallOptions struct {
 	// Now is the time the certificate must be valid at.
 	Now time.Time
 	// Replace allows replacing an installed certificate (a re-enrolment: the
-	// new certificate must name another enrolment).
+	// new certificate must name another enrolment, at a later start epoch).
 	Replace bool
+}
+
+// FileStartEpoch is the file in the agent's key material directory where
+// the daemon records its store's last start epoch (decimal), so that Install
+// can refuse a certificate the daemon would refuse, without opening the
+// store.
+const FileStartEpoch = "start-epoch"
+
+// ErrEpoch is wrapped by the refusal of a certificate whose start epoch is
+// not after the host's last start epoch.
+var ErrEpoch = errors.New("the certificate's start epoch is not after this host's last start epoch")
+
+// WriteStartEpoch records epoch as the host's last start epoch in pkiDir
+// (mode 0600, written atomically).
+func WriteStartEpoch(pkiDir string, epoch uint64) error {
+	return writeAtomic(filepath.Join(pkiDir, FileStartEpoch), []byte(strconv.FormatUint(epoch, 10)+"\n"))
+}
+
+// ReadStartEpoch reads the host's last start epoch from pkiDir, read with
+// read (a strict file reader); found is false when the file does not exist.
+func ReadStartEpoch(pkiDir string, read func(string) ([]byte, error)) (epoch uint64, found bool, err error) {
+	path := filepath.Join(pkiDir, FileStartEpoch)
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+		return 0, false, nil
+	}
+	b, err := read(path)
+	if err != nil {
+		return 0, false, fmt.Errorf("read %s: %w", path, err)
+	}
+	e, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("%s does not hold an epoch", path)
+	}
+	return e, true, nil
 }
 
 // Result describes an installed certificate.
@@ -108,6 +144,9 @@ type Result struct {
 //     subject or the Host's name, carries no DNS, address or e-mail name,
 //     carries exactly the request's URIs (so the enrolment record the manager
 //     drew), and certifies the signer's key (hostidentity.ValidateIssued);
+//   - when a certificate is installed already, or the daemon recorded its
+//     store's last start epoch (FileStartEpoch), the new certificate's start
+//     epoch is after both, so the daemon can re-enrol at it;
 //   - the daemon's own loader (trust.LoadIdentity) accepts the installed
 //     file; if it does not, the previous file is put back.
 //
@@ -188,6 +227,9 @@ func install(o InstallOptions, leafPEM []byte, issued hostidentity.Issued, hostU
 			return Result{}, fmt.Errorf("%w: it names the enrolment that is already installed", ErrExists)
 		}
 	}
+	if err := checkEpochAhead(o, old, hadOld, hostURI, issued.Record); err != nil {
+		return Result{}, err
+	}
 	if err := writeAtomic(path, leafPEM); err != nil {
 		return Result{}, err
 	}
@@ -197,6 +239,29 @@ func install(o InstallOptions, leafPEM []byte, issued hostidentity.Issued, hostU
 		return Result{}, errors.Join(fmt.Errorf("%w: the agent would not load it: %v", ErrInstall, err), rerr)
 	}
 	return Result{HostURI: hostURI, Record: issued.Record, KeyPin: issued.KeyPin, NotAfter: issued.Leaf.NotAfter, Replaced: hadOld}, nil
+}
+
+// checkEpochAhead refuses a certificate whose start epoch is not after the
+// host's last start epoch: the one the daemon recorded (FileStartEpoch) and
+// the installed certificate's. The daemon would refuse to re-enrol at it,
+// and installing it would leave the host with a certificate it cannot use.
+func checkEpochAhead(o InstallOptions, old []byte, hadOld bool, hostURI string, next hostidentity.Record) error {
+	last, found, err := ReadStartEpoch(o.PKIDir, trust.KeyFileReader(o.UID))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInstall, err)
+	}
+	if hadOld {
+		if prev, ok := installedRecord(old, hostURI); ok && prev.Epoch() > last {
+			last, found = prev.Epoch(), true
+		}
+	}
+	if found && next.Epoch() <= last && !guard.Off(guard.EnrolEpochAhead) {
+		return fmt.Errorf("%w: %w: the certificate starts at epoch %d and this host's last start epoch is %d; "+
+			"the manager drew the record for a Host that has lost its earlier enrolments (a re-created Host): set the "+
+			"Host's annotation %s to %d or more, wait for its new status.agent.requestURIs, and make a new request",
+			ErrInstall, ErrEpoch, next.Epoch(), last, hostidentity.AnnotationStartEpochFloor, last+1)
+	}
+	return nil
 }
 
 // readInstalled reads the installed certificate file, if there is one. A

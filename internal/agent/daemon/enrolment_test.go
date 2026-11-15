@@ -23,11 +23,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
+	"github.com/projectbeskar/virtrigaud/internal/agent/enrol"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck/hostchecktest"
@@ -169,5 +171,69 @@ func TestStoreOfAnotherHostIsNotReenrolled(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	if hv, err := st.HostView(ctx, 0); err != nil || hv.Enrolment != nil {
 		t.Fatalf("the store was enrolled for another host: %+v %v", hv, err)
+	}
+}
+
+// TestReenrolmentAtExactlyTheCertificatesEpoch: the store re-enrols at the
+// start epoch the certificate's record carries, and the daemon records it for
+// enroll install. A certificate for a new enrolment whose epoch is not after
+// the store's last start epoch is refused on reload; the store is not touched
+// and the running credentials stay.
+func TestReenrolmentAtExactlyTheCertificatesEpoch(t *testing.T) {
+	h := newHost(t)
+	r, _ := h.run()
+	h.installCert(certWithEnrolmentAt(h, 0x31, 7))
+	r.signals <- syscall.SIGHUP
+	waitLog(t, h, "re-enrolled from the host certificate")
+	if got := answerEnrolment(r); len(got) != hostidentity.IDLen || got[0] != 0x31 {
+		t.Fatalf("answer names %x", got)
+	}
+	readEpoch := func() uint64 {
+		e, found, err := enrol.ReadStartEpoch(h.cfg.PKIDir(), os.ReadFile)
+		if err != nil || !found {
+			t.Fatalf("recorded start epoch: %v %v", found, err)
+		}
+		return e
+	}
+	for deadline := time.Now().Add(5 * time.Second); readEpoch() != 7; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("recorded start epoch %d, want 7", readEpoch())
+		}
+	}
+
+	// A new enrolment at epoch 7 (not after 7) and at 5: refused, the store
+	// keeps its enrolment.
+	for i, epoch := range []uint64{7, 5} {
+		h.installCert(certWithEnrolmentAt(h, byte(0x40+i), epoch))
+		r.signals <- syscall.SIGHUP
+		waitLogCount(t, h, "reload refused", i+1)
+		if got := answerEnrolment(r); len(got) != hostidentity.IDLen || got[0] != 0x31 {
+			t.Fatalf("answer after the refused reload names %x", got)
+		}
+	}
+	if !strings.Contains(h.logs.text(), "start epoch is not after") {
+		t.Fatalf("no epoch refusal in the log:\n%s", h.logs.text())
+	}
+	if readEpoch() != 7 {
+		t.Fatal("a refused certificate moved the recorded start epoch")
+	}
+	// At epoch 8 it is accepted.
+	h.installCert(certWithEnrolmentAt(h, 0x50, 8))
+	r.signals <- syscall.SIGHUP
+	waitLogCount(t, h, "re-enrolled from the host certificate", 2)
+	if got := answerEnrolment(r); len(got) != hostidentity.IDLen || got[0] != 0x50 {
+		t.Fatalf("answer names %x", got)
+	}
+}
+
+// waitLogCount waits until sub appears at least n times in the logs.
+func waitLogCount(t *testing.T, h *host, sub string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for strings.Count(h.logs.text(), sub) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%q fewer than %d times in the logs:\n%s", sub, n, h.logs.text())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
