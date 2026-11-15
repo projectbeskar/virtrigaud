@@ -26,7 +26,9 @@ service AgentService {
   // of its current certificate, and certifies the key of the renewal it
   // requested itself.
   rpc InstallRenewedCertificate(InstallRenewedCertificateRequest) returns (InstallRenewedCertificateResponse);
-  // AgentStatus reports the agent's state. It is a plain read.
+  // AgentStatus reports the agent's state. It is a plain read, except that
+  // it may carry the manager's confirmation that the host may discard the
+  // records of frozen predecessor enrolments (confirm_frozen_enrolment_ids).
   rpc AgentStatus(AgentStatusRequest) returns (AgentStatusResponse);
 }
 
@@ -72,6 +74,20 @@ message AgentStatusRequest {
   // answer_nonce is exactly 16 random bytes, fresh for each request,
   // echoed in the HostAnswer.
   bytes answer_nonce = 1;
+  // confirm_frozen_enrolment_ids are 16-byte enrolment ids of frozen
+  // predecessor enrolments whose freeze the manager confirms: it holds no
+  // open operation under them, and the host may discard their records.
+  // Unsigned: the Provider relays it from the host inventory. The agent
+  // acts only on ids it holds as frozen predecessors of
+  // confirm_for_enrolment_id when that is its active enrolment, and ignores
+  // the rest. A confirmation that is false costs only liveness (the
+  // discarded operations are answered UNKNOWN_TO_AGENT), never a second
+  // execution. At most 16 ids. An agent that does not know the field
+  // ignores it.
+  repeated bytes confirm_frozen_enrolment_ids = 2;
+  // confirm_for_enrolment_id is the enrolment the confirmation was made for:
+  // the host's current enrolment as the manager knows it.
+  bytes confirm_for_enrolment_id = 3;
 }
 
 // AgentStatusResponse answers AgentStatus.

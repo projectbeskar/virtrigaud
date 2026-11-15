@@ -49,7 +49,9 @@ type AgentServiceClient interface {
 	// of its current certificate, and certifies the key of the renewal it
 	// requested itself.
 	InstallRenewedCertificate(ctx context.Context, in *InstallRenewedCertificateRequest, opts ...grpc.CallOption) (*InstallRenewedCertificateResponse, error)
-	// AgentStatus reports the agent's state. It is a plain read.
+	// AgentStatus reports the agent's state. It is a plain read, except that
+	// it may carry the manager's confirmation that the host may discard the
+	// records of frozen predecessor enrolments (confirm_frozen_enrolment_ids).
 	AgentStatus(ctx context.Context, in *AgentStatusRequest, opts ...grpc.CallOption) (*AgentStatusResponse, error)
 }
 
@@ -111,7 +113,9 @@ type AgentServiceServer interface {
 	// of its current certificate, and certifies the key of the renewal it
 	// requested itself.
 	InstallRenewedCertificate(context.Context, *InstallRenewedCertificateRequest) (*InstallRenewedCertificateResponse, error)
-	// AgentStatus reports the agent's state. It is a plain read.
+	// AgentStatus reports the agent's state. It is a plain read, except that
+	// it may carry the manager's confirmation that the host may discard the
+	// records of frozen predecessor enrolments (confirm_frozen_enrolment_ids).
 	AgentStatus(context.Context, *AgentStatusRequest) (*AgentStatusResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }
