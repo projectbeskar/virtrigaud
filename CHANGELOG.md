@@ -24,7 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `internal/controller/host_enrolment_request.go`: the issued certificate is refused when its authorised record names another Provider than the Host's now. The `AlreadyEnrolled` denial is removed. New record ids never take the current or a predecessor's id.
 - `docs/host-agent-enrolment.md`, `docs/per-host-agent-development.md`, `docs/operation-grants-manager.md`, `config/rbac/host-enrolment/README.md`: re-keying, the `rekey` verb, who can open a window (`update`/`patch` on the Host, attributed by the API server audit log), start epochs and the floor, refused certificates, predecessors, release-build effects and limits.
-
 - Release builds: the shared record parser accepts the epoch URI; a release agent writes `pki/start-epoch` only for a store a development build enrolled (it enrols nothing itself); `vrtg-agent enroll`, and so the install check, exists only in development builds; no release manager draws records with an epoch. Nothing else changes.
 
 ### Why
