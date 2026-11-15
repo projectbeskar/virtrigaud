@@ -65,9 +65,13 @@ const (
 	// reasonEnrolInFlight: another request for the Host is authorised and
 	// not finished.
 	reasonEnrolInFlight = "EnrolmentInFlight"
-	// reasonEnrolAlreadyEnrolled: the Host is already enrolled; re-enrolment
-	// is not supported by this manager.
-	reasonEnrolAlreadyEnrolled = "AlreadyEnrolled"
+	// reasonEnrolProviderChanged: the Host is enrolled with another Provider
+	// than its own. A re-key never changes the Provider; also the
+	// AgentEnrolled condition reason of such a Host.
+	reasonEnrolProviderChanged = "ProviderChanged"
+	// reasonEnrolTooManyPredecessors: the Host already holds the most
+	// predecessor enrolments whose freeze is not confirmed.
+	reasonEnrolTooManyPredecessors = "TooManyPredecessorEnrolments"
 	// reasonEnrolAuthorised is the Approved condition reason.
 	reasonEnrolAuthorised = "VirtRigaudHostEnrolmentAuthorised"
 )
@@ -197,7 +201,7 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if !host.DeletionTimestamp.IsZero() {
 		return r.deny(ctx, cr, nil, nil, reasonEnrolHostNotFound, fmt.Sprintf("Host %s/%s is being deleted", ns, name))
 	}
-	_, agent, err := hostRunsAgent(ctx, r.Client, host)
+	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
 	if err != nil {
 		return err
 	}
@@ -219,8 +223,12 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 		// no pending record for this Host object.
 		return r.deny(ctx, cr, host, nil, reasonEnrolNoPending, "no enrolment record is drawn for this Host")
 	}
-	if l.state.Current != nil {
-		return r.deny(ctx, cr, host, &l, reasonEnrolAlreadyEnrolled, "the Host is already enrolled")
+	// An enrolled Host may be re-keyed (a new key or a reinstalled or
+	// restored host: a new enrolment of the same identity) under exactly the
+	// rules of a first enrolment, except that a re-key never changes the
+	// Provider and is refused while the predecessor list is full.
+	if reason, msg := l.state.rekeyBlocked(string(provider.UID)); reason != "" {
+		return r.deny(ctx, cr, host, &l, reason, msg)
 	}
 	if a := l.state.Authorised; a != nil && a.RequestUID != string(cr.GetUID()) {
 		live, err := enrolmentRequestLive(ctx, r.Client, r.Config, a)
@@ -275,7 +283,8 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if err := r.Status().Update(ctx, cr); err != nil {
 		return fmt.Errorf("approve request %s: %w", reqName, err)
 	}
-	log.FromContext(ctx).Info("Approved a host-agent enrolment request", "request", reqName, "host", ns+"/"+name, "issuer", iss.Name())
+	log.FromContext(ctx).Info("Approved a host-agent enrolment request", "request", reqName, "host", ns+"/"+name, "issuer", iss.Name(),
+		"rekey", l.state.Current != nil)
 	r.event(host, corev1.EventTypeNormal, eventReasonAgentEnrolmentApproved, "certificate request "+reqName+" approved")
 	return nil
 }
@@ -330,17 +339,25 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 		return err
 	}
 	issued, verr := r.validateIssued(ctx, host, a, chain)
+	if verr == nil {
+		if reason, msg := l.state.rekeyBlocked(a.Record.ProviderUID); reason != "" {
+			verr = fmt.Errorf("%s: %s", reason, msg)
+		}
+	}
+	var replaced string
 	if verr != nil {
 		l.state.LastRejection = &requestOutcome{Request: reqName, Reason: infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected, Message: verr.Error()}
 		// The refused certificate is CA-valid and carries this record, so the
 		// record is retired and never pinned to another key.
 		l.state.retireOpenRecords()
 	} else {
-		l.state.Current = &currentEnrolment{
+		// A re-key moves the replaced enrolment to the predecessors: its
+		// attempts are still asked about and their VMs held, never re-sent.
+		replaced = l.state.rekey(&currentEnrolment{
 			Record:   a.Record,
 			KeyPins:  []string{a.KeyPin},
 			NotAfter: metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second)),
-		}
+		})
 		l.state.retire(a.Record.EnrolmentID)
 		l.state.Pending, l.state.Authorised, l.state.LastDenial, l.state.LastRejection = nil, nil, nil, nil
 	}
@@ -361,6 +378,17 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 		r.event(host, corev1.EventTypeWarning, eventReasonAgentCertRejected, "the certificate issued for request "+reqName+" was refused")
 		return nil
 	}
+	if replaced != "" {
+		// Audit: identifiers and the public key pin only, never key or
+		// certificate material.
+		log.FromContext(ctx).Info("Re-keyed a host agent: the new key is pinned and the replaced enrolment is a predecessor",
+			"request", reqName, "host", ns+"/"+name, "enrolmentID", a.Record.EnrolmentID, "replacedEnrolmentID", replaced,
+			"keyPin", a.KeyPin, "mintEpoch", l.state.Current.mintEpoch(), "predecessors", len(l.state.PredecessorEnrolmentIDs))
+		r.event(host, corev1.EventTypeNormal, eventReasonAgentRekeyed, fmt.Sprintf("agent re-keyed from request %s: enrolment %s "+
+			"replaces %s, which is kept as a predecessor (its operations are asked about, never re-sent)", reqName,
+			a.Record.EnrolmentID, replaced))
+		return nil
+	}
 	log.FromContext(ctx).Info("Pinned a host-agent key", "request", reqName, "host", ns+"/"+name, "enrolmentID", a.Record.EnrolmentID)
 	r.event(host, corev1.EventTypeNormal, eventReasonAgentEnrolled, "agent key pinned from request "+reqName)
 	return nil
@@ -373,8 +401,12 @@ func (r *HostEnrolmentRequestReconciler) validateIssued(ctx context.Context, hos
 	if host.Spec.Revoked || !host.DeletionTimestamp.IsZero() || host.Spec.Identity == "" {
 		return hostidentity.Issued{}, errors.New("the Host is revoked, deleting or has no identity")
 	}
-	if _, agent, err := hostRunsAgent(ctx, r.Client, host); err != nil || !agent {
+	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
+	if err != nil || !agent {
 		return hostidentity.Issued{}, errors.New("the Host's Provider does not run a per-host agent")
+	}
+	if a.Record.ProviderUID != string(provider.UID) {
+		return hostidentity.Issued{}, errors.New("the authorised record names another Provider than the Host's")
 	}
 	rec, err := a.Record.toRecord()
 	if err != nil {

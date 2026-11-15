@@ -132,6 +132,21 @@ const hostEnrolmentComponent = "host-agent-pins"
 // practice).
 const maxRetiredEnrolmentIDs = 256
 
+// maxPredecessorEnrolmentIDs bounds the predecessor enrolments kept per Host
+// after re-keys. A predecessor is listed until the host has confirmed its
+// freeze (not delivered yet), so that attempts under it are still asked
+// about and their VMs held. A re-key that would exceed the bound is refused
+// rather than dropping a predecessor, whose attempts would then read as
+// tampered.
+const maxPredecessorEnrolmentIDs = 8
+
+// baseMintEpochCounter is the epoch counter of the grants issued under a
+// Host's first enrolment. Each re-key issues the grants of the new
+// enrolment under the next counter, because the host starts the new
+// enrolment at the next start epoch and refuses a first delivery minted
+// below it.
+const baseMintEpochCounter = 1
+
 // Label keys and values of manager-owned objects.
 const (
 	k8sLabelComponent      = "app.kubernetes.io/component"
@@ -147,6 +162,7 @@ const (
 	eventReasonAgentCertRejected      = "AgentCertificateRejected"
 	eventReasonAgentRevoked           = "AgentRevoked"
 	eventReasonAgentRecordRetired     = "AgentEnrolmentRecordRetired"
+	eventReasonAgentRekeyed           = "AgentRekeyed"
 )
 
 // errForeignPinsSecret is returned when a Secret with a Host's pins Secret
@@ -394,9 +410,10 @@ type hostEnrolmentState struct {
 	// the host; none is drawn again.
 	RetiredEnrolmentIDs []string `json:"retiredEnrolmentIDs,omitempty"`
 	// PredecessorEnrolmentIDs are earlier enrolments the host still holds
-	// frozen after a re-enrolment: an attempt under one may be asked about by
-	// op_id, never re-sent. Read by the manager; written by the re-enrolment
-	// flow (empty until then).
+	// frozen after a re-key, oldest first: an attempt under one may be asked
+	// about by op_id, never re-sent. A re-key appends the enrolment it
+	// replaces; an entry is removed only once the host has confirmed its
+	// freeze (later work). At most maxPredecessorEnrolmentIDs.
 	PredecessorEnrolmentIDs []string `json:"predecessorEnrolmentIDs,omitempty"`
 	// LastDenial is the last denied request of an authorised requester, for
 	// the Host condition.
@@ -434,6 +451,52 @@ type currentEnrolment struct {
 	Record   enrolmentRecord `json:"record"`
 	KeyPins  []string        `json:"keyPins"`
 	NotAfter metav1.Time     `json:"notAfter"`
+	// MintEpoch is the epoch counter of the grants issued under this
+	// enrolment; zero (a first enrolment, or a state written before
+	// re-keys existed) is baseMintEpochCounter.
+	MintEpoch uint64 `json:"mintEpoch,omitempty"`
+}
+
+// mintEpoch returns the epoch counter of the grants issued under c.
+func (c *currentEnrolment) mintEpoch() uint64 {
+	if c == nil || c.MintEpoch < baseMintEpochCounter {
+		return baseMintEpochCounter
+	}
+	return c.MintEpoch
+}
+
+// rekeyBlocked returns why the Host's enrolment cannot be re-keyed for
+// providerUID now (empty: it can, or it is not enrolled). A re-key never
+// changes the Provider (a Provider change is a revocation and a new Host),
+// and is refused while the predecessor list is full.
+func (st *hostEnrolmentState) rekeyBlocked(providerUID string) (reason, message string) {
+	c := st.Current
+	switch {
+	case c == nil:
+		return "", ""
+	case c.Record.ProviderUID != providerUID:
+		return reasonEnrolProviderChanged, "the Host is enrolled with another Provider: a re-key never changes the Provider; " +
+			"revoke this Host and create a new one for the new Provider"
+	case len(st.PredecessorEnrolmentIDs) >= maxPredecessorEnrolmentIDs:
+		return reasonEnrolTooManyPredecessors, fmt.Sprintf("the Host already holds %d predecessor enrolments whose freeze is not "+
+			"confirmed; no further re-key until one is", len(st.PredecessorEnrolmentIDs))
+	}
+	return "", ""
+}
+
+// rekey replaces the current enrolment with next: the replaced enrolment
+// becomes a predecessor (its attempts are still asked about, its VMs held)
+// and next's grants are issued under the next epoch counter.
+func (st *hostEnrolmentState) rekey(next *currentEnrolment) (replaced string) {
+	if prev := st.Current; prev != nil {
+		replaced = prev.Record.EnrolmentID
+		next.MintEpoch = prev.mintEpoch() + 1
+		if !slices.Contains(st.PredecessorEnrolmentIDs, replaced) {
+			st.PredecessorEnrolmentIDs = append(st.PredecessorEnrolmentIDs, replaced)
+		}
+	}
+	st.Current = next
+	return replaced
 }
 
 // requestOutcome names a request and the reason of its outcome.
@@ -689,7 +752,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	if host.Spec.Identity == "" {
-		return ctrl.Result{}, r.mirror(ctx, host, nil)
+		return ctrl.Result{}, r.mirror(ctx, host, nil, "")
 	}
 	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
 	if err != nil {
@@ -727,7 +790,17 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				r.event(host, corev1.EventTypeNormal, eventReasonAgentRecordRetired, "the enrolment record of abandoned request "+a.Request+" is retired")
 			}
 		}
-		if st.Current == nil {
+		// A record is drawn for a first enrolment and, once enrolled, for a
+		// re-key, which an enrolment administrator may request under the
+		// same rules. A re-key never changes the Provider: while the Host
+		// is enrolled with another Provider than its own, no record is
+		// drawn (a Provider change is a revocation and a new Host).
+		if blocked, _ := st.rekeyBlocked(string(provider.UID)); blocked == reasonEnrolProviderChanged {
+			if st.Pending != nil || st.Authorised != nil {
+				st.retireOpenRecords()
+				changed = true
+			}
+		} else {
 			if p := st.Pending; p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID) {
 				if p != nil {
 					st.retireOpenRecords()
@@ -753,7 +826,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			res.RequeueAfter = d + time.Second
 		}
 	}
-	return res, r.mirror(ctx, host, st)
+	return res, r.mirror(ctx, host, st, string(provider.UID))
 }
 
 // forgetGoneHost deletes the pins Secret of a Host that no longer exists.
@@ -810,9 +883,10 @@ func (r *HostEnrolmentReconciler) drawEnrolmentID(retired []string) (string, err
 }
 
 // mirror writes Host.status.agent and the AgentEnrolled condition from the
-// state (nil: no state, identity missing). The patch carries the read
-// resourceVersion, so it never overwrites a concurrent status writer.
-func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState) error {
+// state (nil: no state, identity missing); providerUID is the UID of the
+// Host's Provider now. The patch carries the read resourceVersion, so it
+// never overwrites a concurrent status writer.
+func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState, providerUID string) error {
 	base := host.DeepCopy()
 	cond := metav1.Condition{Type: infravirtrigaudiov1beta1.HostConditionAgentEnrolled, Status: metav1.ConditionFalse, ObservedGeneration: host.Generation}
 	var agent *infravirtrigaudiov1beta1.HostAgentStatus
@@ -840,6 +914,9 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 		switch {
 		case host.Spec.Revoked:
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentRevoked, "spec.revoked is true; the enrolment is retired and no enrolment is authorised"
+		case st.Current != nil && st.Current.Record.ProviderUID != providerUID:
+			cond.Reason, cond.Message = reasonEnrolProviderChanged, "the Host is enrolled with another Provider than its own; "+
+				"it is not used and cannot be re-keyed: revoke it and create a new Host for the new Provider"
 		case st.Current != nil && !st.Current.NotAfter.After(r.now()):
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired, "the pinned agent certificate has expired"
 		case st.Current != nil:

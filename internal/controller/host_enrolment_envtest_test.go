@@ -19,7 +19,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -32,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -40,6 +43,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 )
 
 const (
@@ -398,15 +402,148 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
-	It("denies any further request for an enrolled Host and keeps its pins", func() {
+	It("re-keys an enrolled Host for an administrator: the new key replaces the old, which becomes a predecessor", func() {
+		e := newEnv()
+		rec := record.NewFakeRecorder(16)
+		e.reqR.Recorder = rec
+		createHost(e, "host-a", "serial-0001", "ch")
+		pin1, _ := enrol(e, "host-a")
+		st1, _ := loadState(e, "host-a")
+		first := st1.Current.Record.EnrolmentID
+
+		// Once enrolled, a record for a re-key is published.
+		h := reconcileHost(e, "host-a")
+		Expect(h.Status.Agent.PendingEnrolmentID).To(MatchRegexp(`^[0-9a-f]{32}$`))
+		Expect(h.Status.Agent.PendingEnrolmentID).NotTo(Equal(first))
+		Expect(h.Status.Agent.EnrolmentID).To(Equal(first))
+		Expect(meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).
+			To(Equal(infravirtrigaudiov1beta1.HostReasonAgentEnrolled), "the Host stays enrolled while a re-key is possible")
+		second := h.Status.Agent.PendingEnrolmentID
+
+		pin2, _ := enrol(e, "host-a")
+		Expect(pin2).NotTo(Equal(pin1))
+		st, sec := loadState(e, "host-a")
+		Expect(st.Current.Record.EnrolmentID).To(Equal(second))
+		Expect(st.Current.KeyPins).To(Equal([]string{pin2}), "the old key is no longer pinned")
+		Expect(st.Current.mintEpoch()).To(Equal(uint64(2)))
+		Expect(st.PredecessorEnrolmentIDs).To(Equal([]string{first}))
+		Expect(st.RetiredEnrolmentIDs).To(ContainElements(first, second), "neither id is ever drawn again")
+		Expect(string(sec.Data[hostEnrolmentStateKey])).NotTo(ContainSubstring("PRIVATE KEY"))
+
+		// The audit event names identifiers only.
+		var rekeyed string
+		for len(rec.Events) > 0 {
+			if ev := <-rec.Events; strings.Contains(ev, eventReasonAgentRekeyed) {
+				rekeyed = ev
+			}
+		}
+		Expect(rekeyed).To(ContainSubstring(second))
+		Expect(rekeyed).To(ContainSubstring(first))
+		Expect(rekeyed).NotTo(ContainSubstring("BEGIN"))
+
+		// The grant source names the new enrolment and its epoch, and keeps
+		// the replaced one as a predecessor.
+		src := &PinsHostTrust{Client: k8sClient, Config: e.cfg, Epoch: operation.Epoch{Counter: baseMintEpochCounter, Holder: e.cfg.InstallID}}
+		trust, err := src.HostTrust(ctx, e.provider, "host-a")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hex.EncodeToString(trust.Enrolment.EnrolmentID)).To(Equal(second))
+		Expect(trust.Enrolment.Epoch.Counter).To(Equal(uint64(2)))
+		Expect(trust.Predecessors).To(HaveLen(1))
+		Expect(hex.EncodeToString(trust.Predecessors[0])).To(Equal(first))
+		creds, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
+		Expect(reason).To(BeEmpty())
+		Expect(creds.AgentTLS.KeyPins).To(Equal([]string{pin2}), "the inventory renders the new key only")
+
+		// A second re-key: the next epoch, both predecessors kept.
+		enrol(e, "host-a")
+		st, _ = loadState(e, "host-a")
+		Expect(st.Current.mintEpoch()).To(Equal(uint64(3)))
+		Expect(st.PredecessorEnrolmentIDs).To(Equal([]string{first, second}))
+	})
+
+	It("refuses a re-key requested by anyone but an authorised administrator and keeps the pins", func() {
 		e := newEnv()
 		createHost(e, "host-a", "serial-0001", "ch")
 		pin, _ := enrol(e, "host-a")
-		csr := hostidentitytest.NewCSR(GinkgoT(), hostidentitytest.NewKey(GinkgoT()), hostidentitytest.CSROptions{})
-		cr := reconcileCR(e, submit(e, "host-a", csr, adminOpts()))
-		expectDenied(cr, reasonEnrolAlreadyEnrolled)
+		h := reconcileHost(e, "host-a")
+		notAdmin := adminOpts()
+		notAdmin.username, notAdmin.groups = "bob", []string{"system:authenticated"}
+		expectDenied(reconcileCR(e, submit(e, "host-a", csrFor(h, nil), notAdmin)), hostidentity.ReasonRequesterNotAuthorised)
+		noGrant := adminOpts()
+		noGrant.username = "carol"
+		expectDenied(reconcileCR(e, submit(e, "host-a", csrFor(h, nil), noGrant)), reasonEnrolNotAllowedForHost)
 		st, _ := loadState(e, "host-a")
 		Expect(st.Current.KeyPins).To(Equal([]string{pin}))
+		Expect(st.PredecessorEnrolmentIDs).To(BeEmpty())
+	})
+
+	It("refuses a re-key that would change the Provider; the Host is reported and not re-enrolled", func() {
+		e := newEnv()
+		other := envtestProvider(e.hostNS, "ch2", nil)
+		other.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
+		other.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologyCluster
+		Expect(k8sClient.Create(ctx, other)).To(Succeed())
+		createHost(e, "host-a", "serial-0001", "ch")
+		pin, _ := enrol(e, "host-a")
+		h := reconcileHost(e, "host-a")
+		staleURIs := h.Status.Agent.RequestURIs
+
+		h.Spec.ProviderRef.Name = "ch2"
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		h = reconcileHost(e, "host-a")
+		Expect(meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).
+			To(Equal(reasonEnrolProviderChanged))
+		Expect(h.Status.Agent.PendingEnrolmentID).To(BeEmpty(), "no record is drawn for another Provider")
+		csr := hostidentitytest.NewCSR(GinkgoT(), hostidentitytest.NewKey(GinkgoT()), hostidentitytest.CSROptions{URIs: staleURIs})
+		expectDenied(reconcileCR(e, submit(e, "host-a", csr, adminOpts())), reasonEnrolProviderChanged)
+		st, _ := loadState(e, "host-a")
+		Expect(st.Current.KeyPins).To(Equal([]string{pin}))
+		Expect(st.PredecessorEnrolmentIDs).To(BeEmpty())
+		_, err := (&PinsHostTrust{Client: k8sClient, Config: e.cfg, Epoch: operation.Epoch{Counter: 1, Holder: e.cfg.InstallID}}).
+			HostTrust(ctx, other, "host-a")
+		Expect(err).To(MatchError(operation.ErrNoEnrolment), "the new Provider never trusts the old enrolment")
+	})
+
+	It("refuses a replay of an earlier enrolment request after a re-key", func() {
+		e := newEnv()
+		createHost(e, "host-a", "serial-0001", "ch")
+		h := reconcileHost(e, "host-a")
+		key := hostidentitytest.NewKey(GinkgoT())
+		oldCSR := hostidentitytest.NewCSR(GinkgoT(), key, hostidentitytest.CSROptions{CommonName: "host-a", URIs: h.Status.Agent.RequestURIs})
+		oldCR := reconcileCR(e, submit(e, "host-a", oldCSR, adminOpts()))
+		issue(e, oldCR, oldCSR, hostidentitytest.IssueOptions{})
+		oldCR = reconcileCR(e, oldCR)
+		pin2, _ := enrol(e, "host-a") // the re-key
+		st, _ := loadState(e, "host-a")
+
+		// The old, completed request is reconciled again: nothing changes.
+		reconcileCR(e, oldCR)
+		// The old request sent again (same CSR, the replaced record), while
+		// a new record is published for the next re-key: denied.
+		Expect(reconcileHost(e, "host-a").Status.Agent.PendingEnrolmentID).NotTo(BeEmpty())
+		expectDenied(reconcileCR(e, submit(e, "host-a", oldCSR, adminOpts())), hostidentity.ReasonSubjectAltNames)
+		after, _ := loadState(e, "host-a")
+		Expect(after.Current).To(Equal(st.Current))
+		Expect(after.Current.KeyPins).To(Equal([]string{pin2}))
+		Expect(after.PredecessorEnrolmentIDs).To(Equal(st.PredecessorEnrolmentIDs))
+	})
+
+	It("refuses a re-key while the predecessor list is full, and drops none", func() {
+		e := newEnv()
+		createHost(e, "host-a", "serial-0001", "ch")
+		pin, _ := enrol(e, "host-a")
+		h := reconcileHost(e, "host-a")
+		l, err := loadHostEnrolment(ctx, k8sClient, e.cfg, h)
+		Expect(err).NotTo(HaveOccurred())
+		for i := 0; i < maxPredecessorEnrolmentIDs; i++ {
+			l.state.PredecessorEnrolmentIDs = append(l.state.PredecessorEnrolmentIDs, fmt.Sprintf("%032x", i+1))
+		}
+		Expect(saveHostEnrolment(ctx, k8sClient, e.cfg, h, &l)).To(Succeed())
+		h = reconcileHost(e, "host-a")
+		expectDenied(reconcileCR(e, submit(e, "host-a", csrFor(h, nil), adminOpts())), reasonEnrolTooManyPredecessors)
+		st, _ := loadState(e, "host-a")
+		Expect(st.Current.KeyPins).To(Equal([]string{pin}))
+		Expect(st.PredecessorEnrolmentIDs).To(HaveLen(maxPredecessorEnrolmentIDs))
 	})
 
 	It("refuses an issued certificate that does not match the authorisation and pins nothing", func() {
