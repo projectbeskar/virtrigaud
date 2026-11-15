@@ -654,7 +654,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		hb.Annotations = map[string]string{hostidentity.AnnotationStartEpochFloor: "40"}
 		Expect(k8sClient.Update(ctx, hb)).To(Succeed())
 		hb = reconcileHost(e, "host-b")
-		Expect(hb.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIEpochPrefix+"40"))
+		Expect(hb.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIEpochPrefix + "40"))
 		var applied bool
 		for len(rec.Events) > 0 {
 			if ev := <-rec.Events; strings.Contains(ev, "starts at epoch 40") {
