@@ -293,7 +293,9 @@ func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusReq
 	}
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
-	h.f.statuses = append(h.f.statuses, proto.Clone(req).(*agentv1.AgentStatusRequest))
+	if c, ok := proto.Clone(req).(*agentv1.AgentStatusRequest); ok {
+		h.f.statuses = append(h.f.statuses, c)
+	}
 	return &agentv1.AgentStatusResponse{}, nil
 }
 
