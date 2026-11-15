@@ -20,14 +20,20 @@ package cloudhypervisor
 
 import (
 	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
+	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -78,10 +84,53 @@ func TestFreezeConfirmationRelayed(t *testing.T) {
 	}, testTimeout, 10*time.Millisecond)
 	assert.GreaterOrEqual(t, len(a.statusRequests()), 3, "a new connection relays it again")
 
-	// Malformed: the current enrolment named as a predecessor.
+	// Malformed (the current enrolment named as a predecessor): dropped, the
+	// host stays routed and nothing is relayed.
+	before := len(a.statusRequests())
 	require.NoError(t, prov.Reconcile(withFreeze(cur)))
-	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
-	requireHostUnavailable(t, err, CauseNotFronted)
+	a.lis.dropAll()
+	require.Eventually(t, func() bool {
+		_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		return err == nil
+	}, testTimeout, 10*time.Millisecond, "the host stays routed")
+	assert.Len(t, a.statusRequests(), before, "an invalid confirmation is not relayed")
+}
+
+// TestFreezeConfirmationRelayBacksOff: a failed relay is tried again only
+// after a backoff that grows, not with every call; the calls themselves go
+// through.
+func TestFreezeConfirmationRelayBacksOff(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	a.statusFails.Store(true)
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+	h := a.entry()
+	h.FreezeConfirmation = &hostsecret.FreezeConfirmation{ForEnrolmentID: strings.Repeat("a1", 16), EnrolmentIDs: []string{strings.Repeat("b2", 16)}}
+	prov := newProvider(t, p, Options{Now: clock})
+	require.NoError(t, prov.Reconcile(hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion, Hosts: []hostsecret.Host{h}}))
+	client := providerv1.NewProviderClient(served(t, prov))
+	describe := func() {
+		t.Helper()
+		_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		require.NoError(t, err)
+	}
+	describe()
+	describe()
+	assert.EqualValues(t, 1, a.statusCalls.Load(), "not again before the backoff")
+	advance(freezeRetryMin + time.Second)
+	describe()
+	assert.EqualValues(t, 2, a.statusCalls.Load())
+	advance(freezeRetryMin + time.Second)
+	describe()
+	assert.EqualValues(t, 2, a.statusCalls.Load(), "the backoff doubled")
+	a.statusFails.Store(false)
+	advance(2 * freezeRetryMin)
+	describe()
+	describe()
+	assert.EqualValues(t, 3, a.statusCalls.Load(), "delivered, then not again on this connection")
 }
 
 // TestFreezeConfirmationToAnAgentThatServesNoStatus: an agent that refuses
@@ -101,4 +150,16 @@ func TestFreezeConfirmationToAnAgentThatServesNoStatus(t *testing.T) {
 		require.NoError(t, err, "call %d", i)
 	}
 	assert.Empty(t, a.statusRequests())
+	assert.EqualValues(t, 1, a.statusCalls.Load(), "Unimplemented: not asked again on the same connection")
+}
+
+// TestFreezeConfirmationBoundsAgree: the inventory, the agent and the wire
+// comment agree on the most ids one confirmation may carry.
+func TestFreezeConfirmationBoundsAgree(t *testing.T) {
+	assert.Equal(t, hostsecret.MaxFreezeConfirmations, opstore.MaxFreezeConfirmations)
+	f := agentv1.File_agent_v1_agent_proto.Messages().ByName("AgentStatusRequest").Fields().ByName("confirm_frozen_enrolment_ids")
+	require.NotNil(t, f)
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "proto", "agent", "v1", "agent.proto"))
+	require.NoError(t, err)
+	assert.Contains(t, string(src), fmt.Sprintf("At most %d ids.", opstore.MaxFreezeConfirmations))
 }

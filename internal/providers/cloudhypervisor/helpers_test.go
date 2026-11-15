@@ -175,6 +175,10 @@ type fakeAgent struct {
 	helloBlocks atomic.Bool
 	// noStatus makes AgentStatus Unimplemented (an agent that serves none).
 	noStatus atomic.Bool
+	// statusFails makes AgentStatus fail with Internal.
+	statusFails atomic.Bool
+	// statusCalls counts AgentStatus calls, answered or not.
+	statusCalls atomic.Int32
 
 	mu       sync.Mutex
 	statuses []*agentv1.AgentStatusRequest
@@ -288,8 +292,12 @@ func (h *helloServer) Hello(ctx context.Context, req *agentv1.HelloRequest) (*ag
 
 // AgentStatus records a freeze confirmation the Provider relays.
 func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusRequest) (*agentv1.AgentStatusResponse, error) {
+	h.f.statusCalls.Add(1)
 	if h.f.noStatus.Load() {
 		return nil, status.Error(codes.Unimplemented, "not served")
+	}
+	if h.f.statusFails.Load() {
+		return nil, status.Error(codes.Internal, "failed")
 	}
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()

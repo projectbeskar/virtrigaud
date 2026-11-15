@@ -23,6 +23,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strings"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 )
@@ -45,7 +49,8 @@ func (e *hostEntry) pendingFreeze(gen uint64) (forEnrolment []byte, ids [][]byte
 		return nil, nil, "", false
 	}
 	key = freezeKey(f.ForEnrolmentID, f.EnrolmentIDs)
-	if e.freezeDeliveredGen == gen && e.freezeDeliveredKey == key {
+	if (e.freezeDeliveredGen == gen && e.freezeDeliveredKey == key) || e.freezeUnsupportedGen == gen ||
+		e.opts.Now().Before(e.freezeNextTry) {
 		return nil, nil, "", false
 	}
 	forEnrolment, err := hex.DecodeString(f.ForEnrolmentID)
@@ -68,7 +73,32 @@ func (e *hostEntry) freezeDelivered(gen uint64, key string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.freezeDeliveredGen, e.freezeDeliveredKey = gen, key
+	e.freezeFailures, e.freezeNextTry = 0, time.Time{}
 }
+
+// freezeFailed records a failed relay on connection gen: an agent that
+// answers Unimplemented does not support it on that connection; any other
+// failure backs off, from freezeRetryMin doubling up to freezeRetryMax.
+func (e *hostEntry) freezeFailed(gen uint64, unsupported bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if unsupported {
+		e.freezeUnsupportedGen = gen
+		return
+	}
+	wait := freezeRetryMin << min(e.freezeFailures, 8)
+	if wait > freezeRetryMax {
+		wait = freezeRetryMax
+	}
+	e.freezeFailures++
+	e.freezeNextTry = e.opts.Now().Add(wait)
+}
+
+// Relay backoff bounds.
+const (
+	freezeRetryMin = 10 * time.Second
+	freezeRetryMax = 10 * time.Minute
+)
 
 // relayFreeze delivers the host's freeze confirmation, if it has one not yet
 // delivered on the current connection, with an agent.v1 AgentStatus before
@@ -93,7 +123,13 @@ func (p *Provider) relayFreeze(ctx context.Context, e *hostEntry) {
 	req := &agentv1.AgentStatusRequest{AnswerNonce: nonce, ConfirmForEnrolmentId: forEnrolment, ConfirmFrozenEnrolmentIds: ids}
 	cs, err := p.pool.invokeChecked(ctx, e, agentv1.AgentService_AgentStatus_FullMethodName, req, &agentv1.AgentStatusResponse{}, nil, true)
 	if err != nil {
-		p.log.Info("freeze confirmation not relayed; it is sent again with a later call", "host", e.id, "error", err.Error())
+		unsupported := status.Code(err) == codes.Unimplemented
+		e.freezeFailed(gen, unsupported)
+		if unsupported {
+			p.log.Info("the host's agent does not take freeze confirmations; none is relayed on this connection", "host", e.id)
+			return
+		}
+		p.log.Info("freeze confirmation not relayed; it is sent again later", "host", e.id, "error", err.Error())
 		return
 	}
 	e.freezeDelivered(cs.gen, key)

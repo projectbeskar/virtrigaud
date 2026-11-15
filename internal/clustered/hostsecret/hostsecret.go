@@ -193,7 +193,9 @@ type FreezeConfirmation struct {
 // enrolmentIDRE is the shape of an enrolment id in a FreezeConfirmation.
 var enrolmentIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-// Validate checks a FreezeConfirmation's shape; the error echoes no value.
+// Validate checks a FreezeConfirmation's shape; the error echoes no value. A
+// consumer drops an invalid one and keeps the host: it is an optional
+// instruction, never part of how the host is reached.
 func (f FreezeConfirmation) Validate() error {
 	if !enrolmentIDRE.MatchString(f.ForEnrolmentID) {
 		return fmt.Errorf("%w: freeze confirmation: the current enrolment id is malformed", ErrInvalidCredentials)
@@ -368,11 +370,6 @@ func ValidateAgentHost(h Host) error {
 	ns, name, ok := strings.Cut(rest, "/")
 	if !ok || ns == "" || name != h.ID || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return fmt.Errorf("host %q: %w: agent expected SAN does not name this host", h.ID, ErrInvalidCredentials)
-	}
-	if f := h.FreezeConfirmation; f != nil {
-		if err := f.Validate(); err != nil {
-			return fmt.Errorf("host %q: %w", h.ID, err)
-		}
 	}
 	return nil
 }
