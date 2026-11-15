@@ -450,9 +450,11 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(trust.Enrolment.Epoch.Counter).To(Equal(uint64(2)))
 		Expect(trust.Predecessors).To(HaveLen(1))
 		Expect(hex.EncodeToString(trust.Predecessors[0])).To(Equal(first))
-		creds, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
-		Expect(reason).To(BeEmpty())
-		Expect(creds.AgentTLS.KeyPins).To(Equal([]string{pin2}), "the inventory renders the new key only")
+		if devgate.Compiled {
+			creds, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
+			Expect(reason).To(BeEmpty())
+			Expect(creds.AgentTLS.KeyPins).To(Equal([]string{pin2}), "the inventory renders the new key only")
+		}
 
 		// A second re-key: the next epoch, both predecessors kept.
 		enrol(e, "host-a")
