@@ -52,31 +52,46 @@ const (
 
 // getHostInfo is the heartbeat's host read. For a Provider whose type
 // requires operation identity, with signed host answers configured, it is a
-// GetHostInfo that asks the host for a signed host answer, which is verified
-// and recorded (the VirtualMachine controller signs nothing for a host
-// without a recent one); every other Provider is read as before.
+// GetHostInfo that asks the host for a signed host answer with its host
+// inventory, which is verified and recorded (the VirtualMachine controller
+// signs nothing for a host without a recent one); every other Provider is
+// read as before. The inventory observation says what the heartbeat learnt
+// of the host's inventory (applyHostInventory).
 func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
-	provider *infravirtrigaudiov1beta1.Provider, instance contracts.Provider) (contracts.HostInfo, error) {
-	if !identityRequired(provider) || r.HostAnswers == nil {
-		return instance.GetHostInfo(ctx, host.Name)
+	provider *infravirtrigaudiov1beta1.Provider, instance contracts.Provider) (contracts.HostInfo, inventoryObservation, error) {
+	if !identityRequired(provider) {
+		info, err := instance.GetHostInfo(ctx, host.Name)
+		return info, inventoryObservation{}, err
+	}
+	obs := inventoryObservation{inScope: true}
+	if r.HostAnswers == nil {
+		obs.noAnswer = "per-host agent enrolment is not configured on this manager, so the host's answers cannot be verified"
+		info, err := instance.GetHostInfo(ctx, host.Name)
+		return info, obs, err
 	}
 	reader, ok := instance.(contracts.HostAnswerReader)
 	if !ok {
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing,
 			"the Provider's client cannot ask for signed host answers")
-		return instance.GetHostInfo(ctx, host.Name)
+		obs.noAnswer = "the Provider's client cannot ask for signed host answers"
+		info, err := instance.GetHostInfo(ctx, host.Name)
+		return info, obs, err
 	}
-	info, v, verdict, err := r.HostAnswers.RefreshHostAnswer(ctx, provider, reader, host.Name)
+	refresh, err := r.HostAnswers.refreshHost(ctx, provider, reader, host.Name)
 	switch {
 	case err != nil && errors.Is(err, errHostTrust):
 		log.FromContext(ctx).Info("No signed host answer can be verified for the host", "host", host.Name, "error", err.Error())
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerNoTrust,
 			"the manager holds no enrolment, pins or CA for this host, so its answers cannot be verified; nothing new is signed for it")
-		return instance.GetHostInfo(ctx, host.Name)
+		obs.noAnswer = "the manager holds no enrolment, pins or CA for this host, so its answers cannot be verified"
+		info, gerr := instance.GetHostInfo(ctx, host.Name)
+		return info, obs, gerr
 	case err != nil:
-		return info, err
+		return refresh.info, obs, err
 	}
-	switch verdict {
+	obs.refresh = &refresh
+	v := refresh.answer
+	switch refresh.verdict {
 	case answerRegressed:
 		setHostCondition(host, HostConditionAgentStoreRegressed, metav1.ConditionTrue, reasonHostStoreRegressed,
 			"the host's operation store was replaced, rolled back or forked since the manager last verified it; "+
@@ -92,7 +107,7 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing,
 			"the host's answer was missing or failed verification; nothing new is signed for it")
 	}
-	return info, nil
+	return refresh.info, obs, nil
 }
 
 // setHostCondition upserts a Host condition with ObservedGeneration.

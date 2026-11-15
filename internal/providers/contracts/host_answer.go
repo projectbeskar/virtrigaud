@@ -60,6 +60,19 @@ type OperationAnswerQuery struct {
 	ContinuitySeq uint64
 }
 
+// HostAnswerQuery names one host for a GetHostInfo that asks for a signed
+// answer.
+type HostAnswerQuery struct {
+	// HostID is the host.
+	HostID string
+	// ContinuitySeq is as in OperationAnswerQuery.
+	ContinuitySeq uint64
+	// InventoryVersion asks for the host inventory in the signed answer: the
+	// highest inventory version the caller implements, or 0 for none. The
+	// signed inventory echoes it.
+	InventoryVersion uint32
+}
+
 // VMAnswerQuery names one VM placement for a Describe that asks for a signed
 // answer.
 type VMAnswerQuery struct {
@@ -85,7 +98,7 @@ type HostAnswerReader interface {
 	OperationAnswer(ctx context.Context, q OperationAnswerQuery) (TaskStatus, SignedRead, error)
 	// VMAnswer asks the host about one VM placement (Describe).
 	VMAnswer(ctx context.Context, q VMAnswerQuery) (DescribeResponse, SignedRead, error)
-	// HostAnswer asks the host about itself (GetHostInfo), without an
-	// inventory.
-	HostAnswer(ctx context.Context, hostID string, continuitySeq uint64) (HostInfo, SignedRead, error)
+	// HostAnswer asks the host about itself (GetHostInfo), with its host
+	// inventory when q.InventoryVersion is at least 1.
+	HostAnswer(ctx context.Context, q HostAnswerQuery) (HostInfo, SignedRead, error)
 }

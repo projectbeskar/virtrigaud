@@ -328,7 +328,11 @@ Provider that lowers the requested version in transit is caught, and requires
 `inventory_version` to be the lower of the two. A field, enum value or reason added to
 the inventory later is used only when `inventory_version` is at least the version that
 introduced it. An answer without `inventory` to a request that asked for one is still a
-valid answer for every other purpose; it only means that no inventory is known.
+valid answer for every other purpose; it only means that no inventory is known. A manager asks for
+the inventory on every signed `GetHostInfo` to a host of a Provider whose type runs a
+per-host agent, whatever agent version the host last reported, except during a short
+backoff after the agent signed an inventory that breaks a field rule
+([`host-inventory-manager.md`](host-inventory-manager.md#asking)).
 
 **Bounds.** At most 32 components, 8 files per component and 64 files in all, 32
 features and 16 unexpected extensions; the encoded `HostInventory` is at most 32 KiB,

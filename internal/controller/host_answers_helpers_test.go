@@ -20,7 +20,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
@@ -39,6 +41,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
+	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -117,6 +120,29 @@ func (h *testHost) sign(t testing.TB, body proto.Message) *contracts.SignedAnswe
 	}
 	return &contracts.SignedAnswer{BodyType: blob.GetBodyType(), Body: blob.GetBody(), Signature: blob.GetSignature(),
 		SignerCertificate: blob.GetSignerCertificate()}
+}
+
+// signRaw signs body as a host would, without the agent's checks of what it
+// signs.
+func (h *testHost) signRaw(t testing.TB, body proto.Message) *contracts.SignedAnswer {
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	bodyType := string(body.ProtoReflect().Descriptor().FullName())
+	m, err := hostidentity.AnswerSignatureInput(bodyType, raw)
+	if err != nil {
+		t.Fatalf("signature input: %v", err)
+	}
+	d := sha256.Sum256(m)
+	sig, err := ecdsa.SignASN1(rand.Reader, h.key, d[:])
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if sig, err = grantverify.NormalizeLowS(sig, elliptic.P256()); err != nil {
+		t.Fatalf("low-S: %v", err)
+	}
+	return &contracts.SignedAnswer{BodyType: bodyType, Body: raw, Signature: sig, SignerCertificate: h.cert}
 }
 
 // rollBack moves the host's store back to an earlier position (a store
@@ -199,6 +225,23 @@ type signedHostStub struct {
 	// predecessors are earlier enrolments of the host whose operations it
 	// still answers about.
 	predecessors [][]byte
+	// inventory, when set, is the host inventory of a signed GetHostInfo
+	// that asks for one (an agent that reports an inventory); unset, the
+	// host ignores the request's inventory version.
+	inventory func(q contracts.HostAnswerQuery) *providerv1.HostInventory
+	// rawSign signs host answers without the agent's own inventory checks,
+	// so a test can make the agent sign an invalid inventory.
+	rawSign bool
+	// agentVersion overrides the host answers' agent version ("test").
+	agentVersion string
+	// hostErr, when set, fails every signed GetHostInfo with it.
+	hostErr error
+	// hostHealth overrides the plain host health (Ready).
+	hostHealth contracts.HostHealth
+	// hostQueries are the signed GetHostInfo queries received.
+	hostQueries []contracts.HostAnswerQuery
+	// opQueries are the signed TaskStatus queries received.
+	opQueries []contracts.OperationAnswerQuery
 }
 
 func newSignedHostStub(t testing.TB, h *testHost) *signedHostStub {
@@ -255,6 +298,7 @@ func (s *signedHostStub) operationAnswer(q contracts.OperationAnswerQuery,
 	read := contracts.SignedRead{Nonce: nonce}
 	s.amu.Lock()
 	s.answers++
+	s.opQueries = append(s.opQueries, q)
 	k := hex.EncodeToString(q.OpID)
 	p, ok := s.accepted[k]
 	ref := s.taskOf[k]
@@ -335,15 +379,44 @@ func (s *signedHostStub) vmAnswer(q contracts.VMAnswerQuery) (contracts.Describe
 }
 
 // hostAnswer answers a signed GetHostInfo.
-func (s *signedHostStub) hostAnswer(hostID string, continuitySeq uint64) (contracts.HostInfo, contracts.SignedRead, error) {
+func (s *signedHostStub) hostAnswer(q contracts.HostAnswerQuery) (contracts.HostInfo, contracts.SignedRead, error) {
+	s.amu.Lock()
+	s.hostQueries = append(s.hostQueries, q)
+	s.amu.Unlock()
+	if s.hostErr != nil {
+		return contracts.HostInfo{}, contracts.SignedRead{Nonce: drawNonce()}, s.hostErr
+	}
 	nonce := drawNonce()
 	read := contracts.SignedRead{Nonce: nonce}
-	a := &providerv1.HostAnswer{Context: s.host.context(nonce, continuitySeq), AgentVersion: "test", AgentApiVersion: 2, GrantVersions: []uint32{1},
+	hostID := q.HostID
+	version := "test"
+	if s.agentVersion != "" {
+		version = s.agentVersion
+	}
+	a := &providerv1.HostAnswer{Context: s.host.context(nonce, q.ContinuitySeq), AgentVersion: version, AgentApiVersion: 2, GrantVersions: []uint32{1},
 		Mode: providerv1.AgentMode_AGENT_MODE_IDENTITY}
-	if !s.unsigned {
+	if s.inventory != nil && q.InventoryVersion > 0 {
+		a.Inventory = s.inventory(q)
+	}
+	switch {
+	case s.unsigned:
+	case s.rawSign:
+		read.Answer = s.host.signRaw(s.t, a)
+	default:
 		read.Answer = s.host.sign(s.t, a)
 	}
-	return contracts.HostInfo{ID: hostID, Health: contracts.HostHealthReady}, read, nil
+	health := contracts.HostHealthReady
+	if s.hostHealth != "" {
+		health = s.hostHealth
+	}
+	return contracts.HostInfo{ID: hostID, Health: health}, read, nil
+}
+
+// queries returns the signed GetHostInfo queries received.
+func (s *signedHostStub) queries() []contracts.HostAnswerQuery {
+	s.amu.Lock()
+	defer s.amu.Unlock()
+	return append([]contracts.HostAnswerQuery(nil), s.hostQueries...)
 }
 
 // withHostAnswers gives r signed host answers for host of provider, through

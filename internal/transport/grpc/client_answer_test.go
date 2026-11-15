@@ -156,12 +156,30 @@ func TestClient_AnswerFieldWithUnknownsIsNoAnswer(t *testing.T) {
 	dialer, cleanup := startBufconnServer(t, srv)
 	defer cleanup()
 	c := newTestClient(t, dialer, "cloudhypervisor")
-	_, read, err := c.HostAnswer(context.Background(), "host-a", 0)
+	_, read, err := c.HostAnswer(context.Background(), contracts.HostAnswerQuery{HostID: "host-a"})
 	require.NoError(t, err)
 	assert.Nil(t, read.Answer)
 	require.Len(t, srv.hosts, 1)
 	assert.Len(t, srv.hosts[0].GetAnswerNonce(), 16)
 	assert.Zero(t, srv.hosts[0].GetInventoryVersion(), "no inventory is asked for")
+}
+
+// A signed GetHostInfo that asks for the host inventory sends the inventory
+// version beside the nonce and the continuity position.
+func TestClient_HostAnswerAsksForInventory(t *testing.T) {
+	srv := &answerServer{blob: testBlob()}
+	dialer, cleanup := startBufconnServer(t, srv)
+	defer cleanup()
+	c := newTestClient(t, dialer, "cloudhypervisor")
+	_, read, err := c.HostAnswer(context.Background(), contracts.HostAnswerQuery{HostID: "host-a", ContinuitySeq: 7, InventoryVersion: 1})
+	require.NoError(t, err)
+	require.NotNil(t, read.Answer)
+	require.Len(t, srv.hosts, 1)
+	r := srv.hosts[0]
+	assert.Equal(t, "host-a", r.GetHostId())
+	assert.EqualValues(t, 7, r.GetContinuitySeq())
+	assert.EqualValues(t, 1, r.GetInventoryVersion())
+	assert.Equal(t, read.Nonce, r.GetAnswerNonce())
 }
 
 // The signed Describe carries the owner, the binding and a nonce.
@@ -193,7 +211,7 @@ func TestClient_NonceFailureSendsNothing(t *testing.T) {
 	defer func() { nonceReader = old }()
 	_, _, err := c.OperationAnswer(context.Background(), contracts.OperationAnswerQuery{HostID: "host-a"})
 	require.Error(t, err)
-	_, _, err = c.HostAnswer(context.Background(), "host-a", 0)
+	_, _, err = c.HostAnswer(context.Background(), contracts.HostAnswerQuery{HostID: "host-a", InventoryVersion: 1})
 	require.Error(t, err)
 	assert.Empty(t, srv.tasks)
 	assert.Empty(t, srv.hosts)

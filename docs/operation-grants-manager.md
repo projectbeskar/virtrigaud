@@ -374,7 +374,11 @@ such a Provider for a signed host answer and records whether it verified
 a verified host answer under its current enrolment younger than two heartbeats, from an
 agent in state `READY` that implements grant version 1: such a VM reports
 `Ready=False/OperationHostAnswerUnavailable`. The gate concerns new operations only;
-attempts in flight are still asked about.
+attempts in flight are still asked about. The same heartbeat asks for the host inventory;
+the Host is ready for placement only while the verified inventory is complete, recent and
+allow-listed (`AgentInventoryVerified`, `ComponentsReady`; see
+[`host-inventory-manager.md`](host-inventory-manager.md)). An answer without the
+inventory is still used for this gate.
 
 **What an answer about an attempt decides.** Only a verified answer from a `READY` agent
 that binds to the attempt's verified intent (its `op_id` and enrolment, and for an answer

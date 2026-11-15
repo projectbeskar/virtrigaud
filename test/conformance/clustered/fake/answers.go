@@ -39,6 +39,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -206,12 +207,62 @@ func (p *provider) signedHostInfo(req *providerv1.GetHostInfoRequest, hs *hostSt
 	a := &providerv1.HostAnswer{Context: p.answerContext(req.GetHostId(), hs, req.GetAnswerNonce(), req.GetContinuitySeq()),
 		AgentVersion: "fake", AgentApiVersion: answer.AgentAPIVersion, GrantVersions: []uint32{answer.GrantVersion},
 		Mode: providerv1.AgentMode_AGENT_MODE_IDENTITY}
+	if p.inventory && req.GetInventoryVersion() >= 1 {
+		a.Inventory = FakeInventory(req.GetInventoryVersion())
+	}
 	blob, err := p.sign(req.GetHostId(), a)
 	if err != nil {
 		return status.Errorf(codes.Internal, "sign: %v", err)
 	}
 	info.HostAnswer = blob
 	return nil
+}
+
+// FakeInventoryComponent, FakeInventoryVersion and the digests below name
+// the one component of FakeInventory, so a test can allow-list it.
+const (
+	// FakeInventoryComponent is the component's name.
+	FakeInventoryComponent = "cloud-hypervisor"
+	// FakeInventoryVersion is the component's observed and declared version.
+	FakeInventoryVersion = "1.0.0"
+	// FakeInventoryFile is the name of the component's one file.
+	FakeInventoryFile = "cloud-hypervisor"
+)
+
+// FakeInventoryArtifactSHA256 and FakeInventoryFileSHA256 are the digests of
+// the component's artifact and file (SHA-256 of fixed strings).
+var (
+	FakeInventoryArtifactSHA256 = sha256.Sum256([]byte("fake artifact"))
+	FakeInventoryFileSHA256     = sha256.Sum256([]byte("fake file"))
+)
+
+// FakeInventory is the host inventory the fake's hosts report for a request
+// of inventory version requested: complete, one ready component from the
+// read-only manifest directory with an artifact and one file, every feature
+// probe of inventory version 1 present except the two the agent reports as
+// not evaluated, and the pidfs handle identity tier.
+func FakeInventory(requested uint32) *providerv1.HostInventory {
+	inv := &providerv1.HostInventory{
+		InventoryVersion: min(requested, inventory.SupportedVersion), State: providerv1.InventoryState_INVENTORY_STATE_COMPLETE,
+		SnapshotAgeSeconds: 5, RequestedVersion: requested, SupportedVersion: inventory.SupportedVersion,
+		ProcessIdentityTier: providerv1.ProcessIdentityTier_PROCESS_IDENTITY_TIER_PIDFS_HANDLE,
+		Components: []*providerv1.HostComponent{{Name: FakeInventoryComponent, State: providerv1.ComponentState_COMPONENT_STATE_READY,
+			ObservedVersion: FakeInventoryVersion, DeclaredVersion: FakeInventoryVersion, Source: "sysext",
+			ManifestOrigin: providerv1.ManifestOrigin_MANIFEST_ORIGIN_READ_ONLY, ArtifactSha256: FakeInventoryArtifactSHA256[:],
+			Files: []*providerv1.ComponentFile{{Name: FakeInventoryFile, Sha256: FakeInventoryFileSHA256[:]}}}},
+	}
+	notEvaluated := map[string]bool{inventory.FeatureHypervisorPauseResume: true, inventory.FeatureExtensionImagePolicySigned: true}
+	for _, f := range []string{inventory.FeatureCgroupV2, inventory.FeatureCloneIntoCgroup, inventory.FeatureExtensionImagePolicySigned,
+		inventory.FeatureHypervisorPauseResume, inventory.FeatureInitialCgroupNamespace, inventory.FeatureInitialPIDNamespace,
+		inventory.FeatureInitialTimeNamespace, inventory.FeatureKVM, inventory.FeatureMeasuredBoot, inventory.FeaturePidfd,
+		inventory.FeaturePidfdInfoExit, inventory.FeaturePidfsHandle, inventory.FeatureSecureBoot, inventory.FeatureTun} {
+		hf := &providerv1.HostFeature{Name: f, Result: providerv1.FeatureResult_FEATURE_RESULT_PRESENT}
+		if notEvaluated[f] {
+			hf.Result, hf.Reason = providerv1.FeatureResult_FEATURE_RESULT_ERROR, inventory.FeatureReasonNotEvaluated
+		}
+		inv.Features = append(inv.Features, hf)
+	}
+	return inv
 }
 
 // sign signs body with host's key.
