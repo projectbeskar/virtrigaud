@@ -63,6 +63,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -140,12 +141,23 @@ const maxRetiredEnrolmentIDs = 256
 // tampered.
 const maxPredecessorEnrolmentIDs = 8
 
-// baseMintEpochCounter is the epoch counter of the grants issued under a
-// Host's first enrolment. Each re-key issues the grants of the new
-// enrolment under the next counter, because the host starts the new
-// enrolment at the next start epoch and refuses a first delivery minted
-// below it.
-const baseMintEpochCounter = 1
+// baseMintEpochCounter is the lowest epoch counter grants are issued under.
+// Grants for an enrolment are issued at its record's start epoch, which the
+// manager chooses and the CA signs, and at which the host starts the
+// enrolment (a host refuses a first delivery minted below it).
+const baseMintEpochCounter = hostidentity.FirstStartEpoch
+
+// rekeyWindow is how long a re-key window stays open after the time named in
+// the Host's re-key request annotation.
+const rekeyWindow = time.Hour
+
+// rekeyRequestSkew is how far in the future a re-key request time may be
+// (clock skew between the requester and the manager).
+const rekeyRequestSkew = 5 * time.Minute
+
+// maxPreviousKeyPins bounds the key pins of replaced enrolments kept per Host
+// (oldest dropped first); a re-key to one of them is refused.
+const maxPreviousKeyPins = 32
 
 // Label keys and values of manager-owned objects.
 const (
@@ -163,6 +175,7 @@ const (
 	eventReasonAgentRevoked           = "AgentRevoked"
 	eventReasonAgentRecordRetired     = "AgentEnrolmentRecordRetired"
 	eventReasonAgentRekeyed           = "AgentRekeyed"
+	eventReasonAgentRekeyWindow       = "AgentRekeyWindow"
 )
 
 // errForeignPinsSecret is returned when a Secret with a Host's pins Secret
@@ -338,9 +351,21 @@ func (certManagerIssuer) Issued(cr *unstructured.Unstructured) ([]byte, error) {
 }
 
 // Complete implements HostCertificateIssuer: cert-manager owns the request's
-// Ready condition, so the outcome is recorded on the Host only.
-func (certManagerIssuer) Complete(*unstructured.Unstructured, error, time.Time) (bool, error) {
-	return false, nil
+// Ready condition, so a pinned certificate is recorded on the Host only; a
+// refused one is also marked on the request (ConditionRefused), so that no
+// tool hands it out for installation.
+func (certManagerIssuer) Complete(cr *unstructured.Unstructured, validationErr error, now time.Time) (bool, error) {
+	if validationErr == nil {
+		return false, nil
+	}
+	return true, markRefused(cr, validationErr, now)
+}
+
+// markRefused sets ConditionRefused on a request whose issued certificate the
+// manager refused to pin.
+func markRefused(cr *unstructured.Unstructured, validationErr error, now time.Time) error {
+	return certrequest.SetCondition(cr, certrequest.ConditionRefused, certrequest.StatusTrue, certrequest.ReasonRefused,
+		"the manager refused to pin the issued certificate; never install it: "+validationErr.Error(), now)
 }
 
 // externalPKIIssuer is the external-PKI path: an operator takes the
@@ -373,6 +398,9 @@ func (externalPKIIssuer) Issued(cr *unstructured.Unstructured) ([]byte, error) {
 // Ready=False/Failed when refused.
 func (externalPKIIssuer) Complete(cr *unstructured.Unstructured, validationErr error, now time.Time) (bool, error) {
 	if validationErr != nil {
+		if err := markRefused(cr, validationErr, now); err != nil {
+			return true, err
+		}
 		return true, certrequest.SetCondition(cr, certrequest.ConditionReady, certrequest.StatusFalse, certrequest.ReasonFailed,
 			"the returned certificate does not match the authorisation: "+validationErr.Error(), now)
 	}
@@ -415,6 +443,19 @@ type hostEnrolmentState struct {
 	// replaces; an entry is removed only once the host has confirmed its
 	// freeze (later work). At most maxPredecessorEnrolmentIDs.
 	PredecessorEnrolmentIDs []string `json:"predecessorEnrolmentIDs,omitempty"`
+	// LastIssuedEpoch is the highest start epoch of a record the manager has
+	// approved a request for: a CA-valid certificate may exist for it, even
+	// if the manager later refused it, and a host may have started it. The
+	// next record starts after it.
+	LastIssuedEpoch uint64 `json:"lastIssuedEpoch,omitempty"`
+	// PreviousKeyPins are the key pins of replaced enrolments, oldest first,
+	// at most maxPreviousKeyPins; a re-key to one of them is refused.
+	PreviousKeyPins []string `json:"previousKeyPins,omitempty"`
+	// Rekey is the open re-key window, nil when none is open.
+	Rekey *rekeyRequest `json:"rekey,omitempty"`
+	// LastRekeyRequest is the last re-key request annotation value the
+	// manager used or refused; the same value never opens a window again.
+	LastRekeyRequest string `json:"lastRekeyRequest,omitempty"`
 	// LastDenial is the last denied request of an authorised requester, for
 	// the Host condition.
 	LastDenial *requestOutcome `json:"lastDenial,omitempty"`
@@ -423,11 +464,21 @@ type hostEnrolmentState struct {
 	LastRejection *requestOutcome `json:"lastRejection,omitempty"`
 }
 
+// rekeyRequest is an open re-key window.
+type rekeyRequest struct {
+	// Value is the Host's re-key request annotation value that opened it.
+	Value string `json:"value"`
+	// Until is when the window closes.
+	Until metav1.Time `json:"until"`
+}
+
 // enrolmentRecord is an enrolment record in hex.
 type enrolmentRecord struct {
 	EnrolmentID string `json:"enrolmentID"`
 	ProviderUID string `json:"providerUID"`
 	InstallID   string `json:"installID"`
+	// StartEpoch is the record's start epoch; zero is the first epoch.
+	StartEpoch uint64 `json:"startEpoch,omitempty"`
 }
 
 // authorisedRequest is an authorised request.
@@ -442,6 +493,8 @@ type authorisedRequest struct {
 	Record enrolmentRecord `json:"record"`
 	// KeyPin is the pin of the authorised key.
 	KeyPin string `json:"keyPin"`
+	// Requester is the requester's username, for the audit of a re-key.
+	Requester string `json:"requester,omitempty"`
 }
 
 // currentEnrolment is a pinned enrolment. Only the key pins and the expiry
@@ -451,18 +504,55 @@ type currentEnrolment struct {
 	Record   enrolmentRecord `json:"record"`
 	KeyPins  []string        `json:"keyPins"`
 	NotAfter metav1.Time     `json:"notAfter"`
-	// MintEpoch is the epoch counter of the grants issued under this
-	// enrolment; zero (a first enrolment, or a state written before
-	// re-keys existed) is baseMintEpochCounter.
-	MintEpoch uint64 `json:"mintEpoch,omitempty"`
 }
 
-// mintEpoch returns the epoch counter of the grants issued under c.
+// epoch returns the start epoch of a record (FirstStartEpoch when unset).
+func (e enrolmentRecord) epoch() uint64 {
+	return max(e.StartEpoch, hostidentity.FirstStartEpoch)
+}
+
+// mintEpoch returns the epoch counter of the grants issued under c: its
+// record's start epoch.
 func (c *currentEnrolment) mintEpoch() uint64 {
-	if c == nil || c.MintEpoch < baseMintEpochCounter {
+	if c == nil {
 		return baseMintEpochCounter
 	}
-	return c.MintEpoch
+	return c.Record.epoch()
+}
+
+// nextStartEpoch returns the start epoch of the next record drawn for the
+// Host: after every epoch a record was approved at and after the current
+// enrolment's, and at least floor (the Host's start-epoch floor annotation,
+// zero when unset). ok is false when it would exceed
+// hostidentity.MaxStartEpoch.
+func (st *hostEnrolmentState) nextStartEpoch(floor uint64) (epoch uint64, ok bool) {
+	last := st.LastIssuedEpoch
+	if st.Current != nil {
+		last = max(last, st.Current.mintEpoch())
+	}
+	if last >= hostidentity.MaxStartEpoch {
+		return 0, false
+	}
+	return max(last+1, floor, hostidentity.FirstStartEpoch), true
+}
+
+// startEpochFloor reads the Host's start-epoch floor annotation: zero when
+// unset or not a number from 1 to hostidentity.MaxStartEpoch.
+func startEpochFloor(host *infravirtrigaudiov1beta1.Host) uint64 {
+	v, ok := host.Annotations[hostidentity.AnnotationStartEpochFloor]
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+	if err != nil || n < hostidentity.FirstStartEpoch || n > hostidentity.MaxStartEpoch {
+		return 0
+	}
+	return n
+}
+
+// rekeyOpen reports whether a re-key window is open at now.
+func (st *hostEnrolmentState) rekeyOpen(now time.Time) bool {
+	return st.Rekey != nil && now.Before(st.Rekey.Until.Time)
 }
 
 // rekeyBlocked returns why the Host's enrolment cannot be re-keyed for
@@ -477,6 +567,8 @@ func (st *hostEnrolmentState) rekeyBlocked(providerUID string) (reason, message 
 	case c.Record.ProviderUID != providerUID:
 		return reasonEnrolProviderChanged, "the Host is enrolled with another Provider: a re-key never changes the Provider; " +
 			"revoke this Host and create a new one for the new Provider"
+	case c.mintEpoch() >= hostidentity.MaxStartEpoch || st.LastIssuedEpoch >= hostidentity.MaxStartEpoch:
+		return reasonEnrolEpochExhausted, "the Host's start epochs are exhausted; revoke it and create a new Host"
 	case len(st.PredecessorEnrolmentIDs) >= maxPredecessorEnrolmentIDs:
 		return reasonEnrolTooManyPredecessors, fmt.Sprintf("the Host already holds %d predecessor enrolments whose freeze is not "+
 			"confirmed; no further re-key until one is", len(st.PredecessorEnrolmentIDs))
@@ -490,13 +582,42 @@ func (st *hostEnrolmentState) rekeyBlocked(providerUID string) (reason, message 
 func (st *hostEnrolmentState) rekey(next *currentEnrolment) (replaced string) {
 	if prev := st.Current; prev != nil {
 		replaced = prev.Record.EnrolmentID
-		next.MintEpoch = prev.mintEpoch() + 1
 		if !slices.Contains(st.PredecessorEnrolmentIDs, replaced) {
 			st.PredecessorEnrolmentIDs = append(st.PredecessorEnrolmentIDs, replaced)
 		}
+		for _, pin := range prev.KeyPins {
+			if !slices.Contains(st.PreviousKeyPins, pin) {
+				st.PreviousKeyPins = append(st.PreviousKeyPins, pin)
+			}
+		}
+		if n := len(st.PreviousKeyPins); n > maxPreviousKeyPins {
+			st.PreviousKeyPins = slices.Clone(st.PreviousKeyPins[n-maxPreviousKeyPins:])
+		}
 	}
+	if st.Rekey != nil {
+		st.LastRekeyRequest, st.Rekey = st.Rekey.Value, nil
+	}
+	st.LastIssuedEpoch = max(st.LastIssuedEpoch, next.mintEpoch())
 	st.Current = next
 	return replaced
+}
+
+// keyPreviouslyPinned reports whether pin is, or was, a pinned key of the
+// Host.
+func (st *hostEnrolmentState) keyPreviouslyPinned(pin string) bool {
+	return (st.Current != nil && slices.Contains(st.Current.KeyPins, pin)) || slices.Contains(st.PreviousKeyPins, pin)
+}
+
+// usedEnrolmentIDs are the ids a new record must not take: the retired ids,
+// the current enrolment's and the predecessors' (kept even if the retired
+// list dropped them).
+func (st *hostEnrolmentState) usedEnrolmentIDs() []string {
+	out := slices.Clone(st.RetiredEnrolmentIDs)
+	out = append(out, st.PredecessorEnrolmentIDs...)
+	if st.Current != nil {
+		out = append(out, st.Current.Record.EnrolmentID)
+	}
+	return out
 }
 
 // requestOutcome names a request and the reason of its outcome.
@@ -516,7 +637,8 @@ func (e enrolmentRecord) toRecord() (hostidentity.Record, error) {
 	if err != nil {
 		return hostidentity.Record{}, fmt.Errorf("install id: %w", err)
 	}
-	rec := hostidentity.Record{EnrolmentID: eid, ProviderUID: e.ProviderUID, InstallID: iid, Mode: hostidentity.ModeIdentity}
+	rec := hostidentity.Record{EnrolmentID: eid, ProviderUID: e.ProviderUID, InstallID: iid, Mode: hostidentity.ModeIdentity,
+		StartEpoch: e.StartEpoch}
 	return rec, rec.Validate()
 }
 
@@ -791,25 +913,42 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 		// A record is drawn for a first enrolment and, once enrolled, for a
-		// re-key, which an enrolment administrator may request under the
-		// same rules. A re-key never changes the Provider: while the Host
-		// is enrolled with another Provider than its own, no record is
-		// drawn (a Provider change is a revocation and a new Host).
-		if blocked, _ := st.rekeyBlocked(string(provider.UID)); blocked == reasonEnrolProviderChanged {
+		// re-key, only while a re-key window requested on the Host is open.
+		// A re-key never changes the Provider: while the Host is enrolled
+		// with another Provider than its own, no record is drawn (a Provider
+		// change is a revocation and a new Host).
+		if st.Current != nil && r.updateRekeyWindow(host, st) {
+			changed = true
+		}
+		blocked, _ := st.rekeyBlocked(string(provider.UID))
+		switch {
+		case blocked == reasonEnrolProviderChanged || blocked == reasonEnrolEpochExhausted ||
+			(st.Current != nil && !st.rekeyOpen(r.now())):
 			if st.Pending != nil || st.Authorised != nil {
 				st.retireOpenRecords()
 				changed = true
 			}
-		} else {
-			if p := st.Pending; p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID) {
+		default:
+			epoch, ok := st.nextStartEpoch(startEpochFloor(host))
+			p := st.Pending
+			if p != nil && st.Authorised == nil && p.epoch() < epoch {
+				// A record drawn before a later epoch was approved, or before
+				// the floor was raised, starts too early.
+				st.retireOpenRecords()
+				p, changed = nil, true
+			}
+			if ok && (p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID)) {
 				if p != nil {
 					st.retireOpenRecords()
 				}
-				id, err := r.drawEnrolmentID(st.RetiredEnrolmentIDs)
+				id, err := r.drawEnrolmentID(st.usedEnrolmentIDs())
 				if err != nil {
 					return ctrl.Result{}, err
 				}
 				st.Pending = &enrolmentRecord{EnrolmentID: id, ProviderUID: string(provider.UID), InstallID: hex.EncodeToString(r.Config.InstallID)}
+				if epoch > hostidentity.FirstStartEpoch {
+					st.Pending.StartEpoch = epoch
+				}
 				changed = true
 			}
 		}
@@ -825,8 +964,54 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if d := c.NotAfter.Sub(r.now()); d > 0 {
 			res.RequeueAfter = d + time.Second
 		}
+		// Close an open re-key window on time.
+		if st.Rekey != nil {
+			if d := st.Rekey.Until.Sub(r.now()) + time.Second; d > 0 && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
+				res.RequeueAfter = d
+			}
+		}
 	}
 	return res, r.mirror(ctx, host, st, string(provider.UID))
+}
+
+// updateRekeyWindow opens or closes the re-key window of an enrolled Host
+// from its re-key request annotation (HostRekeyRequestAnnotation): a new
+// value naming a time no older than rekeyWindow (and at most
+// rekeyRequestSkew in the future) opens a window until that time plus
+// rekeyWindow; a window past its end is closed and its records retired. A
+// value is used once. Each change is reported with an event naming the
+// annotation value. It reports whether the state changed.
+func (r *HostEnrolmentReconciler) updateRekeyWindow(host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState) bool {
+	now := r.now()
+	changed := false
+	if st.Rekey != nil && !now.Before(st.Rekey.Until.Time) {
+		st.LastRekeyRequest, st.Rekey = st.Rekey.Value, nil
+		st.retireOpenRecords()
+		changed = true
+		r.event(host, corev1.EventTypeNormal, eventReasonAgentRekeyWindow,
+			"the re-key window requested by annotation "+infravirtrigaudiov1beta1.HostRekeyRequestAnnotation+"="+st.LastRekeyRequest+
+				" expired; its record is retired")
+	}
+	v := strings.TrimSpace(host.Annotations[infravirtrigaudiov1beta1.HostRekeyRequestAnnotation])
+	if st.Rekey != nil || v == "" || v == st.LastRekeyRequest {
+		return changed
+	}
+	st.LastRekeyRequest = v
+	at, err := time.Parse(time.RFC3339, v)
+	switch {
+	case err != nil:
+		r.event(host, corev1.EventTypeWarning, eventReasonAgentRekeyWindow, "annotation "+
+			infravirtrigaudiov1beta1.HostRekeyRequestAnnotation+" is not an RFC 3339 time; no re-key window is opened")
+	case at.After(now.Add(rekeyRequestSkew)) || !now.Before(at.Add(rekeyWindow)):
+		r.event(host, corev1.EventTypeWarning, eventReasonAgentRekeyWindow, "annotation "+
+			infravirtrigaudiov1beta1.HostRekeyRequestAnnotation+"="+v+" names a time that is too old or in the future; "+
+			"no re-key window is opened")
+	default:
+		st.Rekey = &rekeyRequest{Value: v, Until: metav1.NewTime(at.Add(rekeyWindow).UTC().Truncate(time.Second))}
+		r.event(host, corev1.EventTypeNormal, eventReasonAgentRekeyWindow, "a re-key window is open until "+
+			st.Rekey.Until.UTC().Format(time.RFC3339)+" (annotation "+infravirtrigaudiov1beta1.HostRekeyRequestAnnotation+"="+v+")")
+	}
+	return true
 }
 
 // forgetGoneHost deletes the pins Secret of a Host that no longer exists.
@@ -922,6 +1107,9 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 		case st.Current != nil:
 			cond.Status = metav1.ConditionTrue
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentEnrolled, "the agent certificate is validated and its key is pinned"
+			if st.rekeyOpen(r.now()) {
+				cond.Message += "; a re-key window is open until " + st.Rekey.Until.UTC().Format(time.RFC3339)
+			}
 		case st.Authorised != nil:
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentAwaitingCertificate,
 				fmt.Sprintf("certificate request %s is authorised; waiting for the issued certificate", st.Authorised.Request)

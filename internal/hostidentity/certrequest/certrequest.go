@@ -62,6 +62,13 @@ const (
 	ConditionReady = "Ready"
 	// ConditionInvalidRequest is cert-manager's invalid-request condition type.
 	ConditionInvalidRequest = "InvalidRequest"
+	// ConditionRefused is VirtRigaud's condition type, True when the manager
+	// refused to pin the certificate issued for the request: it is CA-valid
+	// but must never be installed on a host. Set beside cert-manager's own
+	// conditions, which it leaves as they are.
+	ConditionRefused = "VirtRigaudCertificateRefused"
+	// ReasonRefused is the reason of ConditionRefused.
+	ReasonRefused = "NotPinned"
 
 	// StatusTrue and StatusFalse are condition statuses.
 	StatusTrue  = "True"

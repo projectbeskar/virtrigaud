@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -37,47 +38,84 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
-// enrolmentFor is a pinned enrolment of id for providerUID.
-func enrolmentFor(id, providerUID string) *currentEnrolment {
-	return &currentEnrolment{Record: enrolmentRecord{EnrolmentID: id, ProviderUID: providerUID, InstallID: strings.Repeat("42", 16)},
-		KeyPins: []string{strings.Repeat("ab", 32)}, NotAfter: metav1.NewTime(time.Now().Add(time.Hour))}
+// enrolmentFor is a pinned enrolment of id for providerUID at start epoch
+// epoch, with key pin pin.
+func enrolmentFor(id, providerUID string, epoch uint64, pin string) *currentEnrolment {
+	return &currentEnrolment{Record: enrolmentRecord{EnrolmentID: id, ProviderUID: providerUID, InstallID: strings.Repeat("42", 16),
+		StartEpoch: epoch}, KeyPins: []string{pin}, NotAfter: metav1.NewTime(time.Now().Add(time.Hour))}
 }
 
-// TestHostEnrolmentState_Rekey: a first enrolment issues grants under the
-// base epoch counter; each re-key moves the replaced enrolment to the
-// predecessors and issues the new one's grants under the next counter. A
-// re-key is blocked when it would change the Provider or when the
-// predecessor list is full; nothing is dropped from it.
+// TestHostEnrolmentState_Rekey: the next record starts after the current
+// enrolment's epoch and after every epoch a record was approved at, and at
+// least at the Host's floor; each re-key moves the replaced enrolment to the
+// predecessors and its key pins to the previous pins (bounded, oldest
+// dropped). A re-key is blocked when it would change the Provider, when the
+// predecessor list is full (nothing is dropped from it), and when no epoch
+// is left.
 func TestHostEnrolmentState_Rekey(t *testing.T) {
 	const prov = "prov-uid"
+	pin := func(i int) string { return fmt.Sprintf("%064x", i) }
 	st := &hostEnrolmentState{}
+	e, ok := st.nextStartEpoch(0)
+	assert.True(t, ok)
+	assert.Equal(t, uint64(1), e, "a first record starts at epoch 1 (no epoch URI)")
+	e, _ = st.nextStartEpoch(9)
+	assert.Equal(t, uint64(9), e, "the Host's floor raises it")
 	r, _ := st.rekeyBlocked(prov)
 	assert.Empty(t, r, "a first enrolment is never blocked")
-	assert.Empty(t, st.rekey(enrolmentFor("e1", prov)), "a first enrolment replaces nothing")
+	assert.Empty(t, st.rekey(enrolmentFor("e1", prov, 0, pin(1))), "a first enrolment replaces nothing")
 	assert.Equal(t, uint64(baseMintEpochCounter), st.Current.mintEpoch())
-	assert.Empty(t, st.PredecessorEnrolmentIDs)
+	e, _ = st.nextStartEpoch(0)
+	assert.Equal(t, uint64(2), e)
 
-	assert.Equal(t, "e1", st.rekey(enrolmentFor("e2", prov)))
-	assert.Equal(t, uint64(2), st.Current.mintEpoch())
+	// A record approved at epoch 4 and then refused: the next starts at 5.
+	st.LastIssuedEpoch = 4
+	e, _ = st.nextStartEpoch(0)
+	assert.Equal(t, uint64(5), e)
+	st.Rekey = &rekeyRequest{Value: "2026-11-15T10:00:00Z", Until: metav1.NewTime(time.Now().Add(time.Hour))}
+	assert.Equal(t, "e1", st.rekey(enrolmentFor("e2", prov, 5, pin(2))))
+	assert.Equal(t, uint64(5), st.Current.mintEpoch(), "grants are minted at the record's epoch")
 	assert.Equal(t, []string{"e1"}, st.PredecessorEnrolmentIDs)
-	assert.Equal(t, "e2", st.rekey(enrolmentFor("e3", prov)))
-	assert.Equal(t, uint64(3), st.Current.mintEpoch())
-	assert.Equal(t, []string{"e1", "e2"}, st.PredecessorEnrolmentIDs, "oldest first")
+	assert.Equal(t, []string{pin(1)}, st.PreviousKeyPins)
+	assert.Nil(t, st.Rekey, "a re-key closes its window")
+	assert.Equal(t, "2026-11-15T10:00:00Z", st.LastRekeyRequest, "and its request is used")
+	assert.True(t, st.keyPreviouslyPinned(pin(1)))
+	assert.True(t, st.keyPreviouslyPinned(pin(2)))
+	assert.False(t, st.keyPreviouslyPinned(pin(3)))
+	assert.ElementsMatch(t, []string{"e1", "e2"}, st.usedEnrolmentIDs(), "the current and predecessor ids are never drawn")
+
+	for i := 3; i < 3+maxPreviousKeyPins+2; i++ {
+		st.rekey(enrolmentFor(fmt.Sprintf("e%d", i), prov, uint64(i+3), pin(i)))
+	}
+	assert.Len(t, st.PreviousKeyPins, maxPreviousKeyPins, "previous pins are bounded")
+	assert.NotContains(t, st.PreviousKeyPins, pin(1), "the oldest is dropped")
 
 	r, _ = st.rekeyBlocked("another-provider")
 	assert.Equal(t, reasonEnrolProviderChanged, r, "a re-key never changes the Provider")
-
-	for i := len(st.PredecessorEnrolmentIDs); i < maxPredecessorEnrolmentIDs; i++ {
-		st.PredecessorEnrolmentIDs = append(st.PredecessorEnrolmentIDs, strings.Repeat("c", i+1))
-	}
 	r, msg := st.rekeyBlocked(prov)
 	assert.Equal(t, reasonEnrolTooManyPredecessors, r)
 	assert.Contains(t, msg, "predecessor")
 
-	// A state written before re-keys existed (no mint epoch) reads as the
-	// base counter.
+	exhausted := &hostEnrolmentState{Current: enrolmentFor("x", prov, hostidentity.MaxStartEpoch, pin(1))}
+	r, _ = exhausted.rekeyBlocked(prov)
+	assert.Equal(t, reasonEnrolEpochExhausted, r)
+	_, ok = exhausted.nextStartEpoch(0)
+	assert.False(t, ok, "no record past the last epoch")
+
+	// A state written before start epochs were recorded reads as epoch 1.
 	assert.Equal(t, uint64(baseMintEpochCounter), (&currentEnrolment{}).mintEpoch())
 	assert.Equal(t, uint64(baseMintEpochCounter), (*currentEnrolment)(nil).mintEpoch())
+}
+
+// TestStartEpochFloor: the floor annotation is a number from 1 to the last
+// epoch; anything else is no floor.
+func TestStartEpochFloor(t *testing.T) {
+	h := &infravirtrigaudiov1beta1.Host{}
+	assert.Zero(t, startEpochFloor(h))
+	for v, want := range map[string]uint64{"7": 7, " 12 ": 12, "0": 0, "-3": 0, "x": 0, "4294967297": 0} {
+		h.Annotations = map[string]string{hostidentity.AnnotationStartEpochFloor: v}
+		assert.Equal(t, want, startEpochFloor(h), v)
+	}
 }
 
 // TestPinsHostTrust_RekeyedEnrolment: after a re-key, the host's trust names
@@ -101,14 +139,14 @@ func TestPinsHostTrust_RekeyedEnrolment(t *testing.T) {
 
 	first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16)
 	l := loadedEnrolment{state: hostEnrolmentState{HostUID: string(h.UID), Identity: h.Spec.Identity}}
-	l.state.rekey(enrolmentFor(first, string(identityProviderUID)))
+	l.state.rekey(enrolmentFor(first, string(identityProviderUID), 0, strings.Repeat("ab", 32)))
 	require.NoError(t, saveHostEnrolment(ctx, cli, cfg, h, &l))
 	rec := hostidentity.StoreRecord{StoreID: [16]byte{1}, EnrolmentID: bytes.Repeat([]byte{0xa1}, 16), Seq: 9, Head: [32]byte{9}}
 	require.NoError(t, src.UpdateStoreState(ctx, prov, "host-a", func(st *HostStoreState) { st.Current = rec }))
 
 	l, err := loadHostEnrolment(ctx, cli, cfg, h)
 	require.NoError(t, err)
-	assert.Equal(t, first, l.state.rekey(enrolmentFor(second, string(identityProviderUID))))
+	assert.Equal(t, first, l.state.rekey(enrolmentFor(second, string(identityProviderUID), 2, strings.Repeat("cd", 32))))
 	require.NoError(t, saveHostEnrolment(ctx, cli, cfg, h, &l))
 
 	trust, err := src.HostTrust(ctx, prov, "host-a")
@@ -140,4 +178,18 @@ func TestPinsHostTrust_RekeyedEnrolment(t *testing.T) {
 	assert.NoError(t, check(id(second, 2)), "an attempt under the new enrolment and its epoch")
 	assert.True(t, errors.Is(check(id(second, 1)), errIntentTampered), "the new enrolment under the old epoch counter is not its own")
 	assert.True(t, errors.Is(check(id(strings.Repeat("c3", 16), 2)), errIntentTampered), "an enrolment the host never had")
+
+	// Revoked after the re-key: no enrolment is trusted any more; every
+	// attempt, a predecessor's too, is held (never sent, never closed as
+	// performed or not performed).
+	h.Spec.Revoked = true
+	require.NoError(t, cli.Update(ctx, h))
+	_, err = src.HostTrust(ctx, prov, "host-a")
+	require.ErrorIs(t, err, operation.ErrNoEnrolment)
+	for _, i := range []contracts.OperationAttemptIdentity{id(first, 1), id(second, 2)} {
+		err := check(i)
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, errIntentPredecessor), "a revoked Host's attempts are not polled as predecessors")
+		assert.True(t, errors.Is(err, errIntentTampered), "held")
+	}
 }
