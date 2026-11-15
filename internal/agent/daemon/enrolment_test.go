@@ -58,10 +58,7 @@ func TestReloadReenrolsOnANewEnrolment(t *testing.T) {
 	r.signals <- syscall.SIGHUP
 	waitLog(t, h, "credentials reloaded")
 	waitLog(t, h, "re-enrolled from the host certificate")
-	got := answerEnrolment(r)
-	if len(got) != hostidentity.IDLen || got[0] != 0x77 {
-		t.Fatalf("answer after the reload names %x, want the new enrolment", got)
-	}
+	waitAnswerEnrolment(t, r, 0x77)
 
 	// The old certificate: its enrolment id is retired in the store.
 	h.installCert(h.pki.HostCertPEM)
@@ -185,9 +182,7 @@ func TestReenrolmentAtExactlyTheCertificatesEpoch(t *testing.T) {
 	h.installCert(certWithEnrolmentAt(h, 0x31, 7))
 	r.signals <- syscall.SIGHUP
 	waitLog(t, h, "re-enrolled from the host certificate")
-	if got := answerEnrolment(r); len(got) != hostidentity.IDLen || got[0] != 0x31 {
-		t.Fatalf("answer names %x", got)
-	}
+	waitAnswerEnrolment(t, r, 0x31)
 	readEpoch := func() uint64 {
 		e, found, err := enrol.ReadStartEpoch(h.cfg.PKIDir(), os.ReadFile)
 		if err != nil || !found {
@@ -221,9 +216,7 @@ func TestReenrolmentAtExactlyTheCertificatesEpoch(t *testing.T) {
 	h.installCert(certWithEnrolmentAt(h, 0x50, 8))
 	r.signals <- syscall.SIGHUP
 	waitLogCount(t, h, "re-enrolled from the host certificate", 2)
-	if got := answerEnrolment(r); len(got) != hostidentity.IDLen || got[0] != 0x50 {
-		t.Fatalf("answer names %x", got)
-	}
+	waitAnswerEnrolment(t, r, 0x50)
 }
 
 // waitLogCount waits until sub appears at least n times in the logs.
@@ -235,5 +228,58 @@ func waitLogCount(t *testing.T, h *host, sub string, n int) {
 			t.Fatalf("%q fewer than %d times in the logs:\n%s", sub, n, h.logs.text())
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitAnswerEnrolment waits, bounded, until the agent's signed answer names
+// the enrolment whose id is b repeated. The daemon logs a re-enrolment only
+// once the new credentials are in use, so this normally holds at once; the
+// poll keeps the check independent of that ordering.
+func waitAnswerEnrolment(t *testing.T, r *running, b byte) {
+	t.Helper()
+	var got []byte
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if got = answerEnrolment(r); len(got) == hostidentity.IDLen && got[0] == b {
+			return
+		}
+	}
+	t.Fatalf("answer names %x, want the enrolment %02x...", got, b)
+}
+
+// TestDevEnrolmentFileMustMatchTheRecordsEpoch: on a fresh store, a
+// development enrolment file whose start epoch differs from the one the
+// certificate's record carries is refused (the store stays unenrolled and
+// answers unsigned); an equal one enrols at that epoch. A record without an
+// epoch keeps the file's (TestReenrolmentFreezesTheOpenOperations and the
+// harness use it).
+func TestDevEnrolmentFileMustMatchTheRecordsEpoch(t *testing.T) {
+	h := newHost(t)
+	h.installCert(certWithEnrolmentAt(h, 0x21, 5)) // the file says 2
+	r, _ := h.run()
+	if got := answerEnrolment(r); got != nil {
+		t.Fatalf("an answer under a refused enrolment: %x", got)
+	}
+	waitLog(t, h, "start epoch differs from the certificate's record")
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	h.dev.StartEpoch = 5
+	r, _ = h.run()
+	waitAnswerEnrolment(t, r, 0x21)
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := opstore.Open(context.Background(), opstore.Options{Journal: journal.Options{Dir: h.stateDir}, Executor: none.Executor{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	v, err := st.HostView(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.LastStartEpoch != 5 {
+		t.Fatalf("start epoch %d, want the record's 5", v.LastStartEpoch)
 	}
 }
