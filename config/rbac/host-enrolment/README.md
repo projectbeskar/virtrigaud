@@ -75,6 +75,11 @@ rules:
   verbs: ["rekey", "patch"]   # patch: vrtg host rekey sets the request annotation
 ```
 
+Anyone with `update` or `patch` on a Host can open its re-key window (the
+`enrolment.virtrigaud.io/rekey-requested` annotation); the window grants
+nothing by itself, since the request still needs the `rekey` verb and the
+administrator group. The API server's audit log attributes the annotation.
+
 cert-manager's default approver must not approve requests for the host-agent
 issuer: run cert-manager with `--controllers=*,-certificaterequests-approver`
 and approve other issuers with approver-policy, or otherwise make sure the

@@ -115,7 +115,8 @@ A re-key is opened explicitly and needs its own permission:
    enrolment (its message says until when the window is open). A value is
    used once; a time more than an hour old, more than five minutes in the
    future, or not a time opens nothing. When the window closes without a
-   re-key, its record is retired. Each of these is reported with an
+   re-key, its record is retired, and a certificate issued for it after the
+   window closed is refused. Each of these is reported with an
    `AgentRekeyWindow` event naming the annotation value. Without an open
    window, a request for an enrolled Host is denied with `NoRekeyWindow`.
 2. Submit the new key's request exactly as for a first enrolment (a CSR
@@ -124,6 +125,11 @@ A re-key is opened explicitly and needs its own permission:
    the requester needs the `rekey` verb on the Host instead of `enrol`
    (`RequesterNotAuthorisedToRekey` otherwise). The `enrol` verb alone cannot
    re-key an enrolled Host.
+
+Opening a window needs only `update` or `patch` on the Host (the annotation);
+the window itself grants nothing: the re-key request still needs the `rekey`
+verb, the administrator group and every other rule. The API server's audit
+log records who set the annotation.
 
 Also:
 
@@ -194,8 +200,14 @@ enrolment state, so its first record starts at epoch 1, which a host that was
 enrolled before (whose store has started a later epoch) refuses. The install
 error names the host's last start epoch `N`. Set the annotation
 `enrolment.virtrigaud.io/start-epoch-floor: "<N+1>"` on the new Host: the
-manager draws its next record at that epoch at least. The annotation only
-raises epochs; it never lowers one.
+manager draws its first record at that epoch at least, and reports it with an
+`AgentStartEpochFloor` event. The annotation applies only while the Host is
+fresh (no enrolment and no approved request); once it is enrolled, or a
+request for it was approved, the annotation is ignored, so editing it cannot
+change a re-key's epoch. It is honoured from 1 to 65536; any other value is
+ignored and reported. Changing it on a fresh Host retires a pending record
+drawn at a lower epoch (a request built from that record is then denied, and
+a new one is needed); it never lowers an epoch.
 
 ### Refused certificates
 
