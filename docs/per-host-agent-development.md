@@ -215,13 +215,6 @@ changes) and in a log line when it appears or goes. The per-call check of the
 Provider's certificate uses the later of the host clock and the floor only
 while the floor is healthy.
 
-The daemon records its store's last start epoch in the key material
-directory (`pki/start-epoch`, mode 0600), and `vrtg-agent enroll install`
-refuses a certificate whose start epoch is not after it, or after the
-installed certificate's, with an error that names the epochs and the Host
-annotation (`enrolment.virtrigaud.io/start-epoch-floor`) that makes the
-manager draw a later one ([details](host-agent-enrolment.md#start-epochs)).
-
 ### Re-enrolment freeze
 
 Re-enrolling freezes every operation of the previous enrolment that is still
@@ -1012,6 +1005,13 @@ store's active enrolment is then brought to it:
   to nobody and can be adopted by whichever host presents a certificate: the
   store itself holds nothing that says otherwise, and the provisioning marker
   in the state directory (`host-id`) is what ties a disk to a host.
+
+The daemon records its store's last start epoch in the key material
+directory (`pki/start-epoch`, mode 0600), and `vrtg-agent enroll install`
+refuses a certificate whose start epoch is not after it, or after the
+installed certificate's, with an error that names the epochs and the Host
+annotation (`enrolment.virtrigaud.io/start-epoch-floor`) that makes the
+manager draw a later one ([details](host-agent-enrolment.md#start-epochs)).
 
 On reload, a certificate of the same host with a new enrolment re-enrols the
 store first and only then replaces the running credentials, so no answer names
