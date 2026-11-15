@@ -583,6 +583,87 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(reconcileHost(e, "host-a").Status.Agent.PendingEnrolmentID).To(BeEmpty())
 	})
 
+	It("opens no window for a request time too far in the future", func() {
+		e := newEnv()
+		rec := record.NewFakeRecorder(16)
+		e.hostR.Recorder = rec
+		createHost(e, "host-a", "serial-0001", "ch")
+		enrol(e, "host-a")
+		h := &infravirtrigaudiov1beta1.Host{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.hostNS, Name: "host-a"}, h)).To(Succeed())
+		h.Annotations = map[string]string{infravirtrigaudiov1beta1.HostRekeyRequestAnnotation: time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)}
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		Expect(reconcileHost(e, "host-a").Status.Agent.PendingEnrolmentID).To(BeEmpty())
+		var refused bool
+		for len(rec.Events) > 0 {
+			if ev := <-rec.Events; strings.Contains(ev, "too old or in the future") {
+				refused = true
+			}
+		}
+		Expect(refused).To(BeTrue())
+	})
+
+	It("refuses and marks a re-key certificate issued after its window closed", func() {
+		e := newEnv()
+		createHost(e, "host-a", "serial-0001", "ch")
+		pin, _ := enrol(e, "host-a")
+		h := requestRekey(e, "host-a")
+		csr := csrFor(h, nil)
+		cr := reconcileCR(e, submit(e, "host-a", csr, adminOpts()))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		// The window closes (time moves past it) before the issuance; the
+		// request reconciler sees the issued certificate first.
+		later := time.Now().Add(2 * time.Hour)
+		e.reqR.Now = func() time.Time { return later }
+		issue(e, cr, csr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue())
+		st, _ := loadState(e, "host-a")
+		Expect(st.Current.KeyPins).To(Equal([]string{pin}))
+		Expect(st.LastRejection).NotTo(BeNil())
+		Expect(st.LastRejection.Message).To(ContainSubstring("window closed"))
+	})
+
+	It("honours the start-epoch floor only for a fresh Host, and only up to its cap", func() {
+		e := newEnv()
+		rec := record.NewFakeRecorder(32)
+		e.hostR.Recorder = rec
+		// Above the cap: ignored and reported.
+		h := createHost(e, "host-a", "serial-0001", "ch")
+		h.Annotations = map[string]string{hostidentity.AnnotationStartEpochFloor: "70000"}
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		h = reconcileHost(e, "host-a")
+		Expect(h.Status.Agent.RequestURIs).To(HaveLen(5), "an epoch-1 record")
+		var invalid bool
+		for len(rec.Events) > 0 {
+			if ev := <-rec.Events; strings.Contains(ev, "ignored") {
+				invalid = true
+			}
+		}
+		Expect(invalid).To(BeTrue())
+		// Enrolled: a floor set during a re-key window does not raise the
+		// re-key record's epoch.
+		enrol(e, "host-a")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(h), h)).To(Succeed())
+		h.Annotations[hostidentity.AnnotationStartEpochFloor] = "100"
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		h = requestRekey(e, "host-a")
+		Expect(h.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIEpochPrefix+"2"), "the floor is ignored once enrolled")
+		// A fresh Host within the cap: applied, with an event.
+		hb := createHost(e, "host-b", "serial-0002", "ch")
+		hb.Annotations = map[string]string{hostidentity.AnnotationStartEpochFloor: "40"}
+		Expect(k8sClient.Update(ctx, hb)).To(Succeed())
+		hb = reconcileHost(e, "host-b")
+		Expect(hb.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIEpochPrefix+"40"))
+		var applied bool
+		for len(rec.Events) > 0 {
+			if ev := <-rec.Events; strings.Contains(ev, "starts at epoch 40") {
+				applied = true
+			}
+		}
+		Expect(applied).To(BeTrue())
+	})
+
 	It("refuses a re-key to a key that is or was pinned", func() {
 		e := newEnv()
 		createHost(e, "host-a", "serial-0001", "ch")

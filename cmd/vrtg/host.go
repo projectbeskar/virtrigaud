@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -372,20 +373,11 @@ func (o *options) hostEnrollCertificateOut(cmd *cobra.Command, eo *hostEnrollOpt
 	if err := c.Get(ctx, types.NamespacedName{Namespace: o.namespace, Name: eo.host}, host); err != nil {
 		return fmt.Errorf("get Host %s/%s: %w", o.namespace, eo.host, err)
 	}
-	pin, err := hostidentity.SPKIPin(certs[0].PublicKey)
+	pinned, err := pinnedOnHost(host.Status.Agent, certs[0])
 	if err != nil {
 		return err
 	}
-	pinned := host.Status.Agent != nil && slices.Contains(host.Status.Agent.KeyPins, pin)
-	sameEnrolment := false
-	if host.Status.Agent != nil {
-		for _, u := range certs[0].URIs {
-			if u.String() == hostidentity.URIEnrolmentPrefix+host.Status.Agent.EnrolmentID {
-				sameEnrolment = true
-			}
-		}
-	}
-	if !pinned || !sameEnrolment {
+	if !pinned {
 		return fmt.Errorf("the manager has not pinned the certificate of %s/%s for Host %s/%s (status.agent); not written",
 			eo.issuerNamespace, eo.request, o.namespace, eo.host)
 	}
@@ -490,6 +482,29 @@ func (o *options) hostEnrollCertificate(cmd *cobra.Command, eo *hostEnrollOption
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Returned the certificate to %s/%s; the manager pins its key only if it matches the authorisation\n",
 		eo.issuerNamespace, eo.request)
 	return err
+}
+
+// pinnedOnHost reports whether the Host's agent status pins leaf: its key is
+// one of the pinned keys and its enrolment is the Host's current one. Both
+// must hold: a pinned key under another enrolment, or the current enrolment
+// with another key, is not the pinned certificate.
+func pinnedOnHost(agent *infrav1beta1.HostAgentStatus, leaf *x509.Certificate) (bool, error) {
+	if agent == nil || agent.EnrolmentID == "" {
+		return false, nil
+	}
+	pin, err := hostidentity.SPKIPin(leaf.PublicKey)
+	if err != nil {
+		return false, err
+	}
+	if !slices.Contains(agent.KeyPins, pin) {
+		return false, nil
+	}
+	for _, u := range leaf.URIs {
+		if u.String() == hostidentity.URIEnrolmentPrefix+agent.EnrolmentID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // hostRekey sets the re-key request annotation of a Host to the current

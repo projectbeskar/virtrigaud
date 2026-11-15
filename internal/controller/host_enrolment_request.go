@@ -391,6 +391,8 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 	if verr == nil {
 		if reason, msg := l.state.rekeyBlocked(a.Record.ProviderUID); reason != "" {
 			verr = fmt.Errorf("%s: %s", reason, msg)
+		} else if l.state.Current != nil && !l.state.rekeyOpen(r.now()) {
+			verr = fmt.Errorf("%s: the re-key window closed before the certificate was issued", reasonEnrolNoRekeyWindow)
 		}
 	}
 	var replaced string

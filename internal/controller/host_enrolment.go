@@ -176,6 +176,7 @@ const (
 	eventReasonAgentRecordRetired     = "AgentEnrolmentRecordRetired"
 	eventReasonAgentRekeyed           = "AgentRekeyed"
 	eventReasonAgentRekeyWindow       = "AgentRekeyWindow"
+	eventReasonAgentStartEpochFloor   = "AgentStartEpochFloor"
 )
 
 // errForeignPinsSecret is returned when a Secret with a Host's pins Secret
@@ -520,34 +521,51 @@ func (c *currentEnrolment) mintEpoch() uint64 {
 	return c.Record.epoch()
 }
 
+// maxStartEpochFloor is the highest start-epoch floor annotation honoured,
+// far below hostidentity.MaxStartEpoch, so that the annotation cannot use up
+// a Host's epochs.
+const maxStartEpochFloor = 1 << 16
+
+// fresh reports whether the state holds no enrolment and no approved record:
+// a Host's first enrolment, the only time the start-epoch floor applies.
+func (st *hostEnrolmentState) fresh() bool {
+	return st.Current == nil && st.LastIssuedEpoch == 0
+}
+
 // nextStartEpoch returns the start epoch of the next record drawn for the
 // Host: after every epoch a record was approved at and after the current
-// enrolment's, and at least floor (the Host's start-epoch floor annotation,
-// zero when unset). ok is false when it would exceed
+// enrolment's, and, for a fresh state only, at least floor (the Host's
+// start-epoch floor annotation, zero when unset). floored reports that the
+// floor raised it. ok is false when it would exceed
 // hostidentity.MaxStartEpoch.
-func (st *hostEnrolmentState) nextStartEpoch(floor uint64) (epoch uint64, ok bool) {
+func (st *hostEnrolmentState) nextStartEpoch(floor uint64) (epoch uint64, floored, ok bool) {
 	last := st.LastIssuedEpoch
 	if st.Current != nil {
 		last = max(last, st.Current.mintEpoch())
 	}
 	if last >= hostidentity.MaxStartEpoch {
-		return 0, false
+		return 0, false, false
 	}
-	return max(last+1, floor, hostidentity.FirstStartEpoch), true
+	epoch = max(last+1, hostidentity.FirstStartEpoch)
+	if st.fresh() && floor > epoch {
+		return floor, true, true
+	}
+	return epoch, false, true
 }
 
 // startEpochFloor reads the Host's start-epoch floor annotation: zero when
-// unset or not a number from 1 to hostidentity.MaxStartEpoch.
-func startEpochFloor(host *infravirtrigaudiov1beta1.Host) uint64 {
+// unset; invalid reports an annotation that is present but not a number from 1
+// to maxStartEpochFloor (ignored).
+func startEpochFloor(host *infravirtrigaudiov1beta1.Host) (floor uint64, invalid bool) {
 	v, ok := host.Annotations[hostidentity.AnnotationStartEpochFloor]
 	if !ok {
-		return 0
+		return 0, false
 	}
 	n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
-	if err != nil || n < hostidentity.FirstStartEpoch || n > hostidentity.MaxStartEpoch {
-		return 0
+	if err != nil || n < hostidentity.FirstStartEpoch || n > maxStartEpochFloor {
+		return 0, true
 	}
-	return n
+	return n, false
 }
 
 // rekeyOpen reports whether a re-key window is open at now.
@@ -929,7 +947,12 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				changed = true
 			}
 		default:
-			epoch, ok := st.nextStartEpoch(startEpochFloor(host))
+			floor, invalid := startEpochFloor(host)
+			if invalid && st.fresh() && st.Pending == nil {
+				r.event(host, corev1.EventTypeWarning, eventReasonAgentStartEpochFloor, fmt.Sprintf("annotation %s is not a number "+
+					"from 1 to %d; ignored", hostidentity.AnnotationStartEpochFloor, maxStartEpochFloor))
+			}
+			epoch, floored, ok := st.nextStartEpoch(floor)
 			p := st.Pending
 			if p != nil && st.Authorised == nil && p.epoch() < epoch {
 				// A record drawn before a later epoch was approved, or before
@@ -950,6 +973,10 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					st.Pending.StartEpoch = epoch
 				}
 				changed = true
+				if floored {
+					r.event(host, corev1.EventTypeNormal, eventReasonAgentStartEpochFloor, fmt.Sprintf("the first enrolment record "+
+						"starts at epoch %d, raised by annotation %s", epoch, hostidentity.AnnotationStartEpochFloor))
+				}
 			}
 		}
 	}

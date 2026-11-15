@@ -56,21 +56,26 @@ func TestHostEnrolmentState_Rekey(t *testing.T) {
 	const prov = "prov-uid"
 	pin := func(i int) string { return fmt.Sprintf("%064x", i) }
 	st := &hostEnrolmentState{}
-	e, ok := st.nextStartEpoch(0)
+	e, floored, ok := st.nextStartEpoch(0)
 	assert.True(t, ok)
+	assert.False(t, floored)
 	assert.Equal(t, uint64(1), e, "a first record starts at epoch 1 (no epoch URI)")
-	e, _ = st.nextStartEpoch(9)
-	assert.Equal(t, uint64(9), e, "the Host's floor raises it")
+	e, floored, _ = st.nextStartEpoch(9)
+	assert.True(t, floored)
+	assert.Equal(t, uint64(9), e, "the Host's floor raises a fresh Host's first record")
 	r, _ := st.rekeyBlocked(prov)
 	assert.Empty(t, r, "a first enrolment is never blocked")
 	assert.Empty(t, st.rekey(enrolmentFor("e1", prov, 0, pin(1))), "a first enrolment replaces nothing")
 	assert.Equal(t, uint64(baseMintEpochCounter), st.Current.mintEpoch())
-	e, _ = st.nextStartEpoch(0)
+	e, _, _ = st.nextStartEpoch(0)
+	assert.Equal(t, uint64(2), e)
+	e, floored, _ = st.nextStartEpoch(9)
+	assert.False(t, floored, "the floor is ignored once enrolled")
 	assert.Equal(t, uint64(2), e)
 
 	// A record approved at epoch 4 and then refused: the next starts at 5.
 	st.LastIssuedEpoch = 4
-	e, _ = st.nextStartEpoch(0)
+	e, _, _ = st.nextStartEpoch(0)
 	assert.Equal(t, uint64(5), e)
 	st.Rekey = &rekeyRequest{Value: "2026-11-15T10:00:00Z", Until: metav1.NewTime(time.Now().Add(time.Hour))}
 	assert.Equal(t, "e1", st.rekey(enrolmentFor("e2", prov, 5, pin(2))))
@@ -99,7 +104,7 @@ func TestHostEnrolmentState_Rekey(t *testing.T) {
 	exhausted := &hostEnrolmentState{Current: enrolmentFor("x", prov, hostidentity.MaxStartEpoch, pin(1))}
 	r, _ = exhausted.rekeyBlocked(prov)
 	assert.Equal(t, reasonEnrolEpochExhausted, r)
-	_, ok = exhausted.nextStartEpoch(0)
+	_, _, ok = exhausted.nextStartEpoch(0)
 	assert.False(t, ok, "no record past the last epoch")
 
 	// A state written before start epochs were recorded reads as epoch 1.
@@ -107,15 +112,25 @@ func TestHostEnrolmentState_Rekey(t *testing.T) {
 	assert.Equal(t, uint64(baseMintEpochCounter), (*currentEnrolment)(nil).mintEpoch())
 }
 
-// TestStartEpochFloor: the floor annotation is a number from 1 to the last
-// epoch; anything else is no floor.
+// TestStartEpochFloor: the floor annotation is a number from 1 to
+// maxStartEpochFloor; anything else is ignored and reported invalid. It
+// applies only to a fresh state.
 func TestStartEpochFloor(t *testing.T) {
 	h := &infravirtrigaudiov1beta1.Host{}
-	assert.Zero(t, startEpochFloor(h))
-	for v, want := range map[string]uint64{"7": 7, " 12 ": 12, "0": 0, "-3": 0, "x": 0, "4294967297": 0} {
+	f, invalid := startEpochFloor(h)
+	assert.Zero(t, f)
+	assert.False(t, invalid)
+	for v, want := range map[string]uint64{"7": 7, " 12 ": 12, "65536": 65536, "0": 0, "-3": 0, "x": 0, "65537": 0, "4294967296": 0} {
 		h.Annotations = map[string]string{hostidentity.AnnotationStartEpochFloor: v}
-		assert.Equal(t, want, startEpochFloor(h), v)
+		f, invalid := startEpochFloor(h)
+		assert.Equal(t, want, f, v)
+		assert.Equal(t, want == 0, invalid, v)
 	}
+	approved := &hostEnrolmentState{LastIssuedEpoch: 1}
+	assert.False(t, approved.fresh(), "a record was approved: not fresh")
+	e, floored, _ := approved.nextStartEpoch(500)
+	assert.False(t, floored)
+	assert.Equal(t, uint64(2), e)
 }
 
 // TestPinsHostTrust_RekeyedEnrolment: after a re-key, the host's trust names
