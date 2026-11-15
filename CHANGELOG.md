@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/host_enrolment_request.go`: the issued certificate is refused when its authorised record names another Provider than the Host's now. The `AlreadyEnrolled` denial is removed. New record ids never take the current or a predecessor's id.
 - `docs/host-agent-enrolment.md`, `docs/per-host-agent-development.md`, `docs/operation-grants-manager.md`, `config/rbac/host-enrolment/README.md`: re-keying, the `rekey` verb, who can open a window (`update`/`patch` on the Host, attributed by the API server audit log), start epochs and the floor, refused certificates, predecessors, release-build effects and limits.
 
-Release builds: the shared record parser accepts the epoch URI; a release agent writes `pki/start-epoch` only for a store a development build enrolled (it enrols nothing itself); `vrtg-agent enroll`, and so the install check, exists only in development builds; no release manager draws records with an epoch. Nothing else changes.
+- Release builds: the shared record parser accepts the epoch URI; a release agent writes `pki/start-epoch` only for a store a development build enrolled (it enrols nothing itself); `vrtg-agent enroll`, and so the install check, exists only in development builds; no release manager draws records with an epoch. Nothing else changes.
 
 ### Why
 A host whose key was lost or replaced, or whose disk was reinstalled or restored, had to be revoked and created again, which closed every open operation of its VMs. A re-key keeps the Host and its VMs; the replaced enrolment's operations stay answerable and held. The start epoch in the CA-signed record keeps the manager and the agent on the same epoch whatever happened in between.
