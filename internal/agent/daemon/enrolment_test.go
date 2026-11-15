@@ -283,3 +283,30 @@ func TestDevEnrolmentFileMustMatchTheRecordsEpoch(t *testing.T) {
 		t.Fatalf("start epoch %d, want the record's 5", v.LastStartEpoch)
 	}
 }
+
+// TestDevEnrolmentFileAboveAnEpochlessRecordWarns: a record without an epoch
+// URI cannot be told apart from a manager's first-enrolment record, so a
+// development enrolment file above epoch 1 is honoured (the development flow)
+// with a warning that a certificate from the enrolment flow needs 1.
+func TestDevEnrolmentFileAboveAnEpochlessRecordWarns(t *testing.T) {
+	h := newHost(t) // the file says 2, the certificate's record has no epoch
+	r, _ := h.run()
+	if got := answerEnrolment(r); len(got) != hostidentity.IDLen {
+		t.Fatalf("answer names %x", got)
+	}
+	waitLog(t, h, "the development enrolment file sets the start epoch above the certificate's record")
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	h2 := newHost(t)
+	h2.dev.StartEpoch = 1
+	r2, _ := h2.run()
+	_ = answerEnrolment(r2)
+	if err := r2.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(h2.logs.text(), "the development enrolment file sets the start epoch above") {
+		t.Fatal("a file that says 1 must not warn")
+	}
+}

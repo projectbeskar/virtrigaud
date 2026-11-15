@@ -205,7 +205,10 @@ manager draws its first record at that epoch at least, and reports it with an
 fresh (no enrolment and no approved request); once it is enrolled, or a
 request for it was approved, the annotation is ignored, so editing it cannot
 change a re-key's epoch. It is honoured from 1 to 65536; any other value is
-ignored and reported. Changing it on a fresh Host retires a pending record
+ignored and reported, so a re-created Host whose agent store has started an
+epoch above 65536 cannot be recovered with it (not reachable today: the
+predecessor bound limits one Host object to about 9 epochs). Changing it on a
+fresh Host retires a pending record
 drawn at a lower epoch (a request built from that record is then denied, and
 a new one is needed); it never lowers an epoch.
 

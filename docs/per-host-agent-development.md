@@ -988,7 +988,11 @@ store's active enrolment is then brought to it:
   epoch. A `--dev-enrolment-file` (see below) supplies the epoch only for a
   certificate whose record carries none (one the enrolment flow did not
   issue); for a record that carries an epoch, the file's must be equal, or
-  the enrolment is refused (the log says so) and answers stay unsigned.
+  the enrolment is refused (the log says so) and answers stay unsigned. A
+  manager's first-enrolment record (epoch 1) carries no epoch URI either, so
+  the agent cannot tell it from a development certificate: with a
+  certificate from the enrolment flow, the file must say 1 (or be left out);
+  a file above 1 is honoured with a warning in the log.
 - Any other case: a **re-enrolment**. This means the certificate names an
   enrolment id the store does not have as active, whether another is active or
   none is (a freeze cut short, a re-provisioned host). The previous

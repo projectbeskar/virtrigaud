@@ -1089,6 +1089,16 @@ func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust
 				return fmt.Errorf("%w: the file says %d, the certificate's record %d", errDevEpochMismatch, dev.StartEpoch,
 					id.Record.StartEpoch)
 			}
+			// A record without an epoch URI is either a development
+			// certificate or a manager's first-enrolment record (epoch 1):
+			// both carry the same names, so the agent cannot tell them
+			// apart. For the latter the file must say 1, or every grant is
+			// refused; say so loudly.
+			if id.Record.StartEpoch <= hostidentity.FirstStartEpoch && dev.StartEpoch != hostidentity.FirstStartEpoch {
+				d.log.Info("WARNING: the development enrolment file sets the start epoch above the certificate's record (epoch 1); "+
+					"if the certificate came from the manager's enrolment flow, every operation grant will be refused: "+
+					"remove the file or make it say 1", "fileStartEpoch", dev.StartEpoch)
+			}
 			e.StartEpoch, e.Predecessors = dev.StartEpoch, dev.Predecessors
 		} else if !config.DevBuild {
 			return errNotEnrolled
