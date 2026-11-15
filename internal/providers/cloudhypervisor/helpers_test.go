@@ -174,9 +174,10 @@ type fakeAgent struct {
 	// helloBlocks makes Hello wait until its caller gives up.
 	helloBlocks atomic.Bool
 
-	mu      sync.Mutex
-	calls   []captured
-	respond func(method string, raw []byte) (proto.Message, error)
+	mu       sync.Mutex
+	statuses []*agentv1.AgentStatusRequest
+	calls    []captured
+	respond  func(method string, raw []byte) (proto.Message, error)
 }
 
 type fakeAgentOptions struct {
@@ -281,6 +282,21 @@ func (h *helloServer) Hello(ctx context.Context, req *agentv1.HelloRequest) (*ag
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &agentv1.HelloResponse{HostAnswer: blob}, nil
+}
+
+// AgentStatus records a freeze confirmation the Provider relays.
+func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusRequest) (*agentv1.AgentStatusResponse, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	h.f.statuses = append(h.f.statuses, proto.Clone(req).(*agentv1.AgentStatusRequest))
+	return &agentv1.AgentStatusResponse{}, nil
+}
+
+// statusRequests returns the AgentStatus requests the agent received.
+func (f *fakeAgent) statusRequests() []*agentv1.AgentStatusRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*agentv1.AgentStatusRequest(nil), f.statuses...)
 }
 
 // quiet discards logs.
