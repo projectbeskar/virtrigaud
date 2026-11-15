@@ -444,6 +444,15 @@ type hostEnrolmentState struct {
 	// replaces; an entry is removed only once the host has confirmed its
 	// freeze (later work). At most maxPredecessorEnrolmentIDs.
 	PredecessorEnrolmentIDs []string `json:"predecessorEnrolmentIDs,omitempty"`
+	// PredecessorSince records when each predecessor became one (enrolment
+	// id to time), for the quiet period before its freeze is confirmed and
+	// for operators.
+	PredecessorSince map[string]metav1.Time `json:"predecessorSince,omitempty"`
+	// ConfirmedFrozenEnrolmentIDs are the predecessors whose freeze the
+	// manager has confirmed (no open attempt on the Host): they are rendered
+	// into the host inventory for the agent, and removed with the
+	// predecessor once a signed answer shows the host discarded them.
+	ConfirmedFrozenEnrolmentIDs []string `json:"confirmedFrozenEnrolmentIDs,omitempty"`
 	// LastIssuedEpoch is the highest start epoch of a record the manager has
 	// approved a request for: a CA-valid certificate may exist for it, even
 	// if the manager later refused it, and a host may have started it. The
@@ -597,11 +606,15 @@ func (st *hostEnrolmentState) rekeyBlocked(providerUID string) (reason, message 
 // rekey replaces the current enrolment with next: the replaced enrolment
 // becomes a predecessor (its attempts are still asked about, its VMs held)
 // and next's grants are issued under the next epoch counter.
-func (st *hostEnrolmentState) rekey(next *currentEnrolment) (replaced string) {
+func (st *hostEnrolmentState) rekey(next *currentEnrolment, now time.Time) (replaced string) {
 	if prev := st.Current; prev != nil {
 		replaced = prev.Record.EnrolmentID
 		if !slices.Contains(st.PredecessorEnrolmentIDs, replaced) {
 			st.PredecessorEnrolmentIDs = append(st.PredecessorEnrolmentIDs, replaced)
+			if st.PredecessorSince == nil {
+				st.PredecessorSince = map[string]metav1.Time{}
+			}
+			st.PredecessorSince[replaced] = predecessorStamp(now)
 		}
 		for _, pin := range prev.KeyPins {
 			if !slices.Contains(st.PreviousKeyPins, pin) {
@@ -980,16 +993,25 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 	}
+	// Confirm the freeze of predecessors no open attempt can name.
+	freezeChanged, freezeWaiting, err := r.confirmFreezes(ctx, host, st)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	changed = changed || freezeChanged
 	if changed {
 		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	res := ctrl.Result{}
+	if freezeWaiting {
+		res.RequeueAfter = freezeRecheckInterval
+	}
 	if c := st.Current; c != nil && !host.Spec.Revoked {
 		// Re-mirror at expiry so the condition and the render follow it.
-		if d := c.NotAfter.Sub(r.now()); d > 0 {
-			res.RequeueAfter = d + time.Second
+		if d := c.NotAfter.Sub(r.now()) + time.Second; d > time.Second && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
+			res.RequeueAfter = d
 		}
 		// Close an open re-key window on time.
 		if st.Rekey != nil {
@@ -1237,6 +1259,21 @@ func resolveHostAgentTLS(ctx context.Context, c client.Reader, cfg *HostEnrolmen
 		return hostsecret.Credentials{}, "host pins are malformed"
 	}
 	return creds, ""
+}
+
+// resolveHostFreeze returns the freeze confirmation to render for a Host
+// whose agent credentials resolved (resolveHostAgentTLS): nil when there is
+// none or the state cannot be read (the confirmation is then simply not
+// relayed this time).
+func resolveHostFreeze(ctx context.Context, c client.Reader, cfg *HostEnrolmentConfig, host *infravirtrigaudiov1beta1.Host) *hostsecret.FreezeConfirmation {
+	if !devgate.Compiled || cfg == nil || host.Spec.Revoked {
+		return nil
+	}
+	l, err := loadHostEnrolment(ctx, c, cfg, host)
+	if err != nil || l.reset {
+		return nil
+	}
+	return freezeConfirmationOf(&l.state)
 }
 
 // Compile-time assertions.

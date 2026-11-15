@@ -265,12 +265,19 @@ func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, p
 			skipped = append(skipped, skippedHost{id: h.Name, kind: kind, reason: skipReason})
 			continue
 		}
-		inv.Hosts = append(inv.Hosts, hostsecret.Host{
+		entry := hostsecret.Host{
 			ID:          h.Name,
 			Endpoint:    h.Spec.Endpoint,
 			Labels:      h.Spec.Labels,
 			Credentials: creds,
-		})
+		}
+		if providerRunsHostAgents(provider) {
+			// The manager's confirmation that the host may discard frozen
+			// predecessor enrolments, relayed to the agent by the Provider
+			// (development builds only).
+			entry.FreezeConfirmation = resolveHostFreeze(ctx, r.Client, r.HostEnrolment, h)
+		}
+		inv.Hosts = append(inv.Hosts, entry)
 	}
 
 	// Every skipped host is still one the Provider fronts: it is rendered as an

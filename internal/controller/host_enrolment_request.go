@@ -408,7 +408,7 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 			Record:   a.Record,
 			KeyPins:  []string{a.KeyPin},
 			NotAfter: metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second)),
-		})
+		}, r.now())
 		l.state.retire(a.Record.EnrolmentID)
 		l.state.Pending, l.state.Authorised, l.state.LastDenial, l.state.LastRejection = nil, nil, nil, nil
 	}
