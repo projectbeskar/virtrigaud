@@ -759,8 +759,11 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   outcome written before signed answers existed (development clusters only) is read as it
   is where no fresh signed answer is asked for (an unbound VM, or a VM whose Provider is
   gone).
-- The manager asks no inventory in the signed host answer, and keeps no list of a host's
-  earlier enrolments yet: an attempt sent under one is held after a re-enrolment.
+- The manager asks no inventory in the signed host answer. After a re-key it lists the
+  host's earlier enrolments as predecessors (up to 8): an attempt sent under one is asked
+  about by its identity and held, never sent again. Predecessors are not removed yet (the
+  host's confirmation of their freeze is not delivered), so their attempts' VMs stay held
+  until the attempts resolve.
 - Store positions are mirrored nowhere in the Host's status; they live only in the pins
   Secret.
 - A Reconfigure's `RestartRequired` and honest-result flags come from the unsigned answer to

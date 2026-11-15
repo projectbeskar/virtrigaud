@@ -77,7 +77,8 @@ state write, no event, no hint whether the Host exists).
 | The Host's Provider runs a per-host agent | `HostNotAgentManaged` |
 | The Host has `spec.identity` | `HostIdentityMissing` |
 | The Host is not revoked | `HostRevoked` |
-| A record is pending, the Host is not already enrolled, no other request is in flight, and the request's record was not retired | `NoPendingEnrolment`, `AlreadyEnrolled`, `EnrolmentInFlight`, `EnrolmentRecordRetired` |
+| A record is pending, no other request is in flight, and the request's record was not retired | `NoPendingEnrolment`, `EnrolmentInFlight`, `EnrolmentRecordRetired` |
+| For a re-key of an enrolled Host: the Host is enrolled with its own Provider, and fewer than 8 predecessor enrolments are held (see [Re-keying an enrolled Host](#re-keying-an-enrolled-host)) | `ProviderChanged`, `TooManyPredecessorEnrolments` |
 | `spec.request` is one PEM CSR | `RequestInvalid` |
 | The CSR's signature verifies with its own key (proof of possession) | `ProofOfPossessionFailed` |
 | The key is ECDSA P-256/P-384, Ed25519, or RSA of 2048 to 8192 bits | `KeyUnsupported` |
@@ -90,6 +91,59 @@ state write, no event, no hint whether the Host exists).
 
 Before approving, the manager records the authorisation (request UID, record,
 key pin) in the pins Secret. A denial never changes the pins.
+
+## Re-keying an enrolled Host
+
+An enrolled Host can be enrolled again with a new key, for example after its
+key was lost or replaced, its disk reinstalled, or its state restored from a
+snapshot. This is a re-key: a new enrolment of the same `spec.identity`. A
+replaced machine is not re-keyed: it gets a new `spec.identity`, so a new Host.
+
+Once a Host is enrolled, the manager publishes a record for its next
+enrolment in `status.agent.pendingEnrolmentID` and `status.agent.requestURIs`,
+while `status.agent.enrolmentID` and the `AgentEnrolled` condition still show
+the current enrolment. An enrolment administrator re-keys the Host exactly as
+for a first enrolment (a CSR carrying those URIs, `vrtg host enroll`), and the
+request is authorised under the same rules (group, `enrol` on the Host, proof
+of possession, names, usages, lifetime). In addition:
+
+- A re-key never changes the Provider. A Host enrolled with another Provider
+  than the one it names now is reported with `AgentEnrolled=False`, reason
+  `ProviderChanged`; no record is drawn for it and every request is denied
+  with `ProviderChanged`. Its enrolment is not trusted by the new Provider. To
+  move a host to another Provider, revoke the Host and create a new one.
+- At most 8 predecessor enrolments are held per Host. A re-key that would
+  exceed this is denied with `TooManyPredecessorEnrolments`; none is dropped.
+
+When the re-key's certificate is validated, in one write of the pins Secret:
+
+- the new key replaces the old one: the old key is no longer pinned, and the
+  next inventory render carries only the new key, so the Provider closes the
+  agent's old connection and accepts only the new certificate;
+- the replaced enrolment is added to the Host's predecessor enrolments
+  (oldest first). An operation the manager sent under it is still asked about
+  by its identity, and its VM is held until it is resolved; it is never sent
+  again under the new enrolment. Both enrolment ids stay on the never-reuse
+  list;
+- grants for the new enrolment are issued under the next epoch counter (the
+  first enrolment's grants under 1, each re-key's under the previous one plus
+  1), because the agent starts each new enrolment at its next start epoch and
+  refuses a first delivery minted below it;
+- the store positions the manager keeps for the Host are kept too, so the
+  continuity checks of signed answers run across the re-key.
+
+The manager logs the re-key and emits an `AgentRekeyed` event on the Host
+naming the request, the new and the replaced enrolment ids and, in the log,
+the new key's pin. Neither carries key or certificate material.
+
+On the host, install the new certificate with `--replace`; the agent re-enrols
+its store, freezing the replaced enrolment's open operations
+([details](per-host-agent-development.md#re-enrolment-freeze)).
+
+A predecessor stays listed until the host confirms it has discarded the
+predecessor's records. That confirmation is not delivered yet, so
+predecessors accumulate up to the bound; until it exists, a Host that reaches
+the bound can only be revoked and replaced by a new Host object.
 
 ## Issuance paths
 
@@ -258,6 +312,6 @@ inventory, and a Provider that follows the inventory Secret through the API
 ([details](clustered-agent-provider-development.md#following-the-inventory-secret)).
 The agent side (key generation, CSR, certificate installation, deriving the
 enrolment record) is described in
-[`per-host-agent-development.md`](per-host-agent-development.md#enrolment); the
-manager does not yet support enrolling a Host that is already enrolled (a
-re-enrolment is refused with `AlreadyEnrolled`).
+[`per-host-agent-development.md`](per-host-agent-development.md#enrolment).
+Confirming a predecessor's freeze to the host, and removing the predecessor
+once it is confirmed, are not done yet.

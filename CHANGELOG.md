@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-15 19:30] - Re-key an enrolled per-host agent Host (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/host_enrolment.go`, `internal/controller/host_enrolment_request.go`: an enrolment administrator may re-key an enrolled Host (a new key, a reinstalled or restored host: a new enrolment of the same `spec.identity`) under the rules of a first enrolment. Once a Host is enrolled, a record for its next enrolment is published in `status.agent.pendingEnrolmentID`/`requestURIs`. Pinning the re-key's certificate replaces the old key, adds the replaced enrolment to the pins Secret's predecessor enrolments (its operations are still asked about and their VMs held, never re-sent) and issues the new enrolment's grants under the next epoch counter. Event `AgentRekeyed` and a log line name the request and the enrolment ids (the log also the new key pin); no key or certificate material.
+- Denial reasons `ProviderChanged` (a re-key never changes the Provider; also the `AgentEnrolled` condition reason of a Host enrolled with another Provider than its own, for which no record is drawn) and `TooManyPredecessorEnrolments` (at most 8 predecessors; none is dropped).
+- Tests: state transitions and bounds; the grant source after a re-key (new enrolment and epoch, predecessors, store positions kept) and the predecessor/current/tampered intent checks against it; envtest: re-key end to end twice, unauthorised re-key refused, re-key with a Provider change refused (the new Provider does not trust the old enrolment), replay of an earlier request refused, full predecessor list refused.
+
+### Changed
+- `internal/controller/host_answers.go`: grants for a Host carry the epoch counter of its current enrolment (the first enrolment's is unchanged).
+- `internal/controller/host_enrolment_request.go`: the issued certificate is refused when its authorised record names another Provider than the Host's now. The `AlreadyEnrolled` denial is removed.
+- `docs/host-agent-enrolment.md`, `docs/operation-grants-manager.md`: re-keying, its rules, predecessors and limits.
+
+### Why
+A host whose key was lost or replaced, or whose disk was reinstalled or restored, had to be revoked and created again, which closed every open operation of its VMs. A re-key keeps the Host and its VMs; the replaced enrolment's operations stay answerable and held.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-15 15:58] - Clustered per-host agent Provider follows its inventory Secret through the API (development builds only)
 **Author:** @wrkode (William Rizzo)
 
