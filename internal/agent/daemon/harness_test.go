@@ -157,6 +157,9 @@ type host struct {
 	refuseSameUser bool
 	// invRoot is the directory the host inventory reads under.
 	invRoot string
+	// nowOff is added to the clock certificates are judged at, to stand
+	// for time that passed while the agent was down.
+	nowOff atomic.Int64
 }
 
 // testSigner is a real signer process stand-in: the signer's server on a
@@ -250,6 +253,9 @@ func (h *host) start() *running {
 		Config: h.cfg, Probe: h.probe, UID: &uid, Executor: h.exec, DevEnrolment: h.dev, Notifier: h.notes,
 		Log: h.logs.logger(), Version: "test", Listener: lis, TrustDir: h.trustDir, TrustFileOwner: &uid, Hooks: hooks, ObserveEvery: 20 * time.Millisecond,
 		SignerUID: &signerUID, AllowSignerSameUser: !h.refuseSameUser, InventoryRoot: h.invRoot, Floor: daemon.FloorSources{Wall: wall{off: &h.wallOff}, Boot: h.boot, BootID: bootID{}, TimeNS: timeNS{}},
+	}
+	if h.nowOff.Load() != 0 {
+		opts.Now = func() time.Time { return time.Now().Add(time.Duration(h.nowOff.Load())) }
 	}
 	go func() {
 		r.done <- daemon.Run(context.Background(), opts, r.signals)

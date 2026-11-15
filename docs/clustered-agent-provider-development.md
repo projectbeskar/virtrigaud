@@ -22,8 +22,11 @@ package.
 | `--port` | `9443` | gRPC port the manager connects to. |
 | `--health-port` | `8080` | HTTP health port. |
 | `--hosts-file` | `/etc/virtrigaud/hosts/hosts.json` | The mounted host inventory. |
+| `--hosts-secret` | (none) | Name of the host inventory Secret to follow through the Kubernetes API instead of the file (see [Following the inventory Secret](#following-the-inventory-secret)). Excludes `--hosts-file`. Needs `get` and `watch` on that Secret; without them the Provider stops at start with a 403 (`Forbidden`) error. A Provider Deployment the manager renders sets it to `<provider>-hosts` only for a Provider listed in the manager's `--dev-agent-provider-inventory-watch`. |
+| `--hosts-secret-namespace` | `$PROVIDER_NAMESPACE`, then the pod's namespace | Namespace of `--hosts-secret`. |
+| `--inventory-fail-closed-after` | `5m` (minimum `1m`) | With `--hosts-secret`: once no valid inventory was applied for this long, every host is refused (see [Fail-closed](#fail-closed)). |
 | `--agent-client-cert`, `--agent-client-key` | (required) | PEM certificate and key the Provider presents to every agent: its Provider identity certificate. |
-| `--provider-uid` | (none) | UID of the Provider resource. When set, an agent whose certificate records an enrolment with another Provider is refused. Optional for now, with a warning in the log when unset; a deployment the manager renders must set it. |
+| `--provider-uid` | (none) | UID of the Provider resource. When set, an agent whose certificate records an enrolment with another Provider is refused. Optional for now, with a warning in the log when unset; a Provider Deployment the manager renders sets it. |
 
 The manager-facing TLS is the one of the other Providers (the mounted
 provider TLS material and its environment contract).
@@ -31,9 +34,10 @@ provider TLS material and its environment contract).
 ## Host inventory
 
 The hosts come from the host inventory document
-(`internal/clustered/hostsecret`), read from `--hosts-file` and followed as
-the file changes (`internal/clustered/inventoryfile`, shared with clustered
-libvirt): the Provider reads a file, never the Kubernetes API. Every entry
+(`internal/clustered/hostsecret`), read either from `--hosts-file` and
+followed as the file changes (`internal/clustered/inventoryfile`, shared with
+clustered libvirt), or, with `--hosts-secret`, from the inventory Secret
+through the Kubernetes API (next section). Every entry
 must carry agent TLS material and nothing else
 (`hostsecret.ValidateAgentHost`):
 
@@ -58,6 +62,134 @@ file is re-read every 30 seconds on its own, besides the watch on its
 directory; when the watch cannot be set up, the Provider logs it at error
 level and says it in its `Validate` answer, and the periodic re-read still
 follows the file.
+
+## Following the inventory Secret
+
+With `--hosts-secret`, the Provider reads its inventory Secret by name and
+watches it with a `metadata.name` field selector, using its pod's
+ServiceAccount token. Each change is applied as soon as the watch delivers
+it: a host the manager removed from the inventory (a revoked Host, a deleted
+Host, or one whose pins were removed) has its connection closed and every
+call for it refused (`HOST_UNAVAILABLE`, cause `HostNotFronted`) before the next
+call can reach it, without waiting for the kubelet to refresh a mounted
+Secret (which takes up to about a minute or more). The tests measure the
+time from the write that removes a host to its connection closed and its
+calls refused against a real API server, as the Provider's ServiceAccount
+with only the RBAC below: a few milliseconds (p50 about 6 ms, max under
+10 ms over 20 rounds on a development workstation), held to a bound of
+2 seconds. In a cluster, add the manager's re-render of the Secret after the
+Host change (one reconcile) and the API server's watch delivery.
+
+A watch cycle lasts at most 30 seconds and every cycle starts from a fresh
+read of the Secret, so a watch that goes silent without failing delays a
+change by at most about 31 seconds. A failed read or watch is retried with a
+backoff from 250 ms up to 30 seconds. A Secret that cannot be read or parsed
+at start stops the Provider. A deleted Secret fronts no host. Secret content
+is never logged: log lines name the Secret and give a host count or a coarse
+reason.
+
+The inventory's age is the time since the Provider last **applied** a valid
+inventory. Only that refreshes it: a watch bookmark, or an update whose
+document is invalid (a schema version this Provider does not understand, a
+corrupt write), proves that the API answers and nothing more, and never
+clears the failure. Within the fail-closed bound, while no valid inventory
+can be applied, the last good host set is kept; once the age passes three
+reload intervals (90 seconds) the `Validate` answer says so, with the cause.
+
+### Fail-closed
+
+Once no valid inventory was applied for `--inventory-fail-closed-after`
+(default 5 minutes, at least 1 minute; whether the API server is
+unreachable or the Secret's document is invalid), the Provider can no longer
+tell which hosts are still authorised, and it refuses every host: their
+connections are closed, and every call is refused at once, without dialing,
+with `HOST_UNAVAILABLE` and cause `InventoryStale` (no host is named).
+`Validate` answers not Ok and says why. The next valid inventory applied
+restores routing on its own; the hosts are verified again on new
+connections.
+
+Running VMs are not affected: the agents keep them running, and only the
+manager's calls (creating, deleting, power and reconfiguration operations,
+reads) wait until the inventory is applied again. The manager treats
+`HOST_UNAVAILABLE` as host-scoped and outside its circuit breaker, as for an
+unreachable host: a VM waiting on its pending host stays there (it is never
+re-placed and the host is not excluded) and its operation is sent again,
+with the same identity, once the host is routed.
+
+A call already in flight to an agent when the Provider fails closed is cut
+by the closed connection and ends with a transport error, not with
+`InventoryStale`. That is safe for the same reason as a revocation: the agent
+journals every operation and performs it at most once, and the manager asks
+about the operation by its identity before it decides anything, so a cut
+call is never taken as "not performed".
+
+### Metrics
+
+On the health port's `/metrics`, labelled `provider_type="cloudhypervisor"`:
+
+| Metric | Meaning |
+|--------|---------|
+| `virtrigaud_provider_host_inventory_seconds_since_apply` | Seconds since a valid inventory was last applied. |
+| `virtrigaud_provider_host_inventory_stale` | 1 once that age passes three reload intervals, else 0. |
+| `virtrigaud_provider_host_inventory_failed_closed` | 1 while every host is refused (fail-closed), else 0. |
+
+Alert on these gauges (`virtrigaud_provider_host_inventory_stale == 1`, and
+`virtrigaud_provider_host_inventory_failed_closed == 1`), not on the
+Provider's readiness: `Validate` stays Ok while the inventory is stale and
+only turns not Ok once the Provider fails closed. A revocation made while
+the inventory is stale is not applied until a valid inventory is (or until
+the Provider fails closed).
+
+### RBAC
+
+The Provider needs exactly `get` and `watch` on that one Secret and nothing
+else: no `list` (the watch names the Secret, which a `resourceNames` rule
+authorises), no other Secret and no write. The chart grants it, for the
+Providers you list, to each Provider's own ServiceAccount
+(`virtrigaud-provider-<namespace>-<name>`, created by the manager), with a
+Role and RoleBinding in the Provider's namespace:
+
+```yaml
+experimental:
+  agentProviderInventoryWatch:
+    enabled: true
+    developmentBuild: true   # explicit: the Provider image is a development build
+    providers:
+      - namespace: infra
+        name: ch
+```
+
+which renders, per Provider:
+
+```yaml
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "watch"]
+  resourceNames: ["ch-hosts"]
+```
+
+Rendering fails without `developmentBuild: true`, without a Provider, or with
+an entry that is not a valid namespace and name. The manager grants no RBAC
+itself (it holds no `roles` or `rolebindings` write).
+
+The same list also starts the manager with
+`--dev-agent-provider-inventory-watch=<namespace>/<name>,...` (honoured
+only by a development build; a release manager refuses to start with it).
+Only for a clustered `cloudhypervisor` Provider in that list does the
+Deployment the manager renders mount the pod's ServiceAccount token (every
+other Provider pod still runs without one), pass `--hosts-secret` and
+`--provider-uid`, and no longer mount the inventory Secret as a volume, so
+the material is not held twice. Every other Provider, listed nowhere, keeps
+the mounted file and no token. If you set the manager flag by hand, list
+only Providers granted the RBAC above: a listed Provider without it is
+refused its first read (403, `secrets "<provider>-hosts" is forbidden`) and
+stops at start, so its pod restarts until the grant exists.
+
+What the token can reach is that Secret: the agent TLS material of the
+Provider's hosts (CA bundle, expected host URIs and key pins). It holds no
+private key; the inventory a per-host agent Provider reads carries no SSH
+material (`hostsecret.ValidateAgentHost`).
 
 ## Connections to agents
 
@@ -194,10 +326,20 @@ agent processes with the fake executor
 
 ## Limits
 
-- The inventory is a mounted file: a removed or revoked host stops being
-  routed when the file changes on the Provider's disk, which for a mounted
-  Secret is bounded by the kubelet's sync period. Watching the inventory
-  Secret through the API for a faster bound is a later change.
+- With `--hosts-file`, a removed or revoked host stops being routed when the
+  file changes on the Provider's disk, which for a mounted Secret is bounded
+  by the kubelet's sync period; use `--hosts-secret` for a bound in seconds.
+- With `--hosts-secret`, the bound holds while the API server is reachable.
+  During an outage shorter than the fail-closed bound the last good host set
+  is kept (reported by `Validate` and the metrics), so a revocation made
+  meanwhile takes effect when the Provider reads the Secret again, or when it
+  fails closed at the bound, whichever comes first.
+- The chart's optional NetworkPolicies give provider pods no egress to the
+  Kubernetes API server; with them enabled, a Provider started with
+  `--hosts-secret` needs an additional egress rule to the API server.
+- A Provider Deployment the manager renders does not yet carry the
+  Provider's identity certificate (`--agent-client-cert`); deploy the
+  Provider with it by other means until the Provider identity issuer exists.
 - `ListVMs` is not served: a per-host agent does not list VMs yet.
 - The Provider verifies only the answer to its own `Hello`. It relays every
   other signed answer unchanged; verifying them is the manager's job.

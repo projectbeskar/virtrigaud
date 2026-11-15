@@ -1,0 +1,68 @@
+{{- /*
+Inventory Secret read for the clustered Provider for per-host agents.
+DEVELOPMENT ONLY: used only by a provider-cloudhypervisor development build
+started with --hosts-secret. Off by default.
+
+For each listed Provider it grants that Provider's own ServiceAccount
+(virtrigaud-provider-<namespace>-<name>, created by the manager) get and watch
+on exactly one Secret: the Provider's host inventory Secret <name>-hosts, in
+the Provider's namespace (a Role with resourceNames; no list, no wildcard, no
+other Secret). The Provider watches that Secret with a metadata.name field
+selector, which this rule authorises, so that a revoked host is refused within
+seconds instead of after the kubelet's Secret volume sync.
+
+It renders only with experimental.agentProviderInventoryWatch.developmentBuild
+=true, an explicit statement that the Provider image is a development build.
+*/ -}}
+{{- $w := ((.Values.experimental | default dict).agentProviderInventoryWatch | default dict) }}
+{{- if and .Values.rbac.create $w.enabled }}
+{{- if not $w.developmentBuild }}
+{{- fail "experimental.agentProviderInventoryWatch.enabled needs experimental.agentProviderInventoryWatch.developmentBuild=true: only a development build of the clustered Provider for per-host agents follows its inventory Secret through the API" }}
+{{- end }}
+{{- if not $w.providers }}
+{{- fail "experimental.agentProviderInventoryWatch.providers must list the Providers (namespace and name) whose inventory Secret is watched" }}
+{{- end }}
+{{- range $i, $p := $w.providers }}
+{{- if or (not $p.namespace) (not $p.name) }}
+{{- fail "experimental.agentProviderInventoryWatch.providers: every entry needs a namespace and a name" }}
+{{- end }}
+{{- if or (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $p.namespace)) (not (regexMatch "^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$" $p.name)) }}
+{{- fail (printf "experimental.agentProviderInventoryWatch.providers: %q/%q is not a valid namespace and Provider name" $p.namespace $p.name) }}
+{{- end }}
+{{- $sa := printf "virtrigaud-provider-%s-%s" $p.namespace $p.name }}
+{{- if $i }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-inventory" $sa | trunc 253 }}
+  namespace: {{ $p.namespace }}
+  labels:
+    {{- include "virtrigaud.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: provider-inventory-watch
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "watch"]
+  resourceNames:
+  - {{ printf "%s-hosts" $p.name | quote }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-inventory" $sa | trunc 253 }}
+  namespace: {{ $p.namespace }}
+  labels:
+    {{- include "virtrigaud.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: provider-inventory-watch
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-inventory" $sa | trunc 253 }}
+subjects:
+- kind: ServiceAccount
+  name: {{ $sa }}
+  namespace: {{ $p.namespace }}
+{{- end }}
+{{- end }}

@@ -20,10 +20,18 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestDevelopmentFlags: the agent client certificate is required, and a
@@ -51,4 +59,86 @@ func TestDevelopmentFlags(t *testing.T) {
 	if _, err := os.Stat(missing); err == nil {
 		t.Fatal("the test expects the certificate to be missing")
 	}
+}
+
+// TestHostsSecretFlags: --hosts-secret excludes --hosts-file, its namespace
+// comes from the flag, the environment or the pod's namespace file, and
+// outside a cluster it stops the Provider.
+func TestHostsSecretFlags(t *testing.T) {
+	var out, errOut bytes.Buffer
+	base := []string{"--agent-client-cert=c", "--agent-client-key=k"}
+	if code := realMain(append(base, "--hosts-secret=ch-hosts", "--hosts-file=/x"), &out, &errOut); code != exitUsage ||
+		!strings.Contains(errOut.String(), "mutually exclusive") {
+		t.Errorf("both sources: exit %d\n%s", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := realMain(append(base, "--hosts-secret-namespace=infra"), &out, &errOut); code != exitUsage {
+		t.Errorf("namespace without a Secret: exit %d\n%s", code, errOut.String())
+	}
+	if _, err := parseFlags(append(base, "--hosts-secret=ch-hosts", "--inventory-fail-closed-after=30s"), &errOut); err == nil ||
+		!strings.Contains(err.Error(), "at least") {
+		t.Errorf("a fail-closed bound below the minimum: %v", err)
+	}
+	f, err := parseFlags(append(base, "--hosts-secret=ch-hosts"), &errOut)
+	if err != nil || f.hostsSecret != "ch-hosts" || f.hostsFileSet || f.failClosedAfter != 5*time.Minute {
+		t.Errorf("--hosts-secret: %+v %v", f, err)
+	}
+
+	dir := t.TempDir()
+	nsFile := filepath.Join(dir, "namespace")
+	if err := os.WriteFile(nsFile, []byte("pod-ns\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ flag, env, file, want string }{
+		{"flag-ns", "env-ns", nsFile, "flag-ns"},
+		{"", "env-ns", nsFile, "env-ns"},
+		{"", "", nsFile, "pod-ns"},
+	} {
+		got, err := secretNamespace(c.flag, c.env, c.file)
+		if err != nil || got != c.want {
+			t.Errorf("secretNamespace(%q, %q): %q %v, want %q", c.flag, c.env, got, err, c.want)
+		}
+	}
+	if _, err := secretNamespace("", "", filepath.Join(dir, "absent")); err == nil {
+		t.Error("an unknown namespace is an error")
+	}
+
+	// Outside a cluster there are no in-cluster credentials: the Provider
+	// stops (after loading its certificate, so use readable files).
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv(envProviderNamespace, "infra")
+	t.Setenv("VIRTRIGAUD_PROVIDER_INSECURE", "true")
+	certFile, keyFile := writeTestKeyPair(t, dir)
+	errOut.Reset()
+	if code := realMain([]string{"--agent-client-cert=" + certFile, "--agent-client-key=" + keyFile, "--hosts-secret=ch-hosts"},
+		&out, &errOut); code != exitError || !strings.Contains(errOut.String(), "API credentials") {
+		t.Errorf("outside a cluster: exit %d\n%s", code, errOut.String())
+	}
+}
+
+// writeTestKeyPair writes a self-signed certificate and its key to dir.
+func writeTestKeyPair(t *testing.T, dir string) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "provider"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile := filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
 }

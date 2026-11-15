@@ -337,6 +337,24 @@ experimental:
     # issuers.cert-manager.io/<namespace>.<name> or
     # clusterissuers.cert-manager.io/<name>. No wildcard is accepted.
     signerNames: []
+  # Inventory Secret watch of the clustered Provider for per-host agents
+  # (provider-cloudhypervisor started with --hosts-secret, development
+  # builds only). For each listed Provider, its own ServiceAccount gets get
+  # and watch on its host inventory Secret <name>-hosts only (a Role with
+  # resourceNames), and the manager is started with
+  # --dev-agent-provider-inventory-watch=<namespace>/<name>,... so that it
+  # renders those Providers, and only those, to read the Secret through the
+  # API. Off by default; see
+  # docs/clustered-agent-provider-development.md.
+  agentProviderInventoryWatch:
+    enabled: false
+    # Must be set to true together with enabled: an explicit statement that
+    # the Provider image is a development build. Rendering fails otherwise.
+    developmentBuild: false
+    # The Providers, e.g.
+    #   - namespace: infra
+    #     name: ch
+    providers: []
 
 # Security configuration
 security:
