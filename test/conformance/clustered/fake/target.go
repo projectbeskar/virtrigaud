@@ -37,6 +37,8 @@ type Target struct {
 	caps       clustered.Capabilities
 	ident      *identityMode
 	placements *clustered.Placements
+	// inventory makes the hosts report a host inventory (WithHostInventory).
+	inventory bool
 }
 
 // Option configures New.
@@ -50,6 +52,12 @@ func WithViolations(vs ...Violation) Option {
 		}
 	}
 }
+
+// WithHostInventory makes the fake's hosts (in operation-identity mode) put a
+// host inventory in the signed answer of every GetHostInfo that asks for one
+// (FakeInventory), as a per-host agent does. Without it they ignore the
+// request's inventory version, as an agent that reports none does.
+func WithHostInventory() Option { return func(t *Target) { t.inventory = true } }
 
 // Synchronous makes the fake's routed calls synchronous: they return no task.
 func Synchronous() Option { return func(t *Target) { t.async = false } }
@@ -126,7 +134,7 @@ func (t *Target) newProvider() *provider {
 	return &provider{
 		w: t.w, violations: t.violations, async: t.async, notOwned: true,
 		memTasks: map[string]*task{}, ident: t.ident, memOps: map[string]map[string]*opRecord{},
-		placements: t.placements,
+		placements: t.placements, inventory: t.inventory,
 	}
 }
 

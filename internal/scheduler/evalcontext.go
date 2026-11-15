@@ -21,6 +21,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
@@ -37,6 +38,9 @@ type evalContext struct {
 	req      Request
 	cpuRatio float64
 	memRatio float64
+
+	// now is Request.Now, or the clock when it is zero.
+	now time.Time
 
 	// placedByHost maps a host id to the VMs placed on it that are in the
 	// scheduled VM's affinity scope (Request.PlacedVMs not marked CapacityOnly),
@@ -100,8 +104,13 @@ func newEvalContext(req Request) (*evalContext, error) {
 			scopedByHost[host] += hc.ScopedVMs
 		}
 	}
+	now := req.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 	ec := &evalContext{
 		req:             req,
+		now:             now,
 		cpuRatio:        cpuRatio,
 		memRatio:        memRatio,
 		placedByHost:    placedByHost,

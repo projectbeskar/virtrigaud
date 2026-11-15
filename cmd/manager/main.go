@@ -251,6 +251,29 @@ func main() {
 		devOnly+"Trust domain of host URI identities (spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>).")
 	flag.StringVar(&hostEnrolmentFlags.CABundleFile, controller.DevHostEnrolmentCABundleFileFlagName, "",
 		devOnly+"PEM file of the host-agent subordinate CA that issued agent certificates must chain to.")
+	var hostInventoryFlags controller.HostInventoryFlags
+	flag.StringVar(&hostInventoryFlags.AllowListFile, controller.ComponentAllowListFileFlagName, "",
+		devOnly+"Component allow-list file (JSON) that host inventories are compared with, read once at start. "+
+			"It needs --"+controller.ComponentAllowListSHA256FlagName+".")
+	flag.StringVar(&hostInventoryFlags.AllowListSHA256, controller.ComponentAllowListSHA256FlagName, "",
+		devOnly+"SHA-256 of the component allow-list file (64 lowercase hexadecimal characters). A file with "+
+			"another digest is not used, and no Provider whose type runs a per-host agent is served.")
+	flag.StringVar(&hostInventoryFlags.SignersFile, controller.ComponentAllowListSignersFileFlagName, "",
+		devOnly+"PEM file of the public keys (ECDSA P-256 or Ed25519) one of which must have signed the component "+
+			"allow-list. Setting it requires --"+controller.ComponentAllowListSignatureFileFlagName+".")
+	flag.StringVar(&hostInventoryFlags.SignatureFile, controller.ComponentAllowListSignatureFileFlagName, "",
+		devOnly+"Detached signature of the component allow-list file (base64), verified offline against the signers.")
+	flag.BoolVar(&hostInventoryFlags.InsecureSkipAllowList, controller.InsecureSkipComponentAllowListFlagName, false,
+		devOnly+"INSECURE. Let hosts be ready without comparing their components with an allow-list.")
+	flag.StringVar(&hostInventoryFlags.MaxAge, controller.HostInventoryMaxAgeFlagName, "",
+		devOnly+"Maximum age of a host inventory (from 1m to 1h; empty: 5m).")
+	flag.StringVar(&hostInventoryFlags.RequiredFeatures, controller.HostInventoryRequiredFeaturesFlagName, "",
+		devOnly+"Comma-separated feature probes a host must report present, or 'none' (empty: the default set).")
+	flag.StringVar(&hostInventoryFlags.AcceptedOrigins, controller.HostInventoryAcceptedOriginsFlagName, "",
+		devOnly+"Comma-separated manifest origins accepted for a ready component: read-only, writable (empty: both).")
+	flag.StringVar(&hostInventoryFlags.AcceptedTiers, controller.HostInventoryAcceptedTiersFlagName, "",
+		devOnly+"Comma-separated process identity tiers accepted: pidfd-store, pidfs-handle, pidfs-inode, start-time "+
+			"(empty: all).")
 	clientLimits := bindClientRateLimitFlags(flag.CommandLine)
 	opts := zap.Options{
 		Development: true,
@@ -332,6 +355,15 @@ func main() {
 		setupLog.Info("WARNING: per-host agent enrolment is enabled; this manager is not for production use",
 			"namespace", hostEnrolment.Namespace)
 	}
+	// The host inventory policy, refused by a release build like the
+	// signer. An allow-list that cannot be put in force does not stop the
+	// manager: it serves no Provider whose type runs a per-host agent.
+	hostInventoryPolicy, err := controller.ParseHostInventoryPolicy(hostInventoryFlags)
+	if err != nil {
+		setupLog.Error(err, "invalid host inventory flags")
+		os.Exit(1)
+	}
+	hostInventoryPolicy.LogStartup(setupLog)
 	// Host answers are verified against the enrolment's pins and sub-CA
 	// only: the development enrolment file cannot be mixed with them (two
 	// sources of trust for one host), and without enrolment nothing is sent
@@ -560,6 +592,9 @@ func main() {
 	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
 
 	hostAnswers := controller.NewHostAnswers(mgr.GetClient(), mgr.GetAPIReader(), hostEnrolment, installID)
+	if hostAnswers != nil {
+		hostAnswers.Inventory = hostInventoryPolicy
+	}
 
 	vmReconciler := &controller.VirtualMachineReconciler{
 		Client:           mgr.GetClient(),
@@ -607,6 +642,7 @@ func main() {
 		// Development builds only: renders enrolled per-host agent hosts.
 		HostEnrolment:         hostEnrolment,
 		OperationSignerLoaded: devOperationSigner != nil,
+		HostInventory:         hostInventoryPolicy,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
@@ -722,6 +758,7 @@ func main() {
 		Scheme:         mgr.GetScheme(),
 		RemoteResolver: remoteResolver,
 		HostAnswers:    hostAnswers,
+		Recorder:       mgr.GetEventRecorderFor("host-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Host")
 		os.Exit(1)

@@ -439,11 +439,21 @@ type HostAnswers struct {
 	// Now is the clock (nil: time.Now).
 	Now func() time.Time
 
+	// Inventory is the host inventory policy (nil: the default policy,
+	// DefaultHostInventoryPolicy).
+	Inventory *HostInventoryPolicy
+
 	mu    sync.Mutex
 	hosts map[string]*hostAnswerState
 
 	wmu     sync.Mutex
 	writers map[string]*hostWriter
+
+	// imu guards invBackoff, the inventory backoff of each host. It is kept
+	// apart from hosts, so forgetting a host's store positions never resets
+	// its backoff.
+	imu        sync.Mutex
+	invBackoff map[string]*inventoryBackoff
 }
 
 // hostWriter serialises the store-state writes of one host and paces them
@@ -613,6 +623,9 @@ const (
 type hostRead struct {
 	trust    HostTrust
 	snapshot hostidentity.StoreRecord
+	// inventoryVersion is the inventory version a GetHostInfo read sent
+	// (0: none).
+	inventoryVersion uint32
 }
 
 // errHostTrust wraps begin's failures to read the manager's own trust or
@@ -663,12 +676,32 @@ func blobOf(a *contracts.SignedAnswer) *providerv1.SignedBlob {
 // write is no answer.
 func (h *HostAnswers) finish(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string, hr hostRead,
 	bodyType string, read contracts.SignedRead, definite func(hostidentity.VerifiedAnswer) bool) (hostidentity.VerifiedAnswer, answerVerdict) {
-	logger := log.FromContext(ctx)
-	v, err := hostidentity.VerifyAnswer(blobOf(read.Answer), hr.trust.expectation(provider, hostID, bodyType, read.Nonce, h.now()))
+	v, err := h.verify(ctx, provider, hostID, hr, bodyType, read)
 	if err != nil {
-		logger.Info("No signed host answer; nothing is concluded", "host", hostID, "check", err.Error())
 		return hostidentity.VerifiedAnswer{}, answerNone
 	}
+	return h.finishVerified(ctx, provider, hostID, hr, v, definite)
+}
+
+// verify verifies the answer of a read begun with hr; a failure is logged
+// and is no answer.
+func (h *HostAnswers) verify(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string, hr hostRead,
+	bodyType string, read contracts.SignedRead) (hostidentity.VerifiedAnswer, error) {
+	exp := hr.trust.expectation(provider, hostID, bodyType, read.Nonce, h.now())
+	exp.InventoryVersion = hr.inventoryVersion
+	v, err := hostidentity.VerifyAnswer(blobOf(read.Answer), exp)
+	if err != nil {
+		log.FromContext(ctx).Info("No signed host answer; nothing is concluded", "host", hostID, "check", err.Error())
+		return hostidentity.VerifiedAnswer{}, err
+	}
+	return v, nil
+}
+
+// finishVerified checks the store continuity of a verified answer of a read
+// begun with hr and raises the host's record (see finish).
+func (h *HostAnswers) finishVerified(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string, hr hostRead,
+	v hostidentity.VerifiedAnswer, definite func(hostidentity.VerifiedAnswer) bool) (hostidentity.VerifiedAnswer, answerVerdict) {
+	logger := log.FromContext(ctx)
 	c := hostidentity.CheckContinuity(hr.snapshot, v)
 	if c.Regressed {
 		h.markRegressed(ctx, provider, hostID, c.Reason, v.Context.GetEnrolmentId())
@@ -869,20 +902,71 @@ func (h *HostAnswers) grantReady(provider *infravirtrigaudiov1beta1.Provider, ho
 // RefreshHostAnswer asks the host for a signed host answer through reader
 // and, when it verifies, records it (what grantReady reads). It returns the
 // plain host information beside it (the Provider's unsigned claim), the
-// verified answer and the verdict.
+// verified answer and the verdict. It asks for the host inventory as
+// refreshHost does.
 func (h *HostAnswers) RefreshHostAnswer(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, reader contracts.HostAnswerReader,
 	hostID string) (contracts.HostInfo, hostidentity.VerifiedAnswer, answerVerdict, error) {
+	r, err := h.refreshHost(ctx, provider, reader, hostID)
+	return r.info, r.answer, r.verdict, err
+}
+
+// hostRefresh is the outcome of one signed host read.
+type hostRefresh struct {
+	// info is the Provider's unsigned host information.
+	info contracts.HostInfo
+	// answer is the verified answer (when verdict is answerVerified).
+	answer hostidentity.VerifiedAnswer
+	// verdict is what the read gave.
+	verdict answerVerdict
+	// read is the signed read (its relayed answer is logged on an
+	// inventory condition transition).
+	read contracts.SignedRead
+	// asked is the inventory version the read sent (0: none).
+	asked uint32
+	// inventoryBackoff reports that the read did not ask for the inventory
+	// because the host's agent recently signed an invalid one, or that it
+	// signed one in this read.
+	inventoryBackoff bool
+	// verifiedAt is the manager's clock when the answer verified.
+	verifiedAt time.Time
+}
+
+// refreshHost asks the host for a signed host answer with its host inventory
+// (the highest inventory version the manager implements, except while the
+// host's agent is in an inventory backoff) and, when it verifies, records it
+// (what grantReady reads). An answer without the inventory asked for is still
+// a valid answer for everything else. An answer whose inventory does not echo
+// the request is no answer and changes nothing else: the next read asks
+// again. An answer whose inventory breaks a field rule is no answer and
+// starts or extends the host's inventory backoff.
+func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, reader contracts.HostAnswerReader,
+	hostID string) (hostRefresh, error) {
 	hr, err := h.begin(ctx, provider, hostID)
 	if err != nil {
 		if errors.Is(err, errHostRegressed) {
-			return contracts.HostInfo{}, hostidentity.VerifiedAnswer{}, answerRegressed, nil
+			return hostRefresh{verdict: answerRegressed}, nil
 		}
-		return contracts.HostInfo{}, hostidentity.VerifiedAnswer{}, answerNone, err
+		return hostRefresh{verdict: answerNone}, err
 	}
-	info, read, rerr := reader.HostAnswer(ctx, hostID, hr.snapshot.ContinuitySeq())
+	hr.inventoryVersion = h.inventoryAsk(provider, hostID)
+	out := hostRefresh{asked: hr.inventoryVersion, inventoryBackoff: hr.inventoryVersion == 0}
+	info, read, rerr := reader.HostAnswer(ctx, contracts.HostAnswerQuery{HostID: hostID, ContinuitySeq: hr.snapshot.ContinuitySeq(),
+		InventoryVersion: hr.inventoryVersion})
+	out.info, out.read = info, read
 	if rerr != nil {
-		return info, hostidentity.VerifiedAnswer{}, answerNone, rerr
+		out.verdict = answerNone
+		return out, rerr
 	}
+	v, verr := h.verify(ctx, provider, hostID, hr, hostidentity.BodyTypeHostAnswer, read)
+	if verr != nil {
+		if errors.Is(verr, hostidentity.ErrInventoryInvalid) {
+			h.inventoryFault(provider, hostID)
+			out.inventoryBackoff = true
+		}
+		out.verdict = answerNone
+		return out, nil
+	}
+	out.verifiedAt = h.now()
 	// Until this process has a verified position of the host persisted, the
 	// host answer's position is written before it counts.
 	unanchored := func(hostidentity.VerifiedAnswer) bool {
@@ -891,10 +975,12 @@ func (h *HostAnswers) RefreshHostAnswer(ctx context.Context, provider *infravirt
 		s := h.hosts[hostAnswerKey(provider, hostID)]
 		return s == nil || !s.anchored
 	}
-	v, verdict := h.finish(ctx, provider, hostID, hr, hostidentity.BodyTypeHostAnswer, read, unanchored)
-	if verdict != answerVerified {
-		return info, v, verdict, nil
+	v, out.verdict = h.finishVerified(ctx, provider, hostID, hr, v, unanchored)
+	out.answer = v
+	if out.verdict != answerVerified {
+		return out, nil
 	}
+	h.inventoryAnswered(provider, hostID, v, hr.inventoryVersion)
 	h.mu.Lock()
 	if s, err := h.state(ctx, provider, hostID); err == nil {
 		s.hostAnswerAt, s.hostAnswerEnrol = h.now(), bytes.Clone(v.Context.GetEnrolmentId())
@@ -902,7 +988,7 @@ func (h *HostAnswers) RefreshHostAnswer(ctx context.Context, provider *infravirt
 		s.hostAgentState = v.Context.GetAgentState()
 	}
 	h.mu.Unlock()
-	return info, v, verdict, nil
+	return out, nil
 }
 
 // auditSignedDecision writes the audit record of a decision a signed answer

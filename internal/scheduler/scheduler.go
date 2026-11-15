@@ -76,6 +76,7 @@ package scheduler
 
 import (
 	"fmt"
+	"time"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
@@ -276,6 +277,17 @@ type Request struct {
 	// Addendum B), which exists nowhere else on host-local storage. Every
 	// other candidate is filtered out (RejectionNotRequiredHost).
 	RequiredHost string
+
+	// HeartbeatMaxAge, when positive, rejects every candidate whose
+	// status.lastHeartbeatTime is absent or older than HeartbeatMaxAge at Now
+	// (RejectionHeartbeatStale). The caller sets it for the hosts of a
+	// Provider whose type runs a per-host agent, so a Ready health left by a
+	// Host controller that stopped writing cannot outlive the maximum host
+	// inventory age; zero (every other Provider) checks nothing.
+	HeartbeatMaxAge time.Duration
+
+	// Now is the clock HeartbeatMaxAge is measured on (zero: time.Now()).
+	Now time.Time
 }
 
 // Result is the scheduler's decision for a feasible placement.

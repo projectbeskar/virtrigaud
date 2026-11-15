@@ -51,6 +51,11 @@ const (
 // (AllExcluded).
 const RejectionExcludedForVM = "host excluded for this VM"
 
+// RejectionHeartbeatStale is the rejection category of a host whose last
+// successful sync (status.lastHeartbeatTime) is absent or older than
+// Request.HeartbeatMaxAge.
+const RejectionHeartbeatStale = "host heartbeat stale"
+
 // RejectionNotRequiredHost is the rejection category of a host other than
 // Request.RequiredHost.
 const RejectionNotRequiredHost = "not the host the VM's disk was imported to"
@@ -85,6 +90,15 @@ func (ec *evalContext) filterHost(h *v1beta1.Host) (reason, detail string, err e
 	//    bound VM off a now-cordoned host.
 	if h.Status.Health != v1beta1.HostHealthReady {
 		return rejNotReady, string(h.Status.Health), nil
+	}
+	// 1b. For the hosts of a Provider whose type runs a per-host agent, a
+	//     Ready health is only as recent as the last successful sync that
+	//     wrote it: a host not synced within HeartbeatMaxAge is rejected.
+	if ec.req.HeartbeatMaxAge > 0 {
+		hb := h.Status.LastHeartbeatTime
+		if hb == nil || ec.now.Sub(hb.Time) > ec.req.HeartbeatMaxAge {
+			return RejectionHeartbeatStale, "", nil
+		}
 	}
 	if !h.Spec.Schedulable {
 		return rejCordoned, "", nil

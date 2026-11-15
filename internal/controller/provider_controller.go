@@ -235,6 +235,12 @@ type ProviderReconciler struct {
 	// without one. Read only.
 	OperationSignerLoaded bool
 
+	// HostInventory is the host inventory policy (development builds; nil:
+	// the default). A Provider whose type runs a per-host agent reports
+	// Ready=False while a configured component allow-list is not in force.
+	// Read only.
+	HostInventory *HostInventoryPolicy
+
 	// intentSkipWarned remembers, per Provider (namespace, name and UID) and
 	// Secret name, the intent Secrets the sweeper kept for disagreeing
 	// annotations that a Warning event was recorded for, so each is
@@ -546,6 +552,7 @@ func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, 
 		providerConditionCapabilitiesReported, metav1.ConditionTrue,
 		providerReasonCapabilitiesFetched, "Provider capabilities reported", provider.Generation)
 	setOperationIdentityReadiness(provider, caps, r.OperationSignerLoaded)
+	setComponentAllowListReadiness(provider, r.HostInventory)
 	return true
 }
 

@@ -471,7 +471,9 @@ machines with, in the signed `HostAnswer` of `GetHostInfo`
 [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#host-inventory)).
 It is a **detective control**: signed so that the Provider cannot alter,
 replay or downgrade it, but a host whose agent is compromised can report
-anything.
+anything. What the manager does with it (verification, the Host conditions,
+the component allow-list and scheduling) is in
+[`host-inventory-manager.md`](host-inventory-manager.md).
 
 ### When it is sent
 

@@ -115,6 +115,8 @@ type provider struct {
 	served     int
 	// ident is the operation-identity mode, nil when the fake is not in it.
 	ident *identityMode
+	// inventory makes signed host answers carry a host inventory when asked.
+	inventory bool
 	// memOps holds the operation records in the provider's memory
 	// (TombstonesInProviderMemory).
 	memOps map[string]map[string]*opRecord

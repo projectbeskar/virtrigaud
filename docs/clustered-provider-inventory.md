@@ -881,6 +881,12 @@ host-alpha    Ready      pool-a    true          5m
 host-bravo    NotReady   pool-a    true          5m
 ```
 
+For a Provider whose type runs a per-host agent (development builds only),
+`Host.status` also carries `agentInventory` (the last verified host inventory, an
+output only) and the `AgentInventoryVerified` and `ComponentsReady` conditions; the
+health is `Ready` only while both are True. See
+[`host-inventory-manager.md`](host-inventory-manager.md).
+
 Security: `Host.status` carries capacity/health only, **never** connection secrets
 (ADR-0007 Security). The controller writes the status subresource (`hosts/status`)
 and, for the in-use finalizer only, the Host object (`hosts` update plus
@@ -941,6 +947,7 @@ constraint that must hold:
 | Filter | Rule |
 |--------|------|
 | Health + cordon | `status.health == Ready` **and** `spec.schedulable == true` (a cordoned or NotReady host is never a target for a new VM). |
+| Recent sync (per-host agent Providers only; development builds) | `status.lastHeartbeatTime` present and no older than the maximum host inventory age (default 5 minutes); otherwise rejected as `host heartbeat stale`. Other Providers' hosts are not checked. See [`host-inventory-manager.md`](host-inventory-manager.md). |
 | Capacity fit | the request fits in what is **free**: `allocatableCPU` / `allocatableMemoryMiB` times the pool's overcommit ratio, **minus** what the VMs bound to, pending on or assumed on the host already hold (see *Committed capacity* below). |
 | Hard host list | `VMPlacementPolicy.Hard.Hosts` allow-list / `Hard.ExcludedHosts` deny-list (a host id is its `Host` CR name). |
 | Hard node-selector | `Hard.NodeSelector` matched against `Host.spec.labels`. |
