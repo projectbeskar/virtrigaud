@@ -33,8 +33,11 @@ limitations under the License.
 //	urn:virtrigaud:provider:<Provider UID>
 //	urn:virtrigaud:install:<32 hex>
 //	urn:virtrigaud:mode:identity
+//	urn:virtrigaud:epoch:<decimal>   (only for a start epoch from 2)
 //
-// The subordinate CA signs them, so whoever holds the certificate can derive
+// The start epoch is the epoch the host starts the enrolment at; a record
+// without the epoch URI starts at epoch 1, so a first enrolment's names are
+// unchanged. The subordinate CA signs them, so whoever holds the certificate can derive
 // the enrolment record from it offline, authenticated by the CA (RecordFromURIs).
 //
 // # Key pins

@@ -109,6 +109,46 @@ func TestRecordFromURIsRefusesAnythingButTheExactSet(t *testing.T) {
 	}
 }
 
+// A record's start epoch: epoch 1 carries no epoch URI (a first
+// enrolment's names are unchanged); a later epoch is the last URI, round
+// trips, and is part of the record's identity; malformed or out-of-range
+// epoch URIs are refused.
+func TestRecordStartEpoch(t *testing.T) {
+	host := testHostURI(t)
+	first := testRecord()
+	assert.Equal(t, uint64(hostidentity.FirstStartEpoch), first.Epoch())
+	assert.Len(t, hostidentity.RequestURIs(host, first), 5)
+	one := first
+	one.StartEpoch = 1
+	assert.Equal(t, hostidentity.RequestURIs(host, first), hostidentity.RequestURIs(host, one), "epoch 1 is written by leaving the URI out")
+	assert.True(t, first.Equal(one))
+
+	later := testRecord()
+	later.StartEpoch = 7
+	uris := hostidentity.RequestURIs(host, later)
+	require.Len(t, uris, 6)
+	assert.Equal(t, "urn:virtrigaud:epoch:7", uris[5])
+	got, err := hostidentity.RecordFromURIs(hostidentitytest.ParseURIs(t, uris), host)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7), got.Epoch())
+	assert.True(t, got.Equal(later))
+	assert.False(t, got.Equal(first), "the start epoch is part of the record")
+
+	base := hostidentity.RequestURIs(host, first)
+	for name, epoch := range map[string]string{"epoch 1 spelled out": "1", "zero": "0", "leading zero": "07", "sign": "+7",
+		"not decimal": "x7", "empty": "", "above the bound": "4294967297", "overflow": "99999999999999999999999"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := hostidentity.RecordFromURIs(hostidentitytest.ParseURIs(t, append(append([]string{}, base...), hostidentity.URIEpochPrefix+epoch)), host)
+			assert.ErrorIs(t, err, hostidentity.ErrRecord)
+		})
+	}
+	_, err = hostidentity.RecordFromURIs(hostidentitytest.ParseURIs(t, append(append([]string{}, uris...), uris[5])), host)
+	assert.ErrorIs(t, err, hostidentity.ErrRecord, "a repeated epoch URI")
+	tooHigh := testRecord()
+	tooHigh.StartEpoch = hostidentity.MaxStartEpoch + 1
+	assert.ErrorIs(t, tooHigh.Validate(), hostidentity.ErrRecord)
+}
+
 func TestAuthoriseAcceptsAWellFormedRequest(t *testing.T) {
 	key := hostidentitytest.NewKey(t)
 	csr := hostidentitytest.NewCSR(t, key, hostidentitytest.CSROptions{CommonName: testHostName, URIs: hostidentity.RequestURIs(testHostURI(t), testRecord())})
