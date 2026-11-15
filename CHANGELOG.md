@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-15 23:30] - Confirm the freeze of a re-keyed Host's predecessor enrolments (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/agent/v1/agent.proto`: `AgentStatusRequest.confirm_frozen_enrolment_ids` and `confirm_for_enrolment_id` (additive): the manager's unsigned confirmation, relayed by the Provider, that the host may discard frozen predecessor enrolments. An older agent ignores them.
+- `internal/agent/opstore/reenrol.go`, `internal/agent/server/services.go`, `internal/agent/daemon/daemon.go`: a development agent applies a relayed confirmation only while ready, only for its active enrolment, to at most 16 well-formed ids, and only to frozen predecessors (`ConfirmFrozen` over `ConfirmFreeze`); idempotent; each discard logged. Mutation guards `confirm-for-active` and `confirm-only-frozen`.
+- `internal/clustered/hostsecret/hostsecret.go`, `internal/providers/cloudhypervisor/freeze.go`: the host inventory may carry a host's `freezeConfirmation`; the Provider relays it with `agent.v1 AgentStatus` before the next call to the host, once per connection and again when it changes; a malformed one makes the entry unroutable.
+- `internal/controller/host_freeze.go`, `internal/controller/host_enrolment.go`, `internal/controller/provider_hostinventory.go`: the manager confirms a predecessor's freeze once it is past a two-minute quiet period and no VirtualMachine of the Host's Provider has an open attempt on the Host (read from the API server); confirmed predecessors are recorded in the pins Secret, with the time each became one, and rendered into the host inventory. Event `AgentFreezeConfirmed`.
+- `internal/controller/host_controller_answer.go`, `internal/controller/host_freeze.go`: the heartbeat asks the host, signed, about an op_id it never used under each confirmed predecessor and removes the predecessor from the pins Secret only on a verified `UNKNOWN_TO_AGENT` from a ready agent (resourceVersion precondition, audit log line with the signed answer, event `AgentPredecessorDiscarded`). The predecessor bound then drains and the Host can be re-keyed again.
+- Tests: the agent applies only valid confirmations (stale, active, unknown, malformed, too many, replayed) and nothing runs again; an agent without the confirmer ignores it; the Provider relays once per connection and again on change or reconnect, refuses a malformed one, and an agent that serves no AgentStatus keeps working; the manager's decision (quiet period, open attempts on the host, other hosts and Providers, terminal attempts, revoked Host, restart), removal only on the signed discard (not on NO_RECORD, unsigned or mismatched answers), and an envtest from eight re-keys through confirmation and removal to a ninth re-key.
+
+### Changed
+- `docs/host-agent-enrolment.md`, `docs/per-host-agent-development.md`, `docs/operation-grants-manager.md`, `docs/clustered-agent-provider-development.md`: how a predecessor's freeze is confirmed, relayed, applied and removed, and what a false relay can and cannot do.
+
+### Why
+After a re-key, the replaced enrolment's records were kept for ever and predecessors accumulated up to the bound, after which a Host could not be re-keyed again. The host may now discard them once the manager holds no operation under them, and the manager stops listing them only on the host's signed word.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-15 19:30] - Re-key an enrolled per-host agent Host (development builds only)
 **Author:** @wrkode (William Rizzo)
 

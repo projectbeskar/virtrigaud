@@ -234,6 +234,23 @@ the host refusing every operation, and the host reports `AGENT_STATE_UNATTESTED`
 (cause `freeze_incomplete`, as above). A marker that cannot be read quarantines the
 store (`inconsistent_store`) and keeps the host refusing; reads still answer.
 
+### Freeze confirmation
+
+The manager confirms, through the Provider, that it holds no open operation
+under frozen predecessor enrolments, so that the host may discard their
+records (`agent.v1 AgentStatus`: `confirm_frozen_enrolment_ids` and
+`confirm_for_enrolment_id`). The confirmation is unsigned. A development
+build applies it only while the agent is `READY`, only when
+`confirm_for_enrolment_id` is the store's active enrolment, only for at most
+16 ids of 16 bytes, and only to enrolments the store holds as frozen
+predecessors; the active enrolment, unknown, already discarded, repeated and
+malformed ids are skipped, and a confirmation made for another enrolment (a
+stale relay) changes nothing. It is idempotent. Each discard is logged with
+the enrolment id. After it, an operation of the discarded enrolment is
+answered `UNKNOWN_TO_AGENT` (never a definite not-performed), and a re-sent
+grant of it is refused without running anything. A false confirmation
+therefore costs only liveness. A release build ignores the field.
+
 ### Host checks
 
 | Check | Refusal reason |
@@ -325,7 +342,7 @@ and a client may not send keepalive pings more often than every 15 seconds
 |--------|--------|
 | `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)). `host_id` naming another host, a nonce that is not 16 bytes, `continuity_seq` without a nonce, or `inventory_version` without a nonce: `InvalidArgument`. |
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
-| `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. |
+| `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. A freeze confirmation it carries is applied first (see [Freeze confirmation](#freeze-confirmation)). |
 | `agent.v1.AgentService/InstallRenewedCertificate` | `Unimplemented`. |
 | Every mutating Provider method (the operation kind table) | `Unavailable` with `UNATTESTED` before the agent is ready; `FailedPrecondition` with `QUARANTINED` while the store is quarantined. Once ready: a release build answers `Unimplemented`; a development build runs the operation path (see [Operations](#operations)). |
 | `provider.v1.Provider/TaskStatus` | Development builds: the operation's state from its record or tombstone, by task reference, or by `op_id` with a signed `OperationAnswer` (see [Operations](#operations)). Release builds: `Unimplemented`. |
@@ -1119,9 +1136,6 @@ that is already enrolled is never changed by this file.
   a revoked host (see
   [the Provider's inventory Secret watch](clustered-agent-provider-development.md#following-the-inventory-secret));
   the agent itself refuses an expired certificate at start, without opening
-  its store, and a new enrolment restores it. The freeze of a predecessor
-  enrolment is never confirmed to the agent yet (no message carries the
-  confirmation), so its records stay answerable until a later change
-  delivers it. Enrolment needs the manager side's flow by hand (copying
-  files).
+  its store, and a new enrolment restores it. Enrolment needs the manager
+  side's flow by hand (copying files).
 - The Provider identity CA is a development stand-in.

@@ -174,10 +174,48 @@ only once the manager has pinned its key for the Host, and install it with
 the replaced enrolment's open operations
 ([details](per-host-agent-development.md#re-enrolment-freeze)).
 
-A predecessor stays listed until the host confirms it has discarded the
-predecessor's records. That confirmation is not delivered yet, so
-predecessors accumulate up to the bound; until it exists, a Host that reaches
-the bound can only be revoked and replaced by a new Host object.
+### Confirming a predecessor's freeze
+
+A predecessor stays listed until the host has discarded its records, in
+three steps:
+
+1. **Decision.** The manager confirms the freeze of a predecessor once it has
+   been one for at least two minutes and no VirtualMachine of the Host's
+   Provider has an open (not `Terminal`) operation attempt on the Host. The
+   attempts are read from the API server, not a cache. An attempt does not
+   record its enrolment, so any open attempt on the Host holds every
+   predecessor; a busy Host is confirmed once its operations settle. The
+   decision is recorded in the pins Secret (`confirmedFrozenEnrolmentIDs`,
+   with the time each predecessor became one in `predecessorSince`) and
+   reported with an `AgentFreezeConfirmed` event naming the enrolment id. It
+   is re-checked every minute while a predecessor waits, and it survives a
+   manager restart.
+2. **Delivery.** The confirmed predecessors (at most 16) and the Host's
+   current enrolment id are rendered into the Provider's host inventory
+   (`freezeConfirmation`), which the Provider follows; it relays them to
+   the agent with the next call to the host (`agent.v1 AgentStatus`), once per
+   connection and again when they change. The agent discards the records of
+   the predecessors it holds as frozen predecessors of that current
+   enrolment and ignores everything else
+   ([details](per-host-agent-development.md#freeze-confirmation)).
+3. **Removal.** The manager's heartbeat asks the host, with a signed request,
+   about an operation id it never used under each confirmed predecessor. Only
+   a verified signed answer from a ready agent that the predecessor is
+   `UNKNOWN_TO_AGENT` (its records are gone) removes it from the pins Secret
+   (written with its resourceVersion as precondition), with an
+   `AgentPredecessorDiscarded` event and an audit log line carrying the signed
+   answer. A `NO_RECORD` (still held), an unsigned answer, or one about
+   another operation or enrolment removes nothing.
+
+Once removed, a predecessor no longer counts towards the bound of 8, so a
+Host that reached it can be re-keyed again. The relay is unsigned: a
+Provider that confirms a predecessor the manager did not confirm, or relays
+a stale confirmation, can only make the host discard records early. Their
+operations are then answered `UNKNOWN_TO_AGENT` and the manager holds their
+VMs; nothing runs twice. Such a predecessor is not removed from the pins
+Secret, since the manager only probes those it confirmed. A Provider or an
+agent that predates this never confirms anything: predecessors then stay
+listed, as before.
 
 ### Start epochs
 
@@ -403,5 +441,5 @@ inventory, and a Provider that follows the inventory Secret through the API
 The agent side (key generation, CSR, certificate installation, deriving the
 enrolment record) is described in
 [`per-host-agent-development.md`](per-host-agent-development.md#enrolment).
-Confirming a predecessor's freeze to the host, and removing the predecessor
-once it is confirmed, are not done yet.
+A predecessor's freeze is confirmed and the predecessor removed as described
+in [Confirming a predecessor's freeze](#confirming-a-predecessors-freeze).

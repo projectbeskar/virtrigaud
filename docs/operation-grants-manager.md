@@ -761,9 +761,12 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   gone).
 - The manager asks no inventory in the signed host answer. After a re-key it lists the
   host's earlier enrolments as predecessors (up to 8): an attempt sent under one is asked
-  about by its identity and held, never sent again. Predecessors are not removed yet (the
-  host's confirmation of their freeze is not delivered), so their attempts' VMs stay held
-  until the attempts resolve.
+  about by its identity and held, never sent again. Once no attempt on the host is open,
+  the manager confirms the predecessor's freeze; the host discards its records and the
+  manager removes it on a signed answer that shows it gone
+  ([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)). An attempt still
+  open under a predecessor whose records the host discarded early (an unsigned relay
+  cannot be trusted) is answered `UNKNOWN_TO_AGENT` and held.
 - Store positions are mirrored nowhere in the Host's status; they live only in the pins
   Secret.
 - A Reconfigure's `RestartRequired` and honest-result flags come from the unsigned answer to
