@@ -158,6 +158,12 @@ const (
 	// ReenrolEpochAhead: the daemon re-enrols only at a certificate's start
 	// epoch that is after the store's last start epoch.
 	ReenrolEpochAhead Name = "reenrol-epoch-ahead"
+	// ConfirmForActive: a relayed freeze confirmation is applied only when it
+	// names the store's active enrolment.
+	ConfirmForActive Name = "confirm-for-active"
+	// ConfirmOnlyFrozen: a freeze confirmation discards only a frozen
+	// enrolment, never the active one.
+	ConfirmOnlyFrozen Name = "confirm-only-frozen"
 )
 
 // All lists every guard, in a fixed order.
@@ -171,6 +177,6 @@ func All() []Name {
 		SignerRateLimit, SignerVerify, HostKeyUnreadable, SourceThrottle, HandshakeCap,
 		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun, InventoryValidate, InventoryOnlyWhenAsked,
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
-		EnrolLoaderCheck, EnrolEpochAhead, ReenrolEpochAhead,
+		EnrolLoaderCheck, EnrolEpochAhead, ReenrolEpochAhead, ConfirmForActive, ConfirmOnlyFrozen,
 	}
 }

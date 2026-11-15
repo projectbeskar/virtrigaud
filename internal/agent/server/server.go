@@ -260,6 +260,17 @@ type Options struct {
 	// method once the agent is ready (Unimplemented): a release build never
 	// sets it.
 	Operations Operations
+	// Freezes applies freeze confirmations relayed in AgentStatus. Nil
+	// ignores them: a release build never sets it.
+	Freezes FreezeConfirmer
+}
+
+// FreezeConfirmer applies a relayed freeze confirmation (the operation store,
+// opstore.Store.ConfirmFrozen): it discards the frozen predecessor
+// enrolments among ids, when the confirmation was made for the active
+// enrolment forEnrolment, and returns those it discarded.
+type FreezeConfirmer interface {
+	ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([][]byte, error)
 }
 
 // InventorySource gives the host inventory a signed answer carries.

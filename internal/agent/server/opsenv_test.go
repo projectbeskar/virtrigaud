@@ -162,6 +162,11 @@ func (o *opsProxy) AnswerVM(ctx context.Context, uid string, b []byte, seq uint6
 	return s.AnswerVM(ctx, uid, b, seq)
 }
 
+func (o *opsProxy) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([][]byte, error) {
+	s, _ := o.get()
+	return s.ConfirmFrozen(ctx, forEnrolment, ids)
+}
+
 func (o *opsProxy) Supports(k providerv1.OperationKind) bool {
 	_, err := o.exec.Plan(k)
 	return err == nil
@@ -308,6 +313,7 @@ func newOpsEnvEnrolled(t testing.TB, enrolment []byte, mods ...withOptions) *ops
 	logs := &logLines{}
 	all := append([]withOptions{func(o *server.Options) {
 		o.Operations = proxy
+		o.Freezes = proxy
 		o.Log = funcrLogger(logs)
 	}}, mods...)
 	e := newEnvWith(t, server.Throttle{}, all...)

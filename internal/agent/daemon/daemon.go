@@ -530,8 +530,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 	}})
 	var ops server.Operations
+	var freezes server.FreezeConfirmer
 	if config.DevBuild {
 		ops = &operations{store: st, exec: d.o.Executor, pool: pool}
+		freezes = st
 	}
 	coll, err := d.newInventory()
 	if err != nil {
@@ -539,7 +541,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		return err
 	}
 	srv, err := server.New(server.Options{Agent: agent, Credentials: d.creds, Version: d.o.Version,
-		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Operations: ops, Inventory: coll})
+		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Operations: ops, Inventory: coll, Freezes: freezes})
 	if err != nil {
 		closeStore()
 		return err

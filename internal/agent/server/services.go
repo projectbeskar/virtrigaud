@@ -18,10 +18,12 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -82,16 +84,58 @@ func (a *agentService) Hello(ctx context.Context, req *agentv1.HelloRequest) (*a
 	return &agentv1.HelloResponse{HostAnswer: a.s.helloAnswer(ctx, req.GetAnswerNonce())}, nil
 }
 
-// AgentStatus answers with a signed HostAnswer.
+// AgentStatus answers with a signed HostAnswer. A freeze confirmation it
+// carries is applied first (applyFreezeConfirmation), so the answer reflects
+// it; the confirmation never changes the answer's success.
 func (a *agentService) AgentStatus(ctx context.Context, req *agentv1.AgentStatusRequest) (*agentv1.AgentStatusResponse, error) {
 	if err := checkNonce(req.GetAnswerNonce(), true); err != nil {
 		return nil, err
 	}
+	a.s.applyFreezeConfirmation(ctx, req.GetConfirmForEnrolmentId(), req.GetConfirmFrozenEnrolmentIds())
 	return &agentv1.AgentStatusResponse{HostAnswer: a.s.hostAnswer(ctx, req.GetAnswerNonce(), 0)}, nil
+}
+
+// applyFreezeConfirmation applies a relayed, unsigned freeze confirmation:
+// only while the agent is READY, only for at most
+// opstore.MaxFreezeConfirmations well-formed ids, and only to frozen
+// predecessors of the active enrolment named by forEnrolment (the store
+// checks). Each discard is logged with the enrolment ids, which are not
+// secret; anything else is ignored with a log line.
+func (s *Server) applyFreezeConfirmation(ctx context.Context, forEnrolment []byte, ids [][]byte) {
+	if len(ids) == 0 && len(forEnrolment) == 0 {
+		return
+	}
+	switch {
+	case s.opts.Freezes == nil:
+		s.opts.Log.Info("freeze confirmation ignored: this agent applies none")
+		return
+	case trustReady(s.opts.Agent) != providerv1.AgentState_AGENT_STATE_READY:
+		s.opts.Log.Info("freeze confirmation ignored: the agent is not ready")
+		return
+	case len(ids) > opstore.MaxFreezeConfirmations:
+		s.opts.Log.Info("freeze confirmation ignored: it names too many enrolments", "count", len(ids))
+		return
+	}
+	done, err := s.opts.Freezes.ConfirmFrozen(ctx, forEnrolment, ids)
+	for _, id := range done {
+		s.opts.Log.Info("freeze confirmed: the records of a frozen predecessor enrolment are discarded",
+			"enrolment", hex.EncodeToString(id), "for", hex.EncodeToString(forEnrolment))
+	}
+	if err != nil {
+		s.opts.Log.Error(err, "freeze confirmation stopped", "for", hex.EncodeToString(forEnrolment))
+	} else if len(done) == 0 {
+		s.opts.Log.V(1).Info("freeze confirmation: nothing to discard", "for", hex.EncodeToString(forEnrolment), "count", len(ids))
+	}
 }
 
 // InstallRenewedCertificate is not served yet: certificate renewal arrives
 // with a later change.
 func (a *agentService) InstallRenewedCertificate(context.Context, *agentv1.InstallRenewedCertificateRequest) (*agentv1.InstallRenewedCertificateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "certificate renewal is not served by this agent")
+}
+
+// trustReady returns the agent's trust state.
+func trustReady(a Agent) providerv1.AgentState {
+	st, _ := a.TrustState()
+	return st
 }

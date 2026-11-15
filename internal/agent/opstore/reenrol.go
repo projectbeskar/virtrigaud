@@ -321,6 +321,51 @@ func anyIntent(rec *pb.OpRecord) bool {
 	return false
 }
 
+// MaxFreezeConfirmations bounds the enrolment ids one relayed freeze
+// confirmation may name.
+const MaxFreezeConfirmations = 16
+
+// ConfirmFrozen applies a relayed confirmation that the manager holds no
+// open operation under the frozen enrolments ids: each id the store holds as
+// a frozen predecessor is discarded (ConfirmFreeze), and its id returned.
+// The confirmation is unsigned, so it is applied only when it was made for
+// the store's active enrolment (forEnrolment), names at most
+// MaxFreezeConfirmations ids, and only to ids that are frozen; the active
+// enrolment, unknown, discarded, repeated and malformed ids are skipped. A
+// false confirmation costs only liveness: a discarded enrolment's operations
+// are answered UNKNOWN_TO_AGENT, never run again (a new operation under a
+// frozen enrolment is refused by its mint epoch). It is idempotent.
+func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([][]byte, error) {
+	if len(ids) == 0 || len(ids) > MaxFreezeConfirmations {
+		return nil, nil
+	}
+	v, err := s.HostView(ctx, 0)
+	if err != nil {
+		return nil, fmt.Errorf("confirm frozen: %w", err)
+	}
+	if v.Enrolment == nil || (!sameBytes(v.Enrolment.ID, forEnrolment) && !guard.Off(guard.ConfirmForActive)) {
+		return nil, nil
+	}
+	var done [][]byte
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if len(id) != idLen || seen[string(id)] || sameBytes(id, v.Enrolment.ID) {
+			continue
+		}
+		seen[string(id)] = true
+		switch err := s.ConfirmFreeze(ctx, id); {
+		case err == nil:
+			done = append(done, append([]byte(nil), id...))
+		case errors.Is(err, ErrEnrolment):
+			// Not a frozen predecessor (unknown, already discarded, or a
+			// freeze still in progress): nothing to do.
+		default:
+			return done, err
+		}
+	}
+	return done, nil
+}
+
 // ConfirmFreeze discards a frozen enrolment's records, once the manager has
 // confirmed that it holds every operation of that enrolment: the operation
 // records, op_id tombstones, attempt marks, panic counts, the enrolment record
@@ -341,7 +386,7 @@ func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 		if err != nil {
 			return err
 		}
-		if !ok || e.GetState() != pb.EnrolmentState_ENROLMENT_STATE_FROZEN {
+		if !ok || (e.GetState() != pb.EnrolmentState_ENROLMENT_STATE_FROZEN && !guard.Off(guard.ConfirmOnlyFrozen)) {
 			return fmt.Errorf("%w: enrolment is not frozen", ErrEnrolment)
 		}
 		act, err := activeEnrolment(tx)
