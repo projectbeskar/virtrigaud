@@ -215,6 +215,13 @@ changes) and in a log line when it appears or goes. The per-call check of the
 Provider's certificate uses the later of the host clock and the floor only
 while the floor is healthy.
 
+The daemon records its store's last start epoch in the key material
+directory (`pki/start-epoch`, mode 0600), and `vrtg-agent enroll install`
+refuses a certificate whose start epoch is not after it, or after the
+installed certificate's, with an error that names the epochs and the Host
+annotation (`enrolment.virtrigaud.io/start-epoch-floor`) that makes the
+manager draw a later one ([details](host-agent-enrolment.md#start-epochs)).
+
 ### Re-enrolment freeze
 
 Re-enrolling freezes every operation of the previous enrolment that is still
@@ -978,19 +985,23 @@ usage, digital signature, server authentication only, at most 30 days, empty
 subject or the Host's name, no DNS, address or e-mail name). The agent keeps no
 separate enrolment file. At start (step 6) and on reload it
 derives its enrolment record from the host certificate: the enrolment id, the
-Provider UID, the install id and the mode are in the URI subject alternative
-names the sub-CA signed, so they are as authentic as the certificate. The
+Provider UID, the install id, the mode and the start epoch (from 2; a record
+without it is epoch 1) are in the URI subject alternative names the sub-CA
+signed, so they are as authentic as the certificate. The
 store's active enrolment is then brought to it:
 
 - The store's active enrolment is the certificate's: nothing happens.
-- The store was never enrolled: it is enrolled at start epoch 1, or at the
-  epoch of `--dev-enrolment-file` when one is given (see below).
+- The store was never enrolled: it is enrolled at the certificate's start
+  epoch, or at the epoch of `--dev-enrolment-file` when that is higher (see
+  below).
 - Any other case: a **re-enrolment**. This means the certificate names an
   enrolment id the store does not have as active, whether another is active or
   none is (a freeze cut short, a re-provisioned host). The previous
   enrolment's open operations are frozen in bounded chunks (see
   [Re-enrolment freeze](#re-enrolment-freeze)), then the new enrolment is
-  activated at the next start epoch (the highest so far plus one). An enrolment
+  activated at exactly the certificate's start epoch, which must be after the
+  highest start epoch the store has used; a certificate whose epoch is not is
+  refused before the store is touched (the log names both epochs). An enrolment
   id the store has used before (active, frozen or retired) is refused: the
   store keeps its state, the error is logged and answers stay unsigned. A store
   that belongs to another host is never touched: the active enrolment's host,
