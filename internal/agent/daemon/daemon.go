@@ -105,6 +105,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
+	"github.com/projectbeskar/virtrigaud/internal/agent/enrol"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
@@ -115,6 +116,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/systemd"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -362,6 +364,10 @@ type daemon struct {
 	// started is set once the start-up sequence ended and READY was sent: a
 	// scrub before it leaves the status to the start-up notification.
 	started atomic.Bool
+	// pendingEnrolLog is the enrolment log line syncEnrolment left, written
+	// by logEnrolment once the credentials naming the enrolment are in use.
+	// Used only by the goroutine that runs the start-up and the reloads.
+	pendingEnrolLog func()
 }
 
 // Run runs the agent until ctx ends or a stop signal arrives on signals, and
@@ -836,8 +842,10 @@ func (d *daemon) reload(ctx context.Context, st *opstore.Store) error {
 		if err := d.syncEnrolment(ctx, st, id); err != nil {
 			return fmt.Errorf("%w: %w", errReenrolmentRefused, err)
 		}
+		d.recordStartEpoch(ctx, st)
 	}
 	d.creds.Store(&server.Credentials{Identity: id, Trust: tc})
+	d.logEnrolment()
 	return nil
 }
 
@@ -988,7 +996,10 @@ func (d *daemon) startFloor(ctx context.Context, st *opstore.Store, floor *clock
 // unsigned: the store keeps what it has and nothing is made up.
 func (d *daemon) enrol(ctx context.Context, st *opstore.Store) {
 	id := d.creds.Load().Identity
-	switch err := d.syncEnrolment(ctx, st, id); {
+	err := d.syncEnrolment(ctx, st, id)
+	d.recordStartEpoch(ctx, st)
+	d.logEnrolment()
+	switch {
 	case err == nil:
 	case errors.Is(err, errNotEnrolled):
 		d.log.Info("the store is not enrolled; answers stay unsigned")
@@ -1066,8 +1077,28 @@ func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust
 		bytes.Equal(v.Enrolment.InstallID, e.InstallID):
 		return nil
 	case v.Enrolment == nil && v.LastStartEpoch == 0:
-		e.StartEpoch = 1
+		// The store starts at the epoch the manager chose and the CA signed
+		// into the certificate's record.
+		e.StartEpoch = id.Record.Epoch()
 		if dev := d.o.DevEnrolment; dev != nil {
+			// The development enrolment file stands in for a record that
+			// carries no start epoch (a certificate the enrolment flow did
+			// not issue); a record that carries one must agree with it, or
+			// the manager would mint below the store's epoch.
+			if id.Record.StartEpoch > hostidentity.FirstStartEpoch && dev.StartEpoch != id.Record.StartEpoch {
+				return fmt.Errorf("%w: the file says %d, the certificate's record %d", errDevEpochMismatch, dev.StartEpoch,
+					id.Record.StartEpoch)
+			}
+			// A record without an epoch URI is either a development
+			// certificate or a manager's first-enrolment record (epoch 1):
+			// both carry the same names, so the agent cannot tell them
+			// apart. For the latter the file must say 1, or every grant is
+			// refused; say so loudly.
+			if id.Record.StartEpoch <= hostidentity.FirstStartEpoch && dev.StartEpoch != hostidentity.FirstStartEpoch {
+				d.log.Info("WARNING: the development enrolment file sets the start epoch above the certificate's record (epoch 1); "+
+					"if the certificate came from the manager's enrolment flow, every operation grant will be refused: "+
+					"remove the file or make it say 1", "fileStartEpoch", dev.StartEpoch)
+			}
 			e.StartEpoch, e.Predecessors = dev.StartEpoch, dev.Predecessors
 		} else if !config.DevBuild {
 			return errNotEnrolled
@@ -1075,19 +1106,62 @@ func (d *daemon) syncEnrolment(ctx context.Context, st *opstore.Store, id *trust
 		if err := st.Enrol(ctx, e); err != nil {
 			return fmt.Errorf("enrol: %w", err)
 		}
-		d.log.Info("enrolled from the host certificate", "enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
+		d.pendingEnrolLog = func() {
+			d.log.Info("enrolled from the host certificate", "enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
+		}
 		return nil
 	}
 	if !config.DevBuild {
 		return errReenrolDevOnly
 	}
-	e.StartEpoch = v.LastStartEpoch + 1
+	// A re-enrolment starts exactly at the certificate's epoch, which must be
+	// after every epoch the store has started; the store is not touched
+	// otherwise.
+	e.StartEpoch = id.Record.Epoch()
+	if e.StartEpoch <= v.LastStartEpoch && !guard.Off(guard.ReenrolEpochAhead) {
+		return fmt.Errorf("%w: the certificate starts at epoch %d and the store's last start epoch is %d", errEpochNotAhead,
+			e.StartEpoch, v.LastStartEpoch)
+	}
 	if err := st.Reenrol(ctx, e); err != nil {
 		return fmt.Errorf("re-enrol: %w", err)
 	}
-	d.log.Info("re-enrolled from the host certificate; the previous enrolment's operations are frozen",
-		"enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
+	d.pendingEnrolLog = func() {
+		d.log.Info("re-enrolled from the host certificate; the previous enrolment's operations are frozen",
+			"enrolment", hex.EncodeToString(e.ID), "startEpoch", e.StartEpoch)
+	}
 	return nil
+}
+
+// errDevEpochMismatch refuses a development enrolment file whose start epoch
+// differs from the one the certificate's record carries.
+var errDevEpochMismatch = errors.New("the development enrolment file's start epoch differs from the certificate's record")
+
+// logEnrolment writes the enrolment log line syncEnrolment left, once the
+// credentials that name the enrolment are in use, so that the line never
+// precedes answers signed for it.
+func (d *daemon) logEnrolment() {
+	if f := d.pendingEnrolLog; f != nil {
+		d.pendingEnrolLog = nil
+		f()
+	}
+}
+
+// errEpochNotAhead refuses to re-enrol at a start epoch that is not after
+// the store's last start epoch.
+var errEpochNotAhead = errors.New("the host certificate's start epoch is not after the store's last start epoch")
+
+// recordStartEpoch writes the store's last start epoch where enroll install
+// reads it (enrol.FileStartEpoch), so that install refuses a certificate the
+// daemon would refuse. A failure is logged only: the daemon's own check does
+// not depend on the file.
+func (d *daemon) recordStartEpoch(ctx context.Context, st *opstore.Store) {
+	v, err := st.HostView(ctx, 0)
+	if err != nil || v.LastStartEpoch == 0 {
+		return
+	}
+	if err := enrol.WriteStartEpoch(d.o.Config.PKIDir(), v.LastStartEpoch); err != nil {
+		d.log.Error(err, "the store's last start epoch could not be recorded for enroll install")
+	}
 }
 
 // storeOwnerMismatch reports whether a store belongs to a host other than

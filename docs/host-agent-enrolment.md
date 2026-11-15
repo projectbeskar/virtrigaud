@@ -72,12 +72,14 @@ state write, no event, no hint whether the Host exists).
 |------|---------------|
 | The request names a Host (annotation `enrolment.virtrigaud.io/host: <namespace>/<name>`) | `HostNotNamed` |
 | The requester (`spec.groups`, recorded by cert-manager's admission webhook) is in the enrolment administrator group | `RequesterNotAuthorised` |
-| The requester may use the `enrol` verb on that Host (`hosts` in `infra.virtrigaud.io`, the Host's namespace and name), checked with a SubjectAccessReview built from the request's `spec.username`, `spec.uid`, `spec.groups` and `spec.extra` | `RequesterNotAuthorisedForHost` |
+| The requester may use the `enrol` verb (for a Host that is not enrolled) or the `rekey` verb (for an enrolled Host) on that Host (`hosts` in `infra.virtrigaud.io`, the Host's namespace and name), checked with a SubjectAccessReview built from the request's `spec.username`, `spec.uid`, `spec.groups` and `spec.extra`; one of the two is checked before the Host is read | `RequesterNotAuthorisedForHost` |
 | The Host exists and is not being deleted | `HostNotFound` |
 | The Host's Provider runs a per-host agent | `HostNotAgentManaged` |
 | The Host has `spec.identity` | `HostIdentityMissing` |
 | The Host is not revoked | `HostRevoked` |
-| A record is pending, the Host is not already enrolled, no other request is in flight, and the request's record was not retired | `NoPendingEnrolment`, `AlreadyEnrolled`, `EnrolmentInFlight`, `EnrolmentRecordRetired` |
+| A record is pending, no other request is in flight, and the request's record was not retired | `NoPendingEnrolment`, `EnrolmentInFlight`, `EnrolmentRecordRetired` |
+| For a re-key of an enrolled Host: the Host is enrolled with its own Provider, its start epochs are not exhausted, fewer than 8 predecessor enrolments are held, the requester may use the `rekey` verb on the Host, and a re-key window is open (see [Re-keying an enrolled Host](#re-keying-an-enrolled-host)) | `ProviderChanged`, `StartEpochExhausted`, `TooManyPredecessorEnrolments`, `RequesterNotAuthorisedToRekey`, `NoRekeyWindow` |
+| The request's key is not the Host's pinned key nor one of its last 32 replaced keys | `KeyPreviouslyPinned` |
 | `spec.request` is one PEM CSR | `RequestInvalid` |
 | The CSR's signature verifies with its own key (proof of possession) | `ProofOfPossessionFailed` |
 | The key is ECDSA P-256/P-384, Ed25519, or RSA of 2048 to 8192 bits | `KeyUnsupported` |
@@ -90,6 +92,137 @@ state write, no event, no hint whether the Host exists).
 
 Before approving, the manager records the authorisation (request UID, record,
 key pin) in the pins Secret. A denial never changes the pins.
+
+## Re-keying an enrolled Host
+
+An enrolled Host can be enrolled again with a new key, for example after its
+key was lost or replaced, its disk reinstalled, or its state restored from a
+snapshot. This is a re-key: a new enrolment of the same `spec.identity`. A
+replaced machine is not re-keyed: it gets a new `spec.identity`, so a new Host.
+A re-key always needs a new key: a request whose key is the current one, or
+one of the last 32 replaced keys, is denied with `KeyPreviouslyPinned`. A
+host restored from a snapshot that kept its old key generates a new one
+(`vrtg-agent enroll csr`) before it is re-keyed.
+
+A re-key is opened explicitly and needs its own permission:
+
+1. Open a re-key window: `vrtg host rekey --host <name>`, which sets the
+   Host's annotation `enrolment.virtrigaud.io/rekey-requested` to the current
+   time (RFC 3339). The manager opens a window that closes one hour after
+   that time and publishes a record for the Host's next enrolment in
+   `status.agent.pendingEnrolmentID` and `status.agent.requestURIs`, while
+   `status.agent.enrolmentID` and `AgentEnrolled=True` still show the current
+   enrolment (its message says until when the window is open). A value is
+   used once; a time more than an hour old, more than five minutes in the
+   future, or not a time opens nothing. When the window closes without a
+   re-key, its record is retired, and a certificate issued for it after the
+   window closed is refused. Each of these is reported with an
+   `AgentRekeyWindow` event naming the annotation value. Without an open
+   window, a request for an enrolled Host is denied with `NoRekeyWindow`.
+2. Submit the new key's request exactly as for a first enrolment (a CSR
+   carrying those URIs, `vrtg host enroll`). It is authorised under the same
+   rules (group, proof of possession, names, usages, lifetime), except that
+   the requester needs the `rekey` verb on the Host instead of `enrol`
+   (`RequesterNotAuthorisedToRekey` otherwise). The `enrol` verb alone cannot
+   re-key an enrolled Host.
+
+Opening a window needs only `update` or `patch` on the Host (the annotation);
+the window itself grants nothing: the re-key request still needs the `rekey`
+verb, the administrator group and every other rule. The API server's audit
+log records who set the annotation.
+
+Also:
+
+- A re-key never changes the Provider. A Host enrolled with another Provider
+  than the one it names now is reported with `AgentEnrolled=False`, reason
+  `ProviderChanged`; no record is drawn for it and every request is denied
+  with `ProviderChanged`. Its enrolment is not trusted by the new Provider. To
+  move a host to another Provider, revoke the Host and create a new one (see
+  [Start epochs](#start-epochs) for the re-created Host).
+- At most 8 predecessor enrolments are held per Host. A re-key that would
+  exceed this is denied with `TooManyPredecessorEnrolments`; none is dropped.
+- Only one request at a time: another request while one is authorised is
+  denied with `EnrolmentInFlight`.
+- The Provider check and the predecessor bound are checked again when the
+  certificate is issued; a certificate that fails them is refused.
+
+When the re-key's certificate is validated, in one write of the pins Secret:
+
+- the new key replaces the old one: the old key is no longer pinned (its pin
+  is kept on the list of replaced keys), and the next inventory render
+  carries only the new key, so the Provider closes the agent's old
+  connection and accepts only the new certificate;
+- the replaced enrolment is added to the Host's predecessor enrolments
+  (oldest first). An operation the manager sent under it is still asked about
+  by its identity, and its VM is held until it is resolved; it is never sent
+  again under the new enrolment. Both enrolment ids stay on the never-reuse
+  list;
+- grants for the new enrolment are issued at its record's start epoch;
+- the window closes;
+- the store positions the manager keeps for the Host are kept too, so the
+  continuity checks of signed answers run across the re-key.
+
+The manager logs the re-key and emits an `AgentRekeyed` event on the Host
+naming the requester (the request's username), the request, the new and the
+replaced enrolment ids and the new start epoch, and, in the log, the new key's
+pin. Neither carries key or certificate material.
+
+Take the certificate to the host with
+`vrtg host enroll --request <name> --certificate-out <file>`, which writes it
+only once the manager has pinned its key for the Host, and install it with
+`vrtg-agent enroll install --replace`; the agent re-enrols its store, freezing
+the replaced enrolment's open operations
+([details](per-host-agent-development.md#re-enrolment-freeze)).
+
+A predecessor stays listed until the host confirms it has discarded the
+predecessor's records. That confirmation is not delivered yet, so
+predecessors accumulate up to the bound; until it exists, a Host that reaches
+the bound can only be revoked and replaced by a new Host object.
+
+### Start epochs
+
+The manager chooses the start epoch of each enrolment and the subordinate CA
+signs it into the record (`urn:virtrigaud:epoch:<n>`, present from epoch 2;
+a record without it is epoch 1, so a first enrolment's names are unchanged).
+The agent starts the enrolment at exactly that epoch, and grants for it are
+minted at it. A host refuses a first delivery minted below its enrolment's
+start epoch, so both sides must agree; the CA signature makes them agree.
+
+Each new record starts after every epoch the manager has approved a request
+at (a CA-valid certificate may exist for it even if the manager later refused
+it) and after the current enrolment's. The agent refuses a certificate whose
+start epoch is not after the last one its store started: `vrtg-agent enroll
+install` refuses it with an error naming the epochs, without touching the
+store, and a running agent refuses to re-enrol at it.
+
+A Host that is deleted and created again under the same name loses its
+enrolment state, so its first record starts at epoch 1, which a host that was
+enrolled before (whose store has started a later epoch) refuses. The install
+error names the host's last start epoch `N`. Set the annotation
+`enrolment.virtrigaud.io/start-epoch-floor: "<N+1>"` on the new Host: the
+manager draws its first record at that epoch at least, and reports it with an
+`AgentStartEpochFloor` event. The annotation applies only while the Host is
+fresh (no enrolment and no approved request); once it is enrolled, or a
+request for it was approved, the annotation is ignored, so editing it cannot
+change a re-key's epoch. It is honoured from 1 to 65536; any other value is
+ignored and reported, so a re-created Host whose agent store has started an
+epoch above 65536 cannot be recovered with it (not reachable today: the
+predecessor bound limits one Host object to about 9 epochs). Changing it on a
+fresh Host retires a pending record
+drawn at a lower epoch (a request built from that record is then denied, and
+a new one is needed); it never lowers an epoch.
+
+### Refused certificates
+
+When the manager refuses to pin an issued certificate (it does not match the
+authorisation, or the Provider changed or the predecessor bound was reached
+before issuance), and when a request's authorisation was withdrawn (its
+re-key window closed, or its record was retired) or its enrolment was
+replaced, the manager sets the condition `VirtRigaudCertificateRefused=True`
+on the `CertificateRequest`. cert-manager may still show `Ready=True`: the
+certificate is CA-valid, but it must never be installed. `vrtg host enroll
+--request` refuses such a request in every mode, and `--certificate-out`
+writes a certificate only once its key is pinned on the Host.
 
 ## Issuance paths
 
@@ -175,8 +308,16 @@ vrtg -n <host namespace> host enroll --host <name> --issuer-namespace <ns> \
     --request <CertificateRequest> --bundle-out <file>
 vrtg -n <host namespace> host enroll --host <name> --issuer-namespace <ns> \
     --request <CertificateRequest> --certificate <file>
+vrtg -n <host namespace> host enroll --host <name> --issuer-namespace <ns> \
+    --request <CertificateRequest> --certificate-out <file>
+vrtg -n <host namespace> host rekey --host <name>
 vrtg -n <host namespace> host revoke --host <name>
 ```
+
+`--certificate-out` writes the request's issued certificate only once the
+manager has pinned its key for the Host (`status.agent`); every `--request`
+mode refuses a request marked `VirtRigaudCertificateRefused`. `host rekey`
+opens a re-key window (it needs `patch` on the Host).
 
 `host enroll` checks the CSR file locally (a regular file of at most 64 KiB
 holding one PEM CSR whose signature verifies; a FIFO or device is refused
@@ -230,7 +371,7 @@ fails without it), `experimental.hostEnrolment.namespace` and
 - `approve` on `signers.cert-manager.io` for the named signer names only
   (`resourceNames`, for example `clusterissuers.cert-manager.io/<name>` for
   the recommended ClusterIssuer; wildcards are refused);
-- `create` on `subjectaccessreviews` (the per-Host `enrol` check);
+- `create` on `subjectaccessreviews` (the per-Host `enrol` and `rekey` checks);
 - `get`, `list` on mutating and validating webhook configurations (the
   startup admission check);
 - in the enrolment namespace only (a `Role`): `get`, `list`, `watch` on
@@ -240,14 +381,17 @@ fails without it), `experimental.hostEnrolment.namespace` and
 
 The manager gets no `create` on `certificaterequests`. Administrators who
 submit requests need `create` on `certificaterequests` in the enrolment
-namespace, the `enrol` verb on the Hosts they enrol (`hosts` in
+namespace, the `enrol` verb on the Hosts they enrol and the `rekey` verb on
+the Hosts they re-key (`hosts` in
 `infra.virtrigaud.io`, in each Host's namespace), and, for the external-PKI
 return, `update` on `certificaterequests/status`. Never give them `approve`
 on the signer.
 
 Before adding anyone to the enrolment administrator group, audit the roles
 that grant wildcard verbs (`*`) on `hosts`, or on every resource: a wildcard
-verb satisfies `enrol`, so whoever holds one can enrol any Host in its scope.
+verb satisfies `enrol` and `rekey`, so whoever holds one can enrol and re-key
+any Host in its scope. Grant `rekey` separately and sparingly: it replaces the
+pinned key of a Host that is in service.
 
 ## Not done yet
 
@@ -258,6 +402,6 @@ inventory, and a Provider that follows the inventory Secret through the API
 ([details](clustered-agent-provider-development.md#following-the-inventory-secret)).
 The agent side (key generation, CSR, certificate installation, deriving the
 enrolment record) is described in
-[`per-host-agent-development.md`](per-host-agent-development.md#enrolment); the
-manager does not yet support enrolling a Host that is already enrolled (a
-re-enrolment is refused with `AlreadyEnrolled`).
+[`per-host-agent-development.md`](per-host-agent-development.md#enrolment).
+Confirming a predecessor's freeze to the host, and removing the predecessor
+once it is confirmed, are not done yet.

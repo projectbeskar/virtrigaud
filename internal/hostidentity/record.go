@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -42,6 +43,23 @@ const (
 	URIInstallPrefix = "urn:virtrigaud:install:"
 	// URIModeIdentity is the mode URI of an identity-only enrolment.
 	URIModeIdentity = "urn:virtrigaud:mode:identity"
+	// URIEpochPrefix prefixes the start epoch URI: the decimal start epoch
+	// of the enrolment, from 2. A record without it starts at epoch 1, so a
+	// first enrolment's names are unchanged.
+	URIEpochPrefix = "urn:virtrigaud:epoch:"
+
+	// AnnotationStartEpochFloor is the Host annotation that raises the start
+	// epoch of the first record the manager draws for a Host that holds no
+	// enrolment state (a re-created Host), so that a host whose store has
+	// already started a later epoch can enrol it again. The manager ignores
+	// it once the Host has an enrolment or an approved record, and above
+	// 65536.
+	AnnotationStartEpochFloor = "enrolment.virtrigaud.io/start-epoch-floor"
+
+	// FirstStartEpoch is the start epoch of a record without an epoch URI.
+	FirstStartEpoch = 1
+	// MaxStartEpoch bounds the start epoch a record may carry.
+	MaxStartEpoch = 1 << 32
 
 	// ModeIdentity is the only enrolment mode.
 	ModeIdentity = "identity"
@@ -51,7 +69,7 @@ const (
 	hostURIPathPrefix = "/virtrigaud/host/"
 
 	// recordURICount is the number of URIs in a certificate: the host URI and
-	// the four record URIs.
+	// the four record URIs, plus the epoch URI for a start epoch above 1.
 	recordURICount = 5
 )
 
@@ -121,6 +139,20 @@ type Record struct {
 	InstallID []byte
 	// Mode is the enrolment mode; only ModeIdentity exists.
 	Mode string
+	// StartEpoch is the epoch the host starts the enrolment at; zero or
+	// FirstStartEpoch is a first-epoch record, which carries no epoch URI.
+	// The manager chooses it and the CA signs it, so the host enrols at
+	// exactly this epoch and grants for the enrolment are minted at it.
+	StartEpoch uint64
+}
+
+// Epoch returns the record's start epoch: StartEpoch, or FirstStartEpoch
+// when it is unset.
+func (r Record) Epoch() uint64 {
+	if r.StartEpoch < FirstStartEpoch {
+		return FirstStartEpoch
+	}
+	return r.StartEpoch
 }
 
 // Validate checks the record's fields.
@@ -134,6 +166,8 @@ func (r Record) Validate() error {
 		return fmt.Errorf("%w: provider uid is not a UID", ErrRecord)
 	case r.Mode != ModeIdentity:
 		return fmt.Errorf("%w: mode is not %q", ErrRecord, ModeIdentity)
+	case r.StartEpoch > MaxStartEpoch:
+		return fmt.Errorf("%w: start epoch above %d", ErrRecord, uint64(MaxStartEpoch))
 	}
 	return nil
 }
@@ -141,17 +175,22 @@ func (r Record) Validate() error {
 // Equal reports whether two records are the same.
 func (r Record) Equal(o Record) bool {
 	return bytes.Equal(r.EnrolmentID, o.EnrolmentID) && bytes.Equal(r.InstallID, o.InstallID) &&
-		r.ProviderUID == o.ProviderUID && r.Mode == o.Mode
+		r.ProviderUID == o.ProviderUID && r.Mode == o.Mode && r.Epoch() == o.Epoch()
 }
 
-// URIs returns the record's four URIs, in a fixed order.
+// URIs returns the record's URIs, in a fixed order: four, and the epoch URI
+// last for a start epoch above FirstStartEpoch.
 func (r Record) URIs() []string {
-	return []string{
+	out := []string{
 		URIEnrolmentPrefix + hex.EncodeToString(r.EnrolmentID),
 		URIProviderPrefix + r.ProviderUID,
 		URIInstallPrefix + hex.EncodeToString(r.InstallID),
 		URIModeIdentity,
 	}
+	if r.Epoch() > FirstStartEpoch {
+		out = append(out, URIEpochPrefix+strconv.FormatUint(r.Epoch(), 10))
+	}
+	return out
 }
 
 // RequestURIs returns the exact URI subject alternative names a certificate
@@ -171,10 +210,13 @@ func NewEnrolmentID(rand io.Reader) ([]byte, error) {
 
 // RecordFromURIs derives the enrolment record from the URI subject
 // alternative names of a certificate or request. The set must be exactly
-// hostURI plus one of each record URI, with no other and no repeated URI.
+// hostURI plus one of each record URI, and at most one epoch URI, with no
+// other and no repeated URI. The epoch URI names an epoch from 2, in
+// decimal without leading zeros (one spelling per epoch).
 func RecordFromURIs(uris []*url.URL, hostURI string) (Record, error) {
-	if len(uris) != recordURICount {
-		return Record{}, fmt.Errorf("%w: %d URIs, want exactly %d", ErrRecord, len(uris), recordURICount)
+	if len(uris) != recordURICount && len(uris) != recordURICount+1 {
+		return Record{}, fmt.Errorf("%w: %d URIs, want exactly %d, or %d with a start epoch", ErrRecord, len(uris), recordURICount,
+			recordURICount+1)
 	}
 	var (
 		rec                                   Record
@@ -212,6 +254,15 @@ func RecordFromURIs(uris []*url.URL, hostURI string) (Record, error) {
 			}
 			haveProv = true
 			rec.ProviderUID = strings.TrimPrefix(s, URIProviderPrefix)
+		case strings.HasPrefix(s, URIEpochPrefix):
+			if rec.StartEpoch != 0 {
+				return Record{}, fmt.Errorf("%w: repeated epoch URI", ErrRecord)
+			}
+			e, err := parseEpoch(strings.TrimPrefix(s, URIEpochPrefix))
+			if err != nil {
+				return Record{}, fmt.Errorf("%w: epoch URI: %v", ErrRecord, err)
+			}
+			rec.StartEpoch = e
 		case strings.HasPrefix(s, URIInstallPrefix):
 			if haveIn {
 				return Record{}, fmt.Errorf("%w: repeated install URI", ErrRecord)
@@ -233,6 +284,20 @@ func RecordFromURIs(uris []*url.URL, hostURI string) (Record, error) {
 		return Record{}, err
 	}
 	return rec, nil
+}
+
+// parseEpoch parses the start epoch of an epoch URI: decimal, no sign, no
+// leading zero, from 2 to MaxStartEpoch (epoch 1 is written by leaving the
+// URI out).
+func parseEpoch(s string) (uint64, error) {
+	if s == "" || s[0] == '0' || strings.TrimLeft(s, "0123456789") != "" {
+		return 0, errors.New("not a decimal epoch without leading zeros")
+	}
+	e, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || e <= FirstStartEpoch || e > MaxStartEpoch {
+		return 0, fmt.Errorf("not an epoch from %d to %d", FirstStartEpoch+1, uint64(MaxStartEpoch))
+	}
+	return e, nil
 }
 
 // decodeLowerHexID decodes a 16-byte identifier written as 32 lowercase

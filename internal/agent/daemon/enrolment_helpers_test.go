@@ -26,10 +26,18 @@ import (
 )
 
 // certWithEnrolment returns the host's certificate for a new enrolment id (b
-// repeated), the same host, key and Provider.
+// repeated), the same host, key and Provider, at start epoch b (above the
+// first enrolment's, as a re-key's record is).
 func certWithEnrolment(h *host, b byte) []byte {
 	h.t.Helper()
+	return certWithEnrolmentAt(h, b, uint64(b))
+}
+
+// certWithEnrolmentAt is certWithEnrolment at start epoch epoch.
+func certWithEnrolmentAt(h *host, b byte, epoch uint64) []byte {
+	h.t.Helper()
 	rec := h.pki.Record
+	rec.StartEpoch = epoch
 	rec.EnrolmentID = make([]byte, hostidentity.IDLen)
 	for i := range rec.EnrolmentID {
 		rec.EnrolmentID[i] = b

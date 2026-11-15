@@ -36,7 +36,8 @@ import (
 // enrolment id) re-enrols a store that holds an operation that was accepted
 // and never ran. The old enrolment's open operation is frozen (retired: it
 // had no step intent), a terminal one is left as it was, the new enrolment is
-// active with the next start epoch, and the old enrolment is frozen.
+// active at exactly the start epoch its certificate carries, and the old
+// enrolment is frozen.
 func TestReenrolmentFreezesTheOpenOperations(t *testing.T) {
 	h := newHost(t)
 	exec, err := fake.New(filepath.Join(h.stateDir, config.FakeExecutorDirName))
@@ -106,7 +107,7 @@ func TestReenrolmentFreezesTheOpenOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hv.Enrolment == nil || hv.Enrolment.ID[0] != 0x55 || hv.LastStartEpoch != h.dev.StartEpoch+1 {
+	if hv.Enrolment == nil || hv.Enrolment.ID[0] != 0x55 || hv.LastStartEpoch != 0x55 {
 		t.Fatalf("host view: %+v", hv)
 	}
 	if st.Freezing() {

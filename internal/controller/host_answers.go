@@ -206,9 +206,12 @@ func (p *PinsHostTrust) HostTrust(ctx context.Context, provider *infravirtrigaud
 	if err != nil {
 		return HostTrust{}, fmt.Errorf("Host %s/%s: %w", h.Namespace, h.Name, err)
 	}
+	// Grants under a re-keyed enrolment carry its own, later epoch counter
+	// (the host starts each new enrolment at the next start epoch).
+	counter := max(p.Epoch.Counter, cur.mintEpoch())
 	t := HostTrust{
 		Enrolment: operation.Enrolment{EnrolmentID: rec.EnrolmentID,
-			Epoch: operation.Epoch{Counter: p.Epoch.Counter, Holder: bytes.Clone(p.Epoch.Holder)}},
+			Epoch: operation.Epoch{Counter: counter, Holder: bytes.Clone(p.Epoch.Holder)}},
 		InstallID: bytes.Clone(p.Config.InstallID), Pins: slices.Clone(cur.KeyPins), Anchors: anchors, HostURI: uri, HostName: h.Name,
 	}
 	for _, s := range l.state.PredecessorEnrolmentIDs {
@@ -1019,7 +1022,7 @@ func NewHostAnswers(c client.Client, reader client.Reader, cfg *HostEnrolmentCon
 		return nil
 	}
 	return &HostAnswers{Trust: &PinsHostTrust{Client: c, Reader: reader, Config: cfg,
-		Epoch: operation.Epoch{Counter: 1, Holder: bytes.Clone(installID)}}}
+		Epoch: operation.Epoch{Counter: baseMintEpochCounter, Holder: bytes.Clone(installID)}}}
 }
 
 // grantAnchored is a signer that names its grant anchor (the development

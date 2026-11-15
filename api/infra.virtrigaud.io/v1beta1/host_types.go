@@ -213,6 +213,18 @@ const (
 // Used only by development builds.
 const HostEnrolVerb = "enrol"
 
+// HostRekeyVerb is the verb a requester must be allowed on an enrolled Host
+// for the manager to approve a re-key (a new enrolment of the same identity)
+// of its agent, instead of HostEnrolVerb. Used only by development builds.
+const HostRekeyVerb = "rekey"
+
+// HostRekeyRequestAnnotation is the annotation that, set on an enrolled Host
+// to an RFC 3339 time, asks the manager to open a re-key window for it: a
+// record for its next enrolment is drawn and published until the window
+// closes, an hour after that time. A value is used once. Used only by
+// development builds.
+const HostRekeyRequestAnnotation = "enrolment.virtrigaud.io/rekey-requested"
+
 // HostAgentModeIdentity is the only agent enrolment mode: the agent proves its
 // identity, and operation epochs carry no fencing meaning.
 const HostAgentModeIdentity = "identity"

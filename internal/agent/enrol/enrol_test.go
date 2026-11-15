@@ -340,9 +340,11 @@ func TestInstallReplacement(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "a refusal leaves the installed certificate")
 
-	// A new enrolment record (re-enrolment) replaces it, on request only.
+	// A new enrolment record (re-enrolment, at a later start epoch)
+	// replaces it, on request only.
 	next := f.rec
 	next.EnrolmentID = bytes16(0xD0)
+	next.StartEpoch = 2
 	f.uris = hostidentity.RequestURIs(f.pki.HostURI, next)
 	f.csr, err = enrol.BuildCSR(f.key, f.uris)
 	require.NoError(t, err)
@@ -358,6 +360,47 @@ func TestInstallReplacement(t *testing.T) {
 	now, err := os.ReadFile(f.hostCrt())
 	require.NoError(t, err)
 	assert.NotEqual(t, before, now)
+}
+
+// TestInstallRefusesAnEpochNotAhead: a replacing certificate whose start
+// epoch is not after the installed certificate's, or after the last start
+// epoch the daemon recorded, is refused with the operator's remedy, and the
+// installed file is left as it was.
+func TestInstallRefusesAnEpochNotAhead(t *testing.T) {
+	f := newFixture(t)
+	_, err := f.install(f.issue(t, hostidentitytest.IssueOptions{}), false)
+	require.NoError(t, err)
+	reissue := func(id byte, epoch uint64) []byte {
+		next := f.rec
+		next.EnrolmentID, next.StartEpoch = bytes16(id), epoch
+		f.uris = hostidentity.RequestURIs(f.pki.HostURI, next)
+		f.csr, err = enrol.BuildCSR(f.key, f.uris)
+		require.NoError(t, err)
+		return f.issue(t, hostidentitytest.IssueOptions{})
+	}
+	before, err := os.ReadFile(f.hostCrt())
+	require.NoError(t, err)
+
+	// Same epoch as the installed certificate (1): refused.
+	_, err = f.install(reissue(0xD1, 1), true)
+	require.ErrorIs(t, err, enrol.ErrEpoch)
+	assert.Contains(t, err.Error(), hostidentity.AnnotationStartEpochFloor, "the error names the remedy")
+	now, err := os.ReadFile(f.hostCrt())
+	require.NoError(t, err)
+	assert.Equal(t, before, now)
+
+	// The daemon recorded a later start epoch (5): epoch 3 is refused, 6 is
+	// installed.
+	require.NoError(t, enrol.WriteStartEpoch(f.pkiDir, 5))
+	_, err = f.install(reissue(0xD2, 3), true)
+	require.ErrorIs(t, err, enrol.ErrEpoch)
+	res, err := f.install(reissue(0xD3, 6), true)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6), res.Record.Epoch())
+	e, found, err := enrol.ReadStartEpoch(f.pkiDir, os.ReadFile)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, uint64(5), e, "install never writes the daemon's file")
 }
 
 func TestInstallIncompleteOptions(t *testing.T) {

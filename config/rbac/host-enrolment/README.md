@@ -49,7 +49,9 @@ adding anyone to the enrolment administrator group.
 
 Administrators who submit requests need, besides `create` on
 `certificaterequests` in the enrolment namespace, the `enrol` verb on the
-Hosts they enrol, for example:
+Hosts they enrol, and the separate `rekey` verb on the enrolled Hosts they
+re-key (grant it only to those who may replace the key of a Host in service),
+for example:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -61,7 +63,22 @@ rules:
 - apiGroups: ["infra.virtrigaud.io"]
   resources: ["hosts"]
   verbs: ["enrol"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-rekeyers
+  namespace: <host namespace>
+rules:
+- apiGroups: ["infra.virtrigaud.io"]
+  resources: ["hosts"]
+  verbs: ["rekey", "patch"]   # patch: vrtg host rekey sets the request annotation
 ```
+
+Anyone with `update` or `patch` on a Host can open its re-key window (the
+`enrolment.virtrigaud.io/rekey-requested` annotation); the window grants
+nothing by itself, since the request still needs the `rekey` verb and the
+administrator group. The API server's audit log attributes the annotation.
 
 cert-manager's default approver must not approve requests for the host-agent
 issuer: run cert-manager with `--controllers=*,-certificaterequests-approver`

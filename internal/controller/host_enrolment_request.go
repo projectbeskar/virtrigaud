@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -65,9 +66,24 @@ const (
 	// reasonEnrolInFlight: another request for the Host is authorised and
 	// not finished.
 	reasonEnrolInFlight = "EnrolmentInFlight"
-	// reasonEnrolAlreadyEnrolled: the Host is already enrolled; re-enrolment
-	// is not supported by this manager.
-	reasonEnrolAlreadyEnrolled = "AlreadyEnrolled"
+	// reasonEnrolProviderChanged: the Host is enrolled with another Provider
+	// than its own. A re-key never changes the Provider; also the
+	// AgentEnrolled condition reason of such a Host.
+	reasonEnrolProviderChanged = "ProviderChanged"
+	// reasonEnrolTooManyPredecessors: the Host already holds the most
+	// predecessor enrolments whose freeze is not confirmed.
+	reasonEnrolTooManyPredecessors = "TooManyPredecessorEnrolments"
+	// reasonEnrolEpochExhausted: no later start epoch is left for the Host.
+	reasonEnrolEpochExhausted = "StartEpochExhausted"
+	// reasonEnrolNotAllowedToRekey: the requester is not allowed the rekey
+	// verb on the enrolled Host.
+	reasonEnrolNotAllowedToRekey = "RequesterNotAuthorisedToRekey"
+	// reasonEnrolNoRekeyWindow: the Host is enrolled and no re-key window is
+	// open (HostRekeyRequestAnnotation).
+	reasonEnrolNoRekeyWindow = "NoRekeyWindow"
+	// reasonEnrolKeyPreviouslyPinned: the request's key is, or was, pinned
+	// for the Host; a re-key needs a new key.
+	reasonEnrolKeyPreviouslyPinned = "KeyPreviouslyPinned"
 	// reasonEnrolAuthorised is the Approved condition reason.
 	reasonEnrolAuthorised = "VirtRigaudHostEnrolmentAuthorised"
 )
@@ -142,8 +158,8 @@ func (r *HostEnrolmentRequestReconciler) now() time.Time {
 }
 
 // requesterAllowed asks the API server whether the request's recorded
-// requester may use the enrol verb on the Host namespace/name.
-func (r *HostEnrolmentRequestReconciler) requesterAllowed(ctx context.Context, in hostidentity.Request, namespace, name string) (bool, error) {
+// requester may use verb (enrol or rekey) on the Host namespace/name.
+func (r *HostEnrolmentRequestReconciler) requesterAllowed(ctx context.Context, in hostidentity.Request, verb, namespace, name string) (bool, error) {
 	extra := make(map[string]authorizationv1.ExtraValue, len(in.Extra))
 	for k, v := range in.Extra {
 		extra[k] = authorizationv1.ExtraValue(v)
@@ -151,12 +167,12 @@ func (r *HostEnrolmentRequestReconciler) requesterAllowed(ctx context.Context, i
 	sar := &authorizationv1.SubjectAccessReview{Spec: authorizationv1.SubjectAccessReviewSpec{
 		User: in.Username, UID: in.UID, Groups: in.Groups, Extra: extra,
 		ResourceAttributes: &authorizationv1.ResourceAttributes{
-			Namespace: namespace, Verb: infravirtrigaudiov1beta1.HostEnrolVerb,
+			Namespace: namespace, Verb: verb,
 			Group: infravirtrigaudiov1beta1.GroupVersion.Group, Resource: "hosts", Name: name,
 		},
 	}}
 	if err := r.Create(ctx, sar); err != nil {
-		return false, fmt.Errorf("review the requester's %s permission on Host %s/%s: %w", infravirtrigaudiov1beta1.HostEnrolVerb, namespace, name, err)
+		return false, fmt.Errorf("review the requester's %s permission on Host %s/%s: %w", verb, namespace, name, err)
 	}
 	return sar.Status.Allowed && !sar.Status.Denied, nil
 }
@@ -178,13 +194,23 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if !slices.Contains(in.Groups, r.Config.AdminGroup) {
 		return r.deny(ctx, cr, nil, nil, hostidentity.ReasonRequesterNotAuthorised, "the requester is not in the enrolment administrator group")
 	}
-	allowed, err := r.requesterAllowed(ctx, in, ns, name)
+	// The requester must hold enrol or rekey on the Host before the Host is
+	// read; which one the request needs is decided once the Host's state is
+	// known (rekey for an enrolled Host).
+	mayEnrol, err := r.requesterAllowed(ctx, in, infravirtrigaudiov1beta1.HostEnrolVerb, ns, name)
 	if err != nil {
 		return err
 	}
-	if !allowed {
+	mayRekey := false
+	if !mayEnrol {
+		if mayRekey, err = r.requesterAllowed(ctx, in, infravirtrigaudiov1beta1.HostRekeyVerb, ns, name); err != nil {
+			return err
+		}
+	}
+	if !mayEnrol && !mayRekey {
 		return r.deny(ctx, cr, nil, nil, reasonEnrolNotAllowedForHost,
-			fmt.Sprintf("the requester may not %s Host %s/%s", infravirtrigaudiov1beta1.HostEnrolVerb, ns, name))
+			fmt.Sprintf("the requester may neither %s nor %s Host %s/%s", infravirtrigaudiov1beta1.HostEnrolVerb,
+				infravirtrigaudiov1beta1.HostRekeyVerb, ns, name))
 	}
 
 	host := &infravirtrigaudiov1beta1.Host{}
@@ -197,7 +223,7 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if !host.DeletionTimestamp.IsZero() {
 		return r.deny(ctx, cr, nil, nil, reasonEnrolHostNotFound, fmt.Sprintf("Host %s/%s is being deleted", ns, name))
 	}
-	_, agent, err := hostRunsAgent(ctx, r.Client, host)
+	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
 	if err != nil {
 		return err
 	}
@@ -219,8 +245,31 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 		// no pending record for this Host object.
 		return r.deny(ctx, cr, host, nil, reasonEnrolNoPending, "no enrolment record is drawn for this Host")
 	}
+	// An enrolled Host may be re-keyed (a new key or a reinstalled or
+	// restored host: a new enrolment of the same identity) under exactly the
+	// rules of a first enrolment, except that a re-key never changes the
+	// Provider and is refused while the predecessor list is full.
 	if l.state.Current != nil {
-		return r.deny(ctx, cr, host, &l, reasonEnrolAlreadyEnrolled, "the Host is already enrolled")
+		if reason, msg := l.state.rekeyBlocked(string(provider.UID)); reason != "" {
+			return r.deny(ctx, cr, host, &l, reason, msg)
+		}
+		if mayEnrol {
+			if mayRekey, err = r.requesterAllowed(ctx, in, infravirtrigaudiov1beta1.HostRekeyVerb, ns, name); err != nil {
+				return err
+			}
+		}
+		if !mayRekey {
+			return r.deny(ctx, cr, host, &l, reasonEnrolNotAllowedToRekey,
+				fmt.Sprintf("the Host is enrolled: a re-key needs the %s verb on Host %s/%s", infravirtrigaudiov1beta1.HostRekeyVerb, ns, name))
+		}
+		if !l.state.rekeyOpen(r.now()) {
+			return r.deny(ctx, cr, host, &l, reasonEnrolNoRekeyWindow,
+				"the Host is enrolled and no re-key window is open: set annotation "+infravirtrigaudiov1beta1.HostRekeyRequestAnnotation+
+					" on the Host to the current time first")
+		}
+	} else if !mayEnrol {
+		return r.deny(ctx, cr, host, &l, reasonEnrolNotAllowedForHost,
+			fmt.Sprintf("the requester may not %s Host %s/%s", infravirtrigaudiov1beta1.HostEnrolVerb, ns, name))
 	}
 	if a := l.state.Authorised; a != nil && a.RequestUID != string(cr.GetUID()) {
 		live, err := enrolmentRequestLive(ctx, r.Client, r.Config, a)
@@ -258,12 +307,20 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 		}
 		return err
 	}
+	if l.state.keyPreviouslyPinned(auth.KeyPin) {
+		return r.deny(ctx, cr, host, &l, reasonEnrolKeyPreviouslyPinned,
+			"the request's key is, or was, pinned for this Host; a re-key needs a new key")
+	}
 	// Record the authorisation first, then approve: a crash in between
 	// leaves an authorised, undecided request, which the next reconcile
-	// approves (its UID matches).
+	// approves (its UID matches). The record's start epoch counts as issued
+	// from now on: a CA-valid certificate may exist for it even if the
+	// manager later refuses it, so the next record starts after it.
 	l.state.Authorised = &authorisedRequest{
 		Request: reqName, RequestUID: string(cr.GetUID()), Issuer: iss.Name(), Record: *l.state.Pending, KeyPin: auth.KeyPin,
+		Requester: in.Username,
 	}
+	l.state.LastIssuedEpoch = max(l.state.LastIssuedEpoch, l.state.Pending.epoch())
 	l.state.LastDenial, l.state.LastRejection = nil, nil
 	if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 		return err
@@ -275,7 +332,8 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if err := r.Status().Update(ctx, cr); err != nil {
 		return fmt.Errorf("approve request %s: %w", reqName, err)
 	}
-	log.FromContext(ctx).Info("Approved a host-agent enrolment request", "request", reqName, "host", ns+"/"+name, "issuer", iss.Name())
+	log.FromContext(ctx).Info("Approved a host-agent enrolment request", "request", reqName, "host", ns+"/"+name, "issuer", iss.Name(),
+		"rekey", l.state.Current != nil)
 	r.event(host, corev1.EventTypeNormal, eventReasonAgentEnrolmentApproved, "certificate request "+reqName+" approved")
 	return nil
 }
@@ -323,24 +381,34 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 	}
 	a := l.state.Authorised
 	if l.reset || a == nil || a.RequestUID != string(cr.GetUID()) || a.Issuer != iss.Name() {
-		return nil
+		return r.markWithdrawn(ctx, cr, host, &l)
 	}
 	chain, err := iss.Issued(cr)
 	if err != nil || chain == nil {
 		return err
 	}
 	issued, verr := r.validateIssued(ctx, host, a, chain)
+	if verr == nil {
+		if reason, msg := l.state.rekeyBlocked(a.Record.ProviderUID); reason != "" {
+			verr = fmt.Errorf("%s: %s", reason, msg)
+		} else if l.state.Current != nil && !l.state.rekeyOpen(r.now()) {
+			verr = fmt.Errorf("%s: the re-key window closed before the certificate was issued", reasonEnrolNoRekeyWindow)
+		}
+	}
+	var replaced string
 	if verr != nil {
 		l.state.LastRejection = &requestOutcome{Request: reqName, Reason: infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected, Message: verr.Error()}
 		// The refused certificate is CA-valid and carries this record, so the
 		// record is retired and never pinned to another key.
 		l.state.retireOpenRecords()
 	} else {
-		l.state.Current = &currentEnrolment{
+		// A re-key moves the replaced enrolment to the predecessors: its
+		// attempts are still asked about and their VMs held, never re-sent.
+		replaced = l.state.rekey(&currentEnrolment{
 			Record:   a.Record,
 			KeyPins:  []string{a.KeyPin},
 			NotAfter: metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second)),
-		}
+		})
 		l.state.retire(a.Record.EnrolmentID)
 		l.state.Pending, l.state.Authorised, l.state.LastDenial, l.state.LastRejection = nil, nil, nil, nil
 	}
@@ -361,8 +429,67 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 		r.event(host, corev1.EventTypeWarning, eventReasonAgentCertRejected, "the certificate issued for request "+reqName+" was refused")
 		return nil
 	}
+	if replaced != "" {
+		// Audit: identifiers and the public key pin only, never key or
+		// certificate material.
+		log.FromContext(ctx).Info("Re-keyed a host agent: the new key is pinned and the replaced enrolment is a predecessor",
+			"request", reqName, "requester", a.Requester, "host", ns+"/"+name, "enrolmentID", a.Record.EnrolmentID,
+			"replacedEnrolmentID", replaced, "keyPin", a.KeyPin, "startEpoch", l.state.Current.mintEpoch(),
+			"predecessors", len(l.state.PredecessorEnrolmentIDs))
+		r.event(host, corev1.EventTypeNormal, eventReasonAgentRekeyed, fmt.Sprintf("agent re-keyed by %s from request %s: enrolment %s "+
+			"(start epoch %d) replaces %s, which is kept as a predecessor (its operations are asked about, never re-sent)",
+			a.Requester, reqName, a.Record.EnrolmentID, l.state.Current.mintEpoch(), replaced))
+		return nil
+	}
 	log.FromContext(ctx).Info("Pinned a host-agent key", "request", reqName, "host", ns+"/"+name, "enrolmentID", a.Record.EnrolmentID)
 	r.event(host, corev1.EventTypeNormal, eventReasonAgentEnrolled, "agent key pinned from request "+reqName)
+	return nil
+}
+
+// markWithdrawn marks as refused (certrequest.ConditionRefused) a request
+// that holds an issued certificate the manager will never pin: its
+// authorisation was withdrawn (a re-key window that closed, a retired
+// record) and the certificate is not the Host's current one. A request
+// already marked, or whose certificate is pinned, is left as it is.
+func (r *HostEnrolmentRequestReconciler) markWithdrawn(ctx context.Context, cr *unstructured.Unstructured,
+	host *infravirtrigaudiov1beta1.Host, l *loadedEnrolment) error {
+	if certrequest.IsTrue(cr, certrequest.ConditionRefused) {
+		return nil
+	}
+	chain, err := certrequest.Certificate(cr)
+	if err != nil || len(chain) == 0 {
+		return nil //nolint:nilerr // no issued certificate: nothing to mark
+	}
+	certs, err := hostidentity.ParseCertificates(chain)
+	if err != nil {
+		return nil //nolint:nilerr // not a certificate the manager could pin either
+	}
+	hostURI, err := hostidentity.HostURI(r.Config.TrustDomain, host.Namespace, host.Name)
+	if err != nil {
+		return nil //nolint:nilerr // a Host without a URI identity has no certificate to mark
+	}
+	rec, err := hostidentity.RecordFromURIs(certs[0].URIs, hostURI)
+	if err != nil {
+		return nil //nolint:nilerr // not a certificate for this Host
+	}
+	if c := l.state.Current; !l.reset && c != nil && c.Record.EnrolmentID == hex.EncodeToString(rec.EnrolmentID) {
+		return nil
+	}
+	if !l.reset && l.state.Authorised != nil && l.state.Authorised.Record.EnrolmentID == hex.EncodeToString(rec.EnrolmentID) {
+		return nil
+	}
+	why := errors.New("its authorisation was withdrawn before the certificate was pinned")
+	if slices.Contains(l.state.PredecessorEnrolmentIDs, hex.EncodeToString(rec.EnrolmentID)) {
+		why = errors.New("its enrolment was replaced by a re-key")
+	}
+	if err := markRefused(cr, why, r.now()); err != nil {
+		return err
+	}
+	if err := r.Status().Update(ctx, cr); err != nil {
+		return fmt.Errorf("mark request %s/%s refused: %w", cr.GetNamespace(), cr.GetName(), err)
+	}
+	log.FromContext(ctx).Info("Marked a host-agent enrolment request whose certificate will never be pinned",
+		"request", cr.GetNamespace()+"/"+cr.GetName(), "host", host.Namespace+"/"+host.Name)
 	return nil
 }
 
@@ -373,8 +500,12 @@ func (r *HostEnrolmentRequestReconciler) validateIssued(ctx context.Context, hos
 	if host.Spec.Revoked || !host.DeletionTimestamp.IsZero() || host.Spec.Identity == "" {
 		return hostidentity.Issued{}, errors.New("the Host is revoked, deleting or has no identity")
 	}
-	if _, agent, err := hostRunsAgent(ctx, r.Client, host); err != nil || !agent {
+	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
+	if err != nil || !agent {
 		return hostidentity.Issued{}, errors.New("the Host's Provider does not run a per-host agent")
+	}
+	if a.Record.ProviderUID != string(provider.UID) {
+		return hostidentity.Issued{}, errors.New("the authorised record names another Provider than the Host's")
 	}
 	rec, err := a.Record.toRecord()
 	if err != nil {

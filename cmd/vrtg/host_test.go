@@ -179,11 +179,11 @@ func TestHostEnrolAndRevokeAgainstAPIServer(t *testing.T) {
 	}
 	hostR := &controller.HostEnrolmentReconciler{Client: env.Client, Config: cfg}
 	reqR := &controller.HostEnrolmentRequestReconciler{Client: env.Client, Config: cfg}
-	// The administrator "alice" may enrol the Hosts in "infra".
+	// The administrator "alice" may enrol and re-key the Hosts in "infra".
 	require.NoError(t, env.Client.Create(ctx, &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: "host-enrolers", Namespace: "infra"},
 		Rules: []rbacv1.PolicyRule{{APIGroups: []string{infrav1beta1.GroupVersion.Group}, Resources: []string{"hosts"},
-			Verbs: []string{infrav1beta1.HostEnrolVerb}}},
+			Verbs: []string{infrav1beta1.HostEnrolVerb, infrav1beta1.HostRekeyVerb}}},
 	}))
 	require.NoError(t, env.Client.Create(ctx, &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "host-enrolers", Namespace: "infra"},
@@ -243,6 +243,48 @@ func TestHostEnrolAndRevokeAgainstAPIServer(t *testing.T) {
 	pinA, err := hostidentity.SPKIPin(&keyA.PublicKey)
 	require.NoError(t, err)
 	assert.Equal(t, []string{pinA}, getHost("host-a").Status.Agent.KeyPins)
+
+	// The pinned certificate is handed out for the host.
+	pinnedOut := filepath.Join(dir, "host-a.pem")
+	_, err = runVrtg(t, env.KubeconfigPath, "-n", "infra", "host", "enroll", "--host", "host-a", "--issuer-namespace", testIssuerNS,
+		"--request", cr.GetName(), "--certificate-out", pinnedOut)
+	require.NoError(t, err)
+	got, err := os.ReadFile(pinnedOut)
+	require.NoError(t, err)
+	want, err := certrequest.Certificate(cr)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	// A re-key requested with the CLI, whose issued certificate the manager
+	// refuses (it certifies another key): the request is marked, and the
+	// CLI refuses to hand the certificate out.
+	_, err = runVrtg(t, env.KubeconfigPath, "-n", "infra", "host", "rekey", "--host", "host-a")
+	require.NoError(t, err)
+	hostA = getHost("host-a")
+	require.Contains(t, hostA.Status.Agent.RequestURIs, hostidentity.URIEpochPrefix+"2")
+	keyA2 := hostidentitytest.NewKey(t)
+	csrA2 := hostidentitytest.NewCSR(t, keyA2, hostidentitytest.CSROptions{URIs: hostA.Status.Agent.RequestURIs})
+	csrFileA2 := filepath.Join(dir, "host-a2.csr")
+	require.NoError(t, os.WriteFile(csrFileA2, csrA2, 0o600))
+	manifestA2 := filepath.Join(dir, "host-a2-request.yaml")
+	_, err = runVrtg(t, offline, "-n", "infra", "host", "enroll", "--host", "host-a", "--csr", csrFileA2,
+		"--issuer-namespace", testIssuerNS, "--issuer", "Issuer/host-agent-ca", "--manifest-out", manifestA2)
+	require.NoError(t, err)
+	crA2 := reconcileCR(createAsAdmin(manifestA2))
+	require.True(t, certrequest.IsTrue(crA2, certrequest.ConditionApproved))
+	other := hostidentitytest.NewKey(t)
+	require.NoError(t, certrequest.SetCertificate(crA2, ca.Issue(t, csrA2, hostidentitytest.IssueOptions{PublicKey: &other.PublicKey}), ca.PEM))
+	require.NoError(t, certrequest.SetCondition(crA2, certrequest.ConditionReady, certrequest.StatusTrue, certrequest.ReasonIssued, "issued", time.Now()))
+	require.NoError(t, env.Client.Status().Update(ctx, crA2))
+	crA2 = reconcileCR(crA2)
+	require.True(t, certrequest.IsTrue(crA2, certrequest.ConditionRefused), "the refused certificate is marked on the request")
+	assert.Equal(t, []string{pinA}, getHost("host-a").Status.Agent.KeyPins, "and not pinned")
+	refusedOut := filepath.Join(dir, "host-a2.pem")
+	_, err = runVrtg(t, env.KubeconfigPath, "-n", "infra", "host", "enroll", "--host", "host-a", "--issuer-namespace", testIssuerNS,
+		"--request", crA2.GetName(), "--certificate-out", refusedOut)
+	require.ErrorContains(t, err, "never install it")
+	_, statErr := os.Stat(refusedOut)
+	assert.True(t, os.IsNotExist(statErr), "nothing is written for a refused certificate")
 
 	// The online submit refuses a CSR that does not carry the Host's
 	// request URIs (here: host-a's CSR for host-b).

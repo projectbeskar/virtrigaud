@@ -36,6 +36,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
+	"github.com/projectbeskar/virtrigaud/internal/agent/enrol"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck/hostchecktest"
@@ -560,7 +561,8 @@ func TestLogsCarryNoKeyMaterial(t *testing.T) {
 }
 
 // TestAgentHoldsNoKeyFile: the agent's key material directory holds the
-// certificate only; the key is in the signer's hands.
+// certificate and the recorded start epoch only; the key is in the signer's
+// hands.
 func TestAgentHoldsNoKeyFile(t *testing.T) {
 	h := newHost(t)
 	r, _ := h.run()
@@ -571,7 +573,7 @@ func TestAgentHoldsNoKeyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, n := range names {
-		if n.Name() != trust.FileHostCert {
+		if n.Name() != trust.FileHostCert && n.Name() != enrol.FileStartEpoch {
 			t.Errorf("the agent's key material directory holds %s", n.Name())
 		}
 	}

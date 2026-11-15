@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,7 @@ const (
 	flagRequest         = "request"
 	flagBundleOut       = "bundle-out"
 	flagCertificate     = "certificate"
+	flagCertificateOut  = "certificate-out"
 )
 
 // maxEnrolFileSize bounds the files the host commands read (a CSR, a
@@ -65,6 +67,7 @@ type hostEnrollOptions struct {
 	request         string
 	bundleOut       string
 	certificateFile string
+	certificateOut  string
 }
 
 // newHostCmd builds the host command tree: enroll and revoke, for hosts of a
@@ -93,7 +96,12 @@ machine: no cluster access is needed.
 External PKI: once the manager approved a request (--request <name>), write
 the authorised bundle with --bundle-out, submit it to the enterprise CA, and
 return the certificate with --certificate <file>. The manager pins the key
-only after checking the certificate against the authorisation.`,
+only after checking the certificate against the authorisation.
+
+To take the issued certificate to the host, use --request <name>
+--certificate-out <file>: it is written only once the manager has pinned its
+key for the Host (status.agent), never for a request the manager refused or
+whose certificate it will not pin (condition VirtRigaudCertificateRefused).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error { return o.hostEnroll(cmd, eo) },
 	}
@@ -107,6 +115,7 @@ only after checking the certificate against the authorisation.`,
 	f.StringVar(&eo.request, flagRequest, "", "External PKI: name of the approved CertificateRequest")
 	f.StringVar(&eo.bundleOut, flagBundleOut, "", "External PKI: write the authorised bundle (CSR and issuance policy) to this file")
 	f.StringVar(&eo.certificateFile, flagCertificate, "", "External PKI: PEM certificate (leaf first) returned by the enterprise CA")
+	f.StringVar(&eo.certificateOut, flagCertificateOut, "", "Write the issued certificate of --request to this file, once the manager has pinned its key for the Host")
 	_ = enroll.MarkFlagRequired(flagHost)
 
 	revoke := &cobra.Command{
@@ -122,23 +131,45 @@ inventory with agent credentials.`,
 	_ = revoke.MarkFlagRequired(flagHost)
 	revoke.RunE = func(cmd *cobra.Command, _ []string) error { return o.hostRevoke(cmd, revokeHost) }
 
-	hostCmd.AddCommand(enroll, revoke)
+	rekey := &cobra.Command{
+		Use:   "rekey --host <name>",
+		Short: "Open a re-key window for an enrolled per-host agent Host",
+		Long: `Set the Host's re-key request annotation to the current time. The manager
+then publishes a record for the Host's next enrolment (status.agent.requestURIs)
+for one hour; submit a new key's request with vrtg host enroll. Approving it
+needs the rekey verb on the Host.`,
+		Args: cobra.NoArgs,
+	}
+	var rekeyHost string
+	rekey.Flags().StringVar(&rekeyHost, flagHost, "", "Host name (in --namespace)")
+	_ = rekey.MarkFlagRequired(flagHost)
+	rekey.RunE = func(cmd *cobra.Command, _ []string) error { return o.hostRekey(cmd, rekeyHost) }
+
+	hostCmd.AddCommand(enroll, revoke, rekey)
 	return hostCmd
 }
 
 // hostEnroll runs vrtg host enroll in one of its three modes.
 func (o *options) hostEnroll(cmd *cobra.Command, eo *hostEnrollOptions) error {
+	modes := 0
+	for _, v := range []string{eo.bundleOut, eo.certificateFile, eo.certificateOut} {
+		if v != "" {
+			modes++
+		}
+	}
 	switch {
-	case eo.request != "" && (eo.bundleOut != "") == (eo.certificateFile != ""):
-		return fmt.Errorf("with --%s, give exactly one of --%s and --%s", flagRequest, flagBundleOut, flagCertificate)
+	case eo.request != "" && modes != 1:
+		return fmt.Errorf("with --%s, give exactly one of --%s, --%s and --%s", flagRequest, flagBundleOut, flagCertificate, flagCertificateOut)
 	case eo.request != "" && eo.csrFile != "":
 		return fmt.Errorf("--%s and --%s cannot be combined", flagRequest, flagCSR)
-	case eo.request == "" && (eo.bundleOut != "" || eo.certificateFile != ""):
-		return fmt.Errorf("--%s and --%s need --%s", flagBundleOut, flagCertificate, flagRequest)
+	case eo.request == "" && modes != 0:
+		return fmt.Errorf("--%s, --%s and --%s need --%s", flagBundleOut, flagCertificate, flagCertificateOut, flagRequest)
 	case eo.issuerNamespace == "":
 		return fmt.Errorf("--%s is required", flagIssuerNamespace)
 	case eo.request != "" && eo.bundleOut != "":
 		return o.hostEnrollBundle(cmd, eo)
+	case eo.request != "" && eo.certificateOut != "":
+		return o.hostEnrollCertificateOut(cmd, eo)
 	case eo.request != "":
 		return o.hostEnrollCertificate(cmd, eo)
 	}
@@ -309,7 +340,52 @@ func (o *options) approvedRequest(cmd *cobra.Command, c client.Client, eo *hostE
 	if !certrequest.IsTrue(cr, certrequest.ConditionApproved) || certrequest.IsTrue(cr, certrequest.ConditionDenied) {
 		return nil, fmt.Errorf("CertificateRequest %s/%s is not approved", eo.issuerNamespace, eo.request)
 	}
+	if certrequest.IsTrue(cr, certrequest.ConditionRefused) {
+		return nil, fmt.Errorf("the manager refused the certificate of CertificateRequest %s/%s: never install it", eo.issuerNamespace, eo.request)
+	}
 	return cr, nil
+}
+
+// hostEnrollCertificateOut writes the issued certificate of an approved
+// request, only once the manager has pinned its key for the Host: the
+// Host's status.agent names its enrolment and key pin. A certificate the
+// manager refused, or has not pinned (yet), is never written.
+func (o *options) hostEnrollCertificateOut(cmd *cobra.Command, eo *hostEnrollOptions) error {
+	c, err := o.getClient()
+	if err != nil {
+		return err
+	}
+	cr, err := o.approvedRequest(cmd, c, eo)
+	if err != nil {
+		return err
+	}
+	chain, err := certrequest.Certificate(cr)
+	if err != nil || len(chain) == 0 {
+		return fmt.Errorf("CertificateRequest %s/%s carries no issued certificate", eo.issuerNamespace, eo.request)
+	}
+	certs, err := hostidentity.ParseCertificates(chain)
+	if err != nil {
+		return fmt.Errorf("the issued certificate of %s/%s: %w", eo.issuerNamespace, eo.request, err)
+	}
+	ctx, cancel := o.newContext(cmd)
+	defer cancel()
+	host := &infrav1beta1.Host{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: o.namespace, Name: eo.host}, host); err != nil {
+		return fmt.Errorf("get Host %s/%s: %w", o.namespace, eo.host, err)
+	}
+	pinned, err := pinnedOnHost(host.Status.Agent, certs[0])
+	if err != nil {
+		return err
+	}
+	if !pinned {
+		return fmt.Errorf("the manager has not pinned the certificate of %s/%s for Host %s/%s (status.agent); not written",
+			eo.issuerNamespace, eo.request, o.namespace, eo.host)
+	}
+	if err := writeFileSafely(eo.certificateOut, chain); err != nil {
+		return fmt.Errorf("write --%s: %w", flagCertificateOut, err)
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Wrote the pinned certificate of %s/%s to %s\n", eo.issuerNamespace, eo.request, eo.certificateOut)
+	return err
 }
 
 // hostEnrollBundle writes the authorised bundle of an approved request.
@@ -405,6 +481,56 @@ func (o *options) hostEnrollCertificate(cmd *cobra.Command, eo *hostEnrollOption
 	}
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Returned the certificate to %s/%s; the manager pins its key only if it matches the authorisation\n",
 		eo.issuerNamespace, eo.request)
+	return err
+}
+
+// pinnedOnHost reports whether the Host's agent status pins leaf: its key is
+// one of the pinned keys and its enrolment is the Host's current one. Both
+// must hold: a pinned key under another enrolment, or the current enrolment
+// with another key, is not the pinned certificate.
+func pinnedOnHost(agent *infrav1beta1.HostAgentStatus, leaf *x509.Certificate) (bool, error) {
+	if agent == nil || agent.EnrolmentID == "" {
+		return false, nil
+	}
+	pin, err := hostidentity.SPKIPin(leaf.PublicKey)
+	if err != nil {
+		return false, err
+	}
+	if !slices.Contains(agent.KeyPins, pin) {
+		return false, nil
+	}
+	for _, u := range leaf.URIs {
+		if u.String() == hostidentity.URIEnrolmentPrefix+agent.EnrolmentID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// hostRekey sets the re-key request annotation of a Host to the current
+// time, opening a re-key window.
+func (o *options) hostRekey(cmd *cobra.Command, name string) error {
+	ctx, cancel := o.newContext(cmd)
+	defer cancel()
+	c, err := o.getClient()
+	if err != nil {
+		return err
+	}
+	host := &infrav1beta1.Host{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: o.namespace, Name: name}, host); err != nil {
+		return fmt.Errorf("get Host %s/%s: %w", o.namespace, name, err)
+	}
+	base := host.DeepCopy()
+	if host.Annotations == nil {
+		host.Annotations = map[string]string{}
+	}
+	at := time.Now().UTC().Format(time.RFC3339)
+	host.Annotations[infrav1beta1.HostRekeyRequestAnnotation] = at
+	if err := c.Patch(ctx, host, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("request a re-key of Host %s/%s: %w", o.namespace, name, err)
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Requested a re-key of Host %s/%s at %s; its window is open for an hour once the manager sees it\n",
+		o.namespace, name, at)
 	return err
 }
 

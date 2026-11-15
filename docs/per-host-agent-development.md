@@ -978,19 +978,29 @@ usage, digital signature, server authentication only, at most 30 days, empty
 subject or the Host's name, no DNS, address or e-mail name). The agent keeps no
 separate enrolment file. At start (step 6) and on reload it
 derives its enrolment record from the host certificate: the enrolment id, the
-Provider UID, the install id and the mode are in the URI subject alternative
-names the sub-CA signed, so they are as authentic as the certificate. The
+Provider UID, the install id, the mode and the start epoch (from 2; a record
+without it is epoch 1) are in the URI subject alternative names the sub-CA
+signed, so they are as authentic as the certificate. The
 store's active enrolment is then brought to it:
 
 - The store's active enrolment is the certificate's: nothing happens.
-- The store was never enrolled: it is enrolled at start epoch 1, or at the
-  epoch of `--dev-enrolment-file` when one is given (see below).
+- The store was never enrolled: it is enrolled at the certificate's start
+  epoch. A `--dev-enrolment-file` (see below) supplies the epoch only for a
+  certificate whose record carries none (one the enrolment flow did not
+  issue); for a record that carries an epoch, the file's must be equal, or
+  the enrolment is refused (the log says so) and answers stay unsigned. A
+  manager's first-enrolment record (epoch 1) carries no epoch URI either, so
+  the agent cannot tell it from a development certificate: with a
+  certificate from the enrolment flow, the file must say 1 (or be left out);
+  a file above 1 is honoured with a warning in the log.
 - Any other case: a **re-enrolment**. This means the certificate names an
   enrolment id the store does not have as active, whether another is active or
   none is (a freeze cut short, a re-provisioned host). The previous
   enrolment's open operations are frozen in bounded chunks (see
   [Re-enrolment freeze](#re-enrolment-freeze)), then the new enrolment is
-  activated at the next start epoch (the highest so far plus one). An enrolment
+  activated at exactly the certificate's start epoch, which must be after the
+  highest start epoch the store has used; a certificate whose epoch is not is
+  refused before the store is touched (the log names both epochs). An enrolment
   id the store has used before (active, frozen or retired) is refused: the
   store keeps its state, the error is logged and answers stay unsigned. A store
   that belongs to another host is never touched: the active enrolment's host,
@@ -1001,6 +1011,20 @@ store's active enrolment is then brought to it:
   to nobody and can be adopted by whichever host presents a certificate: the
   store itself holds nothing that says otherwise, and the provisioning marker
   in the state directory (`host-id`) is what ties a disk to a host.
+
+The daemon records its store's last start epoch in the key material
+directory (`pki/start-epoch`, mode 0600), and `vrtg-agent enroll install`
+refuses a certificate whose start epoch is not after it, or after the
+installed certificate's, with an error that names the epochs and the Host
+annotation (`enrolment.virtrigaud.io/start-epoch-floor`) that makes the
+manager draw a later one ([details](host-agent-enrolment.md#start-epochs)).
+
+What this changes in a release build of the agent: the record parser, shared
+by every build, accepts the epoch URI; and the daemon writes
+`pki/start-epoch` after it reads its store's enrolment, which a release
+build does only for a store a development build enrolled (a release build
+enrols nothing). `vrtg-agent enroll` exists only in development builds, so
+the install check never runs in a release build; nothing else changes.
 
 On reload, a certificate of the same host with a new enrolment re-enrols the
 store first and only then replaces the running credentials, so no answer names
