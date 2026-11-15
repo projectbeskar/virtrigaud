@@ -77,6 +77,10 @@ type HostTrust struct {
 	// holds frozen: an attempt under one may be asked about, never re-sent.
 	// Empty until a re-enrolment records one.
 	Predecessors [][]byte
+	// Discarded are earlier enrolments the host has discarded after their
+	// freeze was confirmed: an attempt under one is held, never re-sent and
+	// never taken as tampered.
+	Discarded [][]byte
 }
 
 // expectation is the verifier's expectation of an answer of bodyType for a
@@ -217,6 +221,11 @@ func (p *PinsHostTrust) HostTrust(ctx context.Context, provider *infravirtrigaud
 	for _, s := range l.state.PredecessorEnrolmentIDs {
 		if id, err := hostidentity.DecodeID(s); err == nil {
 			t.Predecessors = append(t.Predecessors, id)
+		}
+	}
+	for _, s := range l.state.DiscardedEnrolmentIDs {
+		if id, err := hostidentity.DecodeID(s); err == nil {
+			t.Discarded = append(t.Discarded, id)
 		}
 	}
 	return t, nil

@@ -65,6 +65,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -89,6 +90,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 )
 
 // Manager flags of host-agent enrolment. Only a manager built with the
@@ -453,6 +455,11 @@ type hostEnrolmentState struct {
 	// into the host inventory for the agent, and removed with the
 	// predecessor once a signed answer shows the host discarded them.
 	ConfirmedFrozenEnrolmentIDs []string `json:"confirmedFrozenEnrolmentIDs,omitempty"`
+	// DiscardedEnrolmentIDs are predecessors the host has shown, signed, to
+	// have discarded, newest last, at most maxDiscardedEnrolmentIDs: an
+	// attempt still naming one is held as a discarded predecessor's (its
+	// operations are UNKNOWN_TO_AGENT), not as tampered.
+	DiscardedEnrolmentIDs []string `json:"discardedEnrolmentIDs,omitempty"`
 	// LastIssuedEpoch is the highest start epoch of a record the manager has
 	// approved a request for: a CA-valid certificate may exist for it, even
 	// if the manager later refused it, and a host may have started it. The
@@ -881,6 +888,14 @@ type HostEnrolmentReconciler struct {
 	Rand io.Reader
 	// Now is the clock (nil: time.Now).
 	Now func() time.Time
+	// IntentAuth authenticates operation-intent Secrets, so that only an
+	// attempt under a predecessor blocks its freeze confirmation (nil: every
+	// open attempt on the Host blocks every predecessor).
+	IntentAuth operation.IntentAuthenticator
+
+	// freezeWaits counts, per Host, the consecutive checks a predecessor
+	// stayed blocked (the recheck backoff). The zero value is ready.
+	freezeWaits sync.Map
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
@@ -994,7 +1009,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 	// Confirm the freeze of predecessors no open attempt can name.
-	freezeChanged, freezeWaiting, err := r.confirmFreezes(ctx, host, st)
+	freezeChanged, freezeRecheckAfter, err := r.confirmFreezes(ctx, host, st)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1005,9 +1020,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}
 	res := ctrl.Result{}
-	if freezeWaiting {
-		res.RequeueAfter = freezeRecheckInterval
-	}
+	res.RequeueAfter = freezeRecheckAfter
 	if c := st.Current; c != nil && !host.Spec.Revoked {
 		// Re-mirror at expiry so the condition and the render follow it.
 		if d := c.NotAfter.Sub(r.now()) + time.Second; d > time.Second && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
@@ -1204,6 +1217,14 @@ func (r *HostEnrolmentReconciler) hostRequestFromAnnotation(_ context.Context, o
 // while the manager was down), and enrolment requests (so an abandoned
 // request's record is retired).
 func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// The freeze confirmation reads a Provider's VirtualMachines through
+	// these cache indexes before it reads the API server.
+	if err := indexSpecProvider(mgr); err != nil {
+		return err
+	}
+	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
 	inEnrolmentNS := predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetNamespace() == r.Config.Namespace })
 	isPins := predicate.NewPredicateFuncs(func(o client.Object) bool {
 		return o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent

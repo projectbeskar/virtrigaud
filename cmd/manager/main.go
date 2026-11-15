@@ -785,10 +785,11 @@ func main() {
 			os.Exit(1)
 		}
 		if err = (&controller.HostEnrolmentReconciler{
-			Client:    mgr.GetClient(),
-			APIReader: mgr.GetAPIReader(),
-			Config:    hostEnrolment,
-			Recorder:  mgr.GetEventRecorderFor("host-enrolment-controller"),
+			Client:     mgr.GetClient(),
+			APIReader:  mgr.GetAPIReader(),
+			Config:     hostEnrolment,
+			Recorder:   mgr.GetEventRecorderFor("host-enrolment-controller"),
+			IntentAuth: operation.IntentAuthenticatorOf(devOperationSigner),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "HostEnrolment")
 			os.Exit(1)

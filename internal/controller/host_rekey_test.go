@@ -194,6 +194,17 @@ func TestPinsHostTrust_RekeyedEnrolment(t *testing.T) {
 	assert.True(t, errors.Is(check(id(second, 1)), errIntentTampered), "the new enrolment under the old epoch counter is not its own")
 	assert.True(t, errors.Is(check(id(strings.Repeat("c3", 16), 2)), errIntentTampered), "an enrolment the host never had")
 
+	// The predecessor is discarded (confirmed, and shown gone by the host):
+	// an attempt still naming it is a discarded predecessor's, never
+	// tampered (no tamper hold or Warning).
+	ok, err := src.DiscardPredecessor(ctx, prov, "host-a", bytes.Repeat([]byte{0xa1}, 16))
+	require.NoError(t, err)
+	require.True(t, ok)
+	gone := check(id(first, 1))
+	assert.True(t, errors.Is(gone, errIntentPredecessor))
+	assert.True(t, errors.Is(gone, errIntentPredecessorDiscarded))
+	assert.False(t, errors.Is(gone, errIntentTampered))
+
 	// Revoked after the re-key: no enrolment is trusted any more; every
 	// attempt, a predecessor's too, is held (never sent, never closed as
 	// performed or not performed).

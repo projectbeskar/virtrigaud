@@ -23,13 +23,17 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -54,57 +58,91 @@ func freezeHost(prev string, since time.Time) (*infravirtrigaudiov1beta1.Host, *
 // in phase.
 func vmWithAttempt(name, host, provider string, phase infravirtrigaudiov1beta1.OperationAttemptPhase) *infravirtrigaudiov1beta1.VirtualMachine {
 	vm := clusterVM(name, "default", provider)
+	vm.UID = types.UID("uid-" + name)
 	vm.Status.OperationAttempts = []infravirtrigaudiov1beta1.OperationAttempt{{Kind: infravirtrigaudiov1beta1.OperationAttemptKindPowerOn,
 		Attempt: 1, OpID: strings.Repeat("0a", 16), HostID: host, Phase: phase}}
 	return vm
 }
 
+// countingReader counts the List calls made through it.
+type countingReader struct {
+	client.Reader
+	lists atomic.Int32
+}
+
+func (c *countingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	c.lists.Add(1)
+	return c.Reader.List(ctx, list, opts...)
+}
+
+// freezeEnv is a HostEnrolmentReconciler over a fake client holding objs,
+// with the provider cache indexes when indexed, and a clock at now.
+func freezeEnv(t *testing.T, now time.Time, indexed bool, auth operation.IntentAuthenticator,
+	objs ...client.Object) (*HostEnrolmentReconciler, *record.FakeRecorder, *countingReader) {
+	t.Helper()
+	b := fake.NewClientBuilder().WithScheme(coverageTestScheme(t)).WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
+		WithObjects(objs...)
+	if indexed {
+		b = b.WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, specProviderIndex, specProviderIndexValue).
+			WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue)
+	}
+	c := b.Build()
+	live := &countingReader{Reader: c}
+	rec := record.NewFakeRecorder(16)
+	return &HostEnrolmentReconciler{Client: c, APIReader: live, Recorder: rec, IntentAuth: auth, Now: func() time.Time { return now }},
+		rec, live
+}
+
 // TestConfirmFreezes: a predecessor's freeze is confirmed only after its
-// quiet period and only while no VM of the Host's Provider has an open
-// attempt on the Host; an open attempt on another host or of another
-// Provider, or a Terminal one, does not block it. It is rendered for the
-// agent with the current enrolment, and a revoked Host confirms nothing.
+// quiet period (plus the clock skew margin) and only while no attempt blocks
+// it: an attempt not Terminal on the Host, of a VM of the Host's Provider
+// (named in its spec, in another namespace, or only bound to it), or a
+// Terminal Delete of a VM still being deleted. Without an intent key every
+// such attempt blocks every predecessor. It is rendered for the agent with
+// the current enrolment, and a revoked Host confirms nothing.
 func TestConfirmFreezes(t *testing.T) {
 	ctx := context.Background()
 	prev := strings.Repeat("b2", 16)
 	now := time.Now()
-	newR := func(objs ...*infravirtrigaudiov1beta1.VirtualMachine) (*HostEnrolmentReconciler, *record.FakeRecorder) {
-		b := fake.NewClientBuilder().WithScheme(coverageTestScheme(t)).WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{})
-		for _, o := range objs {
-			b = b.WithObjects(o)
-		}
-		rec := record.NewFakeRecorder(16)
-		return &HostEnrolmentReconciler{Client: b.Build(), Recorder: rec, Now: func() time.Time { return now }}, rec
-	}
+	past := now.Add(-time.Hour)
 
-	// Within the quiet period: waiting.
-	r, _ := newR()
-	h, st := freezeHost(prev, now.Add(-time.Minute))
-	changed, waiting, err := r.confirmFreezes(ctx, h, st)
+	// Within the quiet period (and its skew margin): waiting.
+	r, _, _ := freezeEnv(t, now, false, nil)
+	h, st := freezeHost(prev, now.Add(-predecessorQuietPeriod-predecessorClockSkew/2))
+	changed, recheck, err := r.confirmFreezes(ctx, h, st)
 	require.NoError(t, err)
 	assert.False(t, changed)
-	assert.True(t, waiting)
+	assert.Positive(t, recheck)
 	assert.Nil(t, freezeConfirmationOf(st))
 
-	// An open attempt on the Host blocks it; on another host, of another
-	// Provider, or Terminal, it does not.
+	otherNS := vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent)
+	otherNS.Namespace, otherNS.Spec.ProviderRef.Namespace = "tenant", "default"
+	boundOnly := vmWithAttempt("vm-1", "host-a", "elsewhere", infravirtrigaudiov1beta1.OperationAttemptPhaseSent)
+	boundOnly.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: "default", Name: "ch"}
+	deleting := vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal)
+	deleting.Status.OperationAttempts[0].Kind = infravirtrigaudiov1beta1.OperationAttemptKindDelete
+	deleting.Finalizers = []string{infravirtrigaudiov1beta1.VirtualMachineFinalizer}
+	deleting.DeletionTimestamp = &metav1.Time{Time: past}
 	for name, c := range map[string]struct {
 		vm      *infravirtrigaudiov1beta1.VirtualMachine
 		blocked bool
 	}{
-		"open on the host":         {vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent), true},
-		"prepared on the host":     {vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhasePrepared), true},
-		"terminal on the host":     {vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal), false},
-		"open on another host":     {vmWithAttempt("vm-1", "host-b", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent), false},
-		"open of another Provider": {vmWithAttempt("vm-1", "host-a", "other", infravirtrigaudiov1beta1.OperationAttemptPhaseSent), false},
+		"open on the host":                 {vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent), true},
+		"prepared on the host":             {vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhasePrepared), true},
+		"another namespace, same Provider": {otherNS, true},
+		"bound to the Provider only":       {boundOnly, true},
+		"deleting with a Terminal Delete":  {deleting, true},
+		"terminal on the host":             {vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal), false},
+		"open on another host":             {vmWithAttempt("vm-1", "host-b", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent), false},
+		"open of another Provider":         {vmWithAttempt("vm-1", "host-a", "other", infravirtrigaudiov1beta1.OperationAttemptPhaseSent), false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r, rec := newR(c.vm)
-			h, st := freezeHost(prev, now.Add(-time.Hour))
-			changed, waiting, err := r.confirmFreezes(ctx, h, st)
+			r, rec, _ := freezeEnv(t, now, false, nil, c.vm)
+			h, st := freezeHost(prev, past)
+			changed, recheck, err := r.confirmFreezes(ctx, h, st)
 			require.NoError(t, err)
 			assert.Equal(t, !c.blocked, changed)
-			assert.Equal(t, c.blocked, waiting)
+			assert.Equal(t, c.blocked, recheck > 0)
 			if c.blocked {
 				assert.Empty(t, st.ConfirmedFrozenEnrolmentIDs)
 				return
@@ -121,26 +159,115 @@ func TestConfirmFreezes(t *testing.T) {
 		})
 	}
 
-	r, _ = newR()
-	h, st = freezeHost(prev, now.Add(-time.Hour))
+	r, _, _ = freezeEnv(t, now, false, nil)
+	h, st = freezeHost(prev, past)
 	h.Spec.Revoked = true
 	changed, _, err = r.confirmFreezes(ctx, h, st)
 	require.NoError(t, err)
 	assert.False(t, changed, "a revoked Host confirms nothing")
 
-	// A predecessor recorded before timestamps existed has no quiet period.
-	r, _ = newR()
+	// A predecessor recorded before times were kept starts its quiet period
+	// now.
+	r, _, _ = freezeEnv(t, now, false, nil)
 	h, st = freezeHost(prev, now)
 	st.PredecessorSince = nil
-	changed, _, err = r.confirmFreezes(ctx, h, st)
+	changed, recheck, err = r.confirmFreezes(ctx, h, st)
 	require.NoError(t, err)
-	assert.True(t, changed)
+	assert.True(t, changed, "its time is stamped")
+	assert.Positive(t, recheck)
+	assert.Empty(t, st.ConfirmedFrozenEnrolmentIDs)
+	assert.Contains(t, st.PredecessorSince, prev)
 
 	assert.True(t, st.discardPredecessor(prev))
 	assert.Empty(t, st.PredecessorEnrolmentIDs)
 	assert.Empty(t, st.ConfirmedFrozenEnrolmentIDs)
+	assert.Equal(t, []string{prev}, st.DiscardedEnrolmentIDs)
 	assert.Nil(t, freezeConfirmationOf(st))
 	assert.False(t, st.discardPredecessor(prev))
+}
+
+// TestConfirmFreezes_AttemptEnrolmentFromIntent: with the intent key, only an
+// attempt whose authenticated intent names the predecessor blocks it; an
+// attempt under the current enrolment does not, and one whose intent is
+// missing or does not authenticate blocks every predecessor.
+func TestConfirmFreezes_AttemptEnrolmentFromIntent(t *testing.T) {
+	ctx := context.Background()
+	prev := strings.Repeat("b2", 16)
+	now := time.Now()
+	key := make([]byte, 32)
+	key[0] = 7
+	auth, err := operation.NewIntentAuthenticator(key)
+	require.NoError(t, err)
+	provider := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "ch", Namespace: "default", UID: identityProviderUID}}
+	intentFor := func(vm *infravirtrigaudiov1beta1.VirtualMachine, enrolment string, sealWith operation.IntentAuthenticator) *corev1.Secret {
+		e, _ := hex.DecodeString(enrolment)
+		op, _ := hex.DecodeString(vm.Status.OperationAttempts[0].OpID)
+		p := contracts.PreparedOperation{Kind: contracts.OperationKindPowerOn, Identity: contracts.OperationAttemptIdentity{
+			ProviderUID: string(identityProviderUID), HostID: "host-a", EnrolmentID: e, VMUID: string(vm.UID), OpID: op, Attempt: 1},
+			RequestBytes: []byte("r"), DigestSalt: bytes.Repeat([]byte{1}, 32)}
+		s, err := buildIntentSecret(provider, vm, p, coverageTestScheme(t), sealWith)
+		require.NoError(t, err)
+		return s
+	}
+	h, st := freezeHost(prev, now.Add(-time.Hour))
+	cur := st.Current.Record.EnrolmentID
+	other, err := operation.NewIntentAuthenticator(bytes.Repeat([]byte{9}, 32))
+	require.NoError(t, err)
+	for name, c := range map[string]struct {
+		enrolment string
+		seal      operation.IntentAuthenticator
+		noIntent  bool
+		blocked   bool
+	}{
+		"under the current enrolment":       {enrolment: cur, seal: auth, blocked: false},
+		"under the predecessor":             {enrolment: prev, seal: auth, blocked: true},
+		"intent that does not authenticate": {enrolment: cur, seal: other, blocked: true},
+		"no intent":                         {noIntent: true, blocked: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			vm := vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent)
+			objs := []client.Object{vm}
+			if !c.noIntent {
+				objs = append(objs, intentFor(vm, c.enrolment, c.seal))
+			}
+			r, _, _ := freezeEnv(t, now, false, auth, objs...)
+			_, st := freezeHost(prev, now.Add(-time.Hour))
+			changed, _, err := r.confirmFreezes(ctx, h, st)
+			require.NoError(t, err)
+			assert.Equal(t, !c.blocked, changed)
+		})
+	}
+}
+
+// TestConfirmFreezes_CacheFirstAndBackoff: when the cache already shows the
+// predecessor blocked, the API server is not read; the recheck backs off
+// from one minute, doubling, up to ten; once free, the API server confirms
+// it and the backoff resets.
+func TestConfirmFreezes_CacheFirstAndBackoff(t *testing.T) {
+	ctx := context.Background()
+	prev := strings.Repeat("b2", 16)
+	now := time.Now()
+	vm := vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent)
+	r, _, live := freezeEnv(t, now, true, nil, vm)
+	h, st := freezeHost(prev, now.Add(-time.Hour))
+	var got []time.Duration
+	for i := 0; i < 6; i++ {
+		_, recheck, err := r.confirmFreezes(ctx, h, st)
+		require.NoError(t, err)
+		got = append(got, recheck)
+	}
+	assert.Equal(t, []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 10 * time.Minute, 10 * time.Minute}, got)
+	assert.Zero(t, live.lists.Load(), "the cache showed it blocked: no read of the API server")
+
+	vm.Status.OperationAttempts[0].Phase = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal
+	require.NoError(t, r.Client.Status().Update(ctx, vm))
+	changed, recheck, err := r.confirmFreezes(ctx, h, st)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.Zero(t, recheck)
+	assert.Positive(t, live.lists.Load(), "confirmed from the API server")
+	_, ok := r.freezeWaits.Load(h.Namespace + "/" + h.Name)
+	assert.False(t, ok, "the backoff is reset")
 }
 
 // freezeStaticTrust is a staticTrust whose Host holds confirmed predecessors.

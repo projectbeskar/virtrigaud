@@ -790,6 +790,13 @@ func (r *VirtualMachineReconciler) checkIntentIdentity(ctx context.Context, vm *
 				return errIntentPredecessor
 			}
 		}
+		for _, gone := range trust.Discarded {
+			if bytes.Equal(gone, id.EnrolmentID) {
+				// The host discarded it: asked about (UNKNOWN_TO_AGENT, so
+				// held), never re-sent, and not tampered.
+				return errIntentPredecessorDiscarded
+			}
+		}
 		return fmt.Errorf("enrolment: %w", errIntentTampered)
 	}
 	return nil
@@ -804,6 +811,11 @@ var errNoEnrolmentSource = errors.New("the host's operation-identity enrolment c
 // earlier enrolment that the host still holds frozen: the attempt may be
 // asked about by op_id, never re-sent.
 var errIntentPredecessor = errors.New("the intent names a predecessor enrolment of the host")
+
+// errIntentPredecessorDiscarded is checkIntent's answer for an intent issued
+// under a predecessor enrolment the host has since discarded; it is an
+// errIntentPredecessor (treated the same way).
+var errIntentPredecessorDiscarded = fmt.Errorf("%w, which the host has discarded", errIntentPredecessor)
 
 // msgNoEnrolmentSource is the hold of a manager that cannot read the host's
 // enrolment.
