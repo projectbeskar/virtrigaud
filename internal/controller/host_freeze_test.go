@@ -314,9 +314,11 @@ func (o opReader) HostAnswer(_ context.Context, q contracts.HostAnswerQuery) (co
 }
 
 // TestCheckFreezeDiscards: a confirmed predecessor is removed only on a
-// verified signed answer that it is UNKNOWN_TO_AGENT (discarded); while the
-// host still holds it (NO_RECORD), when the answer is unsigned, or when it
-// is signed for another op_id or enrolment, it stays.
+// verified signed answer from a ready agent that it is UNKNOWN_TO_AGENT
+// (discarded); while the host still holds it (NO_RECORD), when the answer is
+// unsigned, signed by an agent that is not ready, signed for another op_id or
+// enrolment, or under the predecessor itself, it stays. Probes that do not
+// show it discarded back off.
 func TestCheckFreezeDiscards(t *testing.T) {
 	ctx := context.Background()
 	prov := withRuntime(clusteredProviderCR("prov-cluster", clusteredNS))
@@ -327,27 +329,50 @@ func TestCheckFreezeDiscards(t *testing.T) {
 	prev := bytes.Repeat([]byte{0x33}, 16)
 	stub := newSignedHostStub(t, h)
 	trust := &freezeStaticTrust{staticTrust: &staticTrust{hosts: map[string]*testHost{"host-alpha": h}}, confirmed: [][]byte{prev}}
-	answers := &HostAnswers{Trust: trust}
+	var mu sync.Mutex
+	now := time.Now()
+	answers := &HostAnswers{Trust: trust, Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return now }}
+	later := func() { mu.Lock(); now = now.Add(freezeProbeMax + time.Minute); mu.Unlock() }
+	check := func() []string {
+		t.Helper()
+		later()
+		return answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha")
+	}
 
 	// Still held by the host: NO_RECORD, kept.
 	stub.predecessors = [][]byte{prev}
-	assert.Empty(t, answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha"))
+	assert.Empty(t, check())
 	// Unsigned (a Provider that strips the answer): kept.
 	stub.predecessors, stub.unsigned = nil, true
-	assert.Empty(t, answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha"))
-	// Signed about another op_id or another enrolment: kept.
+	assert.Empty(t, check())
 	stub.unsigned = false
-	stub.editAnswer = func(a *providerv1.OperationAnswer) { a.OpId = bytes.Repeat([]byte{9}, 16) }
-	assert.Empty(t, answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha"))
-	stub.editAnswer = func(a *providerv1.OperationAnswer) { a.OpEnrolmentId = bytes.Repeat([]byte{8}, 16) }
-	assert.Empty(t, answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha"))
+	for name, edit := range map[string]func(a *providerv1.OperationAnswer){
+		"another op_id":     func(a *providerv1.OperationAnswer) { a.OpId = bytes.Repeat([]byte{9}, 16) },
+		"another enrolment": func(a *providerv1.OperationAnswer) { a.OpEnrolmentId = bytes.Repeat([]byte{8}, 16) },
+		"an agent that is not ready": func(a *providerv1.OperationAnswer) {
+			a.Context.AgentState = providerv1.AgentState_AGENT_STATE_UNATTESTED
+		},
+		"answered under the predecessor": func(a *providerv1.OperationAnswer) { a.Context.EnrolmentId = prev },
+	} {
+		stub.editAnswer = edit
+		assert.Empty(t, check(), name)
+	}
 	assert.Empty(t, trust.discarded)
-	// Discarded by the host: removed.
+
+	// Probes back off: without time passing, the host is not asked again.
 	stub.editAnswer = nil
-	removed := answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha")
+	stub.predecessors = [][]byte{prev}
+	asked := len(stub.opQueries)
+	answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha")
+	answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha")
+	assert.Len(t, stub.opQueries, asked, "a missed probe waits before the next")
+
+	// Discarded by the host: removed.
+	stub.predecessors = nil
+	removed := check()
 	assert.Equal(t, []string{hex.EncodeToString(prev)}, removed)
 	assert.Equal(t, [][]byte{prev}, trust.discarded)
-	assert.Empty(t, answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha"), "nothing left to check")
+	assert.Empty(t, check(), "nothing left to check")
 }
 
 // rekeyingTrust is a staticTrust whose host is re-keyed once rekeyed is set.

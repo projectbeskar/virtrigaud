@@ -447,6 +447,10 @@ func (h *HostAnswers) checkFreezeDiscards(ctx context.Context, provider *infravi
 	logger := log.FromContext(ctx)
 	var removed []string
 	for _, id := range confirmed {
+		key := hostAnswerKey(provider, hostID) + "/" + hex.EncodeToString(id)
+		if !h.freezeProbeDue(key) {
+			continue
+		}
 		probe := make([]byte, operation.IDLen)
 		if _, err := rand.Read(probe); err != nil {
 			return removed
@@ -469,8 +473,10 @@ func (h *HostAnswers) checkFreezeDiscards(ctx context.Context, provider *infravi
 		}
 		v, verdict := h.finish(ctx, provider, hostID, hr, hostidentity.BodyTypeOperationAnswer, read, discarded)
 		if verdict != answerVerified || !discarded(v) {
+			h.freezeProbeMissed(key)
 			continue
 		}
+		h.freezeProbes.Delete(key)
 		ok, err := ft.DiscardPredecessor(ctx, provider, hostID, id)
 		if err != nil {
 			logger.Info("A discarded predecessor enrolment could not be removed; it is checked again", "host", hostID, "error", err.Error())
@@ -482,4 +488,41 @@ func (h *HostAnswers) checkFreezeDiscards(ctx context.Context, provider *infravi
 		}
 	}
 	return removed
+}
+
+// Probe backoff of a confirmed predecessor the host has not shown discarded
+// yet (an agent or Provider that never applies the confirmation): from
+// freezeProbeMin, doubling, up to freezeProbeMax.
+const (
+	freezeProbeMin = time.Minute
+	freezeProbeMax = 30 * time.Minute
+)
+
+// freezeProbe is the probe backoff state of one predecessor.
+type freezeProbe struct {
+	missed int
+	next   time.Time
+}
+
+// freezeProbeDue reports whether the predecessor of key may be probed now.
+func (h *HostAnswers) freezeProbeDue(key string) bool {
+	v, ok := h.freezeProbes.Load(key)
+	if !ok {
+		return true
+	}
+	p, _ := v.(freezeProbe)
+	return !h.now().Before(p.next)
+}
+
+// freezeProbeMissed records a probe that did not show the predecessor
+// discarded, and backs off the next one.
+func (h *HostAnswers) freezeProbeMissed(key string) {
+	var p freezeProbe
+	if v, ok := h.freezeProbes.Load(key); ok {
+		p, _ = v.(freezeProbe)
+	}
+	wait := min(freezeProbeMin<<min(p.missed, 5), freezeProbeMax)
+	p.missed++
+	p.next = h.now().Add(wait)
+	h.freezeProbes.Store(key, p)
 }

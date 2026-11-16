@@ -466,6 +466,11 @@ type HostAnswers struct {
 	// its backoff.
 	imu        sync.Mutex
 	invBackoff map[string]*inventoryBackoff
+
+	// freezeProbes is the probe backoff of each confirmed predecessor
+	// (checkFreezeDiscards), keyed by provider, host and enrolment id. The
+	// zero value is ready.
+	freezeProbes sync.Map
 }
 
 // hostWriter serialises the store-state writes of one host and paces them
