@@ -121,7 +121,8 @@ func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl
 	if err := r.Get(ctx, req.NamespacedName, cr); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !certrequest.IsEnrolment(cr) || !cr.GetDeletionTimestamp().IsZero() {
+	renewal := certrequest.IsRenewal(cr)
+	if (!certrequest.IsEnrolment(cr) && !renewal) || !cr.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
 	}
 	var iss HostCertificateIssuer
@@ -132,6 +133,21 @@ func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 	}
 	if iss == nil {
+		return ctrl.Result{}, nil
+	}
+	if renewal {
+		// A request that names itself a renewal is judged only as one: it is
+		// approved only when the manager created it (decideRenewal).
+		switch {
+		case !certrequest.Decided(cr):
+			if r.Admission != nil && !r.Admission.OK() {
+				log.FromContext(ctx).Info("Not deciding a host-agent renewal request while approvals are suspended", "request", req.String())
+				return ctrl.Result{RequeueAfter: admissionSuspendedRequeue}, nil
+			}
+			return ctrl.Result{}, r.decideRenewal(ctx, cr, iss)
+		case certrequest.IsTrue(cr, certrequest.ConditionApproved) && !certrequest.Failed(cr):
+			return ctrl.Result{}, r.completeRenewal(ctx, cr, iss)
+		}
 		return ctrl.Result{}, nil
 	}
 	switch {

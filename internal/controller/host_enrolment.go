@@ -230,6 +230,15 @@ type HostEnrolmentConfig struct {
 	// InstallID is the 16-byte install identifier (from the development
 	// operation signer).
 	InstallID []byte
+	// ManagerUsername, ManagerGroups and ManagerUID are the manager's own
+	// identity (SetManagerIdentity): certificate renewal requests are
+	// created under it, and only a renewal request recorded under
+	// ManagerUsername is approved. Empty: renewal is off.
+	ManagerUsername string
+	// ManagerGroups are the manager's groups.
+	ManagerGroups []string
+	// ManagerUID is the manager's user UID.
+	ManagerUID string
 }
 
 // ParseHostEnrolmentConfig turns the flags into a configuration. With no
@@ -479,6 +488,9 @@ type hostEnrolmentState struct {
 	// LastRejection is the last refused or abandoned issuance, for the Host
 	// condition.
 	LastRejection *requestOutcome `json:"lastRejection,omitempty"`
+	// Renewal is the current enrolment's certificate renewal in progress
+	// (host_renewal.go), nil when none is.
+	Renewal *renewalState `json:"renewal,omitempty"`
 }
 
 // rekeyRequest is an open re-key window.
@@ -635,6 +647,12 @@ func (st *hostEnrolmentState) rekey(next *currentEnrolment, now time.Time) (repl
 	if st.Rekey != nil {
 		st.LastRekeyRequest, st.Rekey = st.Rekey.Value, nil
 	}
+	// A renewal of the replaced enrolment ends with it; its keys are
+	// previous keys above.
+	if r := st.Renewal; r != nil && !slices.Contains(st.PreviousKeyPins, r.KeyPin) {
+		st.PreviousKeyPins = append(st.PreviousKeyPins, r.KeyPin)
+	}
+	st.Renewal = nil
 	st.LastIssuedEpoch = max(st.LastIssuedEpoch, next.mintEpoch())
 	st.Current = next
 	return replaced
@@ -941,7 +959,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				st.retire(st.Current.Record.EnrolmentID)
 			}
 			st.retireOpenRecords()
-			st.Current = nil
+			st.Current, st.Renewal = nil, nil
 			changed = true
 			log.FromContext(ctx).Info("Revoked a host agent: its enrolment is retired and its pins removed", "host", req.String())
 			r.event(host, corev1.EventTypeWarning, eventReasonAgentRevoked, "the agent enrolment is retired and its key pins removed")
@@ -1016,6 +1034,15 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	changed = changed || freezeChanged
+	// Advance a certificate renewal on the manager's side.
+	var renewalRecheck time.Duration
+	if !host.Spec.Revoked && st.Current != nil && st.Current.Record.ProviderUID == string(provider.UID) {
+		renewalChanged, recheck, rerr := r.reconcileRenewal(ctx, host, st)
+		if rerr != nil && !errors.Is(rerr, errNoManagerIdentity) {
+			return ctrl.Result{}, rerr
+		}
+		changed, renewalRecheck = changed || renewalChanged, recheck
+	}
 	if changed {
 		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 			return ctrl.Result{}, err
@@ -1023,6 +1050,9 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	res := ctrl.Result{}
 	res.RequeueAfter = freezeRecheckAfter
+	if renewalRecheck > 0 && (res.RequeueAfter == 0 || renewalRecheck < res.RequeueAfter) {
+		res.RequeueAfter = renewalRecheck
+	}
 	if c := st.Current; c != nil && !host.Spec.Revoked {
 		// Re-mirror at expiry so the condition and the render follow it.
 		if d := c.NotAfter.Sub(r.now()) + time.Second; d > time.Second && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
@@ -1161,6 +1191,7 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 			agent.KeyPins = append([]string(nil), c.KeyPins...)
 			na := c.NotAfter
 			agent.CertificateExpiry = &na
+			agent.Renewal = renewalStatus(st)
 		}
 		switch {
 		case host.Spec.Revoked:

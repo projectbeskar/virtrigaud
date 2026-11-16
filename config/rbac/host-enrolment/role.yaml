@@ -60,6 +60,7 @@ rules:
   resources:
   - certificaterequests
   verbs:
+  - create
   - get
   - list
   - watch

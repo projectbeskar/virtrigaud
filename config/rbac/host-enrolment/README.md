@@ -32,13 +32,16 @@ What is granted, and nothing more:
 - `get` and `list` on mutating and validating webhook configurations, to check
   at startup that cert-manager's admission webhooks cover `CertificateRequest`s
   (enrolment refuses to run otherwise);
-- in the enrolment namespace only (a `Role`): `get`, `list`, `watch` on
-  `certificaterequests`, `update` on `certificaterequests/status` (to set
-  `Approved`/`Denied`, and `Ready` on the external-PKI path), and the pins
-  Secrets (`create`, `delete`, `get`, `list`, `update`, `watch`).
+- in the enrolment namespace only (a `Role`): `create`, `get`, `list`,
+  `watch` on `certificaterequests` (`create` for the manager's own
+  certificate renewal requests), `update` on `certificaterequests/status` (to
+  set `Approved`/`Denied`, and `Ready` on the external-PKI path), and the
+  pins Secrets (`create`, `delete`, `get`, `list`, `update`, `watch`).
 
-The manager does not get `create` on `certificaterequests`: it only decides
-requests administrators submitted.
+The manager creates only renewal requests, under its own identity, for a
+renewal the host signed with its pinned key; it approves a renewal request
+only when the recorded requester is its own identity. Every other request is
+one an administrator submitted.
 
 Residual: the manager's existing cluster-wide Secret permission (from the
 default RBAC) still reaches every Secret, including the sub-CA key. Narrowing

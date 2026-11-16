@@ -438,6 +438,10 @@ type hostAnswerState struct {
 	hostAnswerStore   [16]byte
 	hostGrantVersions []uint32
 	hostAgentState    providerv1.AgentState
+	// hostAPIVersion is the agent API version of the last verified host
+	// answer: a request field is sent only to an agent of the version that
+	// introduced it.
+	hostAPIVersion uint32
 }
 
 // HostAnswers is the manager's shared state of signed host answers, used by
@@ -643,6 +647,9 @@ type hostRead struct {
 	// inventoryVersion is the inventory version a GetHostInfo read sent
 	// (0: none).
 	inventoryVersion uint32
+	// renewalVersion is the renewal version a GetHostInfo read sent (0:
+	// none).
+	renewalVersion uint32
 }
 
 // errHostTrust wraps begin's failures to read the manager's own trust or
@@ -706,6 +713,7 @@ func (h *HostAnswers) verify(ctx context.Context, provider *infravirtrigaudiov1b
 	bodyType string, read contracts.SignedRead) (hostidentity.VerifiedAnswer, error) {
 	exp := hr.trust.expectation(provider, hostID, bodyType, read.Nonce, h.now())
 	exp.InventoryVersion = hr.inventoryVersion
+	exp.RenewalVersion = hr.renewalVersion
 	v, err := hostidentity.VerifyAnswer(blobOf(read.Answer), exp)
 	if err != nil {
 		log.FromContext(ctx).Info("No signed host answer; nothing is concluded", "host", hostID, "check", err.Error())
@@ -966,9 +974,10 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 		return hostRefresh{verdict: answerNone}, err
 	}
 	hr.inventoryVersion = h.inventoryAsk(provider, hostID)
+	hr.renewalVersion = h.renewalAsk(provider, hostID)
 	out := hostRefresh{asked: hr.inventoryVersion, inventoryBackoff: hr.inventoryVersion == 0}
 	info, read, rerr := reader.HostAnswer(ctx, contracts.HostAnswerQuery{HostID: hostID, ContinuitySeq: hr.snapshot.ContinuitySeq(),
-		InventoryVersion: hr.inventoryVersion})
+		InventoryVersion: hr.inventoryVersion, RenewalVersion: hr.renewalVersion})
 	out.info, out.read = info, read
 	if rerr != nil {
 		out.verdict = answerNone
@@ -1003,6 +1012,7 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 		s.hostAnswerAt, s.hostAnswerEnrol = h.now(), bytes.Clone(v.Context.GetEnrolmentId())
 		s.hostAnswerStore, s.hostGrantVersions = v.Position.StoreID, slices.Clone(v.Host.GetGrantVersions())
 		s.hostAgentState = v.Context.GetAgentState()
+		s.hostAPIVersion = v.Host.GetAgentApiVersion()
 	}
 	h.mu.Unlock()
 	return out, nil

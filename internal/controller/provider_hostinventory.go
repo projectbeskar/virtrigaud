@@ -276,6 +276,9 @@ func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, p
 			// predecessor enrolments, relayed to the agent by the Provider
 			// (development builds only).
 			entry.FreezeConfirmation = resolveHostFreeze(ctx, r.Client, r.HostEnrolment, h)
+			// The renewed certificate the manager had issued for the host's
+			// renewal, for the Provider to stage and then put in use.
+			entry.RenewedCertificate = resolveHostRenewal(ctx, r.Client, r.HostEnrolment, h)
 		}
 		inv.Hosts = append(inv.Hosts, entry)
 	}

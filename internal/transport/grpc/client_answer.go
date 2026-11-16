@@ -100,7 +100,7 @@ func (c *Client) VMAnswer(ctx context.Context, q contracts.VMAnswerQuery) (contr
 
 // HostAnswer implements contracts.HostAnswerReader: a GetHostInfo with a
 // fresh nonce that asks for the host inventory when q.InventoryVersion is at
-// least 1.
+// least 1, and for the pending renewal request when q.RenewalVersion is.
 func (c *Client) HostAnswer(ctx context.Context, q contracts.HostAnswerQuery) (contracts.HostInfo, contracts.SignedRead, error) {
 	nonce, err := drawAnswerNonce()
 	if err != nil {
@@ -110,7 +110,7 @@ func (c *Client) HostAnswer(ctx context.Context, q contracts.HostAnswerQuery) (c
 	ctx, cancel := context.WithTimeout(ctx, getHostInfoCallTimeout)
 	defer cancel()
 	resp, err := c.client.GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: q.HostID, AnswerNonce: nonce,
-		ContinuitySeq: q.ContinuitySeq, InventoryVersion: q.InventoryVersion})
+		ContinuitySeq: q.ContinuitySeq, InventoryVersion: q.InventoryVersion, RenewalVersion: q.RenewalVersion})
 	if err != nil {
 		read.Answer = answerFromStatus(err)
 		return contracts.HostInfo{}, read, c.mapGRPCError("getHostInfo", err)
