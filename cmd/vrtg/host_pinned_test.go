@@ -46,6 +46,10 @@ func TestPinnedOnHost(t *testing.T) {
 	require.NoError(t, err)
 	enrolment := hex.EncodeToString(rec.EnrolmentID)
 	other := hex.EncodeToString(bytes.Repeat([]byte{0xb2}, 16))
+	// A pin that differs from the real one in its first byte, whatever that byte is.
+	first, err := hex.DecodeString(pin[:2])
+	require.NoError(t, err)
+	wrongPin := hex.EncodeToString([]byte{^first[0]}) + pin[2:]
 
 	for name, c := range map[string]struct {
 		agent *infrav1beta1.HostAgentStatus
@@ -53,7 +57,7 @@ func TestPinnedOnHost(t *testing.T) {
 	}{
 		"pinned":                     {&infrav1beta1.HostAgentStatus{EnrolmentID: enrolment, KeyPins: []string{pin}}, true},
 		"pin matches, enrolment not": {&infrav1beta1.HostAgentStatus{EnrolmentID: other, KeyPins: []string{pin}}, false},
-		"enrolment matches, pin not": {&infrav1beta1.HostAgentStatus{EnrolmentID: enrolment, KeyPins: []string{"00" + pin[2:]}}, false},
+		"enrolment matches, pin not": {&infrav1beta1.HostAgentStatus{EnrolmentID: enrolment, KeyPins: []string{wrongPin}}, false},
 		"no agent status":            {nil, false},
 		"not enrolled":               {&infrav1beta1.HostAgentStatus{KeyPins: []string{pin}}, false},
 	} {
