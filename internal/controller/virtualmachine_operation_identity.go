@@ -682,8 +682,16 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	// and never send an attempt minted under an enrolment that is no longer
 	// the host's current one (a re-key in between). It is then asked about
 	// as a predecessor's, never sent.
-	if now, terr := r.HostAnswers.Trust.HostTrust(ctx, ia.providerCR, host); terr != nil ||
-		!bytes.Equal(now.Enrolment.EnrolmentID, enrol.EnrolmentID) {
+	now, terr := r.HostAnswers.Trust.HostTrust(ctx, ia.providerCR, host)
+	if terr != nil {
+		// Not known to be re-keyed: the attempt stays Prepared and the next
+		// reconcile asks about it and decides again (a predecessor's
+		// attempt is then never sent).
+		logger.Info("The host's enrolment could not be read again before the first send; the attempt is sent later",
+			"kind", opReq.Kind, "attempt", attemptNo, "opID", opIDHex, "host", host, "error", terr.Error())
+		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+	}
+	if !bytes.Equal(now.Enrolment.EnrolmentID, enrol.EnrolmentID) {
 		logger.Info("The host's enrolment changed before the attempt was first sent; it is not sent", "kind", opReq.Kind,
 			"attempt", attemptNo, "opID", opIDHex, "host", host)
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationHostRekeyed, msgOperationHostRekeyed, operationHoldRecheckInterval), nil

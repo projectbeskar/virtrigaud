@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -423,4 +424,70 @@ func TestIdentityCreate_RekeyBeforeFirstSendIsNotSent(t *testing.T) {
 	a := findAttempt(vm, contracts.OperationKindCreate)
 	require.NotNil(t, a)
 	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, a.Phase, "no outcome is concluded")
+
+	// The next reconcile asks the host about it as a predecessor's attempt
+	// (the re-keyed host still holds the predecessor and has no record of
+	// it) and still never sends it.
+	stub.signed.host.mu.Lock()
+	stub.signed.host.trust = next
+	stub.signed.host.mu.Unlock()
+	stub.signed.predecessors = [][]byte{cur.Enrolment.EnrolmentID}
+	asked := len(stub.signed.opQueries)
+	reconcileN(t, r, req, 1)
+	assert.Empty(t, stub.sent())
+	require.Greater(t, len(stub.signed.opQueries), asked, "the attempt is asked about")
+	q := stub.signed.opQueries[len(stub.signed.opQueries)-1]
+	assert.Equal(t, a.OpID, hex.EncodeToString(q.OpID))
+	assert.Equal(t, cur.Enrolment.EnrolmentID, q.OpEnrolmentID, "asked about under the predecessor")
+	vm = idVM(t, r)
+	a = findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, a.Phase, "still no outcome")
+	assert.Empty(t, stub.sent())
+}
+
+// failingTrust is a staticTrust whose reads fail while failing is set.
+type failingTrust struct {
+	*staticTrust
+	failing atomic.Bool
+}
+
+func (f *failingTrust) HostTrust(ctx context.Context, p *infravirtrigaudiov1beta1.Provider, hostID string) (HostTrust, error) {
+	if f.failing.Load() {
+		return HostTrust{}, errors.New("transient read failure")
+	}
+	return f.staticTrust.HostTrust(ctx, p, hostID)
+}
+
+// TestIdentityCreate_TrustReadFailureBeforeFirstSendWaits: a failed re-read
+// of the host's enrolment before the first send is not a re-key: the VM is
+// not held, the attempt is retried and sent once the read works again.
+func TestIdentityCreate_TrustReadFailureBeforeFirstSendWaits(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	st, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	ft := &failingTrust{staticTrust: st}
+	r.HostAnswers.Trust = ft
+	r.operationCrashHook = func(_ context.Context, p operationCrashPoint) bool {
+		if p == crashAfterPrepared {
+			ft.failing.Store(true)
+		}
+		return false
+	}
+	res, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, providerErrorRetryInterval, res.RequeueAfter)
+	assert.Empty(t, stub.sent())
+	vm := idVM(t, r)
+	assert.NotEqual(t, k8s.ReasonOperationHostRekeyed, readyReason(vm), "a failed read is not a re-key")
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, a.Phase)
+
+	r.operationCrashHook = nil
+	ft.failing.Store(false)
+	reconcileN(t, r, req, 2)
+	require.Len(t, stub.sent(), 1, "sent once the read works")
+	assert.Equal(t, a.OpID, hex.EncodeToString(stub.sent()[0].Identity.OpID), "the same attempt")
 }
