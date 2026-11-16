@@ -349,6 +349,12 @@ func (a *agentState) ClockFloor() time.Time {
 	return f.Status().Floor
 }
 
+// Start-up progress in the service status (development builds only).
+const (
+	statusOpening    = "STATUS=opening the operation store"
+	statusRecovering = "STATUS=establishing continuity and recovering interrupted operations"
+)
+
 // allowTestOverrides lets this package's tests use the test overrides of
 // Options in a release build; only export_test.go sets it.
 var allowTestOverrides = false
@@ -499,7 +505,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	// Steps 1 to 3: single writer, open, local continuity checks. A large
 	// store takes a while to open; the service status says what start-up
 	// is doing until READY=1.
-	_ = d.notifier.Notify("STATUS=opening the operation store")
+	if config.DevBuild {
+		_ = d.notifier.Notify(statusOpening)
+	}
 	hooks, rotate := devJournalHooks(d.log)
 	st, err := opstore.Open(ctx, opstore.Options{
 		Journal: journal.Options{Dir: d.o.Config.StateDir, FS: d.o.JournalFS, Events: d.journalEvent,
@@ -586,7 +594,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 	srv, err := server.New(server.Options{Agent: agent, Credentials: d.creds, Version: d.o.Version,
 		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Operations: ops, Inventory: coll, Freezes: freezes,
-		Renewals: renewals})
+		Renewals: renewals, LogProviderRefusals: config.DevBuild})
 	if err != nil {
 		closeStore()
 		return err
@@ -668,7 +676,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 
 	// Steps 6 to 8.
-	_ = d.notifier.Notify("STATUS=establishing continuity and recovering interrupted operations")
+	if config.DevBuild {
+		_ = d.notifier.Notify(statusRecovering)
+	}
 	for _, ref := range d.establish(ctx, st, agent.floor.Load()) {
 		if ops != nil && !guard.Off(guard.RecoveredOpsRun) {
 			_ = pool.Start(ref, nil)

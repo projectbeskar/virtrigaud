@@ -816,7 +816,7 @@ func TestHelloHasItsOwnAnswerBudget(t *testing.T) {
 // sees only a closed connection. The call never reaches the agent.
 func TestProviderCertificateWithoutUIDIsRefusedAndLogged(t *testing.T) {
 	logs := &logLines{}
-	e := newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.Log = funcrLogger(logs) })
+	e := newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.Log, o.LogProviderRefusals = funcrLogger(logs), true })
 	noUID := e.pki.ProviderCert(t, nil, trusttest.ProviderIdentity().String())
 	c := agentv1.NewAgentServiceClient(e.dial(&noUID, 0))
 	for i := 0; i < 3; i++ {
@@ -836,5 +836,24 @@ func TestProviderCertificateWithoutUIDIsRefusedAndLogged(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("refusal logged %d times, want once (rate-limited): %v", n, logs.all())
+	}
+}
+
+// TestProviderRefusalLogIsOptIn: without LogProviderRefusals (a release
+// build's agent) the refusal is not logged; the certificate is refused all
+// the same.
+func TestProviderRefusalLogIsOptIn(t *testing.T) {
+	logs := &logLines{}
+	e := newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.Log = funcrLogger(logs) })
+	noUID := e.pki.ProviderCert(t, nil, trusttest.ProviderIdentity().String())
+	c := agentv1.NewAgentServiceClient(e.dial(&noUID, 0))
+	_, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(5), CallerApiVersion: 1})
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("Hello: %v", err)
+	}
+	for _, l := range logs.all() {
+		if strings.Contains(l, "refused a Provider client certificate") {
+			t.Fatalf("logged without the option: %s", l)
+		}
 	}
 }

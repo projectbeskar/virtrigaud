@@ -242,6 +242,9 @@ type Options struct {
 	// Log receives one line per refused call and per answer that could not
 	// be signed; never request bytes.
 	Log logr.Logger
+	// LogProviderRefusals logs, rate-limited, each Provider client
+	// certificate refused after the TLS handshake (development builds).
+	LogProviderRefusals bool
 	// Now is the clock for answers; nil uses time.Now.
 	Now func() time.Time
 	// Inventory supplies the host inventory for a GetHostInfo that asks for
@@ -372,8 +375,12 @@ func New(opts Options) (*Server, error) {
 	s.limited = logGate{every: refusalLogEvery}
 	s.refusedPr = logGate{every: refusalLogEvery}
 	s.opts = opts
+	var onRefused func(error)
+	if opts.LogProviderRefusals {
+		onRefused = s.providerRefused
+	}
 	so := []grpc.ServerOption{
-		grpc.Creds(s.throttle.creds(credentials.NewTLS(tlsConfig(opts.Credentials, s.throttle.acquire, s.providerRefused)))),
+		grpc.Creds(s.throttle.creds(credentials.NewTLS(tlsConfig(opts.Credentials, s.throttle.acquire, onRefused)))),
 		grpc.ConnectionTimeout(ConnectionTimeout),
 		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: MaxConnectionAge, MaxConnectionAgeGrace: MaxConnectionAgeGrace}),

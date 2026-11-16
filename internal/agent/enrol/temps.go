@@ -40,10 +40,14 @@ const tempNonceLen = 16
 // start, holding its state directory's lock, so no write of its own is in
 // flight; a concurrent "vrtg-agent enroll install" (which an operator runs
 // with the agent stopped) would lose its temporary file and fail without
-// installing anything. Errors are ignored: a file that cannot be removed is
-// never in the way, because every write draws a new name. It returns the
-// names removed.
+// installing anything. A pkiDir that is not a real directory (a symbolic
+// link, say) is left alone; the host checks refuse it at start. Errors are
+// ignored: a file that cannot be removed is never in the way, because every
+// write draws a new name. It returns the names removed.
 func RemoveStrayTemps(pkiDir string) []string {
+	if fi, err := os.Lstat(pkiDir); err != nil || !fi.IsDir() {
+		return nil
+	}
 	entries, err := os.ReadDir(pkiDir)
 	if err != nil {
 		return nil

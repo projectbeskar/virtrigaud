@@ -59,4 +59,14 @@ func TestRemoveStrayTemps(t *testing.T) {
 		assert.NoError(t, err, n)
 	}
 	assert.Empty(t, enrol.RemoveStrayTemps(filepath.Join(dir, "missing")))
+
+	// A symbolic link to a directory is not swept through.
+	target := t.TempDir()
+	stray := filepath.Join(target, ".start-epoch.0123456789abcdef")
+	require.NoError(t, os.WriteFile(stray, []byte("x"), 0o600))
+	link := filepath.Join(dir, "pki-link")
+	require.NoError(t, os.Symlink(target, link))
+	assert.Empty(t, enrol.RemoveStrayTemps(link))
+	_, err := os.Lstat(stray)
+	assert.NoError(t, err, "nothing behind a link is removed")
 }
