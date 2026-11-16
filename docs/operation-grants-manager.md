@@ -761,8 +761,9 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   gone).
 - The manager asks no inventory in the signed host answer. After a re-key it lists the
   host's earlier enrolments as predecessors (up to 8): an attempt sent under one is asked
-  about by its identity and held, never sent again. Once no attempt on the host is open,
-  the manager confirms the predecessor's freeze; the host discards its records and the
+  about by its identity and held, never sent again, and an attempt minted just before a
+  re-key is never first sent (`OperationHostRekeyed`). Once no attempt minted under a
+  predecessor is open on the host, the manager confirms that predecessor's freeze; the host discards its records and the
   manager removes it on a signed answer that shows it gone
   ([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)). An attempt still
   open under a predecessor whose records the host discarded early (an unsigned relay
