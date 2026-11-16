@@ -813,6 +813,7 @@ func main() {
 		}
 		if err = (&controller.HostEnrolmentRequestReconciler{
 			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
 			Config:    hostEnrolment,
 			Admission: admissionGate,
 			Recorder:  mgr.GetEventRecorderFor("host-enrolment-controller"),

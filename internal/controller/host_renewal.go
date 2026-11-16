@@ -464,7 +464,7 @@ func (r *HostEnrolmentReconciler) reconcileRenewal(ctx context.Context, host *in
 		}
 		return changed, recheck, nil
 	}
-	if ren.CertificateRequest != "" {
+	if ren.CertificateRequestUID != "" {
 		return false, 0, nil
 	}
 	created, err := r.createRenewalRequest(ctx, host, st)
@@ -473,10 +473,13 @@ func (r *HostEnrolmentReconciler) reconcileRenewal(ctx context.Context, host *in
 
 // createRenewalRequest creates the CertificateRequest of a recorded renewal
 // in the enrolment namespace, under the manager's own identity, for the
-// cert-manager issuer of the sub-CA, and records it. A request of the same
-// name that is already there (a retried create) is taken when it is the
-// manager's renewal request for this Host with this request; anything else
-// of that name is left alone and the renewal is dropped.
+// cert-manager issuer of the sub-CA, in two steps: the request's name is
+// recorded first (and saved by the caller), so the request is never seen
+// before the pins Secret names it; the next reconcile creates it and records
+// its UID. A request of the same name that is already there (a retried
+// create) is taken when it is the manager's renewal request for this Host
+// with this request; anything else of that name is left alone and the
+// renewal is dropped.
 func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
 	st *hostEnrolmentState) (bool, error) {
 	ren := st.Renewal
@@ -500,6 +503,10 @@ func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host
 	}
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: body.GetCertificateRequest()})
 	name := renewalRequestName(host.Namespace, host.Name, ren)
+	if ren.CertificateRequest != r.Config.Namespace+"/"+name {
+		ren.CertificateRequest = r.Config.Namespace + "/" + name
+		return true, nil
+	}
 	cr := certrequest.NewRenewal(certrequest.RenewalSpec{
 		Namespace: r.Config.Namespace, Name: name, HostNamespace: host.Namespace, HostName: host.Name,
 		HostHash: hostHashLabel(host.Namespace, host.Name), IssuerRef: *r.Config.CertManagerIssuer, CSRPEM: csrPEM,
@@ -525,7 +532,7 @@ func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host
 	if err != nil {
 		return false, fmt.Errorf("create renewal request %s/%s: %w", r.Config.Namespace, name, err)
 	}
-	ren.CertificateRequest, ren.CertificateRequestUID = r.Config.Namespace+"/"+name, string(cr.GetUID())
+	ren.CertificateRequestUID = string(cr.GetUID())
 	log.FromContext(ctx).Info("Created a certificate renewal request under the manager's identity", "host", hostKey(host.Namespace, host.Name),
 		"request", ren.CertificateRequest, "newKeyPin", ren.KeyPin)
 	return true, nil
@@ -580,7 +587,7 @@ func (r *HostEnrolmentRequestReconciler) decideRenewal(ctx context.Context, cr *
 	if !agent {
 		return r.denyRenewal(ctx, cr, host, reasonEnrolHostNotAgent, "the Host's Provider does not run a per-host agent")
 	}
-	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
+	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
 	if err != nil {
 		return err
 	}
@@ -673,7 +680,7 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
+	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
 	if err != nil {
 		return err
 	}

@@ -103,6 +103,18 @@ type HostEnrolmentRequestReconciler struct {
 	// Admission gates approvals on the periodic admission check (nil: no
 	// gate; tests only — the manager always sets it).
 	Admission *AdmissionGate
+	// APIReader reads the pins Secret of a renewal decision from the API
+	// server, so a renewal is never denied or withdrawn on a stale cache
+	// (nil: the Client; tests only).
+	APIReader client.Reader
+}
+
+// liveReader returns the APIReader, or the Client when none is set.
+func (r *HostEnrolmentRequestReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // admissionSuspendedRequeue is how soon an undecided request is retried
