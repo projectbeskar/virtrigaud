@@ -146,6 +146,11 @@ type AnswerExpectation struct {
 	// GetHostInfo request (0: it asked for no inventory). Only a HostAnswer
 	// uses it: its inventory must echo it (VerifyInventory).
 	InventoryVersion uint32
+	// RenewalVersion is the renewal version the manager sent in a GetHostInfo
+	// request (0: it asked for no renewal request). Only a HostAnswer uses
+	// it: a pending renewal request is allowed only when it is at least 1,
+	// and must pass VerifyRenewal.
+	RenewalVersion uint32
 	// Now is the manager's clock.
 	Now time.Time
 }
@@ -173,6 +178,9 @@ type VerifiedAnswer struct {
 	VM *providerv1.VMAnswer
 	// Host is the body of a HostAnswer.
 	Host *providerv1.HostAnswer
+	// Renewal is the host's pending renewal request of a HostAnswer that
+	// carried one (VerifyRenewal passed); nil when it carried none.
+	Renewal *VerifiedRenewal
 	// SignerPin is the pin of the signer's key.
 	SignerPin string
 	// BlobSHA256 is the SHA-256 of the deterministic encoding of the
@@ -203,7 +211,9 @@ func refuse(format string, args ...any) error {
 // message, no undefined enum value, and every field rule of its type; the
 // nonce is exp.Nonce; the Provider UID, host, installation and enrolment are
 // exp's and the certificate's record's; last, a HostAnswer's inventory passes
-// VerifyInventory for exp.InventoryVersion. Nothing is decoded before the
+// VerifyInventory for exp.InventoryVersion, and its pending renewal request,
+// allowed only when exp.RenewalVersion is at least 1, passes VerifyRenewal
+// with the answer's own signer certificate. Nothing is decoded before the
 // signature verifies, and no inventory is judged before everything else
 // passed.
 func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedAnswer, error) {
@@ -311,6 +321,13 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		if err := VerifyInventory(out.Host.GetInventory(), exp.InventoryVersion); err != nil {
 			return VerifiedAnswer{}, err
 		}
+		if pr := out.Host.GetPendingRenewal(); pr != nil {
+			r, err := verifyPendingRenewal(blob, pr, exp)
+			if err != nil {
+				return VerifiedAnswer{}, err
+			}
+			out.Renewal = &r
+		}
 	}
 	enc, err := proto.MarshalOptions{Deterministic: true}.Marshal(blob)
 	if err != nil {
@@ -318,6 +335,29 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	}
 	out.BlobSHA256 = sha256.Sum256(enc)
 	return out, nil
+}
+
+// verifyPendingRenewal verifies the pending renewal request pr of a host
+// answer blob: only when the request asked for one (exp.RenewalVersion at
+// least 1 and at most RenewalVersion), signed with the very certificate that
+// signed the answer, and passing VerifyRenewal.
+func verifyPendingRenewal(blob, pr *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedRenewal, error) {
+	switch {
+	case exp.RenewalVersion == 0:
+		return VerifiedRenewal{}, refuse("a renewal request the request did not ask for")
+	case exp.RenewalVersion > RenewalVersion:
+		return VerifiedRenewal{}, refuse("the request asked for renewal version %d, above %d", exp.RenewalVersion, RenewalVersion)
+	case !bytes.Equal(pr.GetSignerCertificate(), blob.GetSignerCertificate()):
+		return VerifiedRenewal{}, refuse("the renewal request is not signed with the answer's certificate")
+	}
+	r, err := VerifyRenewal(pr, RenewalExpectation{
+		Anchors: exp.Anchors, HostURI: exp.HostURI, HostName: exp.HostName, HostID: exp.HostID, Pins: exp.Pins,
+		ProviderUID: exp.ProviderUID, InstallID: exp.InstallID, EnrolmentID: exp.EnrolmentID, Version: exp.RenewalVersion, Now: exp.Now,
+	})
+	if err != nil {
+		return VerifiedRenewal{}, refuse("%v", err)
+	}
+	return r, nil
 }
 
 // verifySigner checks the signer certificate and returns its key,

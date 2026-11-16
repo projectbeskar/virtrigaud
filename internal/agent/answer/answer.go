@@ -142,6 +142,13 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	if !slices.Contains(bodyTypes, bodyType) {
 		return nil, fmt.Errorf("%w: %s is not a host answer body", ErrSign, bodyType)
 	}
+	return signBody(signer, certDER, bodyType, body, MaxBlobBytes)
+}
+
+// signBody signs body of bodyType (a member of the closed set the caller
+// checked) with signer for certDER; the encoded SignedBlob is at most
+// maxBlob bytes.
+func signBody(signer crypto.Signer, certDER []byte, bodyType string, body proto.Message, maxBlob int) (*providerv1.SignedBlob, error) {
 	if len(certDER) == 0 || len(certDER) > MaxCertBytes {
 		return nil, fmt.Errorf("%w: signer certificate of %d bytes", ErrSign, len(certDER))
 	}
@@ -180,8 +187,8 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 		return nil, fmt.Errorf("%w: the signature does not verify", ErrSign)
 	}
 	blob := &providerv1.SignedBlob{Body: raw, Signature: sig, SignerCertificate: bytes.Clone(certDER), BodyType: bodyType}
-	if proto.Size(blob) > MaxBlobBytes {
-		return nil, fmt.Errorf("%w: %w: signed answer exceeds %d bytes", ErrSign, inventory.ErrTooLarge, MaxBlobBytes)
+	if proto.Size(blob) > maxBlob {
+		return nil, fmt.Errorf("%w: %w: signed answer exceeds %d bytes", ErrSign, inventory.ErrTooLarge, maxBlob)
 	}
 	return blob, nil
 }

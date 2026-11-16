@@ -53,6 +53,14 @@ const (
 	// AnnotationHost names the Host a request enrols, as "namespace/name". An
 	// annotation, not a label: a Host name can be longer than a label value.
 	AnnotationHost = "enrolment.virtrigaud.io/host"
+	// LabelAgentRenewal marks a CertificateRequest as a per-host agent
+	// certificate renewal (value "true"): the manager creates such requests
+	// itself, under its own identity, and approves only those (NewRenewal).
+	// A request carrying it that the manager did not create is denied.
+	LabelAgentRenewal = "enrolment.virtrigaud.io/renewal"
+	// LabelHostHash names the Host of a renewal request in a label: a hash
+	// of its namespace and name (AnnotationHost carries the names).
+	LabelHostHash = "enrolment.virtrigaud.io/host-hash"
 
 	// ConditionApproved is cert-manager's approval condition type.
 	ConditionApproved = "Approved"
@@ -168,6 +176,76 @@ func New(s Spec) *unstructured.Unstructured {
 		},
 	}
 	return u
+}
+
+// RenewalSpec is what a renewal CertificateRequest asks for.
+type RenewalSpec struct {
+	// Namespace is the issuer namespace the request is created in.
+	Namespace string
+	// Name is the request's name.
+	Name string
+	// HostNamespace and HostName name the Host whose certificate is renewed.
+	HostNamespace, HostName string
+	// HostHash is the value of LabelHostHash.
+	HostHash string
+	// IssuerRef is the issuer.
+	IssuerRef IssuerRef
+	// CSRPEM is the PEM certificate signing request.
+	CSRPEM []byte
+	// Duration is the requested lifetime.
+	Duration time.Duration
+	// Username, Groups and UID are the manager's own identity. cert-manager's
+	// admission webhook replaces them with the authenticated creator's on
+	// create, so they matter only where no webhook runs (tests); the
+	// manager approves only a request whose recorded username is its own.
+	Username string
+	// Groups are the manager's groups.
+	Groups []string
+	// UID is the manager's user UID.
+	UID string
+}
+
+// NewRenewal builds a renewal CertificateRequest: the agent and renewal
+// labels, the Host label and annotation, the issuer, the CSR, the lifetime,
+// the server authentication and digital signature usages, and the manager's
+// own identity as the requester.
+func NewRenewal(s RenewalSpec) *unstructured.Unstructured {
+	u := NewObject()
+	u.SetNamespace(s.Namespace)
+	u.SetName(s.Name)
+	u.SetLabels(map[string]string{LabelAgentEnrolment: labelTrue, LabelAgentRenewal: labelTrue, LabelHostHash: s.HostHash})
+	u.SetAnnotations(map[string]string{AnnotationHost: s.HostNamespace + "/" + s.HostName})
+	groups := make([]any, 0, len(s.Groups))
+	for _, g := range s.Groups {
+		groups = append(groups, g)
+	}
+	spec := map[string]any{
+		"request":  base64.StdEncoding.EncodeToString(s.CSRPEM),
+		"duration": s.Duration.String(),
+		"isCA":     false,
+		"usages":   []any{hostidentity.UsageDigitalSignature, hostidentity.UsageServerAuth},
+		"issuerRef": map[string]any{
+			"group": s.IssuerRef.Group,
+			"kind":  s.IssuerRef.Kind,
+			"name":  s.IssuerRef.Name,
+		},
+		"username": s.Username,
+	}
+	if len(groups) > 0 {
+		spec["groups"] = groups
+	}
+	if s.UID != "" {
+		spec["uid"] = s.UID
+	}
+	u.Object["spec"] = spec
+	return u
+}
+
+// IsRenewal reports whether the object carries the renewal label (with any
+// value: a request that names itself a renewal is judged as one).
+func IsRenewal(u *unstructured.Unstructured) bool {
+	_, ok := u.GetLabels()[LabelAgentRenewal]
+	return ok
 }
 
 // IsEnrolment reports whether the object carries the agent enrolment label.
