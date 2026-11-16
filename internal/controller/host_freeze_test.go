@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -70,6 +71,12 @@ func vmWithAttempt(name, host, provider string, phase infravirtrigaudiov1beta1.O
 type countingReader struct {
 	client.Reader
 	lists atomic.Int32
+	gets  atomic.Int32
+}
+
+func (c *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	c.gets.Add(1)
+	return c.Reader.Get(ctx, key, obj, opts...)
 }
 
 func (c *countingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
@@ -211,6 +218,16 @@ func TestConfirmFreezes_AttemptEnrolmentFromIntent(t *testing.T) {
 		require.NoError(t, err)
 		return s
 	}
+	redactedFor := func(vm *infravirtrigaudiov1beta1.VirtualMachine, enrolment string) *corev1.Secret {
+		e, _ := hex.DecodeString(enrolment)
+		op, _ := hex.DecodeString(vm.Status.OperationAttempts[0].OpID)
+		p := contracts.PreparedOperation{Kind: contracts.OperationKindPowerOn, Identity: contracts.OperationAttemptIdentity{
+			ProviderUID: string(identityProviderUID), HostID: "host-a", EnrolmentID: e, VMUID: string(vm.UID), OpID: op, Attempt: 1},
+			RequestBytes: []byte("r"), DigestSalt: bytes.Repeat([]byte{1}, 32)}
+		s, err := buildRedactedIntentSecret(provider, vm, p, coverageTestScheme(t), auth)
+		require.NoError(t, err)
+		return s
+	}
 	h, st := freezeHost(prev, now.Add(-time.Hour))
 	cur := st.Current.Record.EnrolmentID
 	other, err := operation.NewIntentAuthenticator(bytes.Repeat([]byte{9}, 32))
@@ -219,17 +236,23 @@ func TestConfirmFreezes_AttemptEnrolmentFromIntent(t *testing.T) {
 		enrolment string
 		seal      operation.IntentAuthenticator
 		noIntent  bool
+		redacted  bool
 		blocked   bool
 	}{
-		"under the current enrolment":       {enrolment: cur, seal: auth, blocked: false},
-		"under the predecessor":             {enrolment: prev, seal: auth, blocked: true},
-		"intent that does not authenticate": {enrolment: cur, seal: other, blocked: true},
-		"no intent":                         {noIntent: true, blocked: true},
+		"redacted intent under the current enrolment": {enrolment: cur, redacted: true, blocked: false},
+		"redacted intent under the predecessor":       {enrolment: prev, redacted: true, blocked: true},
+		"under the current enrolment":                 {enrolment: cur, seal: auth, blocked: false},
+		"under the predecessor":                       {enrolment: prev, seal: auth, blocked: true},
+		"intent that does not authenticate":           {enrolment: cur, seal: other, blocked: true},
+		"no intent":                                   {noIntent: true, blocked: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			vm := vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent)
 			objs := []client.Object{vm}
-			if !c.noIntent {
+			switch {
+			case c.redacted:
+				objs = append(objs, redactedFor(vm, c.enrolment))
+			case !c.noIntent:
 				objs = append(objs, intentFor(vm, c.enrolment, c.seal))
 			}
 			r, _, _ := freezeEnv(t, now, false, auth, objs...)
@@ -239,6 +262,33 @@ func TestConfirmFreezes_AttemptEnrolmentFromIntent(t *testing.T) {
 			assert.Equal(t, !c.blocked, changed)
 		})
 	}
+}
+
+// TestConfirmFreezes_IntentReadOncePerCheck: an attempt whose intent the
+// cache pass authenticated is not read again by the API-server pass of the
+// same check.
+func TestConfirmFreezes_IntentReadOncePerCheck(t *testing.T) {
+	ctx := context.Background()
+	prev := strings.Repeat("b2", 16)
+	now := time.Now()
+	auth, err := operation.NewIntentAuthenticator(bytes.Repeat([]byte{7}, 32))
+	require.NoError(t, err)
+	provider := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "ch", Namespace: "default", UID: identityProviderUID}}
+	h, st := freezeHost(prev, now.Add(-time.Hour))
+	vm := vmWithAttempt("vm-1", "host-a", "ch", infravirtrigaudiov1beta1.OperationAttemptPhaseSent)
+	e, _ := hex.DecodeString(st.Current.Record.EnrolmentID)
+	op, _ := hex.DecodeString(vm.Status.OperationAttempts[0].OpID)
+	intent, err := buildIntentSecret(provider, vm, contracts.PreparedOperation{Kind: contracts.OperationKindPowerOn,
+		Identity: contracts.OperationAttemptIdentity{ProviderUID: string(identityProviderUID), HostID: "host-a", EnrolmentID: e,
+			VMUID: string(vm.UID), OpID: op, Attempt: 1}, RequestBytes: []byte("r"), DigestSalt: bytes.Repeat([]byte{1}, 32)},
+		coverageTestScheme(t), auth)
+	require.NoError(t, err)
+	r, _, live := freezeEnv(t, now, true, auth, vm, intent)
+	changed, _, err := r.confirmFreezes(ctx, h, st)
+	require.NoError(t, err)
+	assert.True(t, changed, "an attempt under the current enrolment does not block the predecessor")
+	assert.Equal(t, int32(1), live.lists.Load(), "the cache did not show it blocked: the API server is read")
+	assert.Equal(t, int32(1), live.gets.Load(), "the intent is read once in the check")
 }
 
 // TestConfirmFreezes_CacheFirstAndBackoff: when the cache already shows the
@@ -270,6 +320,34 @@ func TestConfirmFreezes_CacheFirstAndBackoff(t *testing.T) {
 	assert.Positive(t, live.lists.Load(), "confirmed from the API server")
 	_, ok := r.freezeWaits.Load(h.Namespace + "/" + h.Name)
 	assert.False(t, ok, "the backoff is reset")
+}
+
+// TestFreezeBackoffForgottenWithTheHost: a gone Host's freeze recheck and
+// probe backoffs are dropped.
+func TestFreezeBackoffForgottenWithTheHost(t *testing.T) {
+	r, _, _ := freezeEnv(t, time.Now(), false, nil)
+	key := types.NamespacedName{Namespace: "default", Name: "gone"}
+	r.Config = &HostEnrolmentConfig{Namespace: "enrolment"}
+	r.freezeWaits.Store(key.String(), 3)
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+	_, ok := r.freezeWaits.Load(key.String())
+	assert.False(t, ok, "the recheck backoff of a gone Host is dropped")
+
+	answers := &HostAnswers{}
+	other := types.NamespacedName{Namespace: "default", Name: "other"}
+	for _, k := range []string{freezeProbeKey(key, []byte{1}), freezeProbeKey(key, []byte{2}), freezeProbeKey(other, []byte{1})} {
+		answers.freezeProbes.Store(k, &freezeProbe{})
+	}
+	answers.pruneFreezeProbes(key, [][]byte{{2}})
+	_, kept := answers.freezeProbes.Load(freezeProbeKey(key, []byte{2}))
+	_, pruned := answers.freezeProbes.Load(freezeProbeKey(key, []byte{1}))
+	assert.True(t, kept, "a predecessor still confirmed keeps its backoff")
+	assert.False(t, pruned, "a removed predecessor's backoff is dropped")
+	answers.pruneFreezeProbes(key, nil)
+	_, kept = answers.freezeProbes.Load(freezeProbeKey(key, []byte{2}))
+	_, otherKept := answers.freezeProbes.Load(freezeProbeKey(other, []byte{1}))
+	assert.False(t, kept, "a gone Host's backoffs are dropped")
+	assert.True(t, otherKept, "another Host's are kept")
 }
 
 // freezeStaticTrust is a staticTrust whose Host holds confirmed predecessors.
@@ -374,6 +452,9 @@ func TestCheckFreezeDiscards(t *testing.T) {
 	assert.Equal(t, []string{hex.EncodeToString(prev)}, removed)
 	assert.Equal(t, [][]byte{prev}, trust.discarded)
 	assert.Empty(t, check(), "nothing left to check")
+	n := 0
+	answers.freezeProbes.Range(func(_, _ any) bool { n++; return true })
+	assert.Zero(t, n, "no probe backoff is kept for a removed predecessor")
 }
 
 // rekeyingTrust is a staticTrust whose host is re-keyed once rekeyed is set.

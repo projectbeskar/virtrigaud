@@ -135,8 +135,10 @@ func (b freezeBlockers) blocks(p string) bool { return b.all || b.blocked[p] }
 
 // addVMs adds the blocking attempts of vms on host (VMs of host's Provider
 // only), learning each attempt's enrolment from its authenticated intent.
+// learnt holds the enrolments already learnt in this check, by VM UID and
+// op_id: an attempt's intent never changes, so it is read once per check.
 func (r *HostEnrolmentReconciler) addVMs(ctx context.Context, b *freezeBlockers, host *infravirtrigaudiov1beta1.Host,
-	vms []infravirtrigaudiov1beta1.VirtualMachine) {
+	vms []infravirtrigaudiov1beta1.VirtualMachine, learnt map[string]string) {
 	for i := range vms {
 		vm := &vms[i]
 		if !vmOfProvider(vm, host.Namespace, host.Spec.ProviderRef.Name) {
@@ -144,7 +146,11 @@ func (r *HostEnrolmentReconciler) addVMs(ctx context.Context, b *freezeBlockers,
 		}
 		for _, a := range blockingAttempts(vm, host.Name) {
 			b.open++
-			if id, ok := r.attemptEnrolment(ctx, vm, a, host.Namespace); ok {
+			k := string(vm.UID) + "/" + a.OpID
+			if id, ok := learnt[k]; ok {
+				b.blocked[id] = true
+			} else if id, ok := r.attemptEnrolment(ctx, vm, a, host.Namespace); ok {
+				learnt[k] = id
 				b.blocked[id] = true
 			} else {
 				b.all = true
@@ -161,8 +167,7 @@ func (r *HostEnrolmentReconciler) attemptEnrolment(ctx context.Context, vm *infr
 	if r.IntentAuth == nil {
 		return "", false
 	}
-	vr := &VirtualMachineReconciler{Client: r.Client, APIReader: r.liveReader(), OperationIntentAuth: r.IntentAuth}
-	ref, found, err := vr.loadPollIntent(ctx, vm, a.OpID, ns)
+	ref, found, err := intentLoader{reader: r.liveReader(), auth: r.IntentAuth}.loadPollIntent(ctx, vm, a.OpID, ns)
 	if err != nil || !found || len(ref.Identity.EnrolmentID) != operation.IDLen {
 		return "", false
 	}
@@ -172,7 +177,8 @@ func (r *HostEnrolmentReconciler) attemptEnrolment(ctx context.Context, vm *infr
 // cachedBlockers reads the Host's Provider's VirtualMachines from the cache
 // through the provider indexes; ok is false when the cache cannot serve
 // them (no index), and the caller goes to the API server.
-func (r *HostEnrolmentReconciler) cachedBlockers(ctx context.Context, host *infravirtrigaudiov1beta1.Host) (freezeBlockers, bool) {
+func (r *HostEnrolmentReconciler) cachedBlockers(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
+	learnt map[string]string) (freezeBlockers, bool) {
 	b := freezeBlockers{blocked: map[string]bool{}}
 	key := types.NamespacedName{Namespace: host.Namespace, Name: host.Spec.ProviderRef.Name}.String()
 	seen := map[types.UID]bool{}
@@ -189,13 +195,14 @@ func (r *HostEnrolmentReconciler) cachedBlockers(ctx context.Context, host *infr
 			}
 		}
 	}
-	r.addVMs(ctx, &b, host, vms)
+	r.addVMs(ctx, &b, host, vms, learnt)
 	return b, true
 }
 
 // liveBlockers reads every VirtualMachine from the API server, page by page
 // (freezeListPage), so that an attempt written a moment ago is seen.
-func (r *HostEnrolmentReconciler) liveBlockers(ctx context.Context, host *infravirtrigaudiov1beta1.Host) (freezeBlockers, error) {
+func (r *HostEnrolmentReconciler) liveBlockers(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
+	learnt map[string]string) (freezeBlockers, error) {
 	b := freezeBlockers{blocked: map[string]bool{}}
 	cont := ""
 	for {
@@ -203,7 +210,7 @@ func (r *HostEnrolmentReconciler) liveBlockers(ctx context.Context, host *infrav
 		if err := r.liveReader().List(ctx, &list, client.Limit(freezeListPage), client.Continue(cont)); err != nil {
 			return b, fmt.Errorf("list VirtualMachines for Host %s/%s: %w", host.Namespace, host.Name, err)
 		}
-		r.addVMs(ctx, &b, host, list.Items)
+		r.addVMs(ctx, &b, host, list.Items, learnt)
 		if cont = list.Continue; cont == "" {
 			return b, nil
 		}
@@ -277,12 +284,13 @@ func (r *HostEnrolmentReconciler) confirmFreezes(ctx context.Context, host *infr
 		}
 		return out
 	}
-	if cached, ok := r.cachedBlockers(ctx, host); ok && len(free(cached)) == 0 {
+	learnt := map[string]string{}
+	if cached, ok := r.cachedBlockers(ctx, host, learnt); ok && len(free(cached)) == 0 {
 		log.FromContext(ctx).V(1).Info("Predecessor freeze not confirmed yet: attempts on the host block it (cache)",
 			"host", key, "openAttempts", cached.open, "predecessors", predecessorSummary(st))
 		return wait()
 	}
-	live, err := r.liveBlockers(ctx, host)
+	live, err := r.liveBlockers(ctx, host, learnt)
 	if err != nil {
 		return changed, freezeRecheck(n), err
 	}
@@ -441,13 +449,17 @@ func (h *HostAnswers) checkFreezeDiscards(ctx context.Context, provider *infravi
 		return nil
 	}
 	confirmed, err := ft.ConfirmedFrozen(ctx, provider, hostID)
-	if err != nil || len(confirmed) == 0 {
+	if err != nil {
+		return nil
+	}
+	h.pruneFreezeProbes(types.NamespacedName{Namespace: provider.Namespace, Name: hostID}, confirmed)
+	if len(confirmed) == 0 {
 		return nil
 	}
 	logger := log.FromContext(ctx)
 	var removed []string
 	for _, id := range confirmed {
-		key := hostAnswerKey(provider, hostID) + "/" + hex.EncodeToString(id)
+		key := freezeProbeKey(types.NamespacedName{Namespace: provider.Namespace, Name: hostID}, id)
 		if !h.freezeProbeDue(key) {
 			continue
 		}
@@ -525,4 +537,28 @@ func (h *HostAnswers) freezeProbeMissed(key string) {
 	p.missed++
 	p.next = h.now().Add(wait)
 	h.freezeProbes.Store(key, p)
+}
+
+// freezeProbeKey is the probe backoff key of predecessor id of the Host
+// host (a Host lives in its Provider's namespace and is named by its host
+// id).
+func freezeProbeKey(host types.NamespacedName, id []byte) string {
+	return host.String() + "/" + hex.EncodeToString(id)
+}
+
+// pruneFreezeProbes drops the probe backoff of host's predecessors that are
+// no longer confirmed (removed, here or by another replica); with keep nil,
+// of all of them (the Host is gone).
+func (h *HostAnswers) pruneFreezeProbes(host types.NamespacedName, keep [][]byte) {
+	want := map[string]bool{}
+	for _, id := range keep {
+		want[freezeProbeKey(host, id)] = true
+	}
+	prefix := host.String() + "/"
+	h.freezeProbes.Range(func(k, _ any) bool {
+		if ks, ok := k.(string); ok && strings.HasPrefix(ks, prefix) && !want[ks] {
+			h.freezeProbes.Delete(k)
+		}
+		return true
+	})
 }

@@ -239,23 +239,50 @@ func (r *VirtualMachineReconciler) loadIntent(ctx context.Context, vm *infravirt
 	return p, found, err
 }
 
+// loadIntent is VirtualMachineReconciler.loadIntent for l.
+func (l intentLoader) loadIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+	p contracts.PreparedOperation, found bool, err error) {
+	p, _, found, err = l.loadIntentSecret(ctx, vm, opID, ns)
+	return p, found, err
+}
+
+// intentLoader reads operation-intent Secrets (full and redacted) with
+// reader, which must read the API server, not a cache, and authenticates them
+// with auth. It is what both the VirtualMachine controller and the Host
+// enrolment controller's freeze check read intents with.
+type intentLoader struct {
+	reader client.Reader
+	auth   operation.IntentAuthenticator
+}
+
+// intents is the controller's intentLoader.
+func (r *VirtualMachineReconciler) intents() intentLoader {
+	return intentLoader{reader: r.intentReader(), auth: r.OperationIntentAuth}
+}
+
+// loadIntentSecret is the controller's intentLoader.loadIntentSecret.
+func (r *VirtualMachineReconciler) loadIntentSecret(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+	contracts.PreparedOperation, *corev1.Secret, bool, error) {
+	return r.intents().loadIntentSecret(ctx, vm, opID, ns)
+}
+
 // loadIntentSecret is loadIntent that also returns the Secret it
 // authenticated (nil unless err is nil and found), so a caller that acts on
 // that Secret (deletes it, or derives another from it) acts on exactly the
 // read that authenticated, never on a second read.
-func (r *VirtualMachineReconciler) loadIntentSecret(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+func (l intentLoader) loadIntentSecret(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
 	p contracts.PreparedOperation, secret *corev1.Secret, found bool, err error) {
-	if r.OperationIntentAuth == nil {
+	if l.auth == nil {
 		return p, nil, false, operation.ErrNoIntentAuthenticator
 	}
 	s := &corev1.Secret{}
-	if err := r.intentReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: intentSecretName(opID)}, s); err != nil {
+	if err := l.reader.Get(ctx, types.NamespacedName{Namespace: ns, Name: intentSecretName(opID)}, s); err != nil {
 		if apierrors.IsNotFound(err) {
 			return p, nil, false, nil
 		}
 		return p, nil, false, fmt.Errorf("read the operation-intent Secret: %w", err)
 	}
-	p, err = r.openIntentSecret(vm, opID, s)
+	p, err = l.openIntentSecret(vm, opID, s)
 	if err != nil {
 		return p, nil, true, err
 	}
@@ -264,12 +291,12 @@ func (r *VirtualMachineReconciler) loadIntentSecret(ctx context.Context, vm *inf
 
 // openIntentSecret authenticates and decodes the intent Secret s of op_id
 // opID for vm (see loadIntent).
-func (r *VirtualMachineReconciler) openIntentSecret(vm *infravirtrigaudiov1beta1.VirtualMachine, opID string, s *corev1.Secret) (
+func (l intentLoader) openIntentSecret(vm *infravirtrigaudiov1beta1.VirtualMachine, opID string, s *corev1.Secret) (
 	p contracts.PreparedOperation, err error) {
 	if !ownIntent(s, opID, vm.UID) {
 		return p, fmt.Errorf("%w: %w", errIntentTampered, errIntentNotOurs)
 	}
-	if !r.OperationIntentAuth.OpenIntent(intentMAC(s), s.Data[intentKeyTag]) {
+	if !l.auth.OpenIntent(intentMAC(s), s.Data[intentKeyTag]) {
 		return p, fmt.Errorf("authenticate: %w", errIntentTampered)
 	}
 	if s.Annotations[operationIntentVMNamespaceAnnotation] != vm.Namespace || s.Annotations[operationIntentVMNameAnnotation] != vm.Name {

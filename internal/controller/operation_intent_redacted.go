@@ -148,13 +148,13 @@ func buildRedactedIntentSecret(provider *infravirtrigaudiov1beta1.Provider, vm *
 // op_id opID for vm from namespace ns. found is false when there is none. A
 // Secret that is not vm's, does not authenticate, or names another op_id,
 // VM or kind returns errIntentTampered.
-func (r *VirtualMachineReconciler) loadRedactedIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+func (l intentLoader) loadRedactedIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
 	intentRef, bool, error) {
-	if r.OperationIntentAuth == nil {
+	if l.auth == nil {
 		return intentRef{}, false, operation.ErrNoIntentAuthenticator
 	}
 	s := &corev1.Secret{}
-	if err := r.intentReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: redactedIntentName(opID)}, s); err != nil {
+	if err := l.reader.Get(ctx, types.NamespacedName{Namespace: ns, Name: redactedIntentName(opID)}, s); err != nil {
 		if apierrors.IsNotFound(err) {
 			return intentRef{}, false, nil
 		}
@@ -166,7 +166,7 @@ func (r *VirtualMachineReconciler) loadRedactedIntent(ctx context.Context, vm *i
 	if _, has := s.Data[intentKeyRequest]; has {
 		return intentRef{}, true, fmt.Errorf("a redacted intent with request bytes: %w", errIntentTampered)
 	}
-	if !r.OperationIntentAuth.OpenIntent(redactedIntentMAC(s), s.Data[intentKeyTag]) {
+	if !l.auth.OpenIntent(redactedIntentMAC(s), s.Data[intentKeyTag]) {
 		return intentRef{}, true, fmt.Errorf("authenticate: %w", errIntentTampered)
 	}
 	if s.Annotations[operationIntentVMNamespaceAnnotation] != vm.Namespace || s.Annotations[operationIntentVMNameAnnotation] != vm.Name {
@@ -183,18 +183,30 @@ func (r *VirtualMachineReconciler) loadRedactedIntent(ctx context.Context, vm *i
 	return intentRef{Kind: ident.Kind, Identity: ident.Identity, Digest: append([]byte(nil), s.Data[intentKeyDigest]...)}, true, nil
 }
 
+// loadRedactedIntent is the controller's intentLoader.loadRedactedIntent.
+func (r *VirtualMachineReconciler) loadRedactedIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+	intentRef, bool, error) {
+	return r.intents().loadRedactedIntent(ctx, vm, opID, ns)
+}
+
 // loadPollIntent loads what asking the host about attempt opID needs: from
 // its full intent when it is there, else from its redacted one.
-func (r *VirtualMachineReconciler) loadPollIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+func (l intentLoader) loadPollIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
 	intentRef, bool, error) {
-	p, found, err := r.loadIntent(ctx, vm, opID, ns)
+	p, found, err := l.loadIntent(ctx, vm, opID, ns)
 	if err != nil {
 		return intentRef{}, found, err
 	}
 	if found {
 		return refOf(p), true, nil
 	}
-	return r.loadRedactedIntent(ctx, vm, opID, ns)
+	return l.loadRedactedIntent(ctx, vm, opID, ns)
+}
+
+// loadPollIntent is the controller's intentLoader.loadPollIntent.
+func (r *VirtualMachineReconciler) loadPollIntent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, opID, ns string) (
+	intentRef, bool, error) {
+	return r.intents().loadPollIntent(ctx, vm, opID, ns)
 }
 
 // errRedactionMismatch is redactIntent's answer for a redacted intent already

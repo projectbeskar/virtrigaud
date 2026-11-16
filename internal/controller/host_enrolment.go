@@ -909,9 +909,11 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
+		r.freezeWaits.Delete(req.String())
 		return ctrl.Result{}, r.forgetGoneHost(ctx, req.NamespacedName)
 	}
 	if !host.DeletionTimestamp.IsZero() {
+		r.freezeWaits.Delete(req.String())
 		// A deleting Host is never enrolled again; its pins go first.
 		return ctrl.Result{}, deleteHostEnrolment(ctx, r.Client, r.liveReader(), r.Config, host.Namespace, host.Name, host.UID)
 	}
