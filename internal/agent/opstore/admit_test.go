@@ -119,7 +119,9 @@ func TestAdmit_RecordOtherIdentityIsConflict(t *testing.T) {
 		"binding":            func(r *opstore.Request) { r.BindingID = rid() },
 		"kind":               func(r *opstore.Request) { r.Kind = kPowerOn },
 		"attempt":            func(r *opstore.Request) { r.Attempt++ },
-		"digest":             func(r *opstore.Request) { r.IntentDigest = append([]byte{1}, r.IntentDigest[1:]...) },
+		"digest": func(r *opstore.Request) {
+			r.IntentDigest = append([]byte{r.IntentDigest[0] ^ 1}, r.IntentDigest[1:]...)
+		},
 		"mint epoch counter": func(r *opstore.Request) { r.MintEpoch.Counter++ },
 		"mint epoch holder":  func(r *opstore.Request) { r.MintEpoch.Holder = rid() },
 	}
