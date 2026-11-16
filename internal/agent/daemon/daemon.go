@@ -194,6 +194,9 @@ type Hooks struct {
 	// (RenewalStep* constants); an error stops the activation there, as a
 	// crash would.
 	RenewalStep func(step string) error
+	// HealConnected runs when a tick that finishes an interrupted
+	// activation has reached the signer, before it takes the renewal lock.
+	HealConnected func()
 }
 
 // Options configures Run.
@@ -345,7 +348,7 @@ func (o Options) testOverrides() []string {
 	for name, on := range map[string]bool{
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
 		"TrustFileOwner": o.TrustFileOwner != nil, "InventoryRoot": o.InventoryRoot != "", "Listener": o.Listener != nil, "Now": o.Now != nil,
-		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil || o.Hooks.RenewalStep != nil,
+		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil || o.Hooks.RenewalStep != nil || o.Hooks.HealConnected != nil,
 		"StepDeadlines": o.StepDeadlines != nil,
 	} {
 		if on {

@@ -606,3 +606,58 @@ func (r *running) tryAnswer() *providerv1.SignedBlob {
 	}
 	return info.GetHostAnswer()
 }
+
+// TestRenewalStaleHealConnectionIgnored: a tick that reached the signer
+// before an activation began never acts on that connection. The interleaving
+// is driven by hooks: activation 1 stops before the switch (the old key
+// stays in use, the heal flag is set); a tick connects (it sees the old key)
+// and is held; activation 2 switches keys and stops unfinished; the held tick
+// then must not clear the heal flag with its stale view, so a later tick
+// brings the credentials to the new key.
+func TestRenewalStaleHealConnectionIgnored(t *testing.T) {
+	h, _ := renewalHost(t)
+	var stops atomic.Int32
+	h.hooks.RenewalStep = func(s string) error {
+		switch {
+		case s == daemon.RenewalStepSignerReached && stops.CompareAndSwap(0, 1):
+			return errors.New("stop before the switch")
+		case s == daemon.RenewalStepKeySwitched && stops.CompareAndSwap(1, 2):
+			return errors.New("stop after the switch")
+		}
+		return nil
+	}
+	reached, release := make(chan struct{}), make(chan struct{})
+	var held atomic.Bool
+	h.hooks.HealConnected = func() {
+		if stops.Load() == 1 && held.CompareAndSwap(false, true) {
+			close(reached)
+			<-release
+		}
+	}
+	r, _ := h.run()
+	der, newPub := issueRenewal(t, r, h)
+	h.nowOff.Store(0)
+	if _, err := r.install(der, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.install(der, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("activation 1: %v", err)
+	}
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no tick reached the signer")
+	}
+	// The held tick saw the old key. Activation 2 switches and stops.
+	done := make(chan error, 1)
+	go func() { _, err := r.install(der, true); done <- err }()
+	if err := <-done; status.Code(err) != codes.Unavailable {
+		close(release)
+		t.Fatalf("activation 2: %v", err)
+	}
+	close(release)
+	waitFor(t, "answers by the new key", func() bool {
+		blob := r.tryAnswer()
+		return blob != nil && signerOf(t, blob).Equal(newPub)
+	})
+}

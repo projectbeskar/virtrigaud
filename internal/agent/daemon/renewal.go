@@ -57,6 +57,9 @@ const (
 // (Hooks.RenewalStep): after the signer put the new key in use, and after
 // the staged certificate became the host certificate.
 const (
+	// RenewalStepSignerReached comes before the signer is asked to switch
+	// (an activation stopped there leaves the old key in use).
+	RenewalStepSignerReached = "signer-reached"
 	// RenewalStepKeySwitched follows the signer's switch to the new key.
 	RenewalStepKeySwitched = "key-switched"
 	// RenewalStepPromoted follows the promotion of the staged certificate.
@@ -94,10 +97,45 @@ type renewer struct {
 	broken atomic.Bool
 	// healLogAt is when a failed heal was last logged (rate-limited).
 	healLogAt time.Time
-	// activations counts activations, so a tick that reached the signer
-	// before one ran does not act on what the signer held then.
-	activations atomic.Uint64
+	// activations is a sequence lock around activations: odd while one runs.
+	// A tick acts on its signer connection only if no activation ran or was
+	// running from before it connected to when it holds the lock.
+	activations activationSeq
+	// healFailures counts consecutive failed tick heals, and healNextTry
+	// (Unix nanoseconds) is the earliest next one: the first few retries are
+	// immediate, then they back off up to healRetryMax.
+	healFailures atomic.Int64
+	healNextTry  atomic.Int64
 }
+
+// Tick heal backoff: the first healImmediateRetries failed heals are retried
+// at the next tick; then the wait doubles from healRetryMin up to
+// healRetryMax.
+const (
+	healImmediateRetries = 3
+	healRetryMin         = 5 * time.Second
+	healRetryMax         = time.Minute
+)
+
+// activationSeq is a sequence lock: begin and end each add one, so the value
+// is odd while an activation runs.
+type activationSeq struct{ n atomic.Uint64 }
+
+// begin marks an activation as running.
+func (q *activationSeq) begin() { q.n.Add(1) }
+
+// end marks it done.
+func (q *activationSeq) end() { q.n.Add(1) }
+
+// snapshot returns the current value and whether no activation is running.
+func (q *activationSeq) snapshot() (uint64, bool) {
+	v := q.n.Load()
+	return v, v%2 == 0
+}
+
+// unchanged reports whether no activation began since snapshot returned v
+// (with no activation running then).
+func (q *activationSeq) unchanged(v uint64) bool { return q.n.Load() == v }
 
 // healLogEvery is the shortest interval between two log lines about a heal
 // that keeps failing.
@@ -171,23 +209,22 @@ func (r *renewer) exclusive(f func() error) error {
 // signer for a renewal request once the current certificate is two thirds
 // through its lifetime and none is pending.
 func (r *renewer) tick(ctx context.Context) {
-	if r.broken.Load() {
+	if gen, idle := r.activations.snapshot(); r.broken.Load() && idle && r.d.o.Now().UnixNano() >= r.healNextTry.Load() {
 		// Reach the signer without holding the lock, so answers are not
-		// delayed while it is away; finish under the lock, unless an
-		// activation ran in between (what the signer held may have changed).
-		gen := r.activations.Load()
+		// delayed while it is away; finish under the lock, only if no
+		// activation began since (what the signer held may have changed).
 		hctx, cancel := context.WithTimeout(ctx, healTickTimeout)
 		nc, cerr := signer.Connect(hctx, r.d.signerOptions(r.run))
 		cancel()
+		if r.d.o.Hooks.HealConnected != nil {
+			r.d.o.Hooks.HealConnected()
+		}
 		r.mu.Lock()
 		err := cerr
-		if err == nil && r.healPending && r.activations.Load() == gen {
+		if err == nil && r.healPending && r.activations.unchanged(gen) {
 			err = r.healWith(nc)
 		}
-		if err != nil && r.d.o.Now().Sub(r.healLogAt) >= healLogEvery {
-			r.healLogAt = r.d.o.Now()
-			r.d.log.Error(err, "an interrupted activation is not finished yet; operations are refused until it is (tried again every few seconds)")
-		}
+		r.healBackoff(err)
 		r.mu.Unlock()
 	}
 	r.mu.Lock()
@@ -380,6 +417,10 @@ func (r *renewer) Install(ctx context.Context, der []byte, activate bool) error 
 // switched keys marks the activation for healing: healLocked finishes it,
 // now if it can, else at the next tick or activation.
 func (r *renewer) activateLocked(ctx context.Context, cur *server.Credentials, leaf *x509.Certificate) error {
+	r.activations.begin()
+	defer r.activations.end()
+	r.healFailures.Store(0)
+	r.healNextTry.Store(0)
 	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activationTimeout)
 	defer cancel()
 	pin, err := keyPinBytes(leaf.PublicKey)
@@ -394,8 +435,10 @@ func (r *renewer) activateLocked(ctx context.Context, cur *server.Credentials, l
 	// answer may be lost after the rename).
 	// The mirror read by ticks is set only when the activation returns
 	// unfinished (Install), so no tick acts on the signer mid-activation.
-	r.activations.Add(1)
 	r.healPending = true
+	if err := r.step(RenewalStepSignerReached); err != nil {
+		return err
+	}
 	if _, err := c.ActivateRenewal(actx, pin); err != nil {
 		return errors.Join(fmt.Errorf("the signer did not put the new key in use: %w", err), r.healLocked(actx))
 	}
@@ -465,6 +508,27 @@ func (r *renewer) healWith(nc *signer.Client) error {
 	r.d.log.Info("credentials brought to the signer's key: the renewed certificate is in use",
 		"sha256", hex.EncodeToString(sha256Of(id.Leaf.Raw)))
 	return nil
+}
+
+// healBackoff records the outcome of a tick's heal (err nil: healed or
+// nothing to do): a failure is logged at most every healLogEvery and, after
+// healImmediateRetries, delays the next attempt. The lock must be held.
+func (r *renewer) healBackoff(err error) {
+	now := r.d.o.Now()
+	if err == nil {
+		r.healFailures.Store(0)
+		r.healNextTry.Store(0)
+		return
+	}
+	n := r.healFailures.Add(1)
+	if n > healImmediateRetries {
+		wait := min(healRetryMin<<min(n-healImmediateRetries-1, 8), healRetryMax)
+		r.healNextTry.Store(now.Add(wait).UnixNano())
+	}
+	if now.Sub(r.healLogAt) >= healLogEvery {
+		r.healLogAt = now
+		r.d.log.Error(err, "an interrupted activation is not finished yet; operations are refused until it is (retried, backing off up to a minute)")
+	}
 }
 
 // hostCertIs reports whether the host certificate file holds der.
