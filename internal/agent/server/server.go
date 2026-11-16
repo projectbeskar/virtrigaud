@@ -138,11 +138,17 @@ func (s *CredentialStore) Store(c *Credentials) { s.p.Store(c) }
 // certificate, and a required client certificate that chains to the pinned
 // Provider identity issuer and names an allowed Provider. Each handshake
 // reads the current Credentials.
-func TLSConfig(creds *CredentialStore) *tls.Config { return tlsConfig(creds, nil) }
+func TLSConfig(creds *CredentialStore) *tls.Config { return tlsConfig(creds, nil, nil) }
 
 // tlsConfig is TLSConfig with a hook that runs when a ClientHello has
-// arrived, before anything is signed: a non-nil error ends the handshake.
-func tlsConfig(creds *CredentialStore, onHello func(net.Conn) error) *tls.Config {
+// arrived, before anything is signed (a non-nil error ends the handshake),
+// and one that receives each refusal of a client certificate that chains to
+// the Provider identity issuer but names no allowed Provider (a URI that is
+// not a Provider identity with a UID, or a Provider not in the trust
+// configuration). In TLS 1.3 that refusal comes after the client finished
+// its handshake, so the client sees only a closed connection; the hook is
+// what lets the agent say why.
+func tlsConfig(creds *CredentialStore, onHello func(net.Conn) error, onRefused func(error)) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		MaxVersion: tls.VersionTLS13,
@@ -169,6 +175,9 @@ func tlsConfig(creds *CredentialStore, onHello func(net.Conn) error) *tls.Config
 						return errors.New("no client certificate")
 					}
 					_, _, err := c.Trust.AuthorizeProvider(cs.PeerCertificates[0])
+					if err != nil && onRefused != nil {
+						onRefused(err)
+					}
 					return err
 				},
 			}, nil
@@ -330,6 +339,7 @@ type Server struct {
 	hellos    *sourceLimiter
 	noAnswer  logGate
 	limited   logGate
+	refusedPr logGate
 	providerS *providerService
 	agentS    *agentService
 	vc        verifierCache
@@ -360,9 +370,10 @@ func New(opts Options) (*Server, error) {
 	}
 	s.hellos = newSourceLimiter(opts.HelloAnswersPerSecond, opts.HelloAnswerBurst)
 	s.limited = logGate{every: refusalLogEvery}
+	s.refusedPr = logGate{every: refusalLogEvery}
 	s.opts = opts
 	so := []grpc.ServerOption{
-		grpc.Creds(s.throttle.creds(credentials.NewTLS(tlsConfig(opts.Credentials, s.throttle.acquire)))),
+		grpc.Creds(s.throttle.creds(credentials.NewTLS(tlsConfig(opts.Credentials, s.throttle.acquire, s.providerRefused)))),
 		grpc.ConnectionTimeout(ConnectionTimeout),
 		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: MaxConnectionAge, MaxConnectionAgeGrace: MaxConnectionAgeGrace}),
@@ -377,6 +388,16 @@ func New(opts Options) (*Server, error) {
 	providerv1.RegisterProviderServer(s.grpc, s.providerS)
 	agentv1.RegisterAgentServiceServer(s.grpc, s.agentS)
 	return s, nil
+}
+
+// providerRefused logs the refusal of a Provider client certificate, at most
+// once per refusalLogEvery with the number held back since the last line.
+// The reason names the rule and the Provider identity, never a key.
+func (s *Server) providerRefused(err error) {
+	if ok, n := s.refusedPr.allow(s.opts.Now()); ok {
+		s.opts.Log.Error(err, "refused a Provider client certificate after the TLS handshake; the Provider sees a closed connection",
+			"suppressedSinceLast", n)
+	}
 }
 
 // Serve serves on lis until Stop or GracefulStop. Connections pass the

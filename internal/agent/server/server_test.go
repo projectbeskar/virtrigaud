@@ -29,6 +29,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -805,5 +806,35 @@ func TestHelloHasItsOwnAnswerBudget(t *testing.T) {
 	}
 	if signed != 2 {
 		t.Fatalf("%d signed Hello answers with a Hello burst of 2 after the read limit was used up", signed)
+	}
+}
+
+// TestProviderCertificateWithoutUIDIsRefusedAndLogged: a Provider identity
+// certificate whose URI lacks the Provider UID chains to the Provider
+// identity issuer, so the TLS 1.3 handshake completes on the client's side;
+// the agent then refuses it and logs why (rate-limited), since the client
+// sees only a closed connection. The call never reaches the agent.
+func TestProviderCertificateWithoutUIDIsRefusedAndLogged(t *testing.T) {
+	logs := &logLines{}
+	e := newEnvWith(t, server.Throttle{}, func(o *server.Options) { o.Log = funcrLogger(logs) })
+	noUID := e.pki.ProviderCert(t, nil, trusttest.ProviderIdentity().String())
+	c := agentv1.NewAgentServiceClient(e.dial(&noUID, 0))
+	for i := 0; i < 3; i++ {
+		_, err := c.Hello(ctx(t), &agentv1.HelloRequest{AnswerNonce: nonce(5), CallerApiVersion: 1})
+		if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), "remote error: tls:") {
+			t.Fatalf("Hello with a certificate without the Provider UID: %v", err)
+		}
+	}
+	n := 0
+	for _, l := range logs.all() {
+		if strings.Contains(l, "refused a Provider client certificate") {
+			n++
+			if !strings.Contains(l, "UID") {
+				t.Errorf("the log line does not say why: %s", l)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("refusal logged %d times, want once (rate-limited): %v", n, logs.all())
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -197,6 +198,10 @@ type fakeAgentOptions struct {
 	// leaf replaces the certificate the agent presents (key is its key).
 	leaf *x509.Certificate
 	key  *ecdsa.PrivateKey
+	// refuseClient makes the agent refuse every client certificate after
+	// the handshake, as an agent does with a Provider identity it does not
+	// allow.
+	refuseClient bool
 }
 
 func newFakeAgent(t *testing.T, p *pki, name string, o fakeAgentOptions) *fakeAgent {
@@ -213,11 +218,15 @@ func newFakeAgent(t *testing.T, p *pki, name string, o fakeAgentOptions) *fakeAg
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	f.lis = &countingListener{Listener: l, conns: map[*countedConn]struct{}{}}
-	f.srv = grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+	srvTLS := &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{{Certificate: [][]byte{leaf.Raw}, PrivateKey: key}},
 		ClientAuth:   tls.RequireAnyClientCert,
-	})), grpc.UnknownServiceHandler(f.unknown))
+	}
+	if o.refuseClient {
+		srvTLS.VerifyConnection = func(tls.ConnectionState) error { return errors.New("not an allowed Provider") }
+	}
+	f.srv = grpc.NewServer(grpc.Creds(credentials.NewTLS(srvTLS)), grpc.UnknownServiceHandler(f.unknown))
 	agentv1.RegisterAgentServiceServer(f.srv, &helloServer{f: f})
 	go func() { _ = f.srv.Serve(f.lis) }()
 	t.Cleanup(f.srv.Stop)

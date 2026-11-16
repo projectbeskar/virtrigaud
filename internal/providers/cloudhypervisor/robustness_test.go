@@ -440,3 +440,20 @@ func (s *syncBuffer) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// TestAgentRefusingTheProviderCertificateHasItsOwnCause: an agent that
+// refuses the Provider's identity certificate after the TLS 1.3 handshake
+// (a URI without the Provider UID, a Provider it does not allow) is reported
+// as ProviderCertificateRefused, not as unreachable, for reads and mutating
+// calls alike, and receives no call.
+func TestAgentRefusingTheProviderCertificateHasItsOwnCause(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{refuseClient: true})
+	prov := newProvider(t, p, Options{}, a)
+	client := providerv1.NewProviderClient(served(t, prov))
+	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	requireHostUnavailable(t, err, CauseProviderCertificateRefused)
+	_, err = client.Power(ctx(t), signedPower(t, "host-a"))
+	requireHostUnavailable(t, err, CauseProviderCertificateRefused)
+	assert.Empty(t, a.received(), "the agent received no call")
+}

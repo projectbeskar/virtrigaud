@@ -25,11 +25,65 @@ package.
 | `--hosts-secret` | (none) | Name of the host inventory Secret to follow through the Kubernetes API instead of the file (see [Following the inventory Secret](#following-the-inventory-secret)). Excludes `--hosts-file`. Needs `get` and `watch` on that Secret; without them the Provider stops at start with a 403 (`Forbidden`) error. A Provider Deployment the manager renders sets it to `<provider>-hosts` only for a Provider listed in the manager's `--dev-agent-provider-inventory-watch`. |
 | `--hosts-secret-namespace` | `$PROVIDER_NAMESPACE`, then the pod's namespace | Namespace of `--hosts-secret`. |
 | `--inventory-fail-closed-after` | `5m` (minimum `1m`) | With `--hosts-secret`: once no valid inventory was applied for this long, every host is refused (see [Fail-closed](#fail-closed)). |
-| `--agent-client-cert`, `--agent-client-key` | (required) | PEM certificate and key the Provider presents to every agent: its Provider identity certificate. |
+| `--agent-client-cert`, `--agent-client-key` | (required) | PEM certificate and key the Provider presents to every agent: its Provider identity certificate, issued by the agents' Provider identity issuer, with exactly one URI subject alternative name `spiffe://<trust domain>/virtrigaud/provider/<namespace>/<name>/<Provider UID>` (the trailing UID is required; see [Connections to agents](#connections-to-agents)). A Provider Deployment the manager renders sets them to `tls.crt` and `tls.key` of the Provider's credentials Secret (see [Provider identity certificate](#provider-identity-certificate)). |
 | `--provider-uid` | (none) | UID of the Provider resource. When set, an agent whose certificate records an enrolment with another Provider is refused. Optional for now, with a warning in the log when unset; a Provider Deployment the manager renders sets it. |
 
 The manager-facing TLS is the one of the other Providers (the mounted
-provider TLS material and its environment contract).
+provider TLS material and its environment contract). It is required: the
+manager sends this Provider's mutating calls as signed operations and its
+client for a Provider that requires operation identity refuses plaintext
+and unverified TLS (`an operation-identity client needs TLS with a verified
+server certificate`), so set `spec.runtime.service.tls.enabled: true` with a
+`secretRef` (see [ADR-0003](adr/0003-mtls-and-provider-grpc-auth.md)); with
+TLS off, the manager cannot reach the Provider at all.
+
+## Provider identity certificate
+
+A Provider Deployment the manager renders (development builds) passes
+`--agent-client-cert=/etc/virtrigaud/credentials/tls.crt` and
+`--agent-client-key=/etc/virtrigaud/credentials/tls.key`: the Provider
+identity certificate and key come from the `tls.crt` and `tls.key` keys of
+the Provider's credentials Secret (`spec.credentialSecretRef`), which the
+pod mounts read-only at `/etc/virtrigaud/credentials`. The Provider stops at
+start when it cannot load them. The Secret must be in the Provider's
+namespace and hold:
+
+- `tls.crt`: the certificate, issued by the Provider identity issuer whose
+  CA the agents pin in `provider-ca.pem`, with the client authentication
+  usage and exactly one URI subject alternative name,
+  `spiffe://<trust domain>/virtrigaud/provider/<namespace>/<name>/<Provider UID>`;
+- `tls.key`: its private key.
+
+The URI carries the Provider resource's UID, which exists only once the
+Provider is created: create the Provider, read its `metadata.uid`, then issue
+the certificate into the Secret its `credentialSecretRef` names (the pod
+waits for the Secret to exist). With cert-manager, for example:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ch-provider-identity
+  namespace: infra                     # the Provider's namespace
+spec:
+  secretName: ch-provider-credentials  # the Provider's spec.credentialSecretRef.name
+  duration: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages: ["digital signature", "client auth"]
+  uris:
+  - spiffe://example.test/virtrigaud/provider/infra/ch/<Provider UID>
+  issuerRef:
+    kind: ClusterIssuer
+    name: provider-identity-ca         # the issuer of the agents' provider-ca.pem
+```
+
+The Provider reads the certificate at start only: after the Secret is
+renewed, restart the Provider's pod (`kubectl rollout restart`) before the
+old certificate expires. A certificate whose URI lacks the Provider UID is
+refused by every agent (cause `ProviderCertificateRefused`, see
+[Connections to agents](#connections-to-agents)).
 
 ## Host inventory
 
@@ -216,6 +270,20 @@ handshake:
 A host whose agent fails any of these is unavailable (`HOST_UNAVAILABLE`,
 cause `AgentCertificateRefused`), and the agent receives no call.
 
+The agent, in turn, accepts the Provider's certificate only when it chains to
+its Provider identity issuer (`provider-ca.pem`) and carries exactly one URI,
+`spiffe://<trust domain>/virtrigaud/provider/<namespace>/<name>/<Provider
+UID>`, naming a Provider in its `provider-sans`; the trailing Provider UID is
+required. In TLS 1.3 the agent checks the client certificate after the
+client has finished its handshake, so a refusal reaches the Provider as a
+fatal TLS alert instead of the agent's first frame: the host is unavailable
+with cause `ProviderCertificateRefused` (not `AgentUnreachable`), nothing is
+sent to the agent (a mutating call is definitely not performed), and the
+agent logs `refused a Provider client certificate after the TLS handshake`
+with the rule that failed, at most once per interval with the number held
+back. Repeated refusals count toward the host's circuit breaker, so once it
+opens the cause reads `BreakerOpen` until a probe is let through.
+
 On every new connection the Provider first calls `agent.v1.AgentService/Hello`
 with a fresh nonce and its API version, and verifies the host-signed answer:
 a `HostAnswer` signed with the key of the certificate the handshake just
@@ -384,9 +452,11 @@ agent processes with the fake executor
 - The chart's optional NetworkPolicies give provider pods no egress to the
   Kubernetes API server; with them enabled, a Provider started with
   `--hosts-secret` needs an additional egress rule to the API server.
-- A Provider Deployment the manager renders does not yet carry the
-  Provider's identity certificate (`--agent-client-cert`); deploy the
-  Provider with it by other means until the Provider identity issuer exists.
+- The Provider identity certificate comes from the Provider's credentials
+  Secret (see [Provider identity certificate](#provider-identity-certificate));
+  the Provider identity issuer is a development stand-in that the
+  administrator provides, and the Provider reads a renewed certificate only
+  when its pod restarts.
 - `ListVMs` is not served: a per-host agent does not list VMs yet.
 - The Provider verifies only the answer to its own `Hello`. It relays every
   other signed answer unchanged; verifying them is the manager's job.

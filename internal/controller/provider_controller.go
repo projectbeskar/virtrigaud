@@ -97,6 +97,18 @@ const (
 // promise. See ADR-0003 / umbrella #156.
 const tlsBlockMissingMessage = "TLS is on-by-default in v0.3.7. To proceed: (a) provision a Secret with tls.crt/tls.key/ca.crt and set spec.runtime.service.tls.enabled=true with secretRef pointing at it, OR (b) explicitly set spec.runtime.service.tls.enabled=false to keep plaintext (lab / migration scenarios). See umbrella #156 for the runbook."
 
+// providerCredentialsMountPath is the in-pod path where the manager mounts
+// the Provider's credentials Secret (spec.credentialSecretRef).
+const providerCredentialsMountPath = "/etc/virtrigaud/credentials"
+
+// The keys of the credentials Secret of a clustered Provider for per-host
+// agents that hold its Provider identity certificate and key (a
+// kubernetes.io/tls Secret's keys; development builds only).
+const (
+	agentClientCertKey = "tls.crt"
+	agentClientKeyKey  = "tls.key"
+)
+
 // providerTLSMountPath is the in-pod path where the manager mounts the
 // provider's TLS Secret (matches the path documented in ADR-0003 and
 // consumed by PR-2 in the provider-side `main.go` files).
@@ -1248,7 +1260,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	// Mount credentials secret
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      "provider-credentials",
-		MountPath: "/etc/virtrigaud/credentials",
+		MountPath: providerCredentialsMountPath,
 		ReadOnly:  true,
 	})
 
@@ -1390,18 +1402,33 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 }
 
 // agentProviderArgs returns the extra arguments of the clustered Provider
-// for per-host agents when it follows its host inventory Secret through the
-// API (providerReadsInventorySecret): --hosts-secret, so that a revoked host
-// is refused within seconds, and --provider-uid, so that agents enrolled
-// with another Provider are refused. Nil otherwise.
+// for per-host agents, in a development build only:
+//
+//   - always --agent-client-cert and --agent-client-key, which the Provider
+//     requires: its Provider identity certificate and key, read from the
+//     tls.crt and tls.key keys of its credentials Secret
+//     (spec.credentialSecretRef, mounted at providerCredentialsMountPath);
+//   - when it follows its host inventory Secret through the API
+//     (providerReadsInventorySecret), --hosts-secret, so that a revoked host
+//     is refused within seconds, and --provider-uid, so that agents enrolled
+//     with another Provider are refused.
+//
+// Nil for every other Provider.
 func (r *ProviderReconciler) agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
-	if !r.providerReadsInventorySecret(provider) {
+	if !devgate.Compiled || !providerRunsHostAgents(provider) {
 		return nil
 	}
-	return []string{
-		"--hosts-secret=" + hostInventorySecretName(provider),
-		"--provider-uid=" + string(provider.UID),
+	args := []string{
+		"--agent-client-cert=" + providerCredentialsMountPath + "/" + agentClientCertKey,
+		"--agent-client-key=" + providerCredentialsMountPath + "/" + agentClientKeyKey,
 	}
+	if !r.providerReadsInventorySecret(provider) {
+		return args
+	}
+	return append(args,
+		"--hosts-secret="+hostInventorySecretName(provider),
+		"--provider-uid="+string(provider.UID),
+	)
 }
 
 // providerReadsInventorySecret reports whether the Provider's pod reads its

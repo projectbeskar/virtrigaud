@@ -144,17 +144,71 @@ const (
 	keepaliveTimeout = 10 * time.Second
 )
 
+// alertCreds wraps the client TLS credentials of an agent connection: the
+// connection a handshake returns reports, through onAlert, a fatal TLS alert
+// the agent sends instead of its first frame. A TLS 1.3 server verifies the
+// client certificate after the client finished its handshake, so that alert
+// is how an agent refuses the Provider's certificate; gRPC keeps only the
+// error of the connection's last attempt, which a refused redial replaces.
+type alertCreds struct {
+	credentials.TransportCredentials
+	onAlert func()
+}
+
+// ClientHandshake implements credentials.TransportCredentials.
+func (c *alertCreds) ClientHandshake(ctx context.Context, authority string, raw net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	conn, info, err := c.TransportCredentials.ClientHandshake(ctx, authority, raw)
+	if err != nil {
+		if isRemoteTLSAlert(err) {
+			c.onAlert()
+		}
+		return nil, nil, err
+	}
+	return &alertConn{Conn: conn, onAlert: c.onAlert}, info, nil
+}
+
+// Clone implements credentials.TransportCredentials.
+func (c *alertCreds) Clone() credentials.TransportCredentials {
+	return &alertCreds{TransportCredentials: c.TransportCredentials.Clone(), onAlert: c.onAlert}
+}
+
+// alertConn is an agent connection that reports a fatal TLS alert it reads.
+type alertConn struct {
+	net.Conn
+	onAlert func()
+}
+
+// Read implements net.Conn.
+func (c *alertConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if err != nil && isRemoteTLSAlert(err) {
+		c.onAlert()
+	}
+	return n, err
+}
+
+// isRemoteTLSAlert reports whether err is a fatal TLS alert the peer sent.
+func isRemoteTLSAlert(err error) bool {
+	return strings.Contains(err.Error(), remoteTLSAlert)
+}
+
 // dialAgent returns a lazy client connection to an agent at endpoint: nothing
 // is dialed until the first call. The connection carries the stats handler
-// sh (route.go), keepalive pings and, when dial is set, dials through it.
+// sh (route.go), keepalive pings and, when dial is set, dials through it;
+// onAlert, when set, runs when the agent ends a connection with a fatal TLS
+// alert (it refused the Provider's certificate).
 func dialAgent(endpoint string, trust *agentTrust, client tls.Certificate,
-	dial func(ctx context.Context, addr string) (net.Conn, error), sh stats.Handler) (*grpc.ClientConn, error) {
+	dial func(ctx context.Context, addr string) (net.Conn, error), sh stats.Handler, onAlert func()) (*grpc.ClientConn, error) {
 	addr, err := agentAddress(endpoint)
 	if err != nil {
 		return nil, err
 	}
+	creds := credentials.NewTLS(trust.tlsConfig(client))
+	if onAlert != nil {
+		creds = &alertCreds{TransportCredentials: creds, onAlert: onAlert}
+	}
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(credentials.NewTLS(trust.tlsConfig(client))),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithStatsHandler(sh),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: keepaliveTime, Timeout: keepaliveTimeout, PermitWithoutStream: true}),
 	}

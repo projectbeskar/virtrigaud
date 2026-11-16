@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -88,11 +89,12 @@ func TestAgentProviderReadsInventorySecret(t *testing.T) {
 	off := &ProviderReconciler{}
 	other := &ProviderReconciler{AgentProviderInventoryWatch: map[types.NamespacedName]struct{}{{Namespace: "default", Name: "other"}: {}}}
 
+	clientCert := []string{"--agent-client-cert=/etc/virtrigaud/credentials/tls.crt", "--agent-client-key=/etc/virtrigaud/credentials/tls.key"}
 	spec := deploymentFor(t, on, ch)
 	require.NotNil(t, spec.AutomountServiceAccountToken)
 	assert.Equal(t, devgate.Compiled, *spec.AutomountServiceAccountToken, "token only in a development build")
 	if devgate.Compiled {
-		assert.Subset(t, spec.Containers[0].Args, []string{"--hosts-secret=ch-hosts", "--provider-uid=" + string(ch.UID)})
+		assert.Subset(t, spec.Containers[0].Args, append([]string{"--hosts-secret=ch-hosts", "--provider-uid=" + string(ch.UID)}, clientCert...))
 		assert.False(t, hasInventoryVolume(spec), "no copy of the inventory on disk when it is read through the API")
 	} else {
 		assert.Equal(t, []string{"--port=9443", "--health-port=8080"}, spec.Containers[0].Args, "a release manager renders nothing for it")
@@ -100,13 +102,18 @@ func TestAgentProviderReadsInventorySecret(t *testing.T) {
 	}
 
 	// Not listed in the manager flag (no chart grant for it), with the flag
-	// empty or naming another Provider: no token, no arguments, the
-	// inventory stays mounted.
+	// empty or naming another Provider: no token, no inventory arguments,
+	// the inventory stays mounted; a development build still passes the
+	// Provider identity certificate the Provider requires.
 	for _, r := range []*ProviderReconciler{off, other} {
 		spec = deploymentFor(t, r, ch)
 		require.NotNil(t, spec.AutomountServiceAccountToken)
 		assert.False(t, *spec.AutomountServiceAccountToken)
-		assert.Equal(t, []string{"--port=9443", "--health-port=8080"}, spec.Containers[0].Args)
+		want := []string{"--port=9443", "--health-port=8080"}
+		if devgate.Compiled {
+			want = append(want, clientCert...)
+		}
+		assert.Equal(t, want, spec.Containers[0].Args)
 		assert.True(t, hasInventoryVolume(spec))
 	}
 
@@ -121,6 +128,57 @@ func TestAgentProviderReadsInventorySecret(t *testing.T) {
 		assert.Equal(t, []string{"--port=9443", "--health-port=8080"}, spec.Containers[0].Args, p.Name)
 	}
 	assert.True(t, hasInventoryVolume(deploymentFor(t, on, libvirt)), "clustered libvirt keeps its mounted inventory")
+}
+
+// TestAgentProviderClientCertificate: a development build renders the
+// clustered Provider for per-host agents with --agent-client-cert and
+// --agent-client-key, which it requires to start, pointing at the tls.crt
+// and tls.key keys of its credentials Secret, which the pod mounts read-only
+// at the path the flags name. A release build renders neither; no other
+// Provider gets them.
+func TestAgentProviderClientCertificate(t *testing.T) {
+	ch := agentProvider("ch")
+	spec := deploymentFor(t, &ProviderReconciler{}, ch)
+	var cert, key string
+	for _, a := range spec.Containers[0].Args {
+		if v, ok := strings.CutPrefix(a, "--agent-client-cert="); ok {
+			cert = v
+		}
+		if v, ok := strings.CutPrefix(a, "--agent-client-key="); ok {
+			key = v
+		}
+	}
+	if !devgate.Compiled {
+		assert.Empty(t, cert)
+		assert.Empty(t, key)
+		return
+	}
+	assert.Equal(t, "/etc/virtrigaud/credentials/tls.crt", cert)
+	assert.Equal(t, "/etc/virtrigaud/credentials/tls.key", key)
+	var mounted bool
+	for _, m := range spec.Containers[0].VolumeMounts {
+		if m.Name == "provider-credentials" && m.MountPath == filepath.Dir(cert) && m.ReadOnly {
+			mounted = true
+		}
+	}
+	assert.True(t, mounted, "the credentials Secret is mounted read-only where the flags point")
+	var fromSecret bool
+	for _, v := range spec.Volumes {
+		if v.Name == "provider-credentials" && v.Secret != nil && v.Secret.SecretName == ch.Spec.CredentialSecretRef.Name {
+			fromSecret = true
+		}
+	}
+	assert.True(t, fromSecret, "the volume is the Provider's credentials Secret")
+
+	single := agentProvider("single")
+	single.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologySingle
+	lv := agentProvider("lv")
+	lv.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeLibvirt
+	for _, p := range []*infravirtrigaudiov1beta1.Provider{single, lv} {
+		for _, a := range deploymentFor(t, &ProviderReconciler{}, p).Containers[0].Args {
+			assert.NotContains(t, a, "--agent-client", p.Name)
+		}
+	}
 }
 
 // TestParseAgentProviderInventoryWatch: the manager flag lists

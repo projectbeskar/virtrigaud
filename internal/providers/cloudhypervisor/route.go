@@ -83,6 +83,12 @@ const (
 	CauseAgentCertificateRefused = "AgentCertificateRefused"
 	// CauseAgentUnreachable: the agent could not be reached.
 	CauseAgentUnreachable = "AgentUnreachable"
+	// CauseProviderCertificateRefused: the agent refused this Provider's
+	// identity certificate (a fatal TLS alert during the handshake): it does
+	// not chain to the agent's Provider identity issuer, or its URI is not
+	// this Provider's identity with the Provider UID, or the Provider is not
+	// in the agent's trust configuration. Nothing was sent to the agent.
+	CauseProviderCertificateRefused = "ProviderCertificateRefused"
 	// CauseBreakerOpen: the host's circuit breaker is open.
 	CauseBreakerOpen = "BreakerOpen"
 	// CauseAgentTimeout: the agent did not answer a read within the
@@ -438,6 +444,11 @@ func mapCallError(ctx context.Context, host string, mutating bool, cs *callState
 		return hostUnavailable(host, false, CauseNotFronted)
 	case errors.Is(err, errBreakerOpen):
 		return hostUnavailable(host, true, CauseBreakerOpen)
+	case !cs.answered.Load() && (errors.Is(err, errProviderRefused) || peerRefusedCertificate(err)):
+		// The agent ended the handshake with a fatal alert: it refused the
+		// Provider's certificate before it read any request, so nothing was
+		// performed, a mutating call included.
+		return hostUnavailable(host, true, CauseProviderCertificateRefused)
 	case errors.Is(err, errNotConnected):
 		return hostUnavailable(host, true, CauseAgentUnreachable)
 	case cs.answered.Load():
@@ -452,6 +463,24 @@ func mapCallError(ctx context.Context, host string, mutating bool, cs *callState
 		return hostUnavailable(host, true, CauseAgentTimeout)
 	}
 	return hostUnavailable(host, true, CauseAgentUnreachable)
+}
+
+// remoteTLSAlert is how crypto/tls reports a fatal alert the peer sent
+// ("remote error: tls: bad certificate", "... certificate required", ...),
+// which gRPC carries in the text of a failed connection's error.
+const remoteTLSAlert = "remote error: tls: "
+
+// errProviderRefused is joined to the error of a call that failed on a
+// connection the agent ended with a fatal TLS alert (hostEntry.refusedOn).
+var errProviderRefused = errors.New("the agent refused the Provider's certificate")
+
+// peerRefusedCertificate reports whether err is the failure of a connection
+// the agent ended with a fatal TLS alert. A TLS 1.3 server verifies the
+// client certificate after the client finished its handshake, so the agent's
+// refusal arrives as such an alert instead of the server's first frame; the
+// agent sends no other alert after the handshake.
+func peerRefusedCertificate(err error) bool {
+	return err != nil && strings.Contains(status.Convert(err).Message(), remoteTLSAlert)
 }
 
 // notSentCause names why a call never reached the agent.
@@ -545,6 +574,9 @@ func (p *pool) invokeChecked(ctx context.Context, e *hostEntry, method string, r
 		return cs.answered.Load(), err
 	}, func() bool { return ctx.Err() != nil })
 	cs.timedOut = err != nil && ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded)
+	if err != nil && !cs.answered.Load() && e.refusedOn(gen) {
+		err = errors.Join(errProviderRefused, err)
+	}
 	return cs, err
 }
 
