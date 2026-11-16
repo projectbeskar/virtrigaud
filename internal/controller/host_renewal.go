@@ -660,6 +660,11 @@ func (r *HostEnrolmentReconciler) reconcileRenewal(ctx context.Context, host *in
 // issued certificate validates again now against the current enrolment and
 // the renewal's key. The new key becomes the only pin (the old one belongs
 // to an expired certificate), so the host is never left without a pin.
+//
+// The host may no longer hold that key (its agent discarded an unanswered
+// request and drew a new key that the manager never saw): the host then
+// stays unreachable, as it would have with only the expired pin, and a
+// re-key of the Host is the recovery.
 func (r *HostEnrolmentReconciler) pinRenewalAtExpiry(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
 	st *hostEnrolmentState) (bool, error) {
 	ren, cur := st.Renewal, st.Current
@@ -837,14 +842,6 @@ func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, ho
 	if !ok {
 		return
 	}
-	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
-	if err != nil {
-		return
-	}
-	keep := ""
-	if !l.reset && l.state.Renewal != nil {
-		keep = l.state.Renewal.CertificateRequest
-	}
 	list := certrequest.NewList()
 	if err := r.List(ctx, list, client.InNamespace(r.Config.Namespace), client.MatchingLabels{
 		certrequest.LabelAgentRenewal: "true", certrequest.LabelHostHash: hostHashLabel(host.Namespace, host.Name),
@@ -856,7 +853,7 @@ func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, ho
 	var finished []*unstructured.Unstructured
 	for i := range list.Items {
 		cr := &list.Items[i]
-		if cr.GetNamespace()+"/"+cr.GetName() == keep || !renewalRequestFinished(cr) {
+		if !renewalRequestFinished(cr) {
 			continue
 		}
 		in, err := certrequest.RequestOf(cr)
@@ -865,6 +862,21 @@ func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, ho
 			continue
 		}
 		finished = append(finished, cr)
+	}
+	// The pins Secret is read from the API server only when something could
+	// be deleted: more finished requests than are retained.
+	if len(finished) <= renewalRequestsRetained {
+		return
+	}
+	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
+	if err != nil {
+		return
+	}
+	if !l.reset && l.state.Renewal != nil {
+		keep := l.state.Renewal.CertificateRequest
+		finished = slices.DeleteFunc(finished, func(cr *unstructured.Unstructured) bool {
+			return cr.GetNamespace()+"/"+cr.GetName() == keep
+		})
 	}
 	slices.SortFunc(finished, func(a, b *unstructured.Unstructured) int {
 		return b.GetCreationTimestamp().Compare(a.GetCreationTimestamp().Time)
