@@ -304,6 +304,93 @@ certificate is CA-valid, but it must never be installed. `vrtg host enroll
 --request` refuses such a request in every mode, and `--certificate-out`
 writes a certificate only once its key is pinned on the Host.
 
+## Certificate renewal
+
+An enrolled agent renews its certificate for a new key before it expires.
+A renewal keeps the enrolment: the renewed certificate carries exactly the
+same URI names (host, enrolment, Provider, install, mode and start epoch). It
+is not a re-key: no predecessor is recorded and no epoch changes. Renewal
+needs the cert-manager issuer; with only the external-PKI path configured,
+the manager reports `AgentRenewalNotSupported` on the Host and the Host must
+be re-keyed before its certificate expires.
+
+1. **Request.** At two thirds of its certificate's lifetime the agent has a
+   new key made (it never leaves the host) and offers a renewal request: a
+   PKCS #10 request for the new key, signed by the new key, wrapped in a
+   `RenewalRequest` that the agent signs with its current, pinned key, under
+   the host-signed domain separator with its own body type (never a raw
+   signature over the request). The heartbeat asks for it
+   (`GetHostInfoRequest.renewal_version`, sent only to an agent whose last
+   verified answer shows API version 3 or later) and verifies it with the
+   answer: signed with the answer's own certificate, the current enrolment's
+   identities unchanged, a new P-256 key, proof of possession. A renewal that
+   breaks any rule makes the whole answer "no answer". A verified request is
+   recorded in the pins Secret (`renewal`) with an `AgentRenewalRequested`
+   event; a key that is, or was, pinned for the Host is refused
+   (`AgentRenewalKeyPreviouslyPinned`).
+2. **Certificate request.** The manager records the name of its
+   CertificateRequest in the pins Secret, then creates it in the enrolment
+   namespace under its own identity (read at start with a
+   `SelfSubjectReview`; without it renewal is off), with the labels
+   `enrolment.virtrigaud.io/agent=true`, `enrolment.virtrigaud.io/renewal=true`
+   and `enrolment.virtrigaud.io/host-hash`, the Host annotation, the host's
+   request, the usages `digital signature` and `server auth`, and the current
+   certificate's lifetime (at most 30 days).
+3. **Approval.** The manager approves a request labelled as a renewal only
+   when all of these hold, and denies it otherwise:
+   - its recorded requester (`spec.username`, written by cert-manager's
+     admission webhook) is the manager's own identity, checked before
+     anything else is read (`RenewalNotRequestedByManager`);
+   - it is the Host's renewal in progress, by name and UID
+     (`NoPendingRenewal`);
+   - the stored co-signed renewal request verifies again now: signed by a
+     currently pinned key, the identities of the current enrolment
+     unchanged, the current certificate valid (`RenewalNotVerified`);
+   - the Host exists, runs an agent, has an identity and is not revoked;
+   - the request carries exactly the host's request, agent usages, no CA and
+     a lifetime of at most 30 days, and its key was never pinned.
+
+   A request labelled as a renewal that another principal created (an
+   administrator included) is never approved. Approvals are suspended, as for
+   enrolment, while the admission check fails. Decisions read the pins Secret
+   from the API server.
+4. **Issuance.** The issued certificate is validated against the current
+   enrolment and the new key (chain, profile, URI names, key) and published in
+   the Provider's host inventory (`renewedCertificate`) with an
+   `AgentRenewalIssued` event; a certificate that fails is marked
+   `VirtRigaudCertificateRefused` on the request and the renewal starts
+   again (`AgentRenewalRefused`). The Provider stages it on the host.
+5. **New key pinned.** Only after a GetHostInfo the manager asked (its own
+   nonce), answered by the current key, returns a verified answer whose
+   `staged_certificate_sha256` is the digest of the certificate the manager
+   issued, is the new key pinned beside the old one (`AgentRenewalPinned`).
+   Both keys are now pinned (the overlap), and the Provider puts the renewed
+   certificate in use on the host.
+6. **Old key unpinned.** Only after such an answer is signed by the new key
+   and names nothing staged is the old key unpinned (`AgentRenewed`): the new
+   key is the only pin, the old one is kept as a previous key (a re-key to it
+   is refused), and the certificate expiry becomes the renewed one's.
+
+**Overlap.** The overlap is expected to end within a heartbeat or two. After
+24 hours the manager reports `AgentRenewalOverlapExpired`, but removes no
+pin: without evidence of which key the host uses, removing either could leave
+it with no key the Provider accepts. Both pins stay until the host shows the
+new key in use, or until the old certificate expires, when the old key can no
+longer authenticate the host anyway and is unpinned
+(`AgentRenewalCompletedAtExpiry`); the new key then stays pinned. An expired
+overlap never leaves a host with zero valid pins.
+
+A re-key or a revocation ends a renewal (a re-key records its new key as a
+previous key). `Host.status.agent.renewal` mirrors the phase (`Requested`,
+`Issued`, `Overlap`), the new key's pin, the request and the end of the
+overlap; `status.agent.keyPins` shows both keys during the overlap. Events
+and logs name keys by their pins and certificates by their digests; no
+certificate, request or key material is logged, put in an event or in the
+Host status. The agent side is described in
+[`per-host-agent-development.md`](per-host-agent-development.md#certificate-renewal),
+the Provider's relay in
+[`clustered-agent-provider-development.md`](clustered-agent-provider-development.md#renewed-certificates).
+
 ## Issuance paths
 
 Both paths carry the request as a cert-manager `CertificateRequest` in the
@@ -454,12 +541,15 @@ fails without it), `experimental.hostEnrolment.namespace` and
 - `create` on `subjectaccessreviews` (the per-Host `enrol` and `rekey` checks);
 - `get`, `list` on mutating and validating webhook configurations (the
   startup admission check);
-- in the enrolment namespace only (a `Role`): `get`, `list`, `watch` on
-  `certificaterequests`, `update` on `certificaterequests/status`, and
-  `create`, `delete`, `get`, `list`, `update`, `watch` on Secrets (the pins
-  Secrets).
+- in the enrolment namespace only (a `Role`): `create`, `get`, `list`,
+  `watch` on `certificaterequests` (`create` for the manager's own renewal
+  requests, see [Certificate renewal](#certificate-renewal)), `update` on
+  `certificaterequests/status`, and `create`, `delete`, `get`, `list`,
+  `update`, `watch` on Secrets (the pins Secrets).
 
-The manager gets no `create` on `certificaterequests`. Administrators who
+The manager creates only renewal requests, under its own identity. Its
+identity is read at start with a `SelfSubjectReview`, which every
+authenticated user may create; no grant is added for it. Administrators who
 submit requests need `create` on `certificaterequests` in the enrolment
 namespace, the `enrol` verb on the Hosts they enrol and the `rekey` verb on
 the Hosts they re-key (`hosts` in
@@ -475,7 +565,8 @@ pinned key of a Host that is in service.
 
 ## Not done yet
 
-Rotation and revoking at the CA are later work. A revoked Host's
+Revoking at the CA is later work. Certificate renewal (rotation) is
+described in [Certificate renewal](#certificate-renewal). A revoked Host's
 enrolment is retired and its pins removed, the Host is left out of the
 inventory, and a Provider that follows the inventory Secret through the API
 (`--hosts-secret`) closes its connection and refuses it within seconds

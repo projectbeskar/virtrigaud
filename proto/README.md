@@ -21,7 +21,10 @@ The same holds for the signed host answer messages in
 [`provider/v1/host_answer.proto`](provider/v1/host_answer.proto) (same package and
 Go package as `provider.proto`) and the request and response fields that carry
 them
-([`docs/operation-grants-wire-shape.md#signed-host-answers`](../docs/operation-grants-wire-shape.md#signed-host-answers)).
+([`docs/operation-grants-wire-shape.md#signed-host-answers`](../docs/operation-grants-wire-shape.md#signed-host-answers)),
+including a host's co-signed certificate renewal request (`RenewalRequest` in
+`HostAnswer.pending_renewal`, asked for with `GetHostInfoRequest.renewal_version`;
+[`docs/operation-grants-wire-shape.md#certificate-renewal`](../docs/operation-grants-wire-shape.md#certificate-renewal)).
 
 ## The per-host agent service (internal)
 
@@ -32,7 +35,8 @@ not part of the provider contract, external Provider implementations neither ser
 nor call it, the manager never calls it, and there is no compatibility promise to
 external consumers. It ships in this module so that the agent and the Provider can
 share it, and it evolves additively under the same `buf lint` and `buf breaking`
-checks as `provider.v1`. Nothing serves or calls it yet.
+checks as `provider.v1`. A development build of the per-host agent serves it and
+the Cloud Hypervisor Provider calls it.
 
 ## Versions
 

@@ -120,7 +120,8 @@ description of every field.
 | `AnswerContext` | message | What binds an answer to one request and to the host's state: `nonce` (1), `provider_uid`, `host_id`, `install_id`, `enrolment_id` (2–5), `chain_position` (6, store identifier, sequence number and chain head, 56 bytes), `agent_state` and `state_reason` (7, 8), `agent_time` (9, informational), and the continuity fields `continuity_head`, `checkpoint_seq`, `checkpoint_head` (10–12). Every answer body carries one. |
 | `OperationAnswer` | message | The answer about one operation: `context` (1), the `op_id` and `op_enrolment_id` asked about (2, 3), `state` (4), `tombstoned` (5), the recorded identity `kind`, `attempt`, `vm_uid`, `binding_id`, `intent_digest` (6–10) and `outcome_reason` (11). `kind` is the number of the recorded `OperationKind`, carried as an `int32` because `provider.proto` imports this file. |
 | `VMAnswer` | message | The answer about one VM placement: `context` (1), the `vm_uid` and `binding_id` asked about (2, 3), `presence` (4), and for a completed Delete `delete_op_id`, `delete_enrolment_id`, `delete_seq` (5–7). |
-| `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8), `inventory` (9, see [Host inventory](#host-inventory)). |
+| `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8), `inventory` (9, see [Host inventory](#host-inventory)), `pending_renewal` (10, see [Certificate renewal](#certificate-renewal)). |
+| `RenewalRequest` | message | A host's request to renew its identity certificate for a new key, carried as a host-signed `SignedBlob` in `HostAnswer.pending_renewal`: `renewal_version` (1), `provider_uid`, `host_id`, `install_id`, `enrolment_id` (2–5), `current_certificate_sha256` (6), `certificate_request` (7, DER PKCS #10 for the new key). |
 | `AgentState` | enum | `UNATTESTED`, `READY`, `QUARANTINED` (values 0–3, 0 is `UNSPECIFIED`). `READY` means the store's continuity is established and the recovery of interrupted operations has run. |
 | `OperationRecordState` | enum | `ACCEPTED`, `EXECUTING`, `COMPLETED`, `FAILED_CLEAN`, `FAILED_DIRTY`, `OUTCOME_UNKNOWN`, `RETIRED` (1–7: what the store records for an operation it holds a record or tombstone of), `NO_RECORD` and `UNKNOWN_TO_AGENT` (8, 9: it holds neither; neither proves anything about the operation). |
 | `VMPresence` | enum | `CREATING`, `PRESENT`, `DELETED`, `OTHER_BINDING`, `NO_RECORD` (values 0–5, 0 is `UNSPECIFIED`). `NO_RECORD` never means that the VM was deleted. |
@@ -133,9 +134,10 @@ description of every field.
 | `provider.v1.OperationAnswer` | `TaskStatusResponse.host_answer` (5) | `TaskStatus` |
 | `provider.v1.VMAnswer` | `DescribeResponse.host_answer` (8) | `Describe` |
 | `provider.v1.HostAnswer` | `HostInfo.host_answer` (12); the three responses of the per-host agent service | `GetHostInfo`, the agent service |
+| `provider.v1.RenewalRequest` | `HostAnswer.pending_renewal` (10) only | the pending renewal of a `GetHostInfo` that asked for it |
 
-`body_type` is a closed set of these three strings; a verifier refuses any other value,
-and any member other than the one expected for the RPC that carried it. A `HostInfo`
+`body_type` is a closed set of these four strings; a verifier refuses any other value,
+and any member other than the one expected for the field that carried it. A `HostInfo`
 in a `ListHosts` answer never carries a `host_answer`: `ListHostsRequest` has no nonce.
 When an agent answers a read that carried a nonce with an error status (for example
 `NotFound` with the `UNKNOWN_TO_AGENT` reason), the `SignedBlob` travels as exactly one
@@ -144,7 +146,7 @@ status detail of type `type.googleapis.com/provider.v1.SignedBlob`, beside the
 
 ### Request and response fields
 
-Fourteen additive fields on six existing messages:
+Fifteen additive fields on six existing messages:
 
 | Message | Field | No. | Type |
 |---|---|---|---|
@@ -161,6 +163,7 @@ Fourteen additive fields on six existing messages:
 | `GetHostInfoRequest` | `answer_nonce` | 2 | bytes |
 | | `continuity_seq` | 3 | uint64 |
 | | `inventory_version` | 4 | uint32 |
+| | `renewal_version` | 5 | uint32 |
 | `HostInfo` | `host_answer` | 12 | `SignedBlob` |
 
 - `answer_nonce` is exactly 16 random bytes, fresh for each request. An agent signs an
@@ -179,6 +182,9 @@ Fourteen additive fields on six existing messages:
   that was rolled back or forked from one that moved forward. 0 asks for nothing.
 - `inventory_version` asks the agent to put its host inventory in the signed answer;
   see [Host inventory](#host-inventory). It is set only together with `answer_nonce`.
+- `renewal_version` asks the agent to put its pending certificate renewal request in
+  the signed answer; see [Certificate renewal](#certificate-renewal). It is set only
+  together with `answer_nonce`.
 - The request fields are set only for a Provider whose type requires operation
   identity. They carry no meaning for other Providers: a `Describe` or `GetHostInfo`
   is answered as without them, and a `TaskStatus` is answered from `task` alone, so
@@ -368,6 +374,43 @@ Test vectors (reproduced by the tests in the `proto` module):
   `43b3a3f66dc30637eea72a7b65bde3ee4f93c9844186838322a88971569be858`. The framing
   vector above is unchanged.
 
+### Certificate renewal
+
+A per-host agent renews its identity certificate for a new key it generates on the
+host. It offers the renewal in the signed answer of a `GetHostInfo` that asked for it:
+
+- **Asking.** `GetHostInfoRequest.renewal_version` is the highest version of
+  `RenewalRequest` the caller implements (1), or 0 for none, set only together with
+  `answer_nonce`. `HostAnswer.pending_renewal` is set only in the answer to such a
+  request, and only while the host has a renewal pending; a verifier refuses an answer
+  that carries one the request did not ask for. A manager asks only an agent whose
+  last verified answer showed `agent_api_version` 3 or later.
+- **Signature.** `pending_renewal` is a `SignedBlob` whose `body_type` is
+  `provider.v1.RenewalRequest`, signed over the same signature input as the answers
+  (domain separator `virtrigaud.host-signed.v1`), by the key of the host's current
+  identity certificate. Its `signer_certificate` is exactly the answer's. This is the
+  proof that the holder of the pinned key asks for the renewal; the
+  `certificate_request` inside is signed by the new key, which is the proof of
+  possession of the new key. The current key never signs the PKCS #10 structure
+  itself.
+- **Field rules.** `renewal_version` is the lower of the requested and the implemented
+  version. `provider_uid`, `host_id`, `install_id` and `enrolment_id` are those of the
+  answer and of the signer certificate's enrolment record; `current_certificate_sha256`
+  is the SHA-256 of the signer certificate (32 bytes); `certificate_request` is one DER
+  PKCS #10 request of at most 4096 bytes with nothing after it, whose signature
+  verifies with its own key, for an ECDSA P-256 key other than the signer's, asking for
+  no extension but the subject alternative names, with an empty subject or the host's
+  name, no DNS, address or e-mail name, and URI names that are exactly the signer
+  certificate's (the same host, the same enrolment record and start epoch). The encoded
+  body is at most 8 KiB, the `SignedBlob` at most 18 KiB; the body is canonically
+  encoded and carries no unknown field.
+- **Delivery.** The renewed certificate goes back to the host through the per-host
+  agent service (`InstallRenewedCertificate`): staged first, put in use only with the
+  byte-identical certificate. `HostAnswer.staged_certificate_sha256` names the staged
+  certificate. The manager pins the new key only after the answer to its own
+  `GetHostInfo` names, as staged, the certificate it had issued
+  ([`host-agent-enrolment.md`](host-agent-enrolment.md#certificate-renewal)).
+
 ### The per-host agent service
 
 [`proto/agent/v1/agent.proto`](../proto/agent/v1/agent.proto) (package `agent.v1`, Go
@@ -378,7 +421,8 @@ package `github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1`) defines
 byte-identical certificate in use) and `AgentStatus`. Every response carries a
 `HostAnswer` that echoes the caller's nonce. The service is internal to VirtRigaud: it
 is not part of the provider contract, external Provider implementations neither serve
-nor call it, and the manager never calls it. Nothing serves or calls it yet.
+nor call it, and the manager never calls it. A development build of the per-host agent
+serves it and the Cloud Hypervisor Provider calls it.
 
 ## Compatibility
 
@@ -390,6 +434,10 @@ nor call it, and the manager never calls it. Nothing serves or calls it yet.
 - The host inventory (`HostAnswer.inventory` and the messages and enums it uses) is
   additive in the same way and lives in the same file as `HostAnswer`. It adds no
   `body_type`, changes no framing and no existing field.
+- The certificate renewal request (`GetHostInfoRequest.renewal_version`,
+  `HostAnswer.pending_renewal`, `RenewalRequest`) is additive in the same way. It adds
+  one `body_type`, signed under the same domain separator; the framing and every
+  existing field are unchanged.
 - A provider built against an older contract ignores the new fields; a manager built
   against an older contract never sends them.
 - The grant messages live in `provider.proto`. The contract's breaking-change check

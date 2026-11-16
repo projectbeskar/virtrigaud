@@ -51,6 +51,11 @@ must carry agent TLS material and nothing else
 - `credentials.agentTLS.keyPins`: the SHA-256 of each pinned key's DER
   SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
 
+An entry may also carry `freezeConfirmation` (see
+[Freeze confirmations](#freeze-confirmations)) and `renewedCertificate` (see
+[Renewed certificates](#renewed-certificates)); a malformed one is dropped and
+the entry stays routed.
+
 An entry that fails these rules, or shares its id with another entry, is not
 routed. It is logged when it is first refused, or refused for another
 reason, not at every reload; a malformed id is logged only as a short digest.
@@ -215,8 +220,8 @@ On every new connection the Provider first calls `agent.v1.AgentService/Hello`
 with a fresh nonce and its API version, and verifies the host-signed answer:
 a `HostAnswer` signed with the key of the certificate the handshake just
 verified (the signer certificate must be that certificate), echoing the nonce
-and naming the host. The Provider speaks API version 2 and routes to an agent
-of version 2 or 1. An agent outside that window, or one that does not serve
+and naming the host. The Provider speaks API version 3 and routes to an agent
+of version 3 or 2. An agent outside that window, or one that does not serve
 `Hello`, is not routed until its connection is replaced (cause
 `AgentIncompatible`); the Provider never adapts a request to an older agent.
 An answer that is missing or does not verify leaves the host unavailable
@@ -266,6 +271,28 @@ stays routable and nothing is relayed. The Provider does
 not judge the confirmation: the agent applies it only to its own frozen
 predecessors of the named current enrolment
 ([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)).
+
+## Renewed certificates
+
+An entry may carry `renewedCertificate`: the DER certificate the manager had
+issued for the host's certificate renewal. Before the next call to that host,
+the Provider delivers it with `agent.v1 InstallRenewedCertificate` on the
+host's verified connection: with `activate` false while the certificate's key
+is not among the entry's key pins (the agent stages it), and with the same
+bytes and `activate` true once the inventory lists its key among the pins
+(the manager pins it only after the host showed, signed, that it staged
+exactly that certificate). Each phase is delivered once per connection; a
+relay never fails the call itself. A failed relay is logged and tried again
+after 10 seconds, doubling up to 10 minutes per host; an agent that answers
+`Unimplemented` is not asked again on that connection. A malformed
+certificate (not one DER certificate, or larger than 8 KiB) is dropped with a
+log line and the entry stays routable. The Provider does not judge the
+certificate and does not need to verify the answer: the agent accepts only a
+certificate for its own pending key and its unchanged identities, and the
+connection is authenticated by a pinned key. During the overlap both keys are
+pinned, so connections to the agent succeed before and after it switches;
+a pin change recycles the host's connection
+([details](host-agent-enrolment.md#certificate-renewal)).
 
 ## Routing
 

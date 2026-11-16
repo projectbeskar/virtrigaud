@@ -171,7 +171,9 @@ host's manager-owned pins Secret (kept in the enrolment namespace, not the
 Host's): `mode` (`identity`), `enrolmentID`,
 `pendingEnrolmentID`, `requestURIs` (the exact URI subject alternative names a
 certificate request must carry), `keyPins` (SHA-256 of each pinned key's
-SubjectPublicKeyInfo, hex) and `certificateExpiry`, with an `AgentEnrolled`
+SubjectPublicKeyInfo, hex; two during a certificate renewal's overlap),
+`certificateExpiry` and `renewal` (a certificate renewal in progress: phase,
+new key pin, certificate request, end of the overlap), with an `AgentEnrolled`
 condition. It holds public identifiers only. See
 [host-agent-enrolment.md](host-agent-enrolment.md).
 
