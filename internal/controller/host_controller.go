@@ -97,10 +97,6 @@ const (
 	// are still bound to it (or have a create pending on it), so the in-use
 	// finalizer holds the deletion (ADR-0007 Addendum A, A1).
 	reasonHostInUse = "HostInUse"
-	// reasonHostRevoked is Ready=False on a per-host agent Host whose
-	// spec.revoked is set: its agent identity is revoked, the Provider no
-	// longer fronts it, and the heartbeat no longer polls it.
-	reasonHostRevoked = "Revoked"
 )
 
 // Reason labels for metrics.RecordError from the Host reconciler. Kept small and
@@ -358,7 +354,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	//     polled, and Ready says why (development builds: spec.revoked is
 	//     used only there).
 	if devgate.Compiled && host.Spec.Revoked && providerRunsHostAgents(provider) {
-		r.setHostUnavailable(ctx, host, reasonHostRevoked,
+		r.setHostUnavailable(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentRevoked,
 			"spec.revoked is true: the host's agent identity is revoked and its Provider no longer fronts it; it is not polled")
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}

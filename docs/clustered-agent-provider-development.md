@@ -44,8 +44,11 @@ A Provider Deployment the manager renders (development builds) passes
 `--agent-client-key=/etc/virtrigaud/credentials/tls.key`: the Provider
 identity certificate and key come from the `tls.crt` and `tls.key` keys of
 the Provider's credentials Secret (`spec.credentialSecretRef`), which the
-pod mounts read-only at `/etc/virtrigaud/credentials`. The Provider stops at
-start when it cannot load them. The Secret must be in the Provider's
+pod mounts read-only at `/etc/virtrigaud/credentials` with mode `0440`; the
+pod gets `fsGroup: 65532`, so the files belong to that group, which the
+provider process holds whatever user a custom security context runs it as,
+and no other user can read the key. The Provider stops at start when it
+cannot load them. The Secret must be in the Provider's
 namespace and hold:
 
 - `tls.crt`: the certificate, issued by the Provider identity issuer whose

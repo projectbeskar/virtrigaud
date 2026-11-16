@@ -151,6 +151,7 @@ func TestAgentProviderClientCertificate(t *testing.T) {
 	if !devgate.Compiled {
 		assert.Empty(t, cert)
 		assert.Empty(t, key)
+		assert.Nil(t, spec.SecurityContext)
 		return
 	}
 	assert.Equal(t, "/etc/virtrigaud/credentials/tls.crt", cert)
@@ -166,17 +167,30 @@ func TestAgentProviderClientCertificate(t *testing.T) {
 	for _, v := range spec.Volumes {
 		if v.Name == "provider-credentials" && v.Secret != nil && v.Secret.SecretName == ch.Spec.CredentialSecretRef.Name {
 			fromSecret = true
+			// The identity key: readable by the pod's fsGroup, nobody else.
+			require.NotNil(t, v.Secret.DefaultMode)
+			assert.Equal(t, int32(0o440), *v.Secret.DefaultMode)
 		}
 	}
 	assert.True(t, fromSecret, "the volume is the Provider's credentials Secret")
+	require.NotNil(t, spec.SecurityContext)
+	require.NotNil(t, spec.SecurityContext.FSGroup)
+	assert.Equal(t, int64(65532), *spec.SecurityContext.FSGroup, "the fsGroup that may read the key")
 
 	single := agentProvider("single")
 	single.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologySingle
 	lv := agentProvider("lv")
 	lv.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeLibvirt
 	for _, p := range []*infravirtrigaudiov1beta1.Provider{single, lv} {
-		for _, a := range deploymentFor(t, &ProviderReconciler{}, p).Containers[0].Args {
+		other := deploymentFor(t, &ProviderReconciler{}, p)
+		for _, a := range other.Containers[0].Args {
 			assert.NotContains(t, a, "--agent-client", p.Name)
+		}
+		assert.Nil(t, other.SecurityContext, p.Name)
+		for _, v := range other.Volumes {
+			if v.Name == "provider-credentials" {
+				assert.Nil(t, v.Secret.DefaultMode, "other Providers keep their volume mode: %s", p.Name)
+			}
 		}
 	}
 }

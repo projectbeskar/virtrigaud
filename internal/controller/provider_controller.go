@@ -1062,6 +1062,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					Affinity:                      provider.Spec.Runtime.Affinity,
 					RestartPolicy:                 corev1.RestartPolicyAlways,
 					TerminationGracePeriodSeconds: util.Int64Ptr(30), // Allow time for graceful shutdown
+					SecurityContext:               agentProviderPodSecurityContext(provider),
 				},
 			},
 		},
@@ -1401,6 +1402,32 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	return container, nil
 }
 
+// The credentials volume of the clustered Provider for per-host agents
+// holds its identity key: mode 0440 and the pod's fsGroup, so that the
+// provider process reads it (as the fsGroup is one of its groups, whatever
+// user a custom security context runs it as) and no other user does.
+const (
+	agentCredentialsMode int32 = 0o440
+	agentProviderFSGroup int64 = 65532
+)
+
+// agentProviderHoldsIdentityKey reports whether the Provider's credentials
+// Secret holds its Provider identity key (development builds, the
+// clustered Provider for per-host agents).
+func agentProviderHoldsIdentityKey(provider *infravirtrigaudiov1beta1.Provider) bool {
+	return devgate.Compiled && providerRunsHostAgents(provider)
+}
+
+// agentProviderPodSecurityContext is the pod security context of a Provider
+// whose credentials volume holds its identity key (the fsGroup that may read
+// it); nil for every other Provider.
+func agentProviderPodSecurityContext(provider *infravirtrigaudiov1beta1.Provider) *corev1.PodSecurityContext {
+	if !agentProviderHoldsIdentityKey(provider) {
+		return nil
+	}
+	return &corev1.PodSecurityContext{FSGroup: util.Int64Ptr(agentProviderFSGroup)}
+}
+
 // agentProviderArgs returns the extra arguments of the clustered Provider
 // for per-host agents, in a development build only:
 //
@@ -1415,7 +1442,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 //
 // Nil for every other Provider.
 func (r *ProviderReconciler) agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
-	if !devgate.Compiled || !providerRunsHostAgents(provider) {
+	if !agentProviderHoldsIdentityKey(provider) {
 		return nil
 	}
 	args := []string{
@@ -1501,14 +1528,16 @@ func addTmpSizeLimitEnv(provider *infravirtrigaudiov1beta1.Provider, container *
 func (r *ProviderReconciler) buildPodVolumes(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, migrationMounts []migrationStorageMount) []corev1.Volume {
 	var volumes []corev1.Volume
 
-	// Add credentials volume
+	// Add credentials volume. For the clustered Provider for per-host agents
+	// it holds the Provider identity key: group-readable only, by the pod's
+	// fsGroup (agentProviderPodSecurityContext), never world-readable.
+	credentials := &corev1.SecretVolumeSource{SecretName: provider.Spec.CredentialSecretRef.Name}
+	if agentProviderHoldsIdentityKey(provider) {
+		credentials.DefaultMode = util.Int32Ptr(agentCredentialsMode)
+	}
 	volumes = append(volumes, corev1.Volume{
-		Name: "provider-credentials",
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: provider.Spec.CredentialSecretRef.Name,
-			},
-		},
+		Name:         "provider-credentials",
+		VolumeSource: corev1.VolumeSource{Secret: credentials},
 	})
 
 	// Add the clustered host-inventory volume (ADR-0007 D3) for a

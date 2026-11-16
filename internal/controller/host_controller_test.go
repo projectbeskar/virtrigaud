@@ -362,7 +362,7 @@ func TestHostReconciler_RevokedAgentHost_NotPolled(t *testing.T) {
 	got := getHost(t, r.Client, "host-rev")
 	ready := hostReadyCondition(t, got)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, reasonHostRevoked, ready.Reason)
+	assert.Equal(t, infravirtrigaudiov1beta1.HostReasonAgentRevoked, ready.Reason)
 	assert.Equal(t, infravirtrigaudiov1beta1.HostHealthUnknown, got.Status.Health)
 
 	libvirtProv := clusterProvider("prov-b")
