@@ -179,6 +179,12 @@ type fakeAgent struct {
 	statusFails atomic.Bool
 	// statusCalls counts AgentStatus calls, answered or not.
 	statusCalls atomic.Int32
+	// installMode answers InstallRenewedCertificate: 0 records and
+	// succeeds, 1 is Unimplemented, 2 fails with Internal.
+	installMode atomic.Int32
+	// installCalls counts InstallRenewedCertificate calls, answered or not.
+	installCalls atomic.Int32
+	installs     []*agentv1.InstallRenewedCertificateRequest
 
 	mu       sync.Mutex
 	statuses []*agentv1.AgentStatusRequest
@@ -305,6 +311,32 @@ func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusReq
 		h.f.statuses = append(h.f.statuses, c)
 	}
 	return &agentv1.AgentStatusResponse{}, nil
+}
+
+// InstallRenewedCertificate records a renewed certificate the Provider
+// relays.
+func (h *helloServer) InstallRenewedCertificate(_ context.Context, req *agentv1.InstallRenewedCertificateRequest) (*agentv1.InstallRenewedCertificateResponse, error) {
+	h.f.installCalls.Add(1)
+	switch h.f.installMode.Load() {
+	case 1:
+		return nil, status.Error(codes.Unimplemented, "not served")
+	case 2:
+		return nil, status.Error(codes.Internal, "failed")
+	}
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	if c, ok := proto.Clone(req).(*agentv1.InstallRenewedCertificateRequest); ok {
+		h.f.installs = append(h.f.installs, c)
+	}
+	return &agentv1.InstallRenewedCertificateResponse{}, nil
+}
+
+// installRequests returns the InstallRenewedCertificate requests the agent
+// received.
+func (f *fakeAgent) installRequests() []*agentv1.InstallRenewedCertificateRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*agentv1.InstallRenewedCertificateRequest(nil), f.installs...)
 }
 
 // statusRequests returns the AgentStatus requests the agent received.

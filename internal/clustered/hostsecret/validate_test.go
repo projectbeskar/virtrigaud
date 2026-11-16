@@ -186,3 +186,24 @@ func TestValidateAgentHost(t *testing.T) {
 		assert.NotContains(t, err.Error(), "agent-a.example", "%s: the error never echoes the endpoint", name)
 	}
 }
+
+// TestValidateRenewedCertificate: one DER certificate within the bound, and
+// nothing else.
+func TestValidateRenewedCertificate(t *testing.T) {
+	ca := testAgentCA(t)
+	block, _ := pem.Decode(ca)
+	if err := ValidateRenewedCertificate(block.Bytes); err != nil {
+		t.Fatalf("a DER certificate: %v", err)
+	}
+	for name, der := range map[string][]byte{
+		"empty":          nil,
+		"not DER":        []byte("not a certificate"),
+		"trailing bytes": append(append([]byte(nil), block.Bytes...), 0),
+		"too large":      make([]byte, MaxRenewedCertificateBytes+1),
+		"PEM":            ca,
+	} {
+		if err := ValidateRenewedCertificate(der); !errors.Is(err, ErrInvalidCredentials) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

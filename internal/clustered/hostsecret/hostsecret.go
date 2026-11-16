@@ -173,6 +173,33 @@ type Host struct {
 	// (agent.v1 AgentStatus). Omitted when there is none. Development builds
 	// only.
 	FreezeConfirmation *FreezeConfirmation `json:"freezeConfirmation,omitempty"`
+
+	// RenewedCertificate, for a per-host agent host only, is the DER renewed
+	// identity certificate the manager had issued for the host's renewal
+	// request: the Provider delivers it to the agent (agent.v1
+	// InstallRenewedCertificate), first to stage it and, once its key is
+	// among AgentTLS.KeyPins, to put it in use. Public, but integrity-
+	// critical like the pins. Omitted when there is none. Development builds
+	// only.
+	RenewedCertificate []byte `json:"renewedCertificate,omitempty"`
+}
+
+// MaxRenewedCertificateBytes bounds Host.RenewedCertificate.
+const MaxRenewedCertificateBytes = 8192
+
+// ValidateRenewedCertificate checks the shape of a Host.RenewedCertificate:
+// one DER certificate of at most MaxRenewedCertificateBytes with nothing
+// after it. The agent judges everything else. The error echoes no value. A
+// consumer drops an invalid one and keeps the host.
+func ValidateRenewedCertificate(der []byte) error {
+	if len(der) == 0 || len(der) > MaxRenewedCertificateBytes {
+		return fmt.Errorf("%w: renewed certificate: empty or larger than %d bytes", ErrInvalidCredentials, MaxRenewedCertificateBytes)
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil || !bytes.Equal(c.Raw, der) {
+		return fmt.Errorf("%w: renewed certificate: not one DER certificate", ErrInvalidCredentials)
+	}
+	return nil
 }
 
 // MaxFreezeConfirmations bounds the enrolment ids of a FreezeConfirmation.

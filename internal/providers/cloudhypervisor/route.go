@@ -411,6 +411,7 @@ func (p *Provider) forward(ctx context.Context, host, method string, req, resp p
 			return err
 		}
 		p.relayFreeze(ctx, e)
+		p.relayRenewal(ctx, e)
 		cs, err = p.pool.invokeChecked(ctx, e, method, req, resp, nil, true)
 		if !errors.Is(err, errHelloStale) {
 			break

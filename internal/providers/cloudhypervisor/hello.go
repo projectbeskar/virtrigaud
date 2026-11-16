@@ -40,8 +40,9 @@ import (
 )
 
 // APIVersion is the version of the agent.v1 service this Provider speaks. It
-// accepts an agent of this version and of the version before it.
-const APIVersion uint32 = 2
+// accepts an agent of this version and of the version before it. Version 3
+// relays renewed certificates (InstallRenewedCertificate).
+const APIVersion uint32 = 3
 
 // The signed host answer, as a per-host agent signs it (internal/agent/answer;
 // a test pins the two together). The Provider verifies only the answer to its
