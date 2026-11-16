@@ -393,15 +393,34 @@ signer, is no answer.
 **Retries.** A renewal restarts when its issued certificate is refused, or
 when its request is denied, fails, is deleted or replaced, or loses its
 renewal label (`AgentRenewalRestarted`). The same key is recorded again only
-after a backoff of 10 minutes, doubling up to 6 hours; after 5 failures the
+after a backoff that starts at an eighth of the current certificate's
+remaining lifetime (between 1 and 10 minutes) and doubles up to 6 hours, so
+a short-lived certificate is retried well before the agent draws a new key;
+after 5 failures the
 key is given up (`AgentRenewalGivenUp`, which names the issuer as the likely
 fault: its CA must be the configured sub-CA and it must sign the request's
 names unchanged). The agent draws a new key when its request has gone
 unanswered for half the lifetime its certificate had left when it was made,
-and a new key starts afresh. The manager deletes its own renewal requests
-(recorded under its identity, labelled as this Host's renewals) once no
-renewal needs them: after completion, a refusal or a restart; the pins
-Secret owns them, so they also go with the Host.
+and a new key starts afresh. The manager keeps the newest 3 finished renewal
+requests of each Host (denied, failed, refused or issued) as cert-manager's
+record of the issuance, and deletes older finished ones (recorded under its
+identity, labelled as this Host's renewals, at least 5 minutes old, never
+the request of the renewal in progress, decided on a read of the pins Secret
+from the API server after the reconcile's own save). The pins Secret owns
+them, so they also go with the Host. Events and logs keep the key pins and
+certificate digests of every renewal.
+
+**Dark window at expiry.** If the Provider put the renewed certificate in use
+before step 5 and no answer reached the manager afterwards (the connection
+dropped), the Provider still trusts only the old key and cannot reconnect to
+the host. When the old certificate expires, the manager pins the issued key
+as the only pin (`AgentRenewalPinnedAtExpiry`), after checking on the live
+state that the Host is not revoked or deleting, its Provider is the
+enrolment's, the pins Secret still holds the same enrolment and the same
+unpinned renewal, and the issued certificate still validates. The host is
+then reachable again. The window is bounded by the old certificate's expiry
+(at most a third of its lifetime after the renewal started). A re-key, a
+revocation or a renewal replaced by a new key before then prevents it.
 
 **Overlap.** The overlap is expected to end within a heartbeat or two. After
 24 hours the manager reports `AgentRenewalOverlapExpired`, but removes no
@@ -593,7 +612,14 @@ approver-policy with a `CertificateRequestPolicy` for the host-agent issuer
 that, for requests from the manager's ServiceAccount, allows only one
 `spiffe://<trust domain>/virtrigaud/host/...` URI plus the
 `urn:virtrigaud:` URIs, no DNS, IP or e-mail names, no CA, the usages
-`digital signature` and `server auth`, and a duration of at most 30 days. Administrators who
+`digital signature` and `server auth`, and a duration of at most 30 days.
+
+A principal with `update` or `delete` on `certificaterequests` in the
+enrolment namespace can delete or relabel each new renewal request; each
+counts as a failure, so it can make the manager give a key up after 5 and
+delay renewal until the agent draws a new key (and, repeated, until the
+certificate expires). Grant those verbs there to no one but cert-manager
+and the manager. Administrators who
 submit requests need `create` on `certificaterequests` in the enrolment
 namespace, the `enrol` verb on the Hosts they enrol and the `rekey` verb on
 the Hosts they re-key (`hosts` in

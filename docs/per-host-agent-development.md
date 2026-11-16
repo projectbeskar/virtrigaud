@@ -885,7 +885,12 @@ serves no renewal operation.
   process: it promotes the staged certificate when it certifies the signer's
   key and loads the identity with a client for that key, at once if it can,
   else at the next tick (every few seconds) or at the Provider's next
-  activation, including when `host.crt` already holds the certificate.
+  activation, including when `host.crt` already holds the certificate. A tick
+  waits for the signer without holding the renewal lock, so answers are not
+  delayed. Until it is finished the agent refuses operations with the
+  unattested cause `renewal_activation_incomplete` (in the service status and
+  in the refusals' `ErrorInfo`), and logs a failed attempt at most once a
+  minute.
 - **Crash safety.** Every file is written to a temporary file, synced and
   renamed, and the directory synced. A stop between stage and activation
   leaves the current certificate and key in use and the staged certificate

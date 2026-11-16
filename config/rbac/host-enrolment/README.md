@@ -54,6 +54,12 @@ the manager's ServiceAccount to one `spiffe://<trust domain>/virtrigaud/host/...
 URI and the `urn:virtrigaud:` URIs, no DNS, IP or e-mail names, no CA, the
 usages `digital signature` and `server auth`, and at most 30 days.
 
+Residual: a principal with `update` or `delete` on `certificaterequests` in
+the enrolment namespace can delete or relabel each new renewal request, so
+each counts as a failure and a key is given up after 5 (renewal then waits
+for the agent's next key). Grant those verbs there to no one but cert-manager
+and the manager.
+
 Residual: the manager's existing cluster-wide Secret permission (from the
 default RBAC) still reaches every Secret, including the sub-CA key. Narrowing
 it is separate work.
