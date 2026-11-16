@@ -282,7 +282,10 @@ is not among the entry's key pins (the agent stages it), and with the same
 bytes and `activate` true once the inventory lists its key among the pins
 (the manager pins it only after the host showed, signed, that it staged
 exactly that certificate). Each phase is delivered once per connection; a
-relay never fails the call itself. A failed relay is logged and tried again
+relay never fails the call itself. An activation the agent refuses with
+`FailedPrecondition` (it has nothing staged, for example after losing its
+copy) is followed at once by a stage of the same bytes and the activation
+again. A failed relay is logged and tried again
 after 10 seconds, doubling up to 10 minutes per host; an agent that answers
 `Unimplemented` is not asked again on that connection. A malformed
 certificate (not one DER certificate, or larger than 8 KiB) is dropped with a

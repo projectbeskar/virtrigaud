@@ -324,18 +324,26 @@ be re-keyed before its certificate expires.
    verified answer shows API version 3 or later) and verifies it with the
    answer: signed with the answer's own certificate, the current enrolment's
    identities unchanged, a new P-256 key, proof of possession. A renewal that
-   breaks any rule makes the whole answer "no answer". A verified request is
+   breaks any rule makes the whole answer "no answer", deliberately: the
+   renewal request is part of the signed answer, so a broken one is the
+   agent's fault, and the host is held (no new grant) until the agent stops
+   offering it (it draws a new key after a bound, see below). A verified request is
    recorded in the pins Secret (`renewal`) with an `AgentRenewalRequested`
    event; a key that is, or was, pinned for the Host is refused
    (`AgentRenewalKeyPreviouslyPinned`).
-2. **Certificate request.** The manager records the name of its
-   CertificateRequest in the pins Secret, then creates it in the enrolment
-   namespace under its own identity (read at start with a
-   `SelfSubjectReview`; without it renewal is off), with the labels
+2. **Certificate request.** The manager draws a name for its
+   CertificateRequest (`virtrigaud-renewal-` and 12 random bytes) and records
+   it in the pins Secret, then creates it in the enrolment namespace under its
+   own identity (read at start with a `SelfSubjectReview`, and again every
+   minute while it cannot be; until then a waiting renewal is reported once
+   with `AgentRenewalNoManagerIdentity`), owned by the Host's pins Secret, with the labels
    `enrolment.virtrigaud.io/agent=true`, `enrolment.virtrigaud.io/renewal=true`
    and `enrolment.virtrigaud.io/host-hash`, the Host annotation, the host's
    request, the usages `digital signature` and `server auth`, and the current
-   certificate's lifetime (at most 30 days).
+   certificate's lifetime (at most 30 days). An object of that name that the
+   manager did not create (another requester, Host or request) is left alone
+   and another name is drawn. The request's name appears in
+   `status.agent.renewal` once it exists.
 3. **Approval.** The manager approves a request labelled as a renewal only
    when all of these hold, and denies it otherwise:
    - its recorded requester (`spec.username`, written by cert-manager's
@@ -358,8 +366,9 @@ be re-keyed before its certificate expires.
    enrolment and the new key (chain, profile, URI names, key) and published in
    the Provider's host inventory (`renewedCertificate`) with an
    `AgentRenewalIssued` event; a certificate that fails is marked
-   `VirtRigaudCertificateRefused` on the request and the renewal starts
-   again (`AgentRenewalRefused`). The Provider stages it on the host.
+   `VirtRigaudCertificateRefused` on the request (`AgentRenewalRefused`) and
+   the renewal restarts under the backoff below. The Provider stages it on
+   the host.
 5. **New key pinned.** Only after a GetHostInfo the manager asked (its own
    nonce), answered by the current key, returns a verified answer whose
    `staged_certificate_sha256` is the digest of the certificate the manager
@@ -368,8 +377,31 @@ be re-keyed before its certificate expires.
    certificate in use on the host.
 6. **Old key unpinned.** Only after such an answer is signed by the new key
    and names nothing staged is the old key unpinned (`AgentRenewed`): the new
-   key is the only pin, the old one is kept as a previous key (a re-key to it
-   is refused), and the certificate expiry becomes the renewed one's.
+   key is the only pin, the old one is kept as a previous key (a re-key or
+   renewal to it is refused; the last 128 are kept), and the certificate
+   expiry becomes the renewed one's.
+
+**Activated early.** A Provider that puts the renewed certificate in use
+before step 5 would otherwise lock the host out. A host answer of the
+manager's own `GetHostInfo` whose signer certificate is exactly, byte for
+byte, the certificate the manager issued and validated for this renewal is
+verified with that certificate's key pinned as well (every other check is
+unchanged) and completes the renewal (`AgentRenewalActivatedEarly`). No other
+certificate qualifies: another certificate for the same key, or any other
+signer, is no answer.
+
+**Retries.** A renewal restarts when its issued certificate is refused, or
+when its request is denied, fails, is deleted or replaced, or loses its
+renewal label (`AgentRenewalRestarted`). The same key is recorded again only
+after a backoff of 10 minutes, doubling up to 6 hours; after 5 failures the
+key is given up (`AgentRenewalGivenUp`, which names the issuer as the likely
+fault: its CA must be the configured sub-CA and it must sign the request's
+names unchanged). The agent draws a new key when its request has gone
+unanswered for half the lifetime its certificate had left when it was made,
+and a new key starts afresh. The manager deletes its own renewal requests
+(recorded under its identity, labelled as this Host's renewals) once no
+renewal needs them: after completion, a refusal or a restart; the pins
+Secret owns them, so they also go with the Host.
 
 **Overlap.** The overlap is expected to end within a heartbeat or two. After
 24 hours the manager reports `AgentRenewalOverlapExpired`, but removes no
@@ -541,15 +573,27 @@ fails without it), `experimental.hostEnrolment.namespace` and
 - `create` on `subjectaccessreviews` (the per-Host `enrol` and `rekey` checks);
 - `get`, `list` on mutating and validating webhook configurations (the
   startup admission check);
-- in the enrolment namespace only (a `Role`): `create`, `get`, `list`,
-  `watch` on `certificaterequests` (`create` for the manager's own renewal
-  requests, see [Certificate renewal](#certificate-renewal)), `update` on
+- in the enrolment namespace only (a `Role`): `create`, `delete`, `get`,
+  `list`, `watch` on `certificaterequests` (`create` and `delete` for the
+  manager's own renewal requests, see [Certificate renewal](#certificate-renewal)), `update` on
   `certificaterequests/status`, and `create`, `delete`, `get`, `list`,
   `update`, `watch` on Secrets (the pins Secrets).
 
-The manager creates only renewal requests, under its own identity. Its
-identity is read at start with a `SelfSubjectReview`, which every
-authenticated user may create; no grant is added for it. Administrators who
+The manager creates (and deletes) only renewal requests, under its own
+identity. Its identity is read with a `SelfSubjectReview`, which every
+authenticated user may create; no grant is added for it.
+
+With `create` on `certificaterequests`, `update` on their status and
+`approve` on the signer, the manager can obtain a host-agent certificate by
+itself: its approval rules (a renewal co-signed by the currently pinned key,
+unchanged identities) are enforced by its own code, not by the API server.
+Whoever controls the manager's ServiceAccount can therefore get a certificate
+for any Host's URI names. As defence in depth, install cert-manager's
+approver-policy with a `CertificateRequestPolicy` for the host-agent issuer
+that, for requests from the manager's ServiceAccount, allows only one
+`spiffe://<trust domain>/virtrigaud/host/...` URI plus the
+`urn:virtrigaud:` URIs, no DNS, IP or e-mail names, no CA, the usages
+`digital signature` and `server auth`, and a duration of at most 30 days. Administrators who
 submit requests need `create` on `certificaterequests` in the enrolment
 namespace, the `enrol` verb on the Hosts they enrol and the `rekey` verb on
 the Hosts they re-key (`hosts` in

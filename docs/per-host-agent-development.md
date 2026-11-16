@@ -726,9 +726,10 @@ regulated profile; until it exists, a signed host answer is no stronger than
 the agent process that relays it.
 
 **Protocol** (package `internal/agent/signer`). One request and one response
-per connection, each a frame of a 2-byte big-endian length (at most 6 KiB,
-which fits a renewal request's names and its certificate request; a longer
-announcement closes the connection unread) and that many payload bytes. A
+per connection, each a frame of a 2-byte big-endian length (at most 256 bytes
+for a request to a signer that serves no renewal, every release build; 6 KiB
+otherwise, which fits a renewal request's names and its certificate request;
+a longer announcement closes the connection unread) and that many payload bytes. A
 request is the version byte (1), an operation byte and its body:
 
 | Operation | Body | Response body |
@@ -842,7 +843,12 @@ serves no renewal operation.
   `host.key.pending` beside the host key in its own directory; the agent never
   holds it) and signs only a certificate request it builds itself from those
   names, never a digest the agent chose. The agent keeps the request as
-  `pki/renewal.csr` (`0600`). A failed request is retried after 30 seconds,
+  `pki/renewal.csr` (`0600`) and when it made it as `pki/renewal.since`. A
+  request that was never staged is discarded with the signer's pending key
+  once it has waited half the lifetime the certificate had left when it was
+  made (the manager denied it, it failed or it was lost), and a request for a
+  new key follows. A staged renewal is never discarded this way: the manager
+  may have pinned its key. A failed request is retried after 30 seconds,
   doubling up to 10 minutes. The signer's renewal operations have their own
   budget (1 per second, burst 10).
 - **Request.** A `GetHostInfo` whose `renewal_version` is at least 1 gets, in
@@ -871,6 +877,15 @@ serves no renewal operation.
   once. The answer is signed with the new key and names nothing staged. A
   certificate already in use answers success to a stage or an activation,
   so a repeated call is harmless.
+- **Interrupted activation.** From the signer's switch on, the activation runs
+  on its own 30-second deadline, not the caller's, so a Provider call that
+  gives up does not stop it halfway. If anything fails once the signer may
+  hold the new key (the signer cannot be reached, the certificate cannot be
+  promoted or the identity cannot be loaded), the agent finishes it in
+  process: it promotes the staged certificate when it certifies the signer's
+  key and loads the identity with a client for that key, at once if it can,
+  else at the next tick (every few seconds) or at the Provider's next
+  activation, including when `host.crt` already holds the certificate.
 - **Crash safety.** Every file is written to a temporary file, synced and
   renamed, and the directory synced. A stop between stage and activation
   leaves the current certificate and key in use and the staged certificate
