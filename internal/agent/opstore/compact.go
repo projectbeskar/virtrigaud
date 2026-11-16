@@ -44,15 +44,20 @@ const DefaultCompactBatch = 256
 // number of records dropped. It is safe to interrupt between batches, and to
 // run while the store admits and runs operations: each batch holds the
 // store's lock for one scan and one transaction, and drops only records of
-// finished operations, which nothing changes again. The agent runs it
+// finished operations, which nothing changes again. The scan resumes after
+// the last key the previous batch reached, so one Compact reads the bucket
+// once, and a batch reads at most compactScanFactor times batch records
+// before it lets go of the lock, so a store full of records that cannot be
+// dropped never holds admission for a whole scan. The agent runs it
 // periodically and when the store nears its size threshold (package daemon).
 func (s *Store) Compact(ctx context.Context, batch int) (int, error) {
 	if batch <= 0 {
 		batch = DefaultCompactBatch
 	}
 	total := 0
+	var after []byte
 	for {
-		n, more, err := s.compactBatch(ctx, batch)
+		n, more, next, err := s.compactBatch(ctx, batch, after)
 		total += n
 		if err != nil {
 			return total, fmt.Errorf("compact: %w", err)
@@ -60,24 +65,40 @@ func (s *Store) Compact(ctx context.Context, batch int) (int, error) {
 		if !more {
 			return total, nil
 		}
+		after = next
 		if err := s.j.CrashPoint(PointMidCompaction); err != nil {
 			return total, err
 		}
 	}
 }
 
+// compactScanFactor bounds the records one compaction batch reads, as a
+// multiple of the batch size.
+const compactScanFactor = 16
+
 // errBatchFull ends a compaction scan that found one more record to drop
-// than the batch holds.
+// than the batch holds, or read its share of records.
 var errBatchFull = errors.New("compaction batch full")
 
-func (s *Store) compactBatch(ctx context.Context, batch int) (int, bool, error) {
+// compactBatch drops at most batch records, scanning after the key after. It
+// returns the records dropped, whether the scan stopped before the end of
+// the bucket, and the key to resume after.
+func (s *Store) compactBatch(ctx context.Context, batch int, after []byte) (int, bool, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var keys [][]byte
 	var ids []*pb.OpIdentity
 	more := false
+	var last []byte
+	visited := 0
 	if err := s.j.View(ctx, func(tx *journal.Tx) error {
-		return tx.ForEach(bucketOps, nil, func(k, v []byte) error {
+		return tx.ForEachAfter(bucketOps, nil, after, func(k, v []byte) error {
+			if len(keys) == batch || visited == batch*compactScanFactor {
+				more = true
+				return errBatchFull
+			}
+			visited++
+			last = k
 			rec := &pb.OpRecord{}
 			if err := unmarshalRecord(v, rec); err != nil {
 				return err
@@ -92,19 +113,15 @@ func (s *Store) compactBatch(ctx context.Context, batch int) (int, bool, error) 
 			if !tombstoned {
 				return nil
 			}
-			if len(keys) == batch {
-				more = true
-				return errBatchFull
-			}
 			keys = append(keys, k)
 			ids = append(ids, rec.GetIdentity())
 			return nil
 		})
 	}); err != nil && !errors.Is(err, errBatchFull) {
-		return 0, false, err
+		return 0, false, nil, err
 	}
 	if len(keys) == 0 {
-		return 0, false, nil
+		return 0, more, last, nil
 	}
 	if _, err := s.j.Update(ctx, func(tx *journal.Tx) error {
 		for _, k := range keys {
@@ -119,7 +136,7 @@ func (s *Store) compactBatch(ctx context.Context, batch int) (int, bool, error) 
 		}
 		return nil
 	}); err != nil {
-		return 0, false, err
+		return 0, false, nil, err
 	}
 	if guard.Off(guard.WitnessKept) {
 		for _, id := range ids {
@@ -128,5 +145,5 @@ func (s *Store) compactBatch(ctx context.Context, batch int) (int, bool, error) 
 			}
 		}
 	}
-	return len(keys), more, nil
+	return len(keys), more, last, nil
 }

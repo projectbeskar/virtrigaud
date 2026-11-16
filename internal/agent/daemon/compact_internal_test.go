@@ -37,7 +37,7 @@ func TestCompactDue(t *testing.T) {
 		{"near the threshold, last one a check period ago", now.Add(-compactCheckEvery), true, true},
 		{"near the threshold, last one just now", now.Add(-time.Second), true, false},
 	} {
-		if got := compactDue(now, c.last, time.Hour, c.near); got != c.want {
+		if got := compactDue(now, c.last, time.Hour, 0, c.near); got != c.want {
 			t.Errorf("%s: compactDue = %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -54,5 +54,42 @@ func TestNearCap(t *testing.T) {
 		if got := nearCap(c.live, c.max); got != c.want {
 			t.Errorf("nearCap(%d, %d) = %v, want %v", c.live, c.max, got, c.want)
 		}
+	}
+}
+
+// TestNearBackoff: near the threshold, each early compaction that dropped
+// nothing doubles the wait up to the period; one that dropped records, or
+// growth of the store by a sixty-fourth of the threshold, resets it; a
+// compaction is not due before the wait.
+func TestNearBackoff(t *testing.T) {
+	const maxBytes = 256 << 20
+	every := time.Hour
+	var b nearBackoff
+	want := []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute, time.Hour, time.Hour}
+	for i, w := range want {
+		b.after(0, maxBytes-1, every)
+		if b.wait != w {
+			t.Fatalf("after %d empty compactions wait = %v, want %v", i+1, b.wait, w)
+		}
+	}
+	now := time.Now()
+	if compactDue(now, now.Add(-30*time.Minute), every, b.wait, true) {
+		t.Fatal("due before the backed-off wait")
+	}
+	b.grew(maxBytes-1+maxBytes/compactGrowthDen-1, maxBytes, every)
+	if b.wait != time.Hour {
+		t.Fatal("reset by growth below a sixty-fourth of the threshold")
+	}
+	b.grew(maxBytes-1+maxBytes/compactGrowthDen, maxBytes, every)
+	if b.wait != compactCheckEvery {
+		t.Fatalf("wait after growth = %v", b.wait)
+	}
+	b.after(0, maxBytes, every)
+	b.after(3, maxBytes, every)
+	if b.wait != compactCheckEvery {
+		t.Fatalf("wait after a compaction that dropped records = %v", b.wait)
+	}
+	if !compactDue(now, now.Add(-compactCheckEvery), every, b.wait, true) {
+		t.Fatal("not due after the reset wait")
 	}
 }

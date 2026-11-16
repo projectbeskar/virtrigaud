@@ -16,9 +16,19 @@ limitations under the License.
 
 package opstore
 
+import "context"
+
 // HoldLock takes the store lock, for a test of a caller that must not block
 // on it.
 func HoldLock(s *Store) { s.mu.Lock() }
 
 // ReleaseLock releases the lock HoldLock took.
 func ReleaseLock(s *Store) { s.mu.Unlock() }
+
+// CompactBatch runs one compaction batch after the key after (test only).
+func CompactBatch(ctx context.Context, s *Store, batch int, after []byte) (dropped int, more bool, next []byte, err error) {
+	return s.compactBatch(ctx, batch, after)
+}
+
+// CompactScanFactor is compactScanFactor (test only).
+const CompactScanFactor = compactScanFactor

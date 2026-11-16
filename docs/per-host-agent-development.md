@@ -497,8 +497,13 @@ journal of finished operations only. It never drops an op_id tombstone (a
 re-delivery of a finished operation is answered from it and never runs
 again), a VM tombstone, a witness file, or the record of an operation that
 still holds its VM (an unknown outcome, or a dirty failure not yet resolved).
-Each batch of 256 records is one transaction, so operations are admitted and
-run between batches. The agent logs each compaction (`store compacted`, the
+Each batch drops at most 256 records in one transaction and reads at most
+4,096 records before it lets go of the store's lock, and the next batch
+resumes where it stopped, so operations are admitted and run between
+batches and one compaction reads the store once. Near the threshold, after
+an early compaction that dropped nothing, the wait before the next early one
+doubles (from a minute up to the hour) until the store has grown by a
+sixty-fourth of the threshold. The agent logs each compaction (`store compacted`, the
 number of records dropped, the live size before and after), and logs once,
 as an error, when a compacted store stays above three quarters of the
 threshold: tombstones are never dropped, so such a host refuses new
