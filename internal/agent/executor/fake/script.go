@@ -44,8 +44,13 @@ const (
 	// test uses it to keep an operation running.
 	HoldFile = "hold"
 	// EffectsLog has one line per effect the executor performed:
-	// "<op_id hex> <step> <vm uid>".
+	// "<op_id hex> <step> <vm uid>", appended after the effect.
 	EffectsLog = "effects.log"
+	// IntentsLog has one line per effect the executor is about to perform,
+	// in the same format, appended (and synced) before the effect: an
+	// effect that a crash left without its EffectsLog line still has one
+	// here. A line here without an effect means the crash came first.
+	IntentsLog = "intents.log"
 )
 
 // pollEvery is how often a held or stalled step looks at the hold file. The
@@ -127,8 +132,14 @@ type Effect struct {
 }
 
 // Effects reads the effects log of the fake executor directory dir.
-func Effects(dir string) ([]Effect, error) {
-	f, err := os.Open(filepath.Join(dir, EffectsLog)) // #nosec G304 -- a path the caller owns
+func Effects(dir string) ([]Effect, error) { return readLog(dir, EffectsLog) }
+
+// Intents reads the intents log of the fake executor directory dir.
+func Intents(dir string) ([]Effect, error) { return readLog(dir, IntentsLog) }
+
+// readLog reads one of the executor's logs.
+func readLog(dir, name string) ([]Effect, error) {
+	f, err := os.Open(filepath.Join(dir, name)) // #nosec G304 -- a path the caller owns
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -203,19 +214,35 @@ func (e *Executor) waitHold(ctx context.Context) error {
 	}
 }
 
-// logEffect appends one effect line, durably. The caller holds e.mu.
+// logEffect appends one effect line, durably, after the effect. The caller
+// holds e.mu.
 func (e *Executor) logEffect(op executor.Operation, step executor.Step) error {
-	f, err := os.OpenFile(filepath.Join(e.dir, EffectsLog), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- a path the executor built
+	return e.appendLine(EffectsLog, op, step)
+}
+
+// logIntent appends one intent line, durably, before the effect; the crash
+// hook then runs at pointIntentLogged. The caller holds e.mu.
+func (e *Executor) logIntent(op executor.Operation, step executor.Step) error {
+	if err := e.appendLine(IntentsLog, op, step); err != nil {
+		return err
+	}
+	return e.crash(pointIntentLogged)
+}
+
+// appendLine appends "<op_id hex> <step> <vm uid>" to the log name and syncs
+// it.
+func (e *Executor) appendLine(name string, op executor.Operation, step executor.Step) error {
+	f, err := os.OpenFile(filepath.Join(e.dir, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- a path the executor built
 	if err != nil {
-		return fmt.Errorf("open effects log: %w", err)
+		return fmt.Errorf("open %s: %w", name, err)
 	}
 	if _, err := fmt.Fprintf(f, "%s %s %s\n", hex.EncodeToString(op.OpID), step.Name, op.VMUID); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("write effects log: %w", err)
+		return fmt.Errorf("write %s: %w", name, err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("fsync effects log: %w", err)
+		return fmt.Errorf("fsync %s: %w", name, err)
 	}
 	return f.Close()
 }

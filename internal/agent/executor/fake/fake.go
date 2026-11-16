@@ -28,6 +28,13 @@ limitations under the License.
 // (idempotent). A step that finds its own effect already present, recognised
 // by the VM's binding, is done; an effect that belongs to another binding
 // fails the step without claiming that nothing happened.
+//
+// Each effect is written so that a crash at any point leaves evidence that
+// Inspect reads correctly: a define writes the VM file first and its effect
+// marker after it, so a marker never exists without its VM. Before an effect
+// is performed, a line naming it is appended to the intents log (IntentsLog);
+// after it, to the effects log (EffectsLog). A crash between the two leaves
+// an intent without an effect line, never an effect that no log names.
 package fake
 
 import (
@@ -93,6 +100,25 @@ type Executor struct {
 	mu  sync.Mutex
 	// probeErr names the steps whose inspection fails (FaultProbeError).
 	probeErr map[string]bool
+	// crashAt, when set, is called at each crash point of an effect; an
+	// error stops the step there, as a crash would (tests only).
+	crashAt func(point string) error
+}
+
+// Crash points of an effect, in order.
+const (
+	// pointIntentLogged: the intent line is durable, nothing else is done.
+	pointIntentLogged = "intent-logged"
+	// pointDefineVMWritten: a define wrote the VM file, not its marker.
+	pointDefineVMWritten = "define-vm-written"
+)
+
+// crash runs the crash hook at point.
+func (e *Executor) crash(point string) error {
+	if e.crashAt == nil {
+		return nil
+	}
+	return e.crashAt(point)
 }
 
 var (
@@ -198,10 +224,19 @@ func (e *Executor) runLocked(op executor.Operation, step executor.Step, script S
 			}
 			return fmt.Errorf("fake VM %s exists for another placement", op.VMUID)
 		}
-		if err := writeFile(e.effectPath(op, step), nil); err != nil {
+		if err := e.logIntent(op, step); err != nil {
 			return err
 		}
+		// The VM file first: a marker must never exist without it, or a
+		// crash between the two would make Inspect report a define whose VM
+		// is missing.
 		if err := writeVM(path, VM{Binding: binding, Power: PowerOff}); err != nil {
+			return err
+		}
+		if err := e.crash(pointDefineVMWritten); err != nil {
+			return err
+		}
+		if err := writeFile(e.effectPath(op, step), nil); err != nil {
 			return err
 		}
 		return e.logEffect(op, step)
@@ -212,6 +247,9 @@ func (e *Executor) runLocked(op executor.Operation, step executor.Step, script S
 		if script.CreateStopped {
 			return nil
 		}
+		if err := e.logIntent(op, step); err != nil {
+			return err
+		}
 		vm.Power = PowerOn
 		if err := writeVM(path, vm); err != nil {
 			return err
@@ -220,6 +258,9 @@ func (e *Executor) runLocked(op executor.Operation, step executor.Step, script S
 	case stepDestroy:
 		if !exists {
 			return nil
+		}
+		if err := e.logIntent(op, step); err != nil {
+			return err
 		}
 		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("remove fake VM %s: %w", op.VMUID, err)
@@ -238,6 +279,9 @@ func (e *Executor) runLocked(op executor.Operation, step executor.Step, script S
 		default:
 			vm.Power = PowerOff
 		}
+		if err := e.logIntent(op, step); err != nil {
+			return err
+		}
 		if err := writeVM(path, vm); err != nil {
 			return err
 		}
@@ -247,6 +291,9 @@ func (e *Executor) runLocked(op executor.Operation, step executor.Step, script S
 			return fmt.Errorf("%w: fake VM %s does not exist", executor.ErrNotPerformed, op.VMUID)
 		}
 		if ok, err := fileExists(e.effectPath(op, step)); err != nil || ok {
+			return err
+		}
+		if err := e.logIntent(op, step); err != nil {
 			return err
 		}
 		vm.Generation++

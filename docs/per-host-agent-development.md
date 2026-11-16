@@ -30,8 +30,12 @@ The `none` executor implements no operation kind and performs nothing. The
 `fake` executor (`internal/agent/executor/fake`) keeps small JSON files under
 `<state dir>/fake-executor/` that stand in for VMs; it is compiled only with
 the `virtrigaud_dev` tag, so a release binary does not contain it (a test
-checks the release build's dependency list). Neither build links Kubernetes or
-the VirtRigaud API packages.
+checks the release build's dependency list). It appends a line naming each
+effect to `intents.log` before performing it and to `effects.log` after, so a
+crash never leaves an effect that neither log names; a Create's define writes
+the VM file before its effect marker, so a crash between the two leaves a VM
+that inspection recognises as the define's effect, never a marker without its
+VM. Neither build links Kubernetes or the VirtRigaud API packages.
 
 ## Subcommands and flags
 
