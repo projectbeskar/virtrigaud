@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -88,15 +89,35 @@ type renewer struct {
 	// have put the new key in use: until heal succeeds the credentials may
 	// not sign, and every tick (and the next activation) tries to finish it.
 	healPending bool
+	// broken mirrors healPending for readers outside the lock (the trust
+	// state: an agent whose credentials may not sign refuses operations).
+	broken atomic.Bool
+	// healLogAt is when a failed heal was last logged (rate-limited).
+	healLogAt time.Time
 }
+
+// healLogEvery is the shortest interval between two log lines about a heal
+// that keeps failing.
+const healLogEvery = time.Minute
+
+// setHealPending sets healPending and its mirror.
+func (r *renewer) setHealPending(on bool) {
+	r.healPending = on
+	r.broken.Store(on)
+}
+
+// activationIncomplete reports whether an activation is waiting to be
+// finished (credentials that may not sign).
+func (r *renewer) activationIncomplete() bool { return r != nil && r.broken.Load() }
 
 // activationTimeout bounds an activation from the signer's switch on,
 // independently of the caller's deadline, so that a call that gives up cannot
 // stop it halfway. A variable so that this package's tests can shorten it.
 var activationTimeout = 30 * time.Second
 
-// healTickTimeout bounds a tick's attempt to finish an interrupted
-// activation, so the tick does not hold the renewal lock long.
+// healTickTimeout bounds a tick's attempt to reach the signer while an
+// interrupted activation is finished; the renewal lock is not held while it
+// waits.
 const healTickTimeout = 2 * time.Second
 
 // healRetryEvery is the pause between attempts to reach the signer while an
@@ -147,15 +168,25 @@ func (r *renewer) exclusive(f func() error) error {
 // signer for a renewal request once the current certificate is two thirds
 // through its lifetime and none is pending.
 func (r *renewer) tick(ctx context.Context) {
+	if r.broken.Load() {
+		// Reach the signer without holding the lock, so answers are not
+		// delayed while it is away; finish under the lock.
+		hctx, cancel := context.WithTimeout(ctx, healTickTimeout)
+		nc, cerr := signer.Connect(hctx, r.d.signerOptions(r.run))
+		cancel()
+		r.mu.Lock()
+		err := cerr
+		if err == nil && r.healPending {
+			err = r.healWith(nc)
+		}
+		if err != nil && r.d.o.Now().Sub(r.healLogAt) >= healLogEvery {
+			r.healLogAt = r.d.o.Now()
+			r.d.log.Error(err, "an interrupted activation is not finished yet; operations are refused until it is (tried again every few seconds)")
+		}
+		r.mu.Unlock()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.healPending {
-		hctx, cancel := context.WithTimeout(ctx, healTickTimeout)
-		if err := r.healLocked(hctx); err != nil {
-			r.d.log.Error(err, "an interrupted activation is not finished yet; it is tried again")
-		}
-		cancel()
-	}
 	cur := r.d.creds.Load().Identity
 	now := r.d.o.Now()
 	if r.pending.CSR != nil && !r.pending.MatchesCurrent(cur.Leaf) {
@@ -354,7 +385,7 @@ func (r *renewer) activateLocked(ctx context.Context, cur *server.Credentials, l
 	}
 	// From here the signer may hold the new key even if the call fails (its
 	// answer may be lost after the rename).
-	r.healPending = true
+	r.setHealPending(true)
 	if _, err := c.ActivateRenewal(actx, pin); err != nil {
 		return errors.Join(fmt.Errorf("the signer did not put the new key in use: %w", err), r.healLocked(actx))
 	}
@@ -389,17 +420,23 @@ func (r *renewer) activateLocked(ctx context.Context, cur *server.Credentials, l
 // activation, and finishes one that stopped after the switch. It waits for
 // the signer within ctx.
 func (r *renewer) healLocked(ctx context.Context) error {
-	cur := r.d.creds.Load()
 	nc, err := signer.ConnectWithRetry(ctx, r.d.signerOptions(r.run), healRetryEvery, nil)
 	if err != nil {
 		return fmt.Errorf("reach the signer: %w", err)
 	}
+	return r.healWith(nc)
+}
+
+// healWith is healLocked with a connected signer client nc. The lock must be
+// held.
+func (r *renewer) healWith(nc *signer.Client) error {
+	cur := r.d.creds.Load()
 	pub, ok := nc.Public().(*ecdsa.PublicKey)
 	if !ok {
 		return errors.New("the signer's key is not ECDSA")
 	}
 	if pub.Equal(cur.Identity.Leaf.PublicKey) {
-		r.healPending = false
+		r.setHealPending(false)
 		return nil
 	}
 	if _, err := enrol.RecoverRenewal(r.d.o.Config.PKIDir(), r.reader(), cur.Trust, pub, r.d.o.Now()); err != nil {
@@ -413,7 +450,7 @@ func (r *renewer) healLocked(ctx context.Context) error {
 		return errors.New("the loaded identity is not of the same enrolment")
 	}
 	r.d.creds.Store(&server.Credentials{Identity: id, Trust: cur.Trust})
-	r.healPending = false
+	r.setHealPending(false)
 	r.loadLocked()
 	r.d.log.Info("credentials brought to the signer's key: the renewed certificate is in use",
 		"sha256", hex.EncodeToString(sha256Of(id.Leaf.Raw)))

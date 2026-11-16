@@ -268,6 +268,8 @@ type Options struct {
 type agentState struct {
 	store *opstore.Store
 	floor atomic.Pointer[clockfloor.Floor]
+	// renewal is the certificate renewal (nil: none, a release build).
+	renewal *renewer
 }
 
 var _ server.Agent = (*agentState)(nil)
@@ -300,6 +302,9 @@ func (a *agentState) UnattestedCause() string {
 	}
 	if a.store.Freezing() {
 		return server.CauseFreezeIncomplete
+	}
+	if a.renewal.activationIncomplete() {
+		return server.CauseRenewalIncomplete
 	}
 	switch a.ClockFloorState() {
 	case clockfloor.StateOK:
@@ -498,7 +503,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 		return fmt.Errorf("open the operation store: %w", err)
 	}
-	agent := &agentState{store: st}
+	agent := &agentState{store: st, renewal: d.renewal}
 	closeStore := func() {
 		if err := st.Close(); err != nil {
 			d.log.Error(err, "close the operation store")

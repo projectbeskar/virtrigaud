@@ -210,6 +210,10 @@ const (
 	CauseClockFloorUnavailable = "clock_floor_unavailable"
 	// CauseFreezeIncomplete: a re-enrolment's freeze stopped partway.
 	CauseFreezeIncomplete = "freeze_incomplete"
+	// CauseRenewalIncomplete: a certificate activation stopped after the
+	// signer switched keys and is not finished yet; the credentials may not
+	// sign until it is (development builds only).
+	CauseRenewalIncomplete = "renewal_activation_incomplete"
 	// CauseEnrolmentMismatch: the store's active enrolment is not the one the
 	// host certificate names; new operations are refused until the host is
 	// enrolled again.

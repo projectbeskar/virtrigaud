@@ -28,6 +28,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
 	"github.com/projectbeskar/virtrigaud/internal/agent/enrol"
+	"github.com/projectbeskar/virtrigaud/internal/agent/server"
 	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
@@ -540,6 +542,14 @@ func TestRenewalActivationSignerAway(t *testing.T) {
 	if _, err := r.install(der, true); status.Code(err) != codes.Unavailable {
 		t.Fatalf("activation with the signer away: %v", err)
 	}
+	waitFor(t, "the service status naming the incomplete activation", func() bool {
+		for _, n := range h.notes.snapshot() {
+			if strings.Contains(n, server.CauseRenewalIncomplete) {
+				return true
+			}
+		}
+		return false
+	})
 	h.signer = startRenewalSigner(t, socket, newKeyFrom(t, keyFile), keyFile)
 	waitFor(t, "answers by the new key", func() bool {
 		blob := r.tryAnswer()
