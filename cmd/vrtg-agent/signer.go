@@ -41,8 +41,9 @@ const defaultSignerAgentUser = "virtrigaud-agent"
 // signerCommand runs the signer: the process that holds the host private key
 // and signs digests for the agent over a Unix socket (see package signer for
 // the protocol and for what the separation does and does not protect). It
-// runs as its own unprivileged user, never root. It is the same in a release
-// and a development build: it has no development-only setting. Exit status 0
+// runs as its own unprivileged user, never root. A development build also
+// serves certificate renewal (a pending key beside --key-file, put in use on
+// the agent's request); a release build does not. Exit status 0
 // after a graceful stop, 1 when the start is refused or the signer fails, 2
 // for bad flags.
 func signerCommand(args []string, log logr.Logger, stderr io.Writer) int {
@@ -92,7 +93,7 @@ func signerCommand(args []string, log logr.Logger, stderr io.Writer) int {
 		SocketPath: *socket, KeyFile: *keyFile, OwnerUID: own, AgentUID: agentUID,
 		SignsPerSecond: *perSecond, SignBurst: *burst, LogInterval: *every,
 		HandshakeSignsPerSecond: *hsPerSecond, HandshakeSignBurst: *hsBurst,
-		Notifier: systemd.NewNotifier(), Log: log,
+		Notifier: systemd.NewNotifier(), Log: log, Renewal: config.DevBuild,
 	}, signals); err != nil {
 		log.Error(err, "the signer stopped")
 		return 1

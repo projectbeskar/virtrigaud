@@ -164,6 +164,12 @@ const (
 	// ConfirmOnlyFrozen: a freeze confirmation discards only a frozen
 	// enrolment, never the active one.
 	ConfirmOnlyFrozen Name = "confirm-only-frozen"
+	// SignerRenewalURIs: the signer builds a renewal certificate request only
+	// for a host URI identity and an enrolment record.
+	SignerRenewalURIs Name = "signer-renewal-uris"
+	// SignerActivatePin: the signer puts in use only the pending key the
+	// caller names.
+	SignerActivatePin Name = "signer-activate-pin"
 )
 
 // All lists every guard, in a fixed order.

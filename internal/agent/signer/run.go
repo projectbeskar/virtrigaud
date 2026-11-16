@@ -54,6 +54,9 @@ type RunOptions struct {
 	HandshakeSignBurst int
 	// LogInterval is the period of the activity summary.
 	LogInterval time.Duration
+	// Renewal serves the certificate renewal operations, keeping the pending
+	// key beside KeyFile (development builds only).
+	Renewal bool
 	// Notifier receives READY when the signer serves (nil sends nothing).
 	Notifier systemd.Notifier
 	// Log receives structured events.
@@ -75,7 +78,8 @@ func Run(ctx context.Context, o RunOptions, signals <-chan os.Signal) error {
 	}
 	srv, err := NewServer(ServerOptions{Key: key, AllowedUID: o.AgentUID, Log: o.Log,
 		SignsPerSecond: o.SignsPerSecond, SignBurst: o.SignBurst, LogInterval: o.LogInterval,
-		HandshakeSignsPerSecond: o.HandshakeSignsPerSecond, HandshakeSignBurst: o.HandshakeSignBurst})
+		HandshakeSignsPerSecond: o.HandshakeSignsPerSecond, HandshakeSignBurst: o.HandshakeSignBurst,
+		Renewal: o.Renewal, KeyFile: o.KeyFile, OwnerUID: o.OwnerUID})
 	if err != nil {
 		return fmt.Errorf("run signer: %w", err)
 	}

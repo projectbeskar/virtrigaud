@@ -46,6 +46,9 @@ limitations under the License.
 //	OpPublicKey   no body                            -> the PKIX DER public key
 //	OpSign        hash byte, purpose byte, digest    -> the ASN.1 DER ECDSA signature
 //
+// A signer that serves certificate renewal (development builds only) also
+// answers the renewal operations (see renewal.go).
+//
 // The only hash is SHA-256 (what crypto/tls signs with an ECDSA P-256 key in
 // TLS 1.3 and what host answers use) and the digest must be exactly 32 bytes.
 // The purpose says which budget the signature is charged to: PurposeHandshake
@@ -86,8 +89,9 @@ const (
 	// DigestSize is the size of the only digest accepted: SHA-256.
 	DigestSize = 32
 	// MaxFrameBytes bounds the payload of a frame, in both directions. A
-	// frame announcing more closes the connection unread.
-	MaxFrameBytes = 256
+	// frame announcing more closes the connection unread. It fits a renewal
+	// request's URIs and the certificate request answering it.
+	MaxFrameBytes = 6 << 10
 	// frameHeaderBytes is the size of the length prefix.
 	frameHeaderBytes = 2
 )

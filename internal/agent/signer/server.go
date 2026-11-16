@@ -66,6 +66,20 @@ type ServerOptions struct {
 	// LogInterval is the period of the activity summary
 	// (DefaultLogInterval when zero).
 	LogInterval time.Duration
+	// Renewal serves the certificate renewal operations (development builds
+	// only); they also need KeyFile.
+	Renewal bool
+	// KeyFile is the host key file: the pending renewal key is kept beside
+	// it (PendingKeyFile) and put in use by renaming it over it. Empty:
+	// renewal is not served.
+	KeyFile string
+	// OwnerUID is the signer's own uid, the owner the key files must have.
+	OwnerUID uint32
+	// RenewalPerSecond and RenewalBurst set the renewal budget's rate limit
+	// (DefaultRenewalPerSecond and DefaultRenewalBurst when zero).
+	RenewalPerSecond float64
+	// RenewalBurst is the renewal budget's burst size.
+	RenewalBurst int
 }
 
 // keyPair is the key and its encoded public half.
@@ -84,6 +98,9 @@ type Server struct {
 	now      func() time.Time
 	// peerUID reads a connection's peer uid (PeerUID; tests replace it).
 	peerUID func(net.Conn) (uint32, error)
+
+	// renewalMu serialises the renewal operations.
+	renewalMu sync.Mutex
 
 	signed, limited, rejected, denied, overloaded atomic.Uint64
 	// signedBy and limitedBy count per purpose.
@@ -107,6 +124,12 @@ func NewServer(o ServerOptions) (*Server, error) {
 	if o.SignsPerSecond < 0 || o.SignBurst < 1 || o.HandshakeSignsPerSecond < 0 || o.HandshakeSignBurst < 1 {
 		return nil, errors.New("the signing rate limit must be positive")
 	}
+	if o.RenewalPerSecond <= 0 {
+		o.RenewalPerSecond = DefaultRenewalPerSecond
+	}
+	if o.RenewalBurst <= 0 {
+		o.RenewalBurst = DefaultRenewalBurst
+	}
 	if o.MaxConns == 0 {
 		o.MaxConns = DefaultMaxConns
 	}
@@ -125,6 +148,7 @@ func NewServer(o ServerOptions) (*Server, error) {
 	s.limiters = map[byte]*bucket{
 		PurposeAnswer:    newBucket(o.SignsPerSecond, o.SignBurst, s.now()),
 		PurposeHandshake: newBucket(o.HandshakeSignsPerSecond, o.HandshakeSignBurst, s.now()),
+		purposeRenewal:   newBucket(o.RenewalPerSecond, o.RenewalBurst, s.now()),
 	}
 	return s, nil
 }
@@ -240,6 +264,9 @@ func (s *Server) dispatch(req []byte) (Status, []byte) {
 		purpose := req[3]
 		digest := req[4:]
 		limiter := s.limiters[purpose]
+		if purpose == purposeRenewal {
+			limiter = nil // an internal budget, never named on the wire
+		}
 		if limiter == nil || (!guard.Off(guard.SignerDigestCheck) && (!ok || len(digest) != h.size)) {
 			s.rejected.Add(1)
 			return StatusBadRequest, nil
@@ -257,6 +284,8 @@ func (s *Server) dispatch(req []byte) (Status, []byte) {
 		s.signed.Add(1)
 		s.signedBy[purpose].Add(1)
 		return StatusOK, sig
+	case OpRenewalRequest, OpRenewalActivate, OpRenewalDiscard:
+		return s.dispatchRenewal(req[1], req[2:])
 	}
 	s.rejected.Add(1)
 	return StatusBadRequest, nil
