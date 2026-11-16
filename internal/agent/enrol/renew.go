@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
@@ -65,6 +66,10 @@ const (
 	// FileRenewalCert holds the staged renewed certificate (PEM), not yet in
 	// use.
 	FileRenewalCert = "renewal.crt"
+	// FileRenewalSince holds when the pending renewal was requested (RFC 3339,
+	// the agent's clock), for the bound after which an unanswered request is
+	// drawn again (PendingExpired).
+	FileRenewalSince = "renewal.since"
 )
 
 // ErrRenewed is wrapped by every refusal of a renewed certificate. Nothing is
@@ -95,6 +100,21 @@ type Pending struct {
 	KeyPin string
 	// Staged is the staged renewed certificate; nil when none is staged.
 	Staged *x509.Certificate
+	// Since is when the pending request was made; zero when unknown.
+	Since time.Time
+}
+
+// PendingExpired reports whether a pending renewal of the current
+// certificate cur that was never staged has waited past half of the lifetime
+// cur had left when it was requested, at now: the manager has not answered
+// it (its request was denied, failed or lost), and a new key is drawn so that
+// a fresh request reaches it before cur expires. A staged renewal never
+// expires: the manager may have pinned its key already.
+func (p Pending) PendingExpired(cur *x509.Certificate, now time.Time) bool {
+	if p.CSR == nil || p.Staged != nil || p.Since.IsZero() || !cur.NotAfter.After(p.Since) {
+		return false
+	}
+	return now.After(p.Since.Add(cur.NotAfter.Sub(p.Since) / 2))
 }
 
 // readRenewalFile reads a renewal file with read; found is false when it
@@ -134,6 +154,11 @@ func LoadPending(pkiDir string, read func(string) ([]byte, error)) (Pending, err
 			return Pending{}, fmt.Errorf("%s: %w", FileRenewalCSR, err)
 		}
 		p.CSR = csr
+		if b, ok, err := readRenewalFile(filepath.Join(pkiDir, FileRenewalSince), read); err == nil && ok {
+			if t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); err == nil {
+				p.Since = t
+			}
+		}
 	}
 	b, found, err = readRenewalFile(filepath.Join(pkiDir, FileRenewalCert), read)
 	if err != nil {
@@ -153,7 +178,7 @@ func LoadPending(pkiDir string, read func(string) ([]byte, error)) (Pending, err
 // pending key, as FileRenewalCSR in pkiDir, after checking that it carries
 // exactly the URIs of the current certificate cur and that its signature
 // verifies. A staged certificate for another request is removed first.
-func SavePendingCSR(pkiDir string, der []byte, cur *x509.Certificate) error {
+func SavePendingCSR(pkiDir string, der []byte, cur *x509.Certificate, since time.Time) error {
 	csr, err := x509.ParseCertificateRequest(der)
 	if err != nil || !bytes.Equal(csr.Raw, der) || csr.CheckSignature() != nil {
 		return fmt.Errorf("%w: the renewal request does not parse or verify", ErrRequest)
@@ -162,6 +187,9 @@ func SavePendingCSR(pkiDir string, der []byte, cur *x509.Certificate) error {
 		return fmt.Errorf("%w: the renewal request does not carry the current certificate's URIs", ErrRequest)
 	}
 	if err := removeFile(filepath.Join(pkiDir, FileRenewalCert)); err != nil {
+		return err
+	}
+	if err := writeAtomic(filepath.Join(pkiDir, FileRenewalSince), []byte(since.UTC().Format(time.RFC3339)+"\n")); err != nil {
 		return err
 	}
 	return writeAtomic(filepath.Join(pkiDir, FileRenewalCSR), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
@@ -203,6 +231,9 @@ func CheckRenewed(der []byte, cur *trust.Identity, p Pending, tc *trust.Config, 
 			return nil, fmt.Errorf("%w: it does not chain to the pinned host identity issuer at this time", ErrRenewed)
 		}
 	}
+	// The profile bounds the lifetime too (at most hostidentity.MaxLifetime),
+	// so the agent never installs a long-lived certificate whatever the
+	// manager approved.
 	if err := hostidentity.CheckLeafProfile(leaf, cur.HostName); err != nil && !guard.Off(guard.RenewProfile) {
 		return nil, fmt.Errorf("%w: %v", ErrRenewed, err)
 	}
@@ -251,7 +282,8 @@ func Promote(pkiDir string, read func(string) ([]byte, error)) error {
 
 // DiscardPending removes the renewal files of pkiDir.
 func DiscardPending(pkiDir string) error {
-	return errors.Join(removeFile(filepath.Join(pkiDir, FileRenewalCert)), removeFile(filepath.Join(pkiDir, FileRenewalCSR)))
+	return errors.Join(removeFile(filepath.Join(pkiDir, FileRenewalCert)), removeFile(filepath.Join(pkiDir, FileRenewalCSR)),
+		removeFile(filepath.Join(pkiDir, FileRenewalSince)))
 }
 
 // RecoverRenewal finishes a renewal that a crash cut short between the

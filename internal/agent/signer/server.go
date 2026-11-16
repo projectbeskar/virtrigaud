@@ -230,7 +230,13 @@ func (s *Server) handle(conn net.Conn) {
 			return
 		}
 	}
-	req, err := readFrame(conn)
+	// Only a signer that serves renewal reads requests larger than a sign
+	// request: the release surface is unchanged.
+	limit := MaxSignFrameBytes
+	if s.renewalEnabled() {
+		limit = MaxFrameBytes
+	}
+	req, err := readFrameMax(conn, limit)
 	if err != nil {
 		s.rejected.Add(1)
 		return

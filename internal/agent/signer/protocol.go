@@ -90,8 +90,12 @@ const (
 	DigestSize = 32
 	// MaxFrameBytes bounds the payload of a frame, in both directions. A
 	// frame announcing more closes the connection unread. It fits a renewal
-	// request's URIs and the certificate request answering it.
+	// request's URIs and the certificate request answering it; a signer that
+	// serves no renewal reads requests of at most MaxSignFrameBytes.
 	MaxFrameBytes = 6 << 10
+	// MaxSignFrameBytes bounds a request to a signer that serves no renewal
+	// (every release build): the public key and sign requests fit in it.
+	MaxSignFrameBytes = 256
 	// frameHeaderBytes is the size of the length prefix.
 	frameHeaderBytes = 2
 )
@@ -186,15 +190,18 @@ func writeFrame(w io.Writer, payload []byte) error {
 	return err
 }
 
-// readFrame reads one frame. A length above MaxFrameBytes is refused before
-// any payload is read; a short payload is an error.
-func readFrame(r io.Reader) ([]byte, error) {
+// readFrame reads one frame of at most MaxFrameBytes (readFrameMax).
+func readFrame(r io.Reader) ([]byte, error) { return readFrameMax(r, MaxFrameBytes) }
+
+// readFrameMax reads one frame. A length above maxBytes is refused before any
+// payload is read; a short payload is an error.
+func readFrameMax(r io.Reader, maxBytes int) ([]byte, error) {
 	var hdr [frameHeaderBytes]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
 	n := int(binary.BigEndian.Uint16(hdr[:]))
-	if n > MaxFrameBytes {
+	if n > maxBytes {
 		return nil, ErrFrameTooLarge
 	}
 	payload := make([]byte, n)

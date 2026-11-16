@@ -152,7 +152,9 @@ func TestRenewalRefusals(t *testing.T) {
 		r, keyFile := renewalSigner(t, false)
 		c := r.client(t)
 		_, err := c.RenewalRequest(ctx, renewalURIs)
-		require.ErrorIs(t, err, ErrRefused)
+		require.ErrorIs(t, err, ErrSigner, "a signer that serves no renewal does not read the request")
+		_, err = c.ActivateRenewal(ctx, pinOf(t, &newKey(t).PublicKey))
+		require.ErrorIs(t, err, ErrRefused, "a small renewal request is read and refused")
 		_, err = os.Stat(PendingKeyFile(keyFile))
 		assert.ErrorIs(t, err, os.ErrNotExist, "no key was made")
 	})
@@ -254,4 +256,16 @@ func ecPub(t testing.TB, k any) *ecdsa.PublicKey {
 		t.Fatalf("not an ECDSA public key: %T", k)
 	}
 	return pub
+}
+
+// TestRequestFrameBoundWithoutRenewal: a signer that serves no renewal reads
+// requests of at most MaxSignFrameBytes, as before renewal existed.
+func TestRequestFrameBoundWithoutRenewal(t *testing.T) {
+	r, _ := renewalSigner(t, false)
+	big := append([]byte{Version, OpRenewalRequest, 1}, make([]byte, MaxSignFrameBytes)...)
+	st, _ := rawCall(t, r.socket, big)
+	assert.Equal(t, StatusInternal, st, "the connection is closed unread")
+	r2, _ := renewalSigner(t, true)
+	st, _ = rawCall(t, r2.socket, big)
+	assert.Equal(t, StatusBadRequest, st, "a renewal signer reads it and refuses its content")
 }

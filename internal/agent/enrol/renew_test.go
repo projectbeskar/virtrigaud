@@ -84,7 +84,7 @@ func TestPendingFiles(t *testing.T) {
 	p, err := enrol.LoadPending(f.dir, reader())
 	require.NoError(t, err)
 	assert.Nil(t, p.CSR)
-	require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur))
+	require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur, time.Now()))
 	p, err = enrol.LoadPending(f.dir, reader())
 	require.NoError(t, err)
 	require.NotNil(t, p.CSR)
@@ -99,7 +99,7 @@ func TestPendingFiles(t *testing.T) {
 	other := hostidentitytest.NewCSR(t, hostidentitytest.NewKey(t), hostidentitytest.CSROptions{
 		URIs: hostidentity.RequestURIs(f.pki.HostURI, otherRec)})
 	ob, _ := pem.Decode(other)
-	assert.Error(t, enrol.SavePendingCSR(f.dir, ob.Bytes, f.cur))
+	assert.Error(t, enrol.SavePendingCSR(f.dir, ob.Bytes, f.cur, time.Now()))
 
 	// A malformed file is an error, for the caller to discard.
 	require.NoError(t, os.WriteFile(filepath.Join(f.dir, enrol.FileRenewalCert), []byte("not a certificate"), 0o600))
@@ -121,7 +121,7 @@ func TestRecoverRenewal(t *testing.T) {
 	}
 	t.Run("signer uses the new key: promoted", func(t *testing.T) {
 		f := newRenewFixture(t)
-		require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur))
+		require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur, time.Now()))
 		staged := newKeyOf(f)
 		require.NoError(t, enrol.Stage(f.dir, staged.Raw))
 		done, err := enrol.RecoverRenewal(f.dir, reader(), f.cfg, ecPub(t, staged.PublicKey), time.Now())
@@ -136,7 +136,7 @@ func TestRecoverRenewal(t *testing.T) {
 	})
 	t.Run("signer still uses the old key: nothing", func(t *testing.T) {
 		f := newRenewFixture(t)
-		require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur))
+		require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur, time.Now()))
 		require.NoError(t, enrol.Stage(f.dir, newKeyOf(f).Raw))
 		done, err := enrol.RecoverRenewal(f.dir, reader(), f.cfg, ecPub(t, f.cur.PublicKey), time.Now())
 		require.NoError(t, err)
@@ -173,4 +173,25 @@ func ecPub(t testing.TB, k any) *ecdsa.PublicKey {
 		t.Fatalf("not an ECDSA public key: %T", k)
 	}
 	return pub
+}
+
+// TestPendingExpired: an unstaged request expires after half the lifetime
+// left when it was made; a staged one never does.
+func TestPendingExpired(t *testing.T) {
+	f := newRenewFixture(t)
+	since := time.Now()
+	require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur, since))
+	p, err := enrol.LoadPending(f.dir, reader())
+	require.NoError(t, err)
+	assert.WithinDuration(t, since, p.Since, time.Second)
+	half := since.Add(f.cur.NotAfter.Sub(since) / 2)
+	assert.False(t, p.PendingExpired(f.cur, half.Add(-time.Minute)))
+	assert.True(t, p.PendingExpired(f.cur, half.Add(time.Minute)))
+	b, _ := pem.Decode(f.newPEM)
+	require.NoError(t, enrol.Stage(f.dir, b.Bytes))
+	p, err = enrol.LoadPending(f.dir, reader())
+	require.NoError(t, err)
+	assert.False(t, p.PendingExpired(f.cur, half.Add(time.Hour)), "a staged renewal never expires")
+	require.NoError(t, enrol.DiscardPending(f.dir))
+	assert.NoFileExists(t, filepath.Join(f.dir, enrol.FileRenewalSince))
 }

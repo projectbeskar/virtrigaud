@@ -23,8 +23,10 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -82,7 +84,24 @@ type renewer struct {
 	// nextTry and failures pace failed requests to the signer.
 	nextTry  time.Time
 	failures int
+	// healPending is set when an activation failed after the signer may
+	// have put the new key in use: until heal succeeds the credentials may
+	// not sign, and every tick (and the next activation) tries to finish it.
+	healPending bool
 }
+
+// activationTimeout bounds an activation from the signer's switch on,
+// independently of the caller's deadline, so that a call that gives up cannot
+// stop it halfway. A variable so that this package's tests can shorten it.
+var activationTimeout = 30 * time.Second
+
+// healTickTimeout bounds a tick's attempt to finish an interrupted
+// activation, so the tick does not hold the renewal lock long.
+const healTickTimeout = 2 * time.Second
+
+// healRetryEvery is the pause between attempts to reach the signer while an
+// activation is finished.
+const healRetryEvery = 200 * time.Millisecond
 
 // newRenewer returns the renewer of d with its pending renewal read from
 // the key material directory; a malformed renewal file is discarded.
@@ -130,10 +149,20 @@ func (r *renewer) exclusive(f func() error) error {
 func (r *renewer) tick(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.healPending {
+		hctx, cancel := context.WithTimeout(ctx, healTickTimeout)
+		if err := r.healLocked(hctx); err != nil {
+			r.d.log.Error(err, "an interrupted activation is not finished yet; it is tried again")
+		}
+		cancel()
+	}
 	cur := r.d.creds.Load().Identity
 	now := r.d.o.Now()
 	if r.pending.CSR != nil && !r.pending.MatchesCurrent(cur.Leaf) {
 		r.discardLocked(ctx, "the pending renewal belongs to an earlier certificate")
+	}
+	if r.pending.PendingExpired(cur.Leaf, now) && !r.healPending {
+		r.discardLocked(ctx, "the renewal request was not answered within half the lifetime left when it was made; a new key is drawn")
 	}
 	if r.pending.CSR != nil || !enrol.RenewalDue(cur.Leaf, now) || now.Before(r.nextTry) || !now.Before(cur.Leaf.NotAfter) {
 		return
@@ -166,7 +195,7 @@ func (r *renewer) requestLocked(ctx context.Context, cur *trust.Identity) error 
 	if err != nil {
 		return err
 	}
-	if err := enrol.SavePendingCSR(r.d.o.Config.PKIDir(), der, cur.Leaf); err != nil {
+	if err := enrol.SavePendingCSR(r.d.o.Config.PKIDir(), der, cur.Leaf, r.d.o.Now()); err != nil {
 		return err
 	}
 	r.loadLocked()
@@ -253,6 +282,21 @@ func (r *renewer) Install(ctx context.Context, der []byte, activate bool) error 
 	if bytes.Equal(der, cur.Identity.Leaf.Raw) {
 		return nil
 	}
+	if activate && (r.healPending || r.hostCertIs(der)) {
+		// An earlier activation of this certificate stopped after the switch:
+		// finish it (load the identity the files and the signer now hold).
+		hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activationTimeout)
+		err := r.healLocked(hctx)
+		cancel()
+		if err == nil && bytes.Equal(der, r.d.creds.Load().Identity.Leaf.Raw) {
+			return nil
+		}
+		if err != nil {
+			r.d.log.Error(err, "an interrupted activation could not be finished")
+			return status.Error(codes.Unavailable, "the renewed certificate could not be put in use")
+		}
+		cur = r.d.creds.Load()
+	}
 	sum := sha256.Sum256(der)
 	digest := hex.EncodeToString(sum[:])
 	if r.pending.CSR == nil {
@@ -292,47 +336,98 @@ func (r *renewer) Install(ctx context.Context, der []byte, activate bool) error 
 }
 
 // activateLocked puts the staged certificate leaf and the signer's pending
-// key in use and replaces the credentials.
+// key in use and replaces the credentials. It runs on its own deadline
+// (activationTimeout), detached from the caller's, so that a caller that
+// gives up does not stop it halfway. Any failure once the signer may have
+// switched keys marks the activation for healing: healLocked finishes it,
+// now if it can, else at the next tick or activation.
 func (r *renewer) activateLocked(ctx context.Context, cur *server.Credentials, leaf *x509.Certificate) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activationTimeout)
+	defer cancel()
 	pin, err := keyPinBytes(leaf.PublicKey)
 	if err != nil {
 		return err
 	}
-	c, err := signer.Connect(ctx, r.d.signerOptions(r.run))
+	c, err := signer.Connect(actx, r.d.signerOptions(r.run))
 	if err != nil {
 		return fmt.Errorf("reach the signer: %w", err)
 	}
-	if _, err := c.ActivateRenewal(ctx, pin); err != nil {
-		return fmt.Errorf("the signer did not put the new key in use: %w", err)
+	// From here the signer may hold the new key even if the call fails (its
+	// answer may be lost after the rename).
+	r.healPending = true
+	if _, err := c.ActivateRenewal(actx, pin); err != nil {
+		return errors.Join(fmt.Errorf("the signer did not put the new key in use: %w", err), r.healLocked(actx))
 	}
 	if err := r.step(RenewalStepKeySwitched); err != nil {
 		return err
 	}
 	if err := enrol.Promote(r.d.o.Config.PKIDir(), r.reader()); err != nil {
-		return fmt.Errorf("make the renewed certificate the host certificate: %w", err)
+		return errors.Join(fmt.Errorf("make the renewed certificate the host certificate: %w", err), r.healLocked(actx))
 	}
 	if err := r.step(RenewalStepPromoted); err != nil {
 		return err
 	}
-	nc, err := signer.Connect(ctx, r.d.signerOptions(r.run))
+	if err := r.healLocked(actx); err != nil {
+		return err
+	}
+	if !bytes.Equal(r.d.creds.Load().Identity.Leaf.Raw, leaf.Raw) {
+		return errors.New("the identity in use is not the renewed certificate")
+	}
+	oldPin, _ := keyPinHex(cur.Identity.Leaf.PublicKey)
+	newPin, _ := keyPinHex(leaf.PublicKey)
+	r.d.log.Info("renewed certificate in use: TLS and signed answers use the new key",
+		"enrolment", hex.EncodeToString(cur.Identity.Record.EnrolmentID), "oldKeyPin", oldPin, "newKeyPin", newPin,
+		"sha256", hex.EncodeToString(sha256Of(leaf.Raw)), "notAfter", leaf.NotAfter.UTC().Format(time.RFC3339))
+	return nil
+}
+
+// healLocked brings the credentials to the key the signer holds: when the
+// signer's key is not the one of the certificate in use, the staged
+// certificate is promoted if it certifies the signer's key
+// (enrol.RecoverRenewal), and the identity is loaded from the files with a
+// client for the signer's key and swapped in. It is the end of every
+// activation, and finishes one that stopped after the switch. It waits for
+// the signer within ctx.
+func (r *renewer) healLocked(ctx context.Context) error {
+	cur := r.d.creds.Load()
+	nc, err := signer.ConnectWithRetry(ctx, r.d.signerOptions(r.run), healRetryEvery, nil)
 	if err != nil {
-		return fmt.Errorf("reach the signer for the new key: %w", err)
+		return fmt.Errorf("reach the signer: %w", err)
+	}
+	pub, ok := nc.Public().(*ecdsa.PublicKey)
+	if !ok {
+		return errors.New("the signer's key is not ECDSA")
+	}
+	if pub.Equal(cur.Identity.Leaf.PublicKey) {
+		r.healPending = false
+		return nil
+	}
+	if _, err := enrol.RecoverRenewal(r.d.o.Config.PKIDir(), r.reader(), cur.Trust, pub, r.d.o.Now()); err != nil {
+		return err
 	}
 	id, err := trust.LoadIdentity(r.d.o.Config.PKIDir(), cur.Trust, r.d.o.Now(), r.reader(), nc)
 	if err != nil {
 		return fmt.Errorf("load the renewed identity: %w", err)
 	}
-	if !id.SameEnrolment(cur.Identity) || !bytes.Equal(id.Leaf.Raw, leaf.Raw) {
-		return errors.New("the loaded identity is not the renewed certificate of the same enrolment")
+	if !id.SameEnrolment(cur.Identity) {
+		return errors.New("the loaded identity is not of the same enrolment")
 	}
-	oldPin, _ := keyPinHex(cur.Identity.Leaf.PublicKey)
-	newPin, _ := keyPinHex(leaf.PublicKey)
 	r.d.creds.Store(&server.Credentials{Identity: id, Trust: cur.Trust})
+	r.healPending = false
 	r.loadLocked()
-	r.d.log.Info("renewed certificate in use: TLS and signed answers use the new key",
-		"enrolment", hex.EncodeToString(id.Record.EnrolmentID), "oldKeyPin", oldPin, "newKeyPin", newPin,
-		"sha256", hex.EncodeToString(sha256Of(leaf.Raw)), "notAfter", leaf.NotAfter.UTC().Format(time.RFC3339))
+	r.d.log.Info("credentials brought to the signer's key: the renewed certificate is in use",
+		"sha256", hex.EncodeToString(sha256Of(id.Leaf.Raw)))
 	return nil
+}
+
+// hostCertIs reports whether the host certificate file holds der.
+func (r *renewer) hostCertIs(der []byte) bool {
+	b, err := r.reader()(filepath.Join(r.d.o.Config.PKIDir(), trust.FileHostCert))
+	if err != nil {
+		return false
+	}
+	blk, _ := pem.Decode(b)
+	return blk != nil && bytes.Equal(blk.Bytes, der)
 }
 
 // step runs the test hook of a renewal step.

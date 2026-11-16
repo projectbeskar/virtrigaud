@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -465,4 +466,128 @@ func ecPub(t testing.TB, k any) *ecdsa.PublicKey {
 		t.Fatalf("not an ECDSA public key: %T", k)
 	}
 	return pub
+}
+
+// TestRenewalActivationHealsInProcess: an activation that fails after the
+// signer switched keys (at each point after the switch) leaves the agent
+// able to sign again without a restart: the next tick, or the Provider's
+// next activation, brings the credentials to the new key.
+func TestRenewalActivationHealsInProcess(t *testing.T) {
+	for _, c := range []struct {
+		step  string
+		retry bool
+	}{
+		{daemon.RenewalStepKeySwitched, false}, {daemon.RenewalStepPromoted, false},
+		{daemon.RenewalStepKeySwitched, true}, {daemon.RenewalStepPromoted, true},
+	} {
+		name := c.step + "/tick"
+		if c.retry {
+			name = c.step + "/retry"
+		}
+		t.Run(name, func(t *testing.T) {
+			h, _ := renewalHost(t)
+			var failed atomic.Bool
+			h.hooks.RenewalStep = func(s string) error {
+				if s == c.step && failed.CompareAndSwap(false, true) {
+					return errors.New("fail once")
+				}
+				return nil
+			}
+			r, _ := h.run()
+			der, newPub := issueRenewal(t, r, h)
+			h.nowOff.Store(0)
+			if _, err := r.install(der, false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.install(der, true); status.Code(err) != codes.Unavailable {
+				t.Fatalf("activation failing at %s: %v", c.step, err)
+			}
+			if c.retry {
+				if _, err := r.install(der, true); err != nil {
+					t.Fatalf("the Provider's retry does not finish the activation: %v\n%s", err, h.logs.text())
+				}
+			}
+			waitFor(t, "answers by the new key", func() bool {
+				blob := r.tryAnswer()
+				return blob != nil && signerOf(t, blob).Equal(newPub)
+			})
+			if exists(t, h.pkiPath(enrol.FileRenewalCSR)) || exists(t, h.pkiPath(enrol.FileRenewalCert)) {
+				t.Fatal("renewal files are left")
+			}
+		})
+	}
+}
+
+// TestRenewalActivationSignerAway: the signer becomes unreachable right after
+// it switched keys; the activation gives up on its own deadline, and once
+// the signer is back the agent heals in process.
+func TestRenewalActivationSignerAway(t *testing.T) {
+	daemon.SetActivationTimeout(t, 500*time.Millisecond)
+	h, keyFile := renewalHost(t)
+	socket := h.signer.socket
+	h.hooks.RenewalStep = func(s string) error {
+		if s == daemon.RenewalStepKeySwitched {
+			h.signer.stop()
+		}
+		return nil
+	}
+	r, _ := h.run()
+	der, newPub := issueRenewal(t, r, h)
+	h.nowOff.Store(0)
+	if _, err := r.install(der, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.install(der, true); status.Code(err) != codes.Unavailable {
+		t.Fatalf("activation with the signer away: %v", err)
+	}
+	h.signer = startRenewalSigner(t, socket, newKeyFrom(t, keyFile), keyFile)
+	waitFor(t, "answers by the new key", func() bool {
+		blob := r.tryAnswer()
+		return blob != nil && signerOf(t, blob).Equal(newPub)
+	})
+}
+
+// newKeyFrom loads the key now in keyFile.
+func newKeyFrom(t *testing.T, keyFile string) *ecdsa.PrivateKey {
+	t.Helper()
+	k, err := signer.LoadKey(keyFile, testUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// TestRenewalRedrawnWhenUnanswered: a request never answered (nothing
+// staged) within half the lifetime left when it was made is discarded with
+// its pending key, and a request for a new key is made.
+func TestRenewalRedrawnWhenUnanswered(t *testing.T) {
+	h, keyFile := renewalHost(t)
+	r, _ := h.run()
+	waitFor(t, "the renewal request", func() bool { return exists(t, h.pkiPath(enrol.FileRenewalCSR)) })
+	first := mustCSR(t, h)
+	h.nowOff.Store(int64(26 * 24 * time.Hour))
+	waitFor(t, "a new request", func() bool {
+		p, err := enrol.LoadPending(h.cfg.PKIDir(), trust.KeyFileReader(testUID))
+		return err == nil && p.CSR != nil && !bytes.Equal(p.CSR.Raw, first)
+	})
+	p, _ := enrol.LoadPending(h.cfg.PKIDir(), trust.KeyFileReader(testUID))
+	old, _ := x509.ParseCertificateRequest(first)
+	if ecPub(t, p.CSR.PublicKey).Equal(ecPub(t, old.PublicKey)) {
+		t.Fatal("the new request is for the same key")
+	}
+	if !exists(t, signer.PendingKeyFile(keyFile)) {
+		t.Fatal("no pending key for the new request")
+	}
+	_ = r
+}
+
+// tryAnswer asks GetHostInfo for a signed answer and returns it, or nil when
+// there is none (yet).
+func (r *running) tryAnswer() *providerv1.SignedBlob {
+	info, err := providerv1.NewProviderClient(r.rconn()).GetHostInfo(callCtx(r.h.t),
+		&providerv1.GetHostInfoRequest{AnswerNonce: bytes.Repeat([]byte{8}, 16)})
+	if err != nil {
+		return nil
+	}
+	return info.GetHostAnswer()
 }
