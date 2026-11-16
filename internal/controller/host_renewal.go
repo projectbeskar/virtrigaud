@@ -320,6 +320,13 @@ func (p *PinsHostTrust) RenewalStep(ctx context.Context, provider *infravirtriga
 	if err != nil {
 		return out, err
 	}
+	if v.Renewal == nil {
+		// Most heartbeats carry no renewal: the cached pins Secret says
+		// whether one is in progress before the API server is read.
+		if cached, err := loadHostEnrolment(ctx, p.Client, p.Config, h); err == nil && !cached.reset && cached.state.Renewal == nil {
+			return out, nil
+		}
+	}
 	l, err := loadHostEnrolment(ctx, p.secretReader(), p.Config, h)
 	if err != nil || l.reset {
 		return out, err
