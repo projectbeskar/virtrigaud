@@ -295,7 +295,7 @@ func (c *Client) RenewalRequest(ctx context.Context, uris []string) ([]byte, err
 	if len(uris) == 0 || len(uris) > maxRenewalURIs {
 		return nil, fmt.Errorf("%w: %d URIs", ErrSigner, len(uris))
 	}
-	req := []byte{Version, OpRenewalRequest, byte(len(uris))}
+	req := []byte{Version, OpRenewalRequest, byte(len(uris))} // #nosec G115 -- 1..maxRenewalURIs (8), checked above
 	for _, u := range uris {
 		if len(u) == 0 || len(u) > maxRenewalURIBytes {
 			return nil, fmt.Errorf("%w: a URI of %d bytes", ErrSigner, len(u))
