@@ -796,6 +796,96 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(after.PredecessorEnrolmentIDs).To(Equal(st.PredecessorEnrolmentIDs))
 	})
 
+	It("confirms predecessors' freeze once no attempt is open, renders it, and drains the bound on signed evidence", func() {
+		e := newEnv()
+		rec := record.NewFakeRecorder(64)
+		e.hostR.Recorder = rec
+		createHost(e, "host-a", "serial-0001", "ch")
+		enrol(e, "host-a")
+		for i := 0; i < maxPredecessorEnrolmentIDs; i++ {
+			rekey(e, "host-a")
+		}
+		st, _ := loadState(e, "host-a")
+		Expect(st.PredecessorEnrolmentIDs).To(HaveLen(maxPredecessorEnrolmentIDs))
+		Expect(st.PredecessorSince).To(HaveLen(maxPredecessorEnrolmentIDs))
+		Expect(st.ConfirmedFrozenEnrolmentIDs).To(BeEmpty(), "within the quiet period nothing is confirmed")
+
+		// Past the quiet period, a VM with an open attempt on the Host blocks
+		// the confirmation.
+		e.hostR.Now = func() time.Time { return time.Now().Add(predecessorQuietPeriod + time.Minute) }
+		vm := clusterVM("vm-open", e.hostNS, "ch")
+		Expect(k8sClient.Create(ctx, vm)).To(Succeed())
+		vm.Status.OperationAttempts = []infravirtrigaudiov1beta1.OperationAttempt{{Kind: infravirtrigaudiov1beta1.OperationAttemptKindPowerOn,
+			Attempt: 1, OpID: strings.Repeat("0a", 16), HostID: "host-a", Phase: infravirtrigaudiov1beta1.OperationAttemptPhaseSent,
+			LastTransitionTime: metav1.Now()}}
+		Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
+		_, err := e.hostR.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.hostNS, Name: "host-a"}})
+		Expect(err).NotTo(HaveOccurred())
+		st, _ = loadState(e, "host-a")
+		Expect(st.ConfirmedFrozenEnrolmentIDs).To(BeEmpty(), "an open attempt on the Host blocks the confirmation")
+
+		// The attempt ends: every predecessor is confirmed (a fresh
+		// reconciler, as after a manager restart, decides the same).
+		vm.Status.OperationAttempts[0].Phase = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal
+		vm.Status.OperationAttempts[0].Outcome = infravirtrigaudiov1beta1.OperationAttemptOutcomeSucceeded
+		Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
+		restarted := &HostEnrolmentReconciler{Client: k8sClient, Config: e.cfg, Now: e.hostR.Now, Recorder: rec}
+		_, err = restarted.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.hostNS, Name: "host-a"}})
+		Expect(err).NotTo(HaveOccurred())
+		st, _ = loadState(e, "host-a")
+		Expect(st.ConfirmedFrozenEnrolmentIDs).To(ConsistOf(st.PredecessorEnrolmentIDs))
+		_, err = restarted.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: e.hostNS, Name: "host-a"}})
+		Expect(err).NotTo(HaveOccurred())
+		again, _ := loadState(e, "host-a")
+		Expect(again.ConfirmedFrozenEnrolmentIDs).To(Equal(st.ConfirmedFrozenEnrolmentIDs), "idempotent")
+
+		// Rendered for the agent with the current enrolment.
+		h := &infravirtrigaudiov1beta1.Host{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.hostNS, Name: "host-a"}, h)).To(Succeed())
+		if devgate.Compiled {
+			f := resolveHostFreeze(ctx, k8sClient, e.cfg, h)
+			Expect(f).NotTo(BeNil())
+			Expect(f.ForEnrolmentID).To(Equal(st.Current.Record.EnrolmentID))
+			Expect(f.EnrolmentIDs).To(ConsistOf(st.PredecessorEnrolmentIDs))
+		}
+		var confirmedEvents int
+		for len(rec.Events) > 0 {
+			ev := <-rec.Events
+			Expect(ev).NotTo(ContainSubstring("BEGIN"))
+			if strings.Contains(ev, eventReasonAgentFreezeConfirmed) {
+				confirmedEvents++
+			}
+		}
+		Expect(confirmedEvents).To(Equal(maxPredecessorEnrolmentIDs))
+
+		// The predecessors are still listed (and the bound still holds)
+		// until the host shows, signed, that it discarded them.
+		hreq := requestRekey(e, "host-a")
+		expectDenied(reconcileCR(e, submit(e, "host-a", csrFor(hreq, nil), adminOpts())), reasonEnrolTooManyPredecessors)
+		src := &PinsHostTrust{Client: k8sClient, Config: e.cfg, Epoch: operation.Epoch{Counter: 1, Holder: e.cfg.InstallID}}
+		confirmed, err := src.ConfirmedFrozen(ctx, e.provider, "host-a")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(confirmed).To(HaveLen(maxPredecessorEnrolmentIDs))
+		for _, id := range confirmed {
+			ok, err := src.DiscardPredecessor(ctx, e.provider, "host-a", id)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue())
+		}
+		st, _ = loadState(e, "host-a")
+		Expect(st.PredecessorEnrolmentIDs).To(BeEmpty())
+		Expect(st.ConfirmedFrozenEnrolmentIDs).To(BeEmpty())
+		if devgate.Compiled {
+			Expect(resolveHostFreeze(ctx, k8sClient, e.cfg, h)).To(BeNil(), "nothing left to confirm")
+		}
+
+		// The bound has drained: a ninth re-key succeeds.
+		pin := rekey(e, "host-a")
+		st, _ = loadState(e, "host-a")
+		Expect(st.Current.KeyPins).To(Equal([]string{pin}))
+		Expect(st.PredecessorEnrolmentIDs).To(HaveLen(1))
+		Expect(st.Current.mintEpoch()).To(Equal(uint64(maxPredecessorEnrolmentIDs + 2)))
+	})
+
 	It("reaches the predecessor bound through re-keys, then refuses, dropping none", func() {
 		e := newEnv()
 		createHost(e, "host-a", "serial-0001", "ch")

@@ -173,10 +173,17 @@ type fakeAgent struct {
 	hellos     atomic.Int32
 	// helloBlocks makes Hello wait until its caller gives up.
 	helloBlocks atomic.Bool
+	// noStatus makes AgentStatus Unimplemented (an agent that serves none).
+	noStatus atomic.Bool
+	// statusFails makes AgentStatus fail with Internal.
+	statusFails atomic.Bool
+	// statusCalls counts AgentStatus calls, answered or not.
+	statusCalls atomic.Int32
 
-	mu      sync.Mutex
-	calls   []captured
-	respond func(method string, raw []byte) (proto.Message, error)
+	mu       sync.Mutex
+	statuses []*agentv1.AgentStatusRequest
+	calls    []captured
+	respond  func(method string, raw []byte) (proto.Message, error)
 }
 
 type fakeAgentOptions struct {
@@ -281,6 +288,30 @@ func (h *helloServer) Hello(ctx context.Context, req *agentv1.HelloRequest) (*ag
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &agentv1.HelloResponse{HostAnswer: blob}, nil
+}
+
+// AgentStatus records a freeze confirmation the Provider relays.
+func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusRequest) (*agentv1.AgentStatusResponse, error) {
+	h.f.statusCalls.Add(1)
+	if h.f.noStatus.Load() {
+		return nil, status.Error(codes.Unimplemented, "not served")
+	}
+	if h.f.statusFails.Load() {
+		return nil, status.Error(codes.Internal, "failed")
+	}
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	if c, ok := proto.Clone(req).(*agentv1.AgentStatusRequest); ok {
+		h.f.statuses = append(h.f.statuses, c)
+	}
+	return &agentv1.AgentStatusResponse{}, nil
+}
+
+// statusRequests returns the AgentStatus requests the agent received.
+func (f *fakeAgent) statusRequests() []*agentv1.AgentStatusRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*agentv1.AgentStatusRequest(nil), f.statuses...)
 }
 
 // quiet discards logs.

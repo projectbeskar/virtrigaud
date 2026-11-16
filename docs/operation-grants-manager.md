@@ -761,9 +761,19 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   gone).
 - The manager asks no inventory in the signed host answer. After a re-key it lists the
   host's earlier enrolments as predecessors (up to 8): an attempt sent under one is asked
-  about by its identity and held, never sent again. Predecessors are not removed yet (the
-  host's confirmation of their freeze is not delivered), so their attempts' VMs stay held
-  until the attempts resolve.
+  about by its identity and held, never sent again, and an attempt minted just before a
+  re-key is never first sent (`OperationHostRekeyed`). Once no attempt minted under a
+  predecessor is open on the host, the manager confirms that predecessor's freeze; the host discards its records and the
+  manager removes it on a signed answer that shows it gone
+  ([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)). An attempt still
+  open under a predecessor whose records the host discarded early (an unsigned relay
+  cannot be trusted) is answered `UNKNOWN_TO_AGENT` and held.
+- An attempt under a predecessor enrolment is never concluded by the manager: the host's
+  `NO_RECORD` or `RETIRED` about it is not taken as never performed. Such an attempt
+  (including one held as `OperationHostRekeyed`) keeps its VM held and its predecessor
+  unconfirmed, and so counts towards the bound of 8 re-keys, until an operator settles the
+  VM with `virtrigaud.io/orphan-on-delete` and a delete, or with `virtrigaud.io/force-delete`
+  ([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)).
 - Store positions are mirrored nowhere in the Host's status; they live only in the pins
   Secret.
 - A Reconfigure's `RestartRequired` and honest-result flags come from the unsigned answer to

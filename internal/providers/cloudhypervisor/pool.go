@@ -105,6 +105,17 @@ type hostEntry struct {
 	helloDone bool
 	// apiVersion is the agent's API version from the last verified Hello.
 	apiVersion uint32
+	// freezeDeliveredGen and freezeDeliveredKey name the freeze confirmation
+	// last delivered to the agent and the connection it went on.
+	freezeDeliveredGen uint64
+	freezeDeliveredKey string
+	// freezeUnsupportedGen is the connection whose agent answered
+	// AgentStatus Unimplemented: nothing is relayed on it again.
+	freezeUnsupportedGen uint64
+	// freezeFailures counts consecutive failed relays, and freezeNextTry is
+	// the earliest time of the next one (a backoff).
+	freezeFailures int
+	freezeNextTry  time.Time
 }
 
 // transportInfo is one established transport of an entry's connection.
@@ -386,6 +397,13 @@ func (p *pool) reconcile(inv hostsecret.Inventory) error {
 			unroutable[h.ID] = true
 			refused[logID(h.ID)] = err.Error()
 			continue
+		}
+		if f := h.FreezeConfirmation; f != nil {
+			if err := f.Validate(); err != nil {
+				// An invalid confirmation is dropped; the host stays routed.
+				p.log.Warn("host inventory: invalid freeze confirmation dropped", "host", logID(h.ID), "error", err.Error())
+				h.FreezeConfirmation = nil
+			}
 		}
 		want[h.ID] = h
 	}

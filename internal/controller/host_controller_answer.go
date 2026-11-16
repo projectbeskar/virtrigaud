@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -102,6 +103,14 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 			fmt.Sprintf("signed host answer verified (agent state %s, store position %d)", v.Context.GetAgentState(), v.Position.Seq))
 		if c := meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentStoreRegressed); c != nil {
 			setHostCondition(host, HostConditionAgentStoreRegressed, metav1.ConditionFalse, reasonHostStoreNotRegressed, "")
+		}
+		// A predecessor whose freeze was confirmed is removed once the host
+		// shows, signed, that it discarded it.
+		for _, id := range r.HostAnswers.checkFreezeDiscards(ctx, provider, reader, host.Name) {
+			if r.Recorder != nil {
+				r.Recorder.Event(host, corev1.EventTypeNormal, eventReasonAgentPredecessorDiscarded,
+					"the host discarded the records of predecessor enrolment "+id+" (signed answer); it is no longer listed")
+			}
 		}
 	default:
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing,

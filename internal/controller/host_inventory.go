@@ -801,13 +801,15 @@ func (r *HostReconciler) auditInventory(ctx context.Context, host *infravirtriga
 }
 
 // forgetHostInventory drops what the manager holds in memory about a Host's
-// inventory (its backoff, audit state and metric series), when the Host is
+// inventory (its backoff, audit state and metric series) and its freeze
+// probes' backoff, when the Host is
 // gone or deleted.
 func (r *HostReconciler) forgetHostInventory(key types.NamespacedName) {
 	r.inventoryEvents.forget(key.Namespace + "/" + key.Name)
 	metrics.DeleteHostInventoryConditions(key.Namespace, key.Name)
 	if r.HostAnswers != nil {
 		r.HostAnswers.forgetInventoryBackoff(key)
+		r.HostAnswers.pruneFreezeProbes(key, nil)
 	}
 }
 

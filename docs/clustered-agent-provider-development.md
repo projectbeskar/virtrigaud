@@ -250,6 +250,23 @@ host that came back is reached by that call. Every forwarded call has its own
 deadline: 20 seconds, or the caller's deadline less half a second when that
 is sooner, so that the Provider answers before the caller gives up.
 
+## Freeze confirmations
+
+An entry may carry the manager's `freezeConfirmation`: the host's current
+enrolment id and up to 16 predecessor enrolment ids whose freeze the manager
+confirmed. Before the next call to that host, the Provider relays it
+unchanged with `agent.v1 AgentStatus` on the host's verified connection,
+once per connection and again when it changes; a relay never fails the call
+itself. A failed relay is logged and tried again with a later call, waiting
+10 seconds after the first failure and doubling up to 10 minutes per host. An
+agent that answers `Unimplemented` (it predates confirmations) is not asked
+again on that connection. A malformed confirmation (a bad id, more than 16,
+or the current enrolment among them) is dropped with a log line; the entry
+stays routable and nothing is relayed. The Provider does
+not judge the confirmation: the agent applies it only to its own frozen
+predecessors of the named current enrolment
+([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)).
+
 ## Routing
 
 | Method | How it is routed | What is forwarded |

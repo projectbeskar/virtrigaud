@@ -174,10 +174,90 @@ only once the manager has pinned its key for the Host, and install it with
 the replaced enrolment's open operations
 ([details](per-host-agent-development.md#re-enrolment-freeze)).
 
-A predecessor stays listed until the host confirms it has discarded the
-predecessor's records. That confirmation is not delivered yet, so
-predecessors accumulate up to the bound; until it exists, a Host that reaches
-the bound can only be revoked and replaced by a new Host object.
+### Confirming a predecessor's freeze
+
+A predecessor stays listed until the host has discarded its records, in
+three steps:
+
+1. **Decision.** The manager confirms the freeze of a predecessor once it has
+   been one for at least two minutes plus a 30-second margin for clock skew
+   between manager replicas, and no attempt that could still need it is
+   open. A predecessor recorded without a time (state written before times
+   were kept) is stamped with the current time and waits the full period.
+   The attempts that hold a predecessor are those of VirtualMachines of the
+   Host's Provider (by `spec.providerRef` or `status.boundProvider`, in any
+   namespace) that are open (not `Terminal`) on the Host, and the `Terminal`
+   Delete attempts on the Host of VirtualMachines still being deleted. Each
+   such attempt holds only the predecessor it was minted under, which the
+   manager reads from the attempt's authenticated intent; an attempt whose
+   intent cannot be read or authenticated holds every predecessor. The
+   manager first looks at its cache: if the cache already shows every due
+   predecessor held, it waits without reading the API server. Otherwise it
+   confirms with a paginated read from the API server (500 objects a page);
+   an intent authenticated in the cache pass is not read again.
+   The decision is recorded in the pins Secret
+   (`confirmedFrozenEnrolmentIDs`, with the time each predecessor became one
+   in `predecessorSince`) and reported with an `AgentFreezeConfirmed` event
+   naming the enrolment id. While a predecessor waits, the check is repeated
+   after one minute, doubling up to ten minutes, and the decision survives a
+   manager restart.
+2. **Delivery.** The confirmed predecessors (at most 16) and the Host's
+   current enrolment id are rendered into the Provider's host inventory
+   (`freezeConfirmation`) when the inventory is next rendered (at least every
+   60 seconds), which the Provider follows; it relays them to the agent with
+   the next call to the host (`agent.v1 AgentStatus`), once per connection
+   and again when they change. The agent discards the records of the
+   predecessors it holds as frozen predecessors of that current enrolment
+   and ignores everything else
+   ([details](per-host-agent-development.md#freeze-confirmation),
+   [Provider side](clustered-agent-provider-development.md#freeze-confirmations)).
+3. **Removal.** The manager's heartbeat asks the host, with a signed request,
+   about an operation id it never used under each confirmed predecessor. Only
+   a verified signed answer from a ready agent, answering under another
+   enrolment, that the predecessor is `UNKNOWN_TO_AGENT` (its records are
+   gone) removes it from the pins Secret (written with its resourceVersion
+   as precondition), with an `AgentPredecessorDiscarded` event and an audit
+   log line carrying the signed answer. A `NO_RECORD` (still held), an
+   unsigned answer, an answer from an agent that is not ready or that
+   answers under the predecessor itself, or one about another operation or
+   enrolment removes nothing. A probe that removes nothing is repeated after
+   one minute, doubling up to 30 minutes, per predecessor. A removed
+   predecessor is kept in a bounded list (`discardedEnrolmentIDs`, the last
+   32): a VM whose attempt was minted under it is then reported as an attempt
+   of a predecessor the host has discarded, and held as such, not as a
+   tampered intent.
+
+Once removed, a predecessor no longer counts towards the bound of 8, so a
+Host that reached it can be re-keyed again. The relay is unsigned: a
+Provider that confirms a predecessor the manager did not confirm, or relays
+a stale confirmation, can only make the host discard records early. Their
+operations are then answered `UNKNOWN_TO_AGENT` and the manager holds their
+VMs; nothing runs twice. Such a predecessor is not removed from the pins
+Secret, since the manager only probes those it confirmed. A Provider or an
+agent that predates this never confirms anything: predecessors then stay
+listed, as before.
+
+An attempt minted just before a re-key is never first sent under the new
+enrolment: after recording the attempt and before its first send, the
+manager reads the Host's enrolment again and, if it changed, does not send
+it. The VM is held with the reason `OperationHostRekeyed` for an operator
+(`orphan-on-delete` or force-delete), as for any attempt of a predecessor.
+If the enrolment cannot be read at that point (a transient API error), the
+attempt is not sent either, and the VM is not held: the next reconcile asks
+about the attempt and decides again.
+
+**Liveness cost.** An attempt held this way, or any attempt of a
+predecessor, is never concluded on its own. The host's `NO_RECORD` (or
+`RETIRED`) answer about an attempt under a predecessor enrolment is not taken
+as proof that it was never performed, so the attempt stays open (`Prepared`
+or `Sent`), its VM stays held, and the attempt keeps that predecessor from
+being confirmed. The predecessor then stays listed and counts towards the
+bound of 8 until an operator settles the VM: set the annotation
+`virtrigaud.io/orphan-on-delete=true` and delete the VirtualMachine (the
+manager forgets it and leaves whatever the host has), or set
+`virtrigaud.io/force-delete` on it.
+Once the VM and its attempts are gone, the predecessor is confirmed at the
+next check.
 
 ### Start epochs
 
@@ -403,5 +483,5 @@ inventory, and a Provider that follows the inventory Secret through the API
 The agent side (key generation, CSR, certificate installation, deriving the
 enrolment record) is described in
 [`per-host-agent-development.md`](per-host-agent-development.md#enrolment).
-Confirming a predecessor's freeze to the host, and removing the predecessor
-once it is confirmed, are not done yet.
+A predecessor's freeze is confirmed and the predecessor removed as described
+in [Confirming a predecessor's freeze](#confirming-a-predecessors-freeze).

@@ -59,7 +59,8 @@ func fullMessages() []proto.Message {
 		&HelloResponse{HostAnswer: blob()},
 		&InstallRenewedCertificateRequest{AnswerNonce: fill(0x02, 16), Certificate: fill(0x03, 600), Activate: true},
 		&InstallRenewedCertificateResponse{HostAnswer: blob()},
-		&AgentStatusRequest{AnswerNonce: fill(0x04, 16)},
+		&AgentStatusRequest{AnswerNonce: fill(0x04, 16), ConfirmFrozenEnrolmentIds: [][]byte{fill(0x05, 16)},
+			ConfirmForEnrolmentId: fill(0x06, 16)},
 		&AgentStatusResponse{HostAnswer: blob()},
 	}
 }
@@ -112,6 +113,11 @@ type fieldSpec struct {
 	typeName protoreflect.FullName
 }
 
+// repeatedFields are the only repeated fields of the package.
+var repeatedFields = map[protoreflect.FullName]bool{
+	"agent.v1.AgentStatusRequest.confirm_frozen_enrolment_ids": true,
+}
+
 func checkExactFields(t *testing.T, md protoreflect.MessageDescriptor, want []fieldSpec) {
 	t.Helper()
 	if md.Fields().Len() != len(want) {
@@ -123,9 +129,10 @@ func checkExactFields(t *testing.T, md protoreflect.MessageDescriptor, want []fi
 			t.Errorf("%s: field %s missing", md.FullName(), w.name)
 			continue
 		}
-		if fd.Number() != w.number || fd.Kind() != w.kind || fd.Cardinality() == protoreflect.Repeated {
-			t.Errorf("%s.%s: number %d kind %v repeated %v, want number %d kind %v singular",
-				md.FullName(), w.name, fd.Number(), fd.Kind(), fd.Cardinality() == protoreflect.Repeated, w.number, w.kind)
+		wantRepeated := repeatedFields[fd.FullName()]
+		if fd.Number() != w.number || fd.Kind() != w.kind || (fd.Cardinality() == protoreflect.Repeated) != wantRepeated {
+			t.Errorf("%s.%s: number %d kind %v repeated %v, want number %d kind %v repeated %v",
+				md.FullName(), w.name, fd.Number(), fd.Kind(), fd.Cardinality() == protoreflect.Repeated, w.number, w.kind, wantRepeated)
 		}
 		var typeName protoreflect.FullName
 		if fd.Message() != nil {
@@ -152,6 +159,8 @@ func TestAgent_FieldNumbersPinned(t *testing.T) {
 	checkExactFields(t, (&InstallRenewedCertificateResponse{}).ProtoReflect().Descriptor(), answer)
 	checkExactFields(t, (&AgentStatusRequest{}).ProtoReflect().Descriptor(), []fieldSpec{
 		{"answer_nonce", 1, protoreflect.BytesKind, ""},
+		{"confirm_frozen_enrolment_ids", 2, protoreflect.BytesKind, ""},
+		{"confirm_for_enrolment_id", 3, protoreflect.BytesKind, ""},
 	})
 	checkExactFields(t, (&AgentStatusResponse{}).ProtoReflect().Descriptor(), answer)
 	if n := File_agent_v1_agent_proto.Messages().Len(); n != 6 {

@@ -677,6 +677,25 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if r.operationCrashed(ctx, crashAfterPrepared) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	// The enrolment was read before the marker was written: read the Host's
+	// enrolment again, now that the marker is visible to the freeze check,
+	// and never send an attempt minted under an enrolment that is no longer
+	// the host's current one (a re-key in between). It is then asked about
+	// as a predecessor's, never sent.
+	now, terr := r.HostAnswers.Trust.HostTrust(ctx, ia.providerCR, host)
+	if terr != nil {
+		// Not known to be re-keyed: the attempt stays Prepared and the next
+		// reconcile asks about it and decides again (a predecessor's
+		// attempt is then never sent).
+		logger.Info("The host's enrolment could not be read again before the first send; the attempt is sent later",
+			"kind", opReq.Kind, "attempt", attemptNo, "opID", opIDHex, "host", host, "error", terr.Error())
+		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+	}
+	if !bytes.Equal(now.Enrolment.EnrolmentID, enrol.EnrolmentID) {
+		logger.Info("The host's enrolment changed before the attempt was first sent; it is not sent", "kind", opReq.Kind,
+			"attempt", attemptNo, "opID", opIDHex, "host", host)
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationHostRekeyed, msgOperationHostRekeyed, operationHoldRecheckInterval), nil
+	}
 	ia.noteResult(&prepared, nil)
 	return r.sendAttempt(ctx, vm, ia, &marker, prepared, true)
 }
@@ -790,6 +809,13 @@ func (r *VirtualMachineReconciler) checkIntentIdentity(ctx context.Context, vm *
 				return errIntentPredecessor
 			}
 		}
+		for _, gone := range trust.Discarded {
+			if bytes.Equal(gone, id.EnrolmentID) {
+				// The host discarded it: asked about (UNKNOWN_TO_AGENT, so
+				// held), never re-sent, and not tampered.
+				return errIntentPredecessorDiscarded
+			}
+		}
 		return fmt.Errorf("enrolment: %w", errIntentTampered)
 	}
 	return nil
@@ -804,6 +830,17 @@ var errNoEnrolmentSource = errors.New("the host's operation-identity enrolment c
 // earlier enrolment that the host still holds frozen: the attempt may be
 // asked about by op_id, never re-sent.
 var errIntentPredecessor = errors.New("the intent names a predecessor enrolment of the host")
+
+// msgOperationHostRekeyed is the hold of an attempt minted just before its
+// host was re-keyed.
+var msgOperationHostRekeyed = "the host was re-keyed after this attempt was minted and before it was first sent, so it is never sent; " +
+	"it is asked about as a predecessor enrolment's attempt (the host has no record of it) and held for an operator " +
+	"(orphan-on-delete or force-delete)"
+
+// errIntentPredecessorDiscarded is checkIntent's answer for an intent issued
+// under a predecessor enrolment the host has since discarded; it is an
+// errIntentPredecessor (treated the same way).
+var errIntentPredecessorDiscarded = fmt.Errorf("%w, which the host has discarded", errIntentPredecessor)
 
 // msgNoEnrolmentSource is the hold of a manager that cannot read the host's
 // enrolment.

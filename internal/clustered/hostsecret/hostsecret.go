@@ -166,6 +166,49 @@ type Host struct {
 	// credential resolution — so a rendered host always carries usable material,
 	// but an unpopulated Credentials still renders as {} for schema stability).
 	Credentials Credentials `json:"credentials"`
+
+	// FreezeConfirmation, for a per-host agent host only, is the manager's
+	// confirmation that the host may discard the records of frozen
+	// predecessor enrolments: the Provider relays it to the agent
+	// (agent.v1 AgentStatus). Omitted when there is none. Development builds
+	// only.
+	FreezeConfirmation *FreezeConfirmation `json:"freezeConfirmation,omitempty"`
+}
+
+// MaxFreezeConfirmations bounds the enrolment ids of a FreezeConfirmation.
+const MaxFreezeConfirmations = 16
+
+// FreezeConfirmation names frozen predecessor enrolments of a host whose
+// freeze the manager confirms. It carries enrolment ids only (public
+// identifiers).
+type FreezeConfirmation struct {
+	// ForEnrolmentID is the host's current enrolment the confirmation was
+	// made for, as 32 lowercase hexadecimal characters.
+	ForEnrolmentID string `json:"forEnrolmentID"`
+	// EnrolmentIDs are the confirmed predecessor enrolment ids, each 32
+	// lowercase hexadecimal characters; 1 to MaxFreezeConfirmations.
+	EnrolmentIDs []string `json:"enrolmentIDs"`
+}
+
+// enrolmentIDRE is the shape of an enrolment id in a FreezeConfirmation.
+var enrolmentIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// Validate checks a FreezeConfirmation's shape; the error echoes no value. A
+// consumer drops an invalid one and keeps the host: it is an optional
+// instruction, never part of how the host is reached.
+func (f FreezeConfirmation) Validate() error {
+	if !enrolmentIDRE.MatchString(f.ForEnrolmentID) {
+		return fmt.Errorf("%w: freeze confirmation: the current enrolment id is malformed", ErrInvalidCredentials)
+	}
+	if len(f.EnrolmentIDs) == 0 || len(f.EnrolmentIDs) > MaxFreezeConfirmations {
+		return fmt.Errorf("%w: freeze confirmation: 1 to %d enrolment ids", ErrInvalidCredentials, MaxFreezeConfirmations)
+	}
+	for _, id := range f.EnrolmentIDs {
+		if !enrolmentIDRE.MatchString(id) || id == f.ForEnrolmentID {
+			return fmt.Errorf("%w: freeze confirmation: an enrolment id is malformed or the current one", ErrInvalidCredentials)
+		}
+	}
+	return nil
 }
 
 // Credentials is the per-host connection material a clustered provider needs to

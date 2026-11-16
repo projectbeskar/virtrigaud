@@ -410,6 +410,7 @@ func (p *Provider) forward(ctx context.Context, host, method string, req, resp p
 		if err = p.pool.helloed(ctx, e); err != nil {
 			return err
 		}
+		p.relayFreeze(ctx, e)
 		cs, err = p.pool.invokeChecked(ctx, e, method, req, resp, nil, true)
 		if !errors.Is(err, errHelloStale) {
 			break

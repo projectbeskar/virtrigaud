@@ -65,7 +65,7 @@ func TestHostEnrolmentState_Rekey(t *testing.T) {
 	assert.Equal(t, uint64(9), e, "the Host's floor raises a fresh Host's first record")
 	r, _ := st.rekeyBlocked(prov)
 	assert.Empty(t, r, "a first enrolment is never blocked")
-	assert.Empty(t, st.rekey(enrolmentFor("e1", prov, 0, pin(1))), "a first enrolment replaces nothing")
+	assert.Empty(t, st.rekey(enrolmentFor("e1", prov, 0, pin(1)), time.Now()), "a first enrolment replaces nothing")
 	assert.Equal(t, uint64(baseMintEpochCounter), st.Current.mintEpoch())
 	e, _, _ = st.nextStartEpoch(0)
 	assert.Equal(t, uint64(2), e)
@@ -78,7 +78,7 @@ func TestHostEnrolmentState_Rekey(t *testing.T) {
 	e, _, _ = st.nextStartEpoch(0)
 	assert.Equal(t, uint64(5), e)
 	st.Rekey = &rekeyRequest{Value: "2026-11-15T10:00:00Z", Until: metav1.NewTime(time.Now().Add(time.Hour))}
-	assert.Equal(t, "e1", st.rekey(enrolmentFor("e2", prov, 5, pin(2))))
+	assert.Equal(t, "e1", st.rekey(enrolmentFor("e2", prov, 5, pin(2)), time.Now()))
 	assert.Equal(t, uint64(5), st.Current.mintEpoch(), "grants are minted at the record's epoch")
 	assert.Equal(t, []string{"e1"}, st.PredecessorEnrolmentIDs)
 	assert.Equal(t, []string{pin(1)}, st.PreviousKeyPins)
@@ -90,7 +90,7 @@ func TestHostEnrolmentState_Rekey(t *testing.T) {
 	assert.ElementsMatch(t, []string{"e1", "e2"}, st.usedEnrolmentIDs(), "the current and predecessor ids are never drawn")
 
 	for i := 3; i < 3+maxPreviousKeyPins+2; i++ {
-		st.rekey(enrolmentFor(fmt.Sprintf("e%d", i), prov, uint64(i+3), pin(i)))
+		st.rekey(enrolmentFor(fmt.Sprintf("e%d", i), prov, uint64(i+3), pin(i)), time.Now())
 	}
 	assert.Len(t, st.PreviousKeyPins, maxPreviousKeyPins, "previous pins are bounded")
 	assert.NotContains(t, st.PreviousKeyPins, pin(1), "the oldest is dropped")
@@ -154,14 +154,14 @@ func TestPinsHostTrust_RekeyedEnrolment(t *testing.T) {
 
 	first, second := strings.Repeat("a1", 16), strings.Repeat("b2", 16)
 	l := loadedEnrolment{state: hostEnrolmentState{HostUID: string(h.UID), Identity: h.Spec.Identity}}
-	l.state.rekey(enrolmentFor(first, string(identityProviderUID), 0, strings.Repeat("ab", 32)))
+	l.state.rekey(enrolmentFor(first, string(identityProviderUID), 0, strings.Repeat("ab", 32)), time.Now())
 	require.NoError(t, saveHostEnrolment(ctx, cli, cfg, h, &l))
 	rec := hostidentity.StoreRecord{StoreID: [16]byte{1}, EnrolmentID: bytes.Repeat([]byte{0xa1}, 16), Seq: 9, Head: [32]byte{9}}
 	require.NoError(t, src.UpdateStoreState(ctx, prov, "host-a", func(st *HostStoreState) { st.Current = rec }))
 
 	l, err := loadHostEnrolment(ctx, cli, cfg, h)
 	require.NoError(t, err)
-	assert.Equal(t, first, l.state.rekey(enrolmentFor(second, string(identityProviderUID), 2, strings.Repeat("cd", 32))))
+	assert.Equal(t, first, l.state.rekey(enrolmentFor(second, string(identityProviderUID), 2, strings.Repeat("cd", 32)), time.Now()))
 	require.NoError(t, saveHostEnrolment(ctx, cli, cfg, h, &l))
 
 	trust, err := src.HostTrust(ctx, prov, "host-a")
@@ -193,6 +193,17 @@ func TestPinsHostTrust_RekeyedEnrolment(t *testing.T) {
 	assert.NoError(t, check(id(second, 2)), "an attempt under the new enrolment and its epoch")
 	assert.True(t, errors.Is(check(id(second, 1)), errIntentTampered), "the new enrolment under the old epoch counter is not its own")
 	assert.True(t, errors.Is(check(id(strings.Repeat("c3", 16), 2)), errIntentTampered), "an enrolment the host never had")
+
+	// The predecessor is discarded (confirmed, and shown gone by the host):
+	// an attempt still naming it is a discarded predecessor's, never
+	// tampered (no tamper hold or Warning).
+	ok, err := src.DiscardPredecessor(ctx, prov, "host-a", bytes.Repeat([]byte{0xa1}, 16))
+	require.NoError(t, err)
+	require.True(t, ok)
+	gone := check(id(first, 1))
+	assert.True(t, errors.Is(gone, errIntentPredecessor))
+	assert.True(t, errors.Is(gone, errIntentPredecessorDiscarded))
+	assert.False(t, errors.Is(gone, errIntentTampered))
 
 	// Revoked after the re-key: no enrolment is trusted any more; every
 	// attempt, a predecessor's too, is held (never sent, never closed as

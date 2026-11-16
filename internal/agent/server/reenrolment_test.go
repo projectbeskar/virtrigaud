@@ -18,8 +18,10 @@ package server_test
 
 import (
 	"bytes"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +36,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -156,5 +159,101 @@ func TestReenrolment_OldEnrolmentAnsweredUntilFreezeConfirmed(t *testing.T) {
 	}
 	if n := e.exec.total(); n != effects {
 		t.Fatalf("effects = %d after the confirmation, want %d", n, effects)
+	}
+}
+
+// confirm sends AgentStatus carrying a freeze confirmation; the call
+// succeeds whatever the confirmation says.
+func (e *opsEnv) confirm(forEnrolment []byte, ids ...[]byte) {
+	e.t.Helper()
+	if _, err := agentv1.NewAgentServiceClient(e.cc()).AgentStatus(ctx(e.t), &agentv1.AgentStatusRequest{
+		AnswerNonce: nonce(0x33), ConfirmForEnrolmentId: forEnrolment, ConfirmFrozenEnrolmentIds: ids}); err != nil {
+		e.t.Fatalf("AgentStatus with a confirmation: %v", err)
+	}
+}
+
+// TestReenrolment_RelayedFreezeConfirmation: a relayed (unsigned) freeze
+// confirmation discards a frozen predecessor only when it names the active
+// enrolment and the predecessor; a stale one (made for another enrolment),
+// one naming the active enrolment, an unknown or malformed id, or too many
+// ids discards nothing. A discarded predecessor's operations are then
+// UNKNOWN_TO_AGENT, never refused as definitely not performed, and never run
+// again; a repeated confirmation changes nothing.
+func TestReenrolment_RelayedFreezeConfirmation(t *testing.T) {
+	e := newOpsEnv(t)
+	old := e.pki.Record.EnrolmentID
+	done := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
+	task, err := e.send(done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitDone(task)
+	effects := e.exec.total()
+	next := e.reenrol()
+	stillHeld := func(why string) {
+		t.Helper()
+		if _, a, err := e.signedStatus(done, nonce(1)); err != nil ||
+			a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED {
+			t.Fatalf("%s: the predecessor's record is gone: %v %v", why, a, err)
+		}
+	}
+
+	e.confirm(old, old) // made for the predecessor, not the active enrolment
+	stillHeld("a stale confirmation")
+	e.confirm(randID(), old)
+	stillHeld("a confirmation for an enrolment the host never had")
+	e.confirm(next, next, randID(), []byte{1, 2, 3})
+	stillHeld("the active, an unknown and a malformed id")
+	if hv, err := e.store.HostView(ctx(t), 0); err != nil || hv.Enrolment == nil || !bytes.Equal(hv.Enrolment.ID, next) {
+		t.Fatalf("the active enrolment after confirming it: %+v %v", hv, err)
+	}
+	many := make([][]byte, opstore.MaxFreezeConfirmations+1)
+	for i := range many {
+		many[i] = old
+	}
+	e.confirm(next, many...)
+	stillHeld("too many ids")
+
+	e.confirm(next, old)
+	_, a, err := e.signedStatus(done, nonce(2))
+	if status.Code(err) != codes.NotFound || reasonOf(err) != contracts.UnknownToAgentReason ||
+		a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNKNOWN_TO_AGENT {
+		t.Fatalf("the discarded predecessor's op: %v %v", a, err)
+	}
+	e.confirm(next, old) // idempotent
+	if _, err := e.send(done); err == nil || contracts.IsDefiniteNotPerformedReason(reasonOf(err)) {
+		t.Fatalf("a replay after the discard: %v, want a refusal that is not definite", err)
+	}
+	if n := e.exec.total(); n != effects {
+		t.Fatalf("effects = %d, want %d: nothing runs again", n, effects)
+	}
+	var logged bool
+	for _, l := range e.logs.all() {
+		if strings.Contains(l, "freeze confirmed") && strings.Contains(l, hex.EncodeToString(old)) {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Fatal("the discard is not audited")
+	}
+}
+
+// TestReenrolment_FreezeConfirmationIgnoredWithoutAConfirmer: an agent that
+// applies no confirmation (a release build, or one that predates the field)
+// answers AgentStatus and keeps the predecessor's records.
+func TestReenrolment_FreezeConfirmationIgnoredWithoutAConfirmer(t *testing.T) {
+	e := newOpsEnv(t, func(o *server.Options) { o.Freezes = nil })
+	old := e.pki.Record.EnrolmentID
+	done := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
+	task, err := e.send(done)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.waitDone(task)
+	next := e.reenrol()
+	e.confirm(next, old)
+	if _, a, err := e.signedStatus(done, nonce(1)); err != nil ||
+		a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED {
+		t.Fatalf("the predecessor's record after an ignored confirmation: %v %v", a, err)
 	}
 }

@@ -65,6 +65,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -89,6 +90,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 )
 
 // Manager flags of host-agent enrolment. Only a manager built with the
@@ -444,6 +446,20 @@ type hostEnrolmentState struct {
 	// replaces; an entry is removed only once the host has confirmed its
 	// freeze (later work). At most maxPredecessorEnrolmentIDs.
 	PredecessorEnrolmentIDs []string `json:"predecessorEnrolmentIDs,omitempty"`
+	// PredecessorSince records when each predecessor became one (enrolment
+	// id to time), for the quiet period before its freeze is confirmed and
+	// for operators.
+	PredecessorSince map[string]metav1.Time `json:"predecessorSince,omitempty"`
+	// ConfirmedFrozenEnrolmentIDs are the predecessors whose freeze the
+	// manager has confirmed (no open attempt on the Host): they are rendered
+	// into the host inventory for the agent, and removed with the
+	// predecessor once a signed answer shows the host discarded them.
+	ConfirmedFrozenEnrolmentIDs []string `json:"confirmedFrozenEnrolmentIDs,omitempty"`
+	// DiscardedEnrolmentIDs are predecessors the host has shown, signed, to
+	// have discarded, newest last, at most maxDiscardedEnrolmentIDs: an
+	// attempt still naming one is held as a discarded predecessor's (its
+	// operations are UNKNOWN_TO_AGENT), not as tampered.
+	DiscardedEnrolmentIDs []string `json:"discardedEnrolmentIDs,omitempty"`
 	// LastIssuedEpoch is the highest start epoch of a record the manager has
 	// approved a request for: a CA-valid certificate may exist for it, even
 	// if the manager later refused it, and a host may have started it. The
@@ -597,11 +613,15 @@ func (st *hostEnrolmentState) rekeyBlocked(providerUID string) (reason, message 
 // rekey replaces the current enrolment with next: the replaced enrolment
 // becomes a predecessor (its attempts are still asked about, its VMs held)
 // and next's grants are issued under the next epoch counter.
-func (st *hostEnrolmentState) rekey(next *currentEnrolment) (replaced string) {
+func (st *hostEnrolmentState) rekey(next *currentEnrolment, now time.Time) (replaced string) {
 	if prev := st.Current; prev != nil {
 		replaced = prev.Record.EnrolmentID
 		if !slices.Contains(st.PredecessorEnrolmentIDs, replaced) {
 			st.PredecessorEnrolmentIDs = append(st.PredecessorEnrolmentIDs, replaced)
+			if st.PredecessorSince == nil {
+				st.PredecessorSince = map[string]metav1.Time{}
+			}
+			st.PredecessorSince[replaced] = predecessorStamp(now)
 		}
 		for _, pin := range prev.KeyPins {
 			if !slices.Contains(st.PreviousKeyPins, pin) {
@@ -868,6 +888,14 @@ type HostEnrolmentReconciler struct {
 	Rand io.Reader
 	// Now is the clock (nil: time.Now).
 	Now func() time.Time
+	// IntentAuth authenticates operation-intent Secrets, so that only an
+	// attempt under a predecessor blocks its freeze confirmation (nil: every
+	// open attempt on the Host blocks every predecessor).
+	IntentAuth operation.IntentAuthenticator
+
+	// freezeWaits counts, per Host, the consecutive checks a predecessor
+	// stayed blocked (the recheck backoff). The zero value is ready.
+	freezeWaits sync.Map
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
@@ -881,9 +909,11 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
+		r.freezeWaits.Delete(req.String())
 		return ctrl.Result{}, r.forgetGoneHost(ctx, req.NamespacedName)
 	}
 	if !host.DeletionTimestamp.IsZero() {
+		r.freezeWaits.Delete(req.String())
 		// A deleting Host is never enrolled again; its pins go first.
 		return ctrl.Result{}, deleteHostEnrolment(ctx, r.Client, r.liveReader(), r.Config, host.Namespace, host.Name, host.UID)
 	}
@@ -980,16 +1010,23 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 	}
+	// Confirm the freeze of predecessors no open attempt can name.
+	freezeChanged, freezeRecheckAfter, err := r.confirmFreezes(ctx, host, st)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	changed = changed || freezeChanged
 	if changed {
 		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	res := ctrl.Result{}
+	res.RequeueAfter = freezeRecheckAfter
 	if c := st.Current; c != nil && !host.Spec.Revoked {
 		// Re-mirror at expiry so the condition and the render follow it.
-		if d := c.NotAfter.Sub(r.now()); d > 0 {
-			res.RequeueAfter = d + time.Second
+		if d := c.NotAfter.Sub(r.now()) + time.Second; d > time.Second && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
+			res.RequeueAfter = d
 		}
 		// Close an open re-key window on time.
 		if st.Rekey != nil {
@@ -1053,7 +1090,9 @@ func (r *HostEnrolmentReconciler) forgetGoneHost(ctx context.Context, key types.
 	return deleteHostEnrolment(ctx, r.Client, reader, r.Config, key.Namespace, key.Name, "")
 }
 
-// liveReader returns the APIReader, or the Client when none is set.
+// liveReader returns the APIReader, which reads the API server, or the
+// cache-backed Client when none is set (tests only; production wiring always
+// sets APIReader).
 func (r *HostEnrolmentReconciler) liveReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader
@@ -1182,6 +1221,14 @@ func (r *HostEnrolmentReconciler) hostRequestFromAnnotation(_ context.Context, o
 // while the manager was down), and enrolment requests (so an abandoned
 // request's record is retired).
 func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// The freeze confirmation reads a Provider's VirtualMachines through
+	// these cache indexes before it reads the API server.
+	if err := indexSpecProvider(mgr); err != nil {
+		return err
+	}
+	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
 	inEnrolmentNS := predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetNamespace() == r.Config.Namespace })
 	isPins := predicate.NewPredicateFuncs(func(o client.Object) bool {
 		return o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
@@ -1237,6 +1284,21 @@ func resolveHostAgentTLS(ctx context.Context, c client.Reader, cfg *HostEnrolmen
 		return hostsecret.Credentials{}, "host pins are malformed"
 	}
 	return creds, ""
+}
+
+// resolveHostFreeze returns the freeze confirmation to render for a Host
+// whose agent credentials resolved (resolveHostAgentTLS): nil when there is
+// none or the state cannot be read (the confirmation is then simply not
+// relayed this time).
+func resolveHostFreeze(ctx context.Context, c client.Reader, cfg *HostEnrolmentConfig, host *infravirtrigaudiov1beta1.Host) *hostsecret.FreezeConfirmation {
+	if !devgate.Compiled || cfg == nil || host.Spec.Revoked {
+		return nil
+	}
+	l, err := loadHostEnrolment(ctx, c, cfg, host)
+	if err != nil || l.reset {
+		return nil
+	}
+	return freezeConfirmationOf(&l.state)
 }
 
 // Compile-time assertions.
