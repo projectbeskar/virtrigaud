@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/agent/executor/fake/fake.go`, `script.go`: the fake executor writes a define's VM file before its effect marker (a crash between them made inspection report a define whose VM was missing, and the operation failed dirty) and appends each effect to a synced `intents.log` before performing it.
 - `config/rbac/host-enrolment/admission/approver-policy.yaml`, `docs/host-agent-enrolment.md`: the documented approver-policy allowed no subject common name, which every agent request carries, so it denied every renewal; the sample allows it.
 
+- `cmd/vrtg/host_pinned_test.go`: The mismatching key pin in the `--certificate-out` check test can no longer equal the real pin (it did whenever the real pin started with `00`, about one run in 256).
+
 ### Added
 - `packaging/systemd/vrtg-agent-setup.service`: a oneshot ordered after `systemd-sysext.service` and before the agent, the signer and the shutdown unit (each wants it) that runs `systemd-sysusers` and `systemd-tmpfiles --create` for the agent's fragments, so the users exist when the units arrive in a system extension merged after the boot's own sysusers pass. `virtrigaud-agent.sysusers.conf`: fixed ids 564 (agent) and 565 (signer); collision handling documented.
 - `packaging/systemd/vrtg-agent-boot-start.service`, `packaging/systemd/multi-user.target.d/virtrigaud-agent.conf`: `multi-user.target` upholds the shutdown unit and a `RemainAfterExit` oneshot that runs `systemctl --no-block start vrtg-agent.service` once per boot, so an agent in a late-merged system extension starts at boot while a maintenance stop of the agent is not undone.
