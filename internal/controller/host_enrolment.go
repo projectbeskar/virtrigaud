@@ -1090,7 +1090,9 @@ func (r *HostEnrolmentReconciler) forgetGoneHost(ctx context.Context, key types.
 	return deleteHostEnrolment(ctx, r.Client, reader, r.Config, key.Namespace, key.Name, "")
 }
 
-// liveReader returns the APIReader, or the Client when none is set.
+// liveReader returns the APIReader, which reads the API server, or the
+// cache-backed Client when none is set (tests only; production wiring always
+// sets APIReader).
 func (r *HostEnrolmentReconciler) liveReader() client.Reader {
 	if r.APIReader != nil {
 		return r.APIReader

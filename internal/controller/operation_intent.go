@@ -247,8 +247,9 @@ func (l intentLoader) loadIntent(ctx context.Context, vm *infravirtrigaudiov1bet
 }
 
 // intentLoader reads operation-intent Secrets (full and redacted) with
-// reader, which must read the API server, not a cache, and authenticates them
-// with auth. It is what both the VirtualMachine controller and the Host
+// reader and authenticates them with auth. In production reader is the
+// manager's API reader, which reads the API server; only tests that set no
+// API reader fall back to the cache-backed client. It is what both the VirtualMachine controller and the Host
 // enrolment controller's freeze check read intents with.
 type intentLoader struct {
 	reader client.Reader
