@@ -124,7 +124,7 @@ func TestRecoverRenewal(t *testing.T) {
 		require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur))
 		staged := newKeyOf(f)
 		require.NoError(t, enrol.Stage(f.dir, staged.Raw))
-		done, err := enrol.RecoverRenewal(f.dir, reader(), f.cfg, staged.PublicKey.(*ecdsa.PublicKey), time.Now())
+		done, err := enrol.RecoverRenewal(f.dir, reader(), f.cfg, ecPub(t, staged.PublicKey), time.Now())
 		require.NoError(t, err)
 		assert.True(t, done)
 		b, err := os.ReadFile(filepath.Join(f.dir, trust.FileHostCert))
@@ -138,7 +138,7 @@ func TestRecoverRenewal(t *testing.T) {
 		f := newRenewFixture(t)
 		require.NoError(t, enrol.SavePendingCSR(f.dir, f.newCSR, f.cur))
 		require.NoError(t, enrol.Stage(f.dir, newKeyOf(f).Raw))
-		done, err := enrol.RecoverRenewal(f.dir, reader(), f.cfg, f.cur.PublicKey.(*ecdsa.PublicKey), time.Now())
+		done, err := enrol.RecoverRenewal(f.dir, reader(), f.cfg, ecPub(t, f.cur.PublicKey), time.Now())
 		require.NoError(t, err)
 		assert.False(t, done)
 		assert.FileExists(t, filepath.Join(f.dir, enrol.FileRenewalCert))
@@ -163,4 +163,14 @@ func TestRecoverRenewal(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, done)
 	})
+}
+
+// ecPub returns k as an ECDSA public key, failing the test otherwise.
+func ecPub(t testing.TB, k any) *ecdsa.PublicKey {
+	t.Helper()
+	pub, ok := k.(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatalf("not an ECDSA public key: %T", k)
+	}
+	return pub
 }

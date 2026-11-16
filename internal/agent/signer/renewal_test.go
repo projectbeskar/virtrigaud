@@ -69,13 +69,13 @@ func TestRenewalRequestActivate(t *testing.T) {
 	r, keyFile := renewalSigner(t, true)
 	c := r.client(t)
 	ctx := context.Background()
-	old := c.Public().(*ecdsa.PublicKey)
+	old := ecPub(t, c.Public())
 
 	der, err := c.RenewalRequest(ctx, renewalURIs)
 	require.NoError(t, err)
 	csr, err := x509.ParseCertificateRequest(der)
 	require.NoError(t, err)
-	newPub := csr.PublicKey.(*ecdsa.PublicKey)
+	newPub := ecPub(t, csr.PublicKey)
 	assert.False(t, newPub.Equal(old), "the renewal key is a new key")
 	fi, err := os.Stat(PendingKeyFile(keyFile))
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ func TestRenewalRequestActivate(t *testing.T) {
 	require.NoError(t, err)
 	csr2, err := x509.ParseCertificateRequest(der2)
 	require.NoError(t, err)
-	assert.True(t, csr2.PublicKey.(*ecdsa.PublicKey).Equal(newPub), "the pending key is kept across requests")
+	assert.True(t, ecPub(t, csr2.PublicKey).Equal(newPub), "the pending key is kept across requests")
 
 	// The key in use still signs until activation.
 	d := sha256.Sum256([]byte("before"))
@@ -109,7 +109,7 @@ func TestRenewalRequestActivate(t *testing.T) {
 
 	// A new client sees the new key; signatures are by it.
 	c2 := r.client(t)
-	assert.True(t, c2.Public().(*ecdsa.PublicKey).Equal(newPub))
+	assert.True(t, ecPub(t, c2.Public()).Equal(newPub))
 	sig, err = c2.AnswerSigner().Sign(rand.Reader, d[:], crypto.SHA256)
 	require.NoError(t, err)
 	assert.True(t, ecdsa.VerifyASN1(newPub, d[:], sig))
@@ -132,7 +132,7 @@ func TestRenewalDiscard(t *testing.T) {
 	require.NoError(t, c.DiscardRenewal(ctx, pinOf(t, &newKey(t).PublicKey)))
 	_, err = os.Stat(PendingKeyFile(keyFile))
 	require.NoError(t, err)
-	require.NoError(t, c.DiscardRenewal(ctx, pinOf(t, csr.PublicKey.(*ecdsa.PublicKey))))
+	require.NoError(t, c.DiscardRenewal(ctx, pinOf(t, ecPub(t, csr.PublicKey))))
 	_, err = os.Stat(PendingKeyFile(keyFile))
 	assert.ErrorIs(t, err, os.ErrNotExist)
 	// The next request makes a fresh key.
@@ -140,10 +140,10 @@ func TestRenewalDiscard(t *testing.T) {
 	require.NoError(t, err)
 	csr2, err := x509.ParseCertificateRequest(der2)
 	require.NoError(t, err)
-	assert.False(t, csr2.PublicKey.(*ecdsa.PublicKey).Equal(csr.PublicKey.(*ecdsa.PublicKey)))
+	assert.False(t, ecPub(t, csr2.PublicKey).Equal(ecPub(t, csr.PublicKey)))
 	// With no pending key, discard succeeds.
-	require.NoError(t, c.DiscardRenewal(ctx, pinOf(t, csr2.PublicKey.(*ecdsa.PublicKey))))
-	require.NoError(t, c.DiscardRenewal(ctx, pinOf(t, csr2.PublicKey.(*ecdsa.PublicKey))))
+	require.NoError(t, c.DiscardRenewal(ctx, pinOf(t, ecPub(t, csr2.PublicKey))))
+	require.NoError(t, c.DiscardRenewal(ctx, pinOf(t, ecPub(t, csr2.PublicKey))))
 }
 
 func TestRenewalRefusals(t *testing.T) {
@@ -244,4 +244,14 @@ func rawCall(t *testing.T, socket string, req []byte) (Status, []byte) {
 		return StatusBadRequest, nil
 	}
 	return StatusInternal, nil
+}
+
+// ecPub returns k as an ECDSA public key, failing the test otherwise.
+func ecPub(t testing.TB, k any) *ecdsa.PublicKey {
+	t.Helper()
+	pub, ok := k.(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatalf("not an ECDSA public key: %T", k)
+	}
+	return pub
 }

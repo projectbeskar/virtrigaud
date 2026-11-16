@@ -129,8 +129,10 @@ var renewalConns sync.Map
 
 // rconn returns the run's cached connection.
 func (r *running) rconn() *grpc.ClientConn {
-	if cc, ok := renewalConns.Load(r); ok {
-		return cc.(*grpc.ClientConn) //nolint:forcetypeassert // only connections are stored
+	if v, ok := renewalConns.Load(r); ok {
+		if cc, ok := v.(*grpc.ClientConn); ok {
+			return cc
+		}
 	}
 	cc := r.conn()
 	renewalConns.Store(r, cc)
@@ -192,7 +194,7 @@ func issueRenewal(t *testing.T, r *running, h *host) ([]byte, *ecdsa.PublicKey) 
 	certPEM := h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{})
 	cb, _ := pem.Decode(certPEM)
 	csr, _ := x509.ParseCertificateRequest(v.CSR)
-	return cb.Bytes, csr.PublicKey.(*ecdsa.PublicKey)
+	return cb.Bytes, ecPub(t, csr.PublicKey)
 }
 
 // signerOf parses a host answer's signer certificate key.
@@ -202,7 +204,7 @@ func signerOf(t *testing.T, blob *providerv1.SignedBlob) *ecdsa.PublicKey {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c.PublicKey.(*ecdsa.PublicKey)
+	return ecPub(t, c.PublicKey)
 }
 
 // TestRenewalEndToEnd: past two thirds of its lifetime the agent asks its
@@ -454,3 +456,13 @@ func TestRenewalDiscardedAfterReenrolment(t *testing.T) {
 }
 
 var _ = config.DevBuild
+
+// ecPub returns k as an ECDSA public key, failing the test otherwise.
+func ecPub(t testing.TB, k any) *ecdsa.PublicKey {
+	t.Helper()
+	pub, ok := k.(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatalf("not an ECDSA public key: %T", k)
+	}
+	return pub
+}
