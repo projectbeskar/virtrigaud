@@ -444,10 +444,11 @@ func mapCallError(ctx context.Context, host string, mutating bool, cs *callState
 		return hostUnavailable(host, false, CauseNotFronted)
 	case errors.Is(err, errBreakerOpen):
 		return hostUnavailable(host, true, CauseBreakerOpen)
-	case !cs.answered.Load() && (errors.Is(err, errProviderRefused) || peerRefusedCertificate(err)):
-		// The agent ended the handshake with a fatal alert: it refused the
-		// Provider's certificate before it read any request, so nothing was
-		// performed, a mutating call included.
+	case !cs.answered.Load() && errors.Is(err, errProviderRefused):
+		// The agent ended the connection with a fatal TLS alert before it
+		// sent a single byte of its own: it refused the Provider's
+		// certificate at the handshake and never read a request, so nothing
+		// was performed, a mutating call included.
 		return hostUnavailable(host, true, CauseProviderCertificateRefused)
 	case errors.Is(err, errNotConnected):
 		return hostUnavailable(host, true, CauseAgentUnreachable)
@@ -466,22 +467,13 @@ func mapCallError(ctx context.Context, host string, mutating bool, cs *callState
 }
 
 // remoteTLSAlert is how crypto/tls reports a fatal alert the peer sent
-// ("remote error: tls: bad certificate", "... certificate required", ...),
-// which gRPC carries in the text of a failed connection's error.
+// ("remote error: tls: bad certificate", "... certificate required", ...).
 const remoteTLSAlert = "remote error: tls: "
 
 // errProviderRefused is joined to the error of a call that failed on a
-// connection the agent ended with a fatal TLS alert (hostEntry.refusedOn).
+// connection the agent ended with a fatal TLS alert before sending anything
+// (hostEntry.refusedOn).
 var errProviderRefused = errors.New("the agent refused the Provider's certificate")
-
-// peerRefusedCertificate reports whether err is the failure of a connection
-// the agent ended with a fatal TLS alert. A TLS 1.3 server verifies the
-// client certificate after the client finished its handshake, so the agent's
-// refusal arrives as such an alert instead of the server's first frame; the
-// agent sends no other alert after the handshake.
-func peerRefusedCertificate(err error) bool {
-	return err != nil && strings.Contains(status.Convert(err).Message(), remoteTLSAlert)
-}
 
 // notSentCause names why a call never reached the agent.
 func notSentCause(err error) string {

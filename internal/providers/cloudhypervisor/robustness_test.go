@@ -20,6 +20,8 @@ package cloudhypervisor
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -456,4 +458,51 @@ func TestAgentRefusingTheProviderCertificateHasItsOwnCause(t *testing.T) {
 	_, err = client.Power(ctx(t), signedPower(t, "host-a"))
 	requireHostUnavailable(t, err, CauseProviderCertificateRefused)
 	assert.Empty(t, a.received(), "the agent received no call")
+}
+
+// scriptedConn returns its reads in order, then their errors.
+type scriptedConn struct {
+	net.Conn
+	reads []struct {
+		data string
+		err  error
+	}
+}
+
+func (c *scriptedConn) Read(b []byte) (int, error) {
+	r := c.reads[0]
+	c.reads = c.reads[1:]
+	return copy(b, r.data), r.err
+}
+
+// TestAlertConnReportsOnlyARefusalBeforeAnyData: a fatal TLS alert read
+// before the agent sent anything is a refusal of the Provider's certificate
+// (nothing ran); one read after the agent's first data is not, because a
+// call on that connection may have run.
+func TestAlertConnReportsOnlyARefusalBeforeAnyData(t *testing.T) {
+	alert := errors.New("remote error: tls: bad certificate")
+	var n int
+	c := &alertConn{Conn: &scriptedConn{reads: []struct {
+		data string
+		err  error
+	}{{"", alert}}}, onAlert: func() { n++ }}
+	_, _ = c.Read(make([]byte, 8))
+	assert.Equal(t, 1, n, "an alert before any data is a refusal")
+
+	n = 0
+	c = &alertConn{Conn: &scriptedConn{reads: []struct {
+		data string
+		err  error
+	}{{"settings", nil}, {"", errors.New("remote error: tls: bad record MAC")}}}, onAlert: func() { n++ }}
+	_, _ = c.Read(make([]byte, 8))
+	_, _ = c.Read(make([]byte, 8))
+	assert.Zero(t, n, "an alert after the agent's first data is not a refusal")
+
+	n = 0
+	c = &alertConn{Conn: &scriptedConn{reads: []struct {
+		data string
+		err  error
+	}{{"", io.EOF}}}, onAlert: func() { n++ }}
+	_, _ = c.Read(make([]byte, 8))
+	assert.Zero(t, n, "a close is not a refusal")
 }

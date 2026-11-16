@@ -27,6 +27,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -150,6 +151,8 @@ const (
 // client certificate after the client finished its handshake, so that alert
 // is how an agent refuses the Provider's certificate; gRPC keeps only the
 // error of the connection's last attempt, which a refused redial replaces.
+// An alert after the agent sent anything (its first frame shows it accepted
+// the connection) is not reported: calls on such a connection may have run.
 type alertCreds struct {
 	credentials.TransportCredentials
 	onAlert func()
@@ -172,16 +175,22 @@ func (c *alertCreds) Clone() credentials.TransportCredentials {
 	return &alertCreds{TransportCredentials: c.TransportCredentials.Clone(), onAlert: c.onAlert}
 }
 
-// alertConn is an agent connection that reports a fatal TLS alert it reads.
+// alertConn is an agent connection that reports a fatal TLS alert it reads
+// before any data.
 type alertConn struct {
 	net.Conn
 	onAlert func()
+	// read is set once the agent sent any data (its first frame).
+	read atomic.Bool
 }
 
 // Read implements net.Conn.
 func (c *alertConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
-	if err != nil && isRemoteTLSAlert(err) {
+	if n > 0 {
+		c.read.Store(true)
+	}
+	if err != nil && n == 0 && !c.read.Load() && isRemoteTLSAlert(err) {
 		c.onAlert()
 	}
 	return n, err
