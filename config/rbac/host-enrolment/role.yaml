@@ -61,6 +61,7 @@ rules:
   - certificaterequests
   verbs:
   - create
+  - delete
   - get
   - list
   - watch

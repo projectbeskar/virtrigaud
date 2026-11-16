@@ -241,6 +241,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		e.hostR = &HostEnrolmentReconciler{Client: k8sClient, APIReader: k8sClient, Config: e.cfg, Recorder: e.rec, Now: clock}
 		e.reqR = &HostEnrolmentRequestReconciler{Client: k8sClient, Config: e.cfg, Recorder: e.rec, Now: clock}
 		e.answers = NewHostAnswers(k8sClient, k8sClient, e.cfg, e.cfg.InstallID)
+		e.answers.Now = clock
 
 		// An enrolled Host at start epoch 3: its pins Secret holds the current
 		// enrolment, and the host holds the matching key and certificate.
@@ -334,6 +335,16 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		return b.Bytes
 	}
 
+	renewalRequests := func(e *renewalEnv) []string {
+		list := certrequest.NewList()
+		Expect(k8sClient.List(ctx, list, client.InNamespace(e.issuerNS), client.MatchingLabels{certrequest.LabelAgentRenewal: "true"})).To(Succeed())
+		var out []string
+		for _, i := range list.Items {
+			out = append(out, i.GetName())
+		}
+		return out
+	}
+
 	expectDenied := func(cr *unstructured.Unstructured, reason string) {
 		s, r, found := certrequest.Condition(cr, certrequest.ConditionDenied)
 		Expect(found).To(BeTrue(), "the request must be denied")
@@ -353,6 +364,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		st = state(e)
 		Expect(st.Renewal.CertificateRequest).NotTo(BeEmpty(), "the request's name is recorded first")
 		Expect(st.Renewal.CertificateRequestUID).To(BeEmpty(), "and the request is created only after that")
+		Expect(hostObj(e).Status.Agent.Renewal.CertificateRequest).To(BeEmpty(), "the name is mirrored only once the request exists")
 		list := certrequest.NewList()
 		Expect(k8sClient.List(ctx, list, client.InNamespace(e.issuerNS))).To(Succeed())
 		Expect(list.Items).To(BeEmpty())
@@ -361,8 +373,12 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(st.Renewal.CertificateRequestUID).NotTo(BeEmpty(), "the manager created its request")
 		Expect(h.Status.Agent.Renewal).NotTo(BeNil())
 		Expect(h.Status.Agent.Renewal.Phase).To(Equal(infravirtrigaudiov1beta1.HostAgentRenewalRequested))
+		Expect(h.Status.Agent.Renewal.CertificateRequest).To(Equal(st.Renewal.CertificateRequest))
 		_, name, _ := strings.Cut(st.Renewal.CertificateRequest, "/")
-		return getCR(e, name)
+		cr := getCR(e, name)
+		Expect(cr.GetOwnerReferences()).To(HaveLen(1), "owned by the pins Secret")
+		Expect(cr.GetOwnerReferences()[0].Kind).To(Equal("Secret"))
+		return cr
 	}
 
 	It("rotates the key end to end: request, approval, issuance, stage, pin, activate, unpin", func() {
@@ -414,6 +430,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		// The manager restarts between "pin added" and "old pin removed": a
 		// fresh HostAnswers reads the persisted state.
 		e.answers = NewHostAnswers(k8sClient, k8sClient, e.cfg, e.cfg.InstallID)
+		e.answers.Now = func() time.Time { return e.now }
 		// The Provider activates; the next verified answer of the manager's
 		// own request is signed by the new key and names nothing staged.
 		oldKey, oldCert := e.host.key, e.host.cert
@@ -430,6 +447,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(h.Status.Agent.Renewal).To(BeNil())
 		Expect(h.Status.Agent.KeyPins).To(Equal([]string{newPin}))
 		Expect(resolveHostRenewal(ctx, k8sClient, e.cfg, h)).To(BeNil())
+		Expect(renewalRequests(e)).To(BeEmpty(), "the finished renewal request is deleted")
 
 		// Answers by the old key are no answers now.
 		e.host.mu.Lock()
@@ -573,17 +591,171 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(h.Status.Agent.CertificateExpiry.Time).To(BeTemporally(">", e.now), "the expiry is the renewed certificate's")
 	})
 
-	It("creates nothing while the manager does not know its identity", func() {
+	It("creates nothing while the manager does not know its identity, says so once, and goes on once it does", func() {
 		e := newRenewalEnv()
-		e.cfg.ManagerUsername = ""
+		e.cfg.SetManagerIdentity(ManagerIdentity{})
 		Expect(heartbeat(e)).To(Equal(answerVerified))
 		e.host.startRenewal(e.hostURI, "host-a")
 		Expect(heartbeat(e)).To(Equal(answerVerified))
 		reconcileHost(e)
+		reconcileHost(e)
 		Expect(state(e).Renewal.CertificateRequest).To(BeEmpty())
+		Expect(state(e).Renewal.IdentityReported).To(BeTrue())
+		Expect(strings.Count(drainRenewalEvents(e.rec), eventReasonAgentRenewalNoIdentity)).To(Equal(1), "reported once")
 		list := certrequest.NewList()
 		Expect(k8sClient.List(ctx, list, client.InNamespace(e.issuerNS))).To(Succeed())
 		Expect(list.Items).To(BeEmpty())
+
+		res := &ManagerIdentityResolver{Client: k8sClient, Config: e.cfg, Every: 10 * time.Millisecond}
+		Expect(res.Start(ctx)).To(Succeed())
+		_, ok := e.cfg.managerIdentity()
+		Expect(ok).To(BeTrue())
+		reconcileHost(e)
+		reconcileHost(e)
+		Expect(state(e).Renewal.CertificateRequestUID).NotTo(BeEmpty(), "the request is created once the identity is known")
+	})
+
+	// issueAndRefuse drives the renewal in progress to an issued certificate
+	// that the manager refuses (another CA signed it).
+	issueAndRefuse := func(e *renewalEnv, cr *unstructured.Unstructured) {
+		foreign := hostidentitytest.NewCA(GinkgoT())
+		csr, err := certrequest.CSR(cr)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(certrequest.SetCertificate(cr, foreign.Issue(GinkgoT(), csr, hostidentitytest.IssueOptions{}), foreign.PEM)).To(Succeed())
+		Expect(certrequest.SetCondition(cr, certrequest.ConditionReady, certrequest.StatusTrue, certrequest.ReasonIssued, "issued", time.Now())).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+		reconcileCR(e, cr)
+	}
+
+	It("backs off a renewal whose issued certificate is refused, gives the key up after five failures, and deletes the requests", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		issueAndRefuse(e, cr)
+		st := state(e)
+		Expect(st.Renewal).To(BeNil())
+		Expect(st.RenewalAttempts).To(HaveLen(1))
+		Expect(st.RenewalAttempts[0].Failures).To(Equal(1))
+		Expect(drainRenewalEvents(e.rec)).To(ContainSubstring(eventReasonAgentRenewalRestarted))
+		reconcileHost(e)
+		Expect(renewalRequests(e)).To(BeEmpty(), "the refused request is deleted")
+
+		// Within the backoff the same key is not recorded again.
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		Expect(state(e).Renewal).To(BeNil(), "held back")
+
+		for i := 2; i <= maxRenewalFailures; i++ {
+			e.now = state(e).RenewalAttempts[0].NextTry.Add(time.Second)
+			Expect(heartbeat(e)).To(Equal(answerVerified))
+			Expect(state(e).Renewal).NotTo(BeNil(), "recorded again after the backoff (failure %d)", i)
+			reconcileHost(e)
+			reconcileHost(e)
+			st = state(e)
+			_, name, _ := strings.Cut(st.Renewal.CertificateRequest, "/")
+			cr = reconcileCR(e, getCR(e, name))
+			issueAndRefuse(e, cr)
+			Expect(state(e).RenewalAttempts[0].Failures).To(Equal(i))
+		}
+		Expect(drainRenewalEvents(e.rec)).To(ContainSubstring(eventReasonAgentRenewalGivenUp))
+		e.now = e.now.Add(48 * time.Hour)
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		Expect(state(e).Renewal).To(BeNil(), "a given-up key is never renewed again")
+		reconcileHost(e)
+		Expect(renewalRequests(e)).To(BeEmpty())
+
+		// The host draws a new key: it is renewed.
+		e.host.startRenewal(e.hostURI, "host-a")
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		Expect(state(e).Renewal).NotTo(BeNil())
+	})
+
+	It("restarts a renewal whose request is denied, failed, deleted or unlabelled", func() {
+		for _, breakIt := range []func(e *renewalEnv, cr *unstructured.Unstructured){
+			func(_ *renewalEnv, cr *unstructured.Unstructured) {
+				Expect(certrequest.SetCondition(cr, certrequest.ConditionDenied, certrequest.StatusTrue, "Other", "denied", time.Now())).To(Succeed())
+				Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+			},
+			func(_ *renewalEnv, cr *unstructured.Unstructured) {
+				Expect(certrequest.SetCondition(cr, certrequest.ConditionReady, certrequest.StatusFalse, certrequest.ReasonFailed, "failed", time.Now())).To(Succeed())
+				Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+			},
+			func(_ *renewalEnv, cr *unstructured.Unstructured) { Expect(k8sClient.Delete(ctx, cr)).To(Succeed()) },
+			func(_ *renewalEnv, cr *unstructured.Unstructured) {
+				l := cr.GetLabels()
+				delete(l, certrequest.LabelAgentRenewal)
+				cr.SetLabels(l)
+				Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+			},
+		} {
+			e := newRenewalEnv()
+			cr := requested(e)
+			oldName := cr.GetName()
+			breakIt(e, cr)
+			reconcileHost(e)
+			st := state(e)
+			Expect(st.Renewal).To(BeNil(), "the renewal restarts")
+			Expect(st.RenewalAttempts).To(HaveLen(1))
+			e.now = st.RenewalAttempts[0].NextTry.Add(time.Second)
+			Expect(heartbeat(e)).To(Equal(answerVerified))
+			reconcileHost(e)
+			reconcileHost(e)
+			Expect(state(e).Renewal.CertificateRequestUID).NotTo(BeEmpty(), "a new request is created")
+			Expect(state(e).Renewal.CertificateRequest).NotTo(HaveSuffix("/"+oldName), "under a new name")
+		}
+	})
+
+	It("draws another name when a request of the drawn name exists and is not the manager's", func() {
+		e := newRenewalEnv()
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		e.host.startRenewal(e.hostURI, "host-a")
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		reconcileHost(e)
+		st := state(e)
+		_, name, _ := strings.Cut(st.Renewal.CertificateRequest, "/")
+		body, _, err := st.Renewal.body()
+		Expect(err).NotTo(HaveOccurred())
+		squat := certrequest.NewRenewal(certrequest.RenewalSpec{Namespace: e.issuerNS, Name: name, HostNamespace: e.hostNS, HostName: "host-a",
+			HostHash: hostHashLabel(e.hostNS, "host-a"), IssuerRef: enrolTestCMIssuer, Duration: time.Hour, Username: "mallory",
+			CSRPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: body.GetCertificateRequest()})})
+		Expect(k8sClient.Create(ctx, squat)).To(Succeed())
+		reconcileHost(e)
+		st2 := state(e)
+		Expect(st2.Renewal).NotTo(BeNil(), "the renewal is kept")
+		Expect(st2.Renewal.CertificateRequest).NotTo(Equal(st.Renewal.CertificateRequest), "another name is drawn")
+		reconcileHost(e)
+		Expect(state(e).Renewal.CertificateRequestUID).NotTo(BeEmpty())
+		Expect(getCR(e, name).GetUID()).To(Equal(squat.GetUID()), "the other principal's object is left alone")
+	})
+
+	It("pins and completes on an answer signed by exactly the issued certificate when the host activated early", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		der := issue(e, cr, hostidentitytest.IssueOptions{})
+		reconcileCR(e, cr)
+		newPin := state(e).Renewal.KeyPin
+		// A faulty Provider activates before the manager pinned the new key.
+		e.host.stage(der)
+		e.host.activate()
+		Expect(heartbeat(e)).To(Equal(answerVerified), "verified with the issued certificate's key")
+		st := state(e)
+		Expect(st.Current.KeyPins).To(Equal([]string{newPin}))
+		Expect(st.Renewal).To(BeNil())
+		Expect(drainRenewalEvents(e.rec)).To(ContainSubstring(eventReasonAgentRenewalEarly))
+
+		// Another certificate for the same new key, not the issued one, is
+		// never evidence.
+		e2 := newRenewalEnv()
+		cr2 := reconcileCR(e2, requested(e2))
+		issue(e2, cr2, hostidentitytest.IssueOptions{})
+		reconcileCR(e2, cr2)
+		other := e2.ca.Issue(GinkgoT(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: e2.host.csr}),
+			hostidentitytest.IssueOptions{Lifetime: 29 * 24 * time.Hour})
+		ob, _ := pem.Decode(other)
+		e2.host.stage(ob.Bytes)
+		e2.host.activate()
+		Expect(heartbeat(e2)).NotTo(Equal(answerVerified))
+		Expect(state(e2).Current.KeyPins).To(HaveLen(1))
+		Expect(state(e2).Current.KeyPins[0]).To(Equal(e2.oldPin))
 	})
 
 	It("reads the manager's own identity from the API server", func() {

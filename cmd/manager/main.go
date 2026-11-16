@@ -786,7 +786,8 @@ func main() {
 		}
 		// Certificate renewal requests are created under the manager's own
 		// identity, and only those are approved as renewals: read it from the
-		// API server. Without it renewal stays off; enrolment still works.
+		// API server, now and, while it cannot be read, every minute. Until
+		// then renewal stays off; enrolment still works.
 		if direct, cerr := client.New(restConfig, client.Options{Scheme: scheme}); cerr != nil {
 			setupLog.Error(cerr, "certificate renewal is off: no client to read the manager's identity")
 		} else {
@@ -794,7 +795,11 @@ func main() {
 			id, ierr := controller.ResolveManagerIdentity(idCtx, direct)
 			idCancel()
 			if ierr != nil {
-				setupLog.Error(ierr, "certificate renewal is off: the manager's identity cannot be read")
+				setupLog.Error(ierr, "certificate renewal is off until the manager's identity can be read; it is tried again every minute")
+				if err = mgr.Add(&controller.ManagerIdentityResolver{Client: direct, Config: hostEnrolment}); err != nil {
+					setupLog.Error(err, "unable to add the manager identity resolver")
+					os.Exit(1)
+				}
 			} else {
 				hostEnrolment.SetManagerIdentity(id)
 				setupLog.Info("Per-host agent certificate renewal requests are created and approved under the manager's identity",

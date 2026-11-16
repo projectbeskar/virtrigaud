@@ -59,13 +59,16 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
+	"strings"
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -100,6 +103,23 @@ const renewalAgentAPIVersion = 3
 // renewalRequestPrefix prefixes the name of a renewal CertificateRequest.
 const renewalRequestPrefix = "virtrigaud-renewal-"
 
+// Bounds of retried renewals. A renewal whose issued certificate is refused,
+// or whose request is denied, fails or disappears, starts again for the same
+// key after a backoff from renewalRetryBase doubling up to renewalRetryMax;
+// after maxRenewalFailures failures that key is given up (the agent draws a
+// new key when its request goes unanswered) and the operator is told to fix
+// the issuer. maxRenewalAttempts bounds the keys remembered.
+const (
+	renewalRetryBase   = 10 * time.Minute
+	renewalRetryMax    = 6 * time.Hour
+	maxRenewalFailures = 5
+	maxRenewalAttempts = 8
+)
+
+// renewalRequestRecheck is how often a renewal whose request is created but
+// not yet issued is looked at again (besides the request's own events).
+const renewalRequestRecheck = 5 * time.Minute
+
 // Event reasons of certificate renewal, emitted on the Host.
 const (
 	eventReasonAgentRenewalRequested     = "AgentRenewalRequested"
@@ -114,6 +134,10 @@ const (
 	eventReasonAgentRenewalNotSupported  = "AgentRenewalNotSupported"
 	eventReasonAgentRenewalKeyWasPinned  = "AgentRenewalKeyPreviouslyPinned"
 	eventReasonAgentRenewalCreateRefused = "AgentRenewalRequestNotCreated"
+	eventReasonAgentRenewalRestarted     = "AgentRenewalRestarted"
+	eventReasonAgentRenewalGivenUp       = "AgentRenewalGivenUp"
+	eventReasonAgentRenewalEarly         = "AgentRenewalActivatedEarly"
+	eventReasonAgentRenewalNoIdentity    = "AgentRenewalNoManagerIdentity"
 )
 
 // Denial reasons of renewal requests.
@@ -173,6 +197,75 @@ type renewalState struct {
 	// UnsupportedReported records that the manager reported it cannot
 	// renew (no cert-manager issuer).
 	UnsupportedReported bool `json:"unsupportedReported,omitempty"`
+	// IdentityReported records that the manager reported it cannot create
+	// the request because it does not know its own identity.
+	IdentityReported bool `json:"identityReported,omitempty"`
+}
+
+// renewalAttempt is the failure history of renewals for one new key.
+type renewalAttempt struct {
+	// KeyPin is the new key.
+	KeyPin string `json:"keyPin"`
+	// Failures counts the renewals of the key that failed.
+	Failures int `json:"failures"`
+	// NextTry is the earliest time a renewal of the key is recorded again.
+	NextTry metav1.Time `json:"nextTry"`
+	// Reason is why the last one failed.
+	Reason string `json:"reason,omitempty"`
+}
+
+// renewalBackoff returns the wait after the n-th failure (n from 1).
+func renewalBackoff(n int) time.Duration {
+	return min(renewalRetryBase<<min(n-1, 10), renewalRetryMax)
+}
+
+// failRenewal ends the renewal in progress (before its new key is pinned)
+// after a failure, and records it for its key: the key is renewed again only
+// after a backoff, and never after maxRenewalFailures. It returns the
+// key's history and whether the key is now given up.
+func (st *hostEnrolmentState) failRenewal(now time.Time, reason string) (renewalAttempt, bool) {
+	r := st.Renewal
+	if r == nil || r.PinnedAt != nil {
+		return renewalAttempt{}, false
+	}
+	st.Renewal = nil
+	i := slices.IndexFunc(st.RenewalAttempts, func(a renewalAttempt) bool { return a.KeyPin == r.KeyPin })
+	if i < 0 {
+		st.RenewalAttempts = append(st.RenewalAttempts, renewalAttempt{KeyPin: r.KeyPin})
+		i = len(st.RenewalAttempts) - 1
+	}
+	a := &st.RenewalAttempts[i]
+	a.Failures++
+	a.Reason = reason
+	a.NextTry = metav1.NewTime(now.Add(renewalBackoff(a.Failures)).UTC().Truncate(time.Second))
+	out := *a
+	if n := len(st.RenewalAttempts); n > maxRenewalAttempts {
+		st.RenewalAttempts = slices.Clone(st.RenewalAttempts[n-maxRenewalAttempts:])
+	}
+	return out, out.Failures >= maxRenewalFailures
+}
+
+// renewalHeldBack reports whether a renewal of key pin may not be recorded
+// at now: it is in its backoff, or given up.
+func (st *hostEnrolmentState) renewalHeldBack(pin string, now time.Time) bool {
+	for _, a := range st.RenewalAttempts {
+		if a.KeyPin == pin {
+			return a.Failures >= maxRenewalFailures || now.Before(a.NextTry.Time)
+		}
+	}
+	return false
+}
+
+// restartedEvents returns the events of a renewal that failed with reason
+// and the history a.
+func restartedEvents(a renewalAttempt, gaveUp bool, reason string) []hostEvent {
+	if gaveUp {
+		return []hostEvent{{corev1.EventTypeWarning, eventReasonAgentRenewalGivenUp, fmt.Sprintf("the renewal for key %s failed %d times "+
+			"(last: %s); it is not tried again for this key: fix the host-agent issuer (its CA must be the configured sub-CA, and it "+
+			"must sign the request's names unchanged); the host asks again with a new key", a.KeyPin, a.Failures, reason)}}
+	}
+	return []hostEvent{{corev1.EventTypeWarning, eventReasonAgentRenewalRestarted, fmt.Sprintf("the renewal for key %s failed (%s); "+
+		"it starts again after %s", a.KeyPin, reason, a.NextTry.UTC().Format(time.RFC3339))}}
 }
 
 // phase returns the renewal's mirrored phase.
@@ -213,12 +306,15 @@ func (r *renewalState) body() (*providerv1.RenewalRequest, *x509.Certificate, er
 	return body, cert, nil
 }
 
-// renewalRequestName returns the name of the CertificateRequest of a
-// renewal: a hash of the Host, the new key and when the renewal was
-// recorded, so a retried create finds its own request.
-func renewalRequestName(namespace, name string, r *renewalState) string {
-	sum := sha256.Sum256([]byte(namespace + "/" + name + "/" + r.KeyPin + "/" + r.Since.UTC().Format(time.RFC3339)))
-	return renewalRequestPrefix + hex.EncodeToString(sum[:12])
+// newRenewalRequestName draws the name of a renewal CertificateRequest: a
+// fixed prefix and 12 random bytes, saved in the pins Secret before the
+// request is created, so nobody can predict it.
+func newRenewalRequestName(src io.Reader) (string, error) {
+	b := make([]byte, 12)
+	if _, err := io.ReadFull(src, b); err != nil {
+		return "", fmt.Errorf("draw a renewal request name: %w", err)
+	}
+	return renewalRequestPrefix + hex.EncodeToString(b), nil
 }
 
 // hostHashLabel returns the value of certrequest.LabelHostHash for a Host.
@@ -252,7 +348,7 @@ func (st *hostEnrolmentState) completeRenewalPins() []string {
 	if r.NotAfter != nil {
 		cur.NotAfter = *r.NotAfter
 	}
-	st.Renewal = nil
+	st.Renewal, st.RenewalAttempts = nil, nil
 	return removed
 }
 
@@ -292,6 +388,11 @@ type renewalOutcome struct {
 	// old pins.
 	completed string
 	removed   []string
+	// early reports that the completion came from an answer signed by the
+	// issued certificate before its key was pinned.
+	early bool
+	// heldBack names a new key whose renewal is in its backoff or given up.
+	heldBack string
 }
 
 // renewalTrust is the pins-Secret side of renewal (PinsHostTrust).
@@ -344,6 +445,13 @@ func (p *PinsHostTrust) RenewalStep(ctx context.Context, provider *infravirtriga
 		// The new key is in use: it signed this answer.
 		out.completed, out.removed = r.KeyPin, st.completeRenewalPins()
 		changed = true
+	case r != nil && r.PinnedAt == nil && len(r.Certificate) > 0 && v.SignerPin == r.KeyPin && bytes.Equal(v.SignerCertificate, r.Certificate):
+		// The host put the issued certificate in use before its key was
+		// pinned (a Provider activated early): this answer, signed by exactly
+		// the certificate the manager issued and validated for the current
+		// enrolment, is the evidence; the new key becomes the only pin.
+		out.completed, out.removed, out.early = r.KeyPin, st.completeRenewalPins(), true
+		changed = true
 	case r != nil && r.PinnedAt == nil && r.CertificateSHA256 != "" && staged == r.CertificateSHA256 && v.SignerPin == r.SignerPin:
 		// The host staged exactly the certificate the manager had issued.
 		if !slices.Contains(cur.KeyPins, r.KeyPin) {
@@ -361,9 +469,12 @@ func (p *PinsHostTrust) RenewalStep(ctx context.Context, provider *infravirtriga
 		st.Renewal, changed = nil, true
 	}
 	if pr := v.Renewal; pr != nil && st.Renewal == nil && out.completed == "" {
-		if st.keyPreviouslyPinned(pr.KeyPin) {
+		switch {
+		case st.keyPreviouslyPinned(pr.KeyPin):
 			out.keyWasPinned = pr.KeyPin
-		} else {
+		case st.renewalHeldBack(pr.KeyPin, now):
+			out.heldBack = pr.KeyPin
+		default:
 			st.Renewal = &renewalState{Request: pr.Blob, KeyPin: pr.KeyPin, SignerPin: pr.SignerPin,
 				Since: metav1.NewTime(now.UTC().Truncate(time.Second))}
 			out.requested, changed = pr.KeyPin, true
@@ -423,6 +534,13 @@ func (h *HostAnswers) checkRenewal(ctx context.Context, provider *infravirtrigau
 		evs = append(evs, hostEvent{corev1.EventTypeNormal, eventReasonAgentRenewalPinned,
 			"the host staged its renewed certificate (signed answer); new key " + out.pinned + " is pinned beside the current one"})
 	}
+	if out.heldBack != "" {
+		logger.V(1).Info("A host's renewal request for this key is held back after failures", "host", hostID, "keyPin", out.heldBack)
+	}
+	if out.early {
+		evs = append(evs, hostEvent{corev1.EventTypeWarning, eventReasonAgentRenewalEarly, "the host put its renewed certificate in use " +
+			"before its key was pinned (the Provider activated early); the answer signed by the issued certificate pins the new key"})
+	}
 	if out.completed != "" {
 		logger.Info("Unpinned a host's old key: the new key signed the answer and nothing is staged", "host", hostID,
 			"keyPin", out.completed, "removedKeyPins", out.removed, "answerSHA256", hex.EncodeToString(v.BlobSHA256[:]))
@@ -439,12 +557,14 @@ type hostEvent struct {
 
 // reconcileRenewal advances an enrolled Host's renewal on the manager's own
 // side: it creates the CertificateRequest of a recorded renewal under the
-// manager's identity, reports an overlap that outlasted renewalOverlap, and
-// unpins the old key once the old certificate has expired (it can no longer
-// authenticate the host). It reports whether it changed the state and when to
-// look again.
+// manager's identity, restarts (under the backoff of failRenewal) a renewal
+// whose request was denied, failed, deleted or changed, reports an overlap
+// that outlasted renewalOverlap, and unpins the old key once the old
+// certificate has expired (it can no longer authenticate the host). sec is
+// the pins Secret, the owner of the requests it creates. It reports whether
+// it changed the state and when to look again.
 func (r *HostEnrolmentReconciler) reconcileRenewal(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
-	st *hostEnrolmentState) (changed bool, recheck time.Duration, err error) {
+	st *hostEnrolmentState, sec *corev1.Secret) (changed bool, recheck time.Duration, err error) {
 	ren, cur := st.Renewal, st.Current
 	if ren == nil || cur == nil {
 		return false, 0, nil
@@ -472,24 +592,74 @@ func (r *HostEnrolmentReconciler) reconcileRenewal(ctx context.Context, host *in
 		return changed, recheck, nil
 	}
 	if ren.CertificateRequestUID != "" {
-		return false, 0, nil
+		if len(ren.Certificate) > 0 {
+			return false, 0, nil
+		}
+		if why := r.renewalRequestBroken(ctx, ren); why != "" {
+			a, gaveUp := st.failRenewal(now, why)
+			for _, ev := range restartedEvents(a, gaveUp, why) {
+				r.event(host, ev.typ, ev.reason, ev.message)
+			}
+			log.FromContext(ctx).Info("Restarted a host's certificate renewal", "host", hostKey(host.Namespace, host.Name),
+				"keyPin", a.KeyPin, "reason", why, "failures", a.Failures, "givenUp", gaveUp)
+			return true, 0, nil
+		}
+		return false, renewalRequestRecheck, nil
 	}
-	created, err := r.createRenewalRequest(ctx, host, st)
+	created, err := r.createRenewalRequest(ctx, host, st, sec)
+	if errors.Is(err, errNoManagerIdentity) {
+		if !ren.IdentityReported {
+			ren.IdentityReported = true
+			r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalNoIdentity, "the host asked to renew its certificate, but the "+
+				"manager could not read its own identity (SelfSubjectReview); the request is created once it can")
+			return true, renewalRequestRecheck, nil
+		}
+		return created, renewalRequestRecheck, nil
+	}
 	return created, 0, err
+}
+
+// renewalRequestBroken returns why the recorded request of a renewal can no
+// longer lead to an issued certificate ("" when it can): it is gone or
+// replaced (another UID), it lost the renewal label, or it was denied,
+// failed or refused. It reads the API server.
+func (r *HostEnrolmentReconciler) renewalRequestBroken(ctx context.Context, ren *renewalState) string {
+	ns, name, _ := strings.Cut(ren.CertificateRequest, "/")
+	cr := certrequest.NewObject()
+	err := r.liveReader().Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, cr)
+	switch {
+	case apierrors.IsNotFound(err):
+		return "its certificate request was deleted"
+	case err != nil:
+		return ""
+	case string(cr.GetUID()) != ren.CertificateRequestUID:
+		return "its certificate request was replaced"
+	case !certrequest.IsRenewal(cr):
+		return "its certificate request lost the renewal label"
+	case certrequest.IsTrue(cr, certrequest.ConditionDenied):
+		return "its certificate request was denied"
+	case certrequest.Failed(cr):
+		return "its certificate request failed"
+	case certrequest.IsTrue(cr, certrequest.ConditionRefused):
+		return "its issued certificate was refused"
+	}
+	return ""
 }
 
 // createRenewalRequest creates the CertificateRequest of a recorded renewal
 // in the enrolment namespace, under the manager's own identity, for the
-// cert-manager issuer of the sub-CA, in two steps: the request's name is
-// recorded first (and saved by the caller), so the request is never seen
-// before the pins Secret names it; the next reconcile creates it and records
-// its UID. A request of the same name that is already there (a retried
-// create) is taken when it is the manager's renewal request for this Host
-// with this request; anything else of that name is left alone and the
-// renewal is dropped.
+// cert-manager issuer of the sub-CA, owned by the Host's pins Secret (so it
+// goes with the Host), in two steps: a random name is recorded first (and
+// saved by the caller), so the request is never seen before the pins Secret
+// names it and nobody can predict it; the next reconcile creates it and
+// records its UID. A request of that name that is already there is taken
+// only when the manager created it for this Host with this request (a
+// retried create); anything else of that name is left alone and a new name
+// is drawn.
 func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
-	st *hostEnrolmentState) (bool, error) {
+	st *hostEnrolmentState, sec *corev1.Secret) (bool, error) {
 	ren := st.Renewal
+	id, haveID := r.Config.managerIdentity()
 	switch {
 	case r.Config.CertManagerIssuer == nil:
 		if !ren.UnsupportedReported {
@@ -500,7 +670,7 @@ func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host
 			return true, nil
 		}
 		return false, nil
-	case r.Config.ManagerUsername == "":
+	case !haveID:
 		return false, errNoManagerIdentity
 	}
 	body, current, err := ren.body()
@@ -508,18 +678,19 @@ func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host
 		st.Renewal = nil
 		return true, nil //nolint:nilerr // a stored request that does not decode is dropped; the host offers it again
 	}
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: body.GetCertificateRequest()})
-	name := renewalRequestName(host.Namespace, host.Name, ren)
-	if ren.CertificateRequest != r.Config.Namespace+"/"+name {
-		ren.CertificateRequest = r.Config.Namespace + "/" + name
-		return true, nil
+	if ren.CertificateRequest == "" {
+		return true, r.drawRenewalRequestName(ren)
 	}
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: body.GetCertificateRequest()})
+	_, name, _ := strings.Cut(ren.CertificateRequest, "/")
 	cr := certrequest.NewRenewal(certrequest.RenewalSpec{
 		Namespace: r.Config.Namespace, Name: name, HostNamespace: host.Namespace, HostName: host.Name,
 		HostHash: hostHashLabel(host.Namespace, host.Name), IssuerRef: *r.Config.CertManagerIssuer, CSRPEM: csrPEM,
-		Duration: hostidentity.RenewalLifetime(current), Username: r.Config.ManagerUsername, Groups: r.Config.ManagerGroups,
-		UID: r.Config.ManagerUID,
+		Duration: hostidentity.RenewalLifetime(current), Username: id.Username, Groups: id.Groups, UID: id.UID,
 	})
+	if sec != nil && sec.UID != "" {
+		cr.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "v1", Kind: "Secret", Name: sec.Name, UID: sec.UID}})
+	}
 	err = r.Create(ctx, cr)
 	if apierrors.IsAlreadyExists(err) {
 		existing := certrequest.NewObject()
@@ -527,12 +698,13 @@ func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host
 			return false, fmt.Errorf("get renewal request %s/%s: %w", r.Config.Namespace, name, gerr)
 		}
 		got, cerr := certrequest.CSR(existing)
+		in, rerr := certrequest.RequestOf(existing)
 		ns, hn, ok := certrequest.HostOf(existing)
-		if cerr != nil || !ok || ns != host.Namespace || hn != host.Name || !certrequest.IsRenewal(existing) || !bytes.Equal(got, csrPEM) {
-			st.Renewal = nil
+		if cerr != nil || rerr != nil || in.Username != id.Username || !ok || ns != host.Namespace || hn != host.Name ||
+			!certrequest.IsRenewal(existing) || !bytes.Equal(got, csrPEM) {
 			r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalCreateRefused, "an object named "+name+
-				" that is not this renewal's request exists in the enrolment namespace; the renewal starts again")
-			return true, nil
+				" that is not this renewal's request exists in the enrolment namespace; another name is drawn")
+			return true, r.drawRenewalRequestName(ren)
 		}
 		cr, err = existing, nil
 	}
@@ -543,6 +715,62 @@ func (r *HostEnrolmentReconciler) createRenewalRequest(ctx context.Context, host
 	log.FromContext(ctx).Info("Created a certificate renewal request under the manager's identity", "host", hostKey(host.Namespace, host.Name),
 		"request", ren.CertificateRequest, "newKeyPin", ren.KeyPin)
 	return true, nil
+}
+
+// drawRenewalRequestName records a new random request name for ren.
+func (r *HostEnrolmentReconciler) drawRenewalRequestName(ren *renewalState) error {
+	src := r.Rand
+	if src == nil {
+		src = rand.Reader
+	}
+	name, err := newRenewalRequestName(src)
+	if err != nil {
+		return err
+	}
+	ren.CertificateRequest = r.Config.Namespace + "/" + name
+	return nil
+}
+
+// collectRenewalRequests deletes the manager's renewal CertificateRequests of
+// a Host that no renewal needs any more: every one but the request of the
+// renewal in progress (completed, refused, restarted, or of a renewal that
+// ended). Only requests labelled as renewals of this Host and recorded under
+// the manager's identity are deleted, each with UID and resourceVersion
+// preconditions. Failures are logged; the next reconcile tries again.
+func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState) {
+	id, ok := r.Config.managerIdentity()
+	if !ok {
+		return
+	}
+	list := certrequest.NewList()
+	if err := r.List(ctx, list, client.InNamespace(r.Config.Namespace), client.MatchingLabels{
+		certrequest.LabelAgentRenewal: "true", certrequest.LabelHostHash: hostHashLabel(host.Namespace, host.Name),
+	}); err != nil {
+		log.FromContext(ctx).Info("Cannot list a Host's renewal requests", "host", hostKey(host.Namespace, host.Name), "error", err.Error())
+		return
+	}
+	keep := ""
+	if st.Renewal != nil {
+		keep = st.Renewal.CertificateRequest
+	}
+	for i := range list.Items {
+		cr := &list.Items[i]
+		if cr.GetNamespace()+"/"+cr.GetName() == keep {
+			continue
+		}
+		in, err := certrequest.RequestOf(cr)
+		ns, hn, ok := certrequest.HostOf(cr)
+		if err != nil || in.Username != id.Username || !ok || ns != host.Namespace || hn != host.Name {
+			continue
+		}
+		uid, rv := cr.GetUID(), cr.GetResourceVersion()
+		if err := r.Delete(ctx, cr, client.Preconditions{UID: &uid, ResourceVersion: &rv}); client.IgnoreNotFound(err) != nil {
+			log.FromContext(ctx).Info("Cannot delete a finished renewal request", "request", cr.GetNamespace()+"/"+cr.GetName(), "error", err.Error())
+			continue
+		}
+		log.FromContext(ctx).Info("Deleted a finished renewal request", "request", cr.GetNamespace()+"/"+cr.GetName(),
+			"host", hostKey(host.Namespace, host.Name))
+	}
 }
 
 // decideRenewal approves a renewal CertificateRequest only when all of these
@@ -561,7 +789,7 @@ func (r *HostEnrolmentRequestReconciler) decideRenewal(ctx context.Context, cr *
 	if err != nil {
 		return r.denyRenewal(ctx, cr, nil, hostidentity.ReasonRequestInvalid, err.Error())
 	}
-	if r.Config.ManagerUsername == "" || in.Username != r.Config.ManagerUsername {
+	if id, ok := r.Config.managerIdentity(); !ok || in.Username != id.Username {
 		return r.denyRenewal(ctx, cr, nil, reasonRenewalRequester,
 			"a renewal request is approved only when the manager created it; this one was created by another principal")
 	}
@@ -704,9 +932,12 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 	}
 	issued, verr := r.validateRenewed(ctx, host, cur, ren, chain)
 	if verr != nil {
-		l.state.Renewal = nil
+		a, gaveUp := l.state.failRenewal(r.now(), "the issued certificate was refused: "+verr.Error())
 		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 			return err
+		}
+		for _, ev := range restartedEvents(a, gaveUp, "the issued certificate was refused") {
+			r.event(host, ev.typ, ev.reason, ev.message)
 		}
 		if _, err := iss.Complete(cr, verr, r.now()); err != nil {
 			return err
@@ -716,7 +947,7 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 		}
 		log.FromContext(ctx).Info("Refused the certificate issued for a renewal request", "request", reqName, "host", ns+"/"+name)
 		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalRefused, "the certificate issued for renewal request "+reqName+
-			" was refused; the renewal starts again")
+			" was refused")
 		return nil
 	}
 	na := metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second))
@@ -794,7 +1025,10 @@ func renewalStatus(st *hostEnrolmentState) *infravirtrigaudiov1beta1.HostAgentRe
 	if ren == nil || st.Current == nil {
 		return nil
 	}
-	out := &infravirtrigaudiov1beta1.HostAgentRenewal{Phase: ren.phase(), KeyPin: ren.KeyPin, CertificateRequest: ren.CertificateRequest}
+	out := &infravirtrigaudiov1beta1.HostAgentRenewal{Phase: ren.phase(), KeyPin: ren.KeyPin}
+	if ren.CertificateRequestUID != "" {
+		out.CertificateRequest = ren.CertificateRequest
+	}
 	if ren.OverlapUntil != nil {
 		u := *ren.OverlapUntil
 		out.OverlapUntil = &u
@@ -829,7 +1063,67 @@ func ResolveManagerIdentity(ctx context.Context, c client.Client) (ManagerIdenti
 
 // SetManagerIdentity records the manager's own identity in the enrolment
 // configuration: renewal requests are created under it and only requests
-// recorded under it are approved as renewals.
+// recorded under it are approved as renewals. An identity without a
+// username clears it (renewal off).
 func (cfg *HostEnrolmentConfig) SetManagerIdentity(id ManagerIdentity) {
-	cfg.ManagerUsername, cfg.ManagerGroups, cfg.ManagerUID = id.Username, slices.Clone(id.Groups), id.UID
+	if id.Username == "" {
+		cfg.managerID.Store(nil)
+		return
+	}
+	c := ManagerIdentity{Username: id.Username, Groups: slices.Clone(id.Groups), UID: id.UID}
+	cfg.managerID.Store(&c)
 }
+
+// managerIdentity returns the manager's own identity, and whether it is
+// known.
+func (cfg *HostEnrolmentConfig) managerIdentity() (ManagerIdentity, bool) {
+	id := cfg.managerID.Load()
+	if id == nil {
+		return ManagerIdentity{}, false
+	}
+	return *id, true
+}
+
+// ManagerIdentityResolver reads the manager's own identity until it has it:
+// at once, then every Every while the API server cannot tell it (renewal
+// stays off until then). It runs on every replica.
+type ManagerIdentityResolver struct {
+	// Client creates the SelfSubjectReview (a client that reads the API
+	// server directly).
+	Client client.Client
+	// Config receives the identity.
+	Config *HostEnrolmentConfig
+	// Every is the pause between attempts (zero: one minute).
+	Every time.Duration
+}
+
+// Start implements manager.Runnable.
+func (m *ManagerIdentityResolver) Start(ctx context.Context) error {
+	every := m.Every
+	if every <= 0 {
+		every = time.Minute
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if _, ok := m.Config.managerIdentity(); ok {
+			return nil
+		}
+		id, err := ResolveManagerIdentity(ctx, m.Client)
+		if err == nil {
+			m.Config.SetManagerIdentity(id)
+			log.FromContext(ctx).Info("Per-host agent certificate renewal is on: the manager's identity is known", "username", id.Username)
+			return nil
+		}
+		log.FromContext(ctx).Info("The manager's identity cannot be read yet; certificate renewal stays off", "error", err.Error())
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+		}
+	}
+}
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable: every
+// replica needs its identity.
+func (m *ManagerIdentityResolver) NeedLeaderElection() bool { return false }

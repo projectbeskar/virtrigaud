@@ -81,6 +81,14 @@ type HostTrust struct {
 	// freeze was confirmed: an attempt under one is held, never re-sent and
 	// never taken as tampered.
 	Discarded [][]byte
+	// RenewalCertificate is the renewed certificate the manager issued and
+	// validated for the host's renewal in progress, before its key is pinned,
+	// and RenewalKeyPin its key's pin. A host answer whose signer
+	// certificate is exactly these bytes is verified with that key pinned
+	// too (the evidence that the host put it in use early); nothing else
+	// uses them.
+	RenewalCertificate []byte
+	RenewalKeyPin      string
 }
 
 // expectation is the verifier's expectation of an answer of bodyType for a
@@ -222,6 +230,9 @@ func (p *PinsHostTrust) HostTrust(ctx context.Context, provider *infravirtrigaud
 		if id, err := hostidentity.DecodeID(s); err == nil {
 			t.Predecessors = append(t.Predecessors, id)
 		}
+	}
+	if ren := l.state.Renewal; ren != nil && ren.PinnedAt == nil && len(ren.Certificate) > 0 {
+		t.RenewalCertificate, t.RenewalKeyPin = bytes.Clone(ren.Certificate), ren.KeyPin
 	}
 	for _, s := range l.state.DiscardedEnrolmentIDs {
 		if id, err := hostidentity.DecodeID(s); err == nil {
@@ -984,6 +995,16 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 		return out, rerr
 	}
 	v, verr := h.verify(ctx, provider, hostID, hr, hostidentity.BodyTypeHostAnswer, read)
+	if verr != nil && len(hr.trust.RenewalCertificate) > 0 && read.Answer != nil &&
+		bytes.Equal(read.Answer.SignerCertificate, hr.trust.RenewalCertificate) {
+		// Signed by exactly the renewed certificate the manager issued for
+		// this host and not yet pinned: verified again with its key pinned
+		// as well (every other check unchanged), so the renewal sees that
+		// the host put it in use early.
+		early := hr
+		early.trust.Pins = append(slices.Clone(hr.trust.Pins), hr.trust.RenewalKeyPin)
+		v, verr = h.verify(ctx, provider, hostID, early, hostidentity.BodyTypeHostAnswer, read)
+	}
 	if verr != nil {
 		if errors.Is(verr, hostidentity.ErrInventoryInvalid) {
 			h.inventoryFault(provider, hostID)

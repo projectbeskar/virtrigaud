@@ -93,3 +93,53 @@ func TestResolveHostRenewal(t *testing.T) {
 	h.Spec.Revoked = true
 	assert.Nil(t, resolveHostRenewal(ctx, c, cfg, h), "a revoked Host gets none")
 }
+
+// TestFailRenewalBackoff: each failure of a key's renewal doubles its wait
+// (up to the cap) and the key is given up after maxRenewalFailures; a pinned
+// renewal is never failed.
+func TestFailRenewalBackoff(t *testing.T) {
+	now := time.Now()
+	pin := strings.Repeat("bb", 32)
+	st := &hostEnrolmentState{}
+	for i := 1; i <= maxRenewalFailures; i++ {
+		st.Renewal = &renewalState{KeyPin: pin}
+		a, gaveUp := st.failRenewal(now, "refused")
+		assert.Nil(t, st.Renewal)
+		assert.Equal(t, i, a.Failures)
+		assert.Equal(t, i >= maxRenewalFailures, gaveUp)
+		assert.True(t, st.renewalHeldBack(pin, now))
+		if i < maxRenewalFailures {
+			assert.False(t, st.renewalHeldBack(pin, now.Add(renewalBackoff(i)+time.Second)))
+		}
+	}
+	assert.True(t, st.renewalHeldBack(pin, now.Add(1000*time.Hour)), "given up for good")
+	assert.False(t, st.renewalHeldBack(strings.Repeat("cc", 32), now), "another key is not held back")
+	assert.Equal(t, renewalRetryMax, renewalBackoff(40))
+	pinned := metav1.Now()
+	st.Renewal = &renewalState{KeyPin: pin, PinnedAt: &pinned}
+	_, gaveUp := st.failRenewal(now, "x")
+	assert.False(t, gaveUp)
+	assert.NotNil(t, st.Renewal, "a pinned renewal is never failed")
+	for i := 0; i < 2*maxRenewalAttempts; i++ {
+		st.Renewal = &renewalState{KeyPin: strings.Repeat(string(rune('a'+i%6)), 1) + strings.Repeat("0", 63)}
+		st.failRenewal(now, "x")
+	}
+	assert.LessOrEqual(t, len(st.RenewalAttempts), maxRenewalAttempts)
+}
+
+// TestManagerIdentity: set, read, cleared by an empty username.
+func TestManagerIdentity(t *testing.T) {
+	cfg := &HostEnrolmentConfig{}
+	_, ok := cfg.managerIdentity()
+	assert.False(t, ok)
+	cfg.SetManagerIdentity(ManagerIdentity{Username: "system:serviceaccount:a:b", Groups: []string{"g"}})
+	id, ok := cfg.managerIdentity()
+	assert.True(t, ok)
+	assert.Equal(t, "system:serviceaccount:a:b", id.Username)
+	cfg.SetManagerIdentity(ManagerIdentity{})
+	_, ok = cfg.managerIdentity()
+	assert.False(t, ok)
+	name, err := newRenewalRequestName(strings.NewReader(strings.Repeat("x", 12)))
+	require.NoError(t, err)
+	assert.Equal(t, renewalRequestPrefix+"787878787878787878787878", name)
+}

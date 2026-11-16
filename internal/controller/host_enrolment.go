@@ -66,6 +66,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -157,9 +158,14 @@ const rekeyWindow = time.Hour
 // (clock skew between the requester and the manager).
 const rekeyRequestSkew = 5 * time.Minute
 
-// maxPreviousKeyPins bounds the key pins of replaced enrolments kept per Host
-// (oldest dropped first); a re-key to one of them is refused.
-const maxPreviousKeyPins = 32
+// maxPreviousKeyPins bounds the key pins of replaced enrolments and renewed
+// keys kept per Host (oldest dropped first); a re-key or renewal to one of
+// them is refused. At one renewal per 20 days (two thirds of the longest
+// lifetime) this covers about seven years. A pin that falls out is still no
+// risk on its own: the signer replaces the key file on a renewal and a
+// re-key draws a new key, so an old key is not on the host to be offered
+// again.
+const maxPreviousKeyPins = 128
 
 // Label keys and values of manager-owned objects.
 const (
@@ -230,15 +236,11 @@ type HostEnrolmentConfig struct {
 	// InstallID is the 16-byte install identifier (from the development
 	// operation signer).
 	InstallID []byte
-	// ManagerUsername, ManagerGroups and ManagerUID are the manager's own
-	// identity (SetManagerIdentity): certificate renewal requests are
-	// created under it, and only a renewal request recorded under
-	// ManagerUsername is approved. Empty: renewal is off.
-	ManagerUsername string
-	// ManagerGroups are the manager's groups.
-	ManagerGroups []string
-	// ManagerUID is the manager's user UID.
-	ManagerUID string
+	// managerID is the manager's own identity (SetManagerIdentity):
+	// certificate renewal requests are created under it, and only a renewal
+	// request recorded under its username is approved. Nil: renewal is off
+	// until it is known (ManagerIdentityResolver).
+	managerID atomic.Pointer[ManagerIdentity]
 }
 
 // ParseHostEnrolmentConfig turns the flags into a configuration. With no
@@ -491,6 +493,9 @@ type hostEnrolmentState struct {
 	// Renewal is the current enrolment's certificate renewal in progress
 	// (host_renewal.go), nil when none is.
 	Renewal *renewalState `json:"renewal,omitempty"`
+	// RenewalAttempts are the failure histories of renewed keys, oldest
+	// first, at most maxRenewalAttempts (failRenewal).
+	RenewalAttempts []renewalAttempt `json:"renewalAttempts,omitempty"`
 }
 
 // rekeyRequest is an open re-key window.
@@ -1037,12 +1042,13 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Advance a certificate renewal on the manager's side.
 	var renewalRecheck time.Duration
 	if !host.Spec.Revoked && st.Current != nil && st.Current.Record.ProviderUID == string(provider.UID) {
-		renewalChanged, recheck, rerr := r.reconcileRenewal(ctx, host, st)
-		if rerr != nil && !errors.Is(rerr, errNoManagerIdentity) {
+		renewalChanged, recheck, rerr := r.reconcileRenewal(ctx, host, st, l.secret)
+		if rerr != nil {
 			return ctrl.Result{}, rerr
 		}
 		changed, renewalRecheck = changed || renewalChanged, recheck
 	}
+	r.collectRenewalRequests(ctx, host, st)
 	if changed {
 		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 			return ctrl.Result{}, err

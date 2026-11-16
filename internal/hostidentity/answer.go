@@ -183,6 +183,8 @@ type VerifiedAnswer struct {
 	Renewal *VerifiedRenewal
 	// SignerPin is the pin of the signer's key.
 	SignerPin string
+	// SignerCertificate is the signer's DER certificate.
+	SignerCertificate []byte
 	// BlobSHA256 is the SHA-256 of the deterministic encoding of the
 	// SignedBlob (for audit).
 	BlobSHA256 [32]byte
@@ -251,7 +253,7 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		return VerifiedAnswer{}, err
 	}
 	// Body.
-	out := VerifiedAnswer{SignerPin: pin}
+	out := VerifiedAnswer{SignerPin: pin, SignerCertificate: bytes.Clone(blob.GetSignerCertificate())}
 	var body proto.Message
 	switch exp.BodyType {
 	case BodyTypeOperationAnswer:
@@ -340,7 +342,13 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 // verifyPendingRenewal verifies the pending renewal request pr of a host
 // answer blob: only when the request asked for one (exp.RenewalVersion at
 // least 1 and at most RenewalVersion), signed with the very certificate that
-// signed the answer, and passing VerifyRenewal.
+// signed the answer, and passing VerifyRenewal. A renewal request that fails
+// makes the whole answer "no answer" (fail closed, like every other field
+// rule): an agent that offers a broken renewal is held like one that signs a
+// broken answer, until it stops offering it (its request is discarded after a
+// bound, or re-enrolment replaces it). The coupling is deliberate: the
+// renewal request is part of the signed answer, so a broken one is the
+// agent's fault, as any other broken field is.
 func verifyPendingRenewal(blob, pr *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedRenewal, error) {
 	switch {
 	case exp.RenewalVersion == 0:
