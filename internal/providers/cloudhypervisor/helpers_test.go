@@ -185,6 +185,7 @@ type fakeAgent struct {
 	// installCalls counts InstallRenewedCertificate calls, answered or not.
 	installCalls atomic.Int32
 	installs     []*agentv1.InstallRenewedCertificateRequest
+	stagedSeen   bool
 
 	mu       sync.Mutex
 	statuses []*agentv1.AgentStatusRequest
@@ -322,6 +323,20 @@ func (h *helloServer) InstallRenewedCertificate(_ context.Context, req *agentv1.
 		return nil, status.Error(codes.Unimplemented, "not served")
 	case 2:
 		return nil, status.Error(codes.Internal, "failed")
+	case 3:
+		// Nothing staged: an activation is refused until a stage arrives.
+		if req.GetActivate() {
+			h.f.mu.Lock()
+			staged := h.f.stagedSeen
+			h.f.mu.Unlock()
+			if !staged {
+				return nil, status.Error(codes.FailedPrecondition, "nothing staged")
+			}
+		} else {
+			h.f.mu.Lock()
+			h.f.stagedSeen = true
+			h.f.mu.Unlock()
+		}
 	}
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()

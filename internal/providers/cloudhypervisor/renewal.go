@@ -133,6 +133,19 @@ func (p *Provider) relayRenewal(ctx context.Context, e *hostEntry) {
 	req := &agentv1.InstallRenewedCertificateRequest{AnswerNonce: nonce, Certificate: der, Activate: activate}
 	cs, err := p.pool.invokeChecked(ctx, e, agentv1.AgentService_InstallRenewedCertificate_FullMethodName, req,
 		&agentv1.InstallRenewedCertificateResponse{}, nil, true)
+	if activate && status.Code(err) == codes.FailedPrecondition {
+		// The agent has nothing staged (it lost its staged copy, or never got
+		// it on this connection): stage the same bytes, then activate them.
+		stage := &agentv1.InstallRenewedCertificateRequest{AnswerNonce: freshNonce(), Certificate: der}
+		if _, serr := p.pool.invokeChecked(ctx, e, agentv1.AgentService_InstallRenewedCertificate_FullMethodName, stage,
+			&agentv1.InstallRenewedCertificateResponse{}, nil, true); serr == nil {
+			req.AnswerNonce = freshNonce()
+			cs, err = p.pool.invokeChecked(ctx, e, agentv1.AgentService_InstallRenewedCertificate_FullMethodName, req,
+				&agentv1.InstallRenewedCertificateResponse{}, nil, true)
+		} else {
+			err = serr
+		}
+	}
 	if err != nil {
 		unsupported := status.Code(err) == codes.Unimplemented
 		e.renewalFailed(gen, unsupported)
@@ -146,4 +159,13 @@ func (p *Provider) relayRenewal(ctx context.Context, e *hostEntry) {
 	}
 	e.renewalDelivered(cs.gen, key)
 	p.log.Info("renewed certificate relayed to the host's agent", "host", e.id, "activate", activate, "sha256", key[:64])
+}
+
+// freshNonce returns 16 random bytes (zeros if the system's randomness
+// fails, which the agent then answers without a usable answer; the relay
+// does not read it).
+func freshNonce() []byte {
+	n := make([]byte, nonceLen)
+	_, _ = rand.Read(n)
+	return n
 }

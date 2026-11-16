@@ -144,3 +144,28 @@ func TestRenewedCertificateRelayBacksOff(t *testing.T) {
 	describe()
 	assert.EqualValues(t, 3, a.installCalls.Load(), "delivered, then not again on this connection")
 }
+
+// TestRenewedCertificateRestagedWhenNotStaged: an activation the agent
+// refuses because nothing is staged (it lost its copy) is followed by a
+// stage of the same bytes and the activation again.
+func TestRenewedCertificateRestagedWhenNotStaged(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	a.installMode.Store(3)
+	newKey := hostidentitytest.NewKey(t)
+	renewed := hostCert(t, p.ca, "host-a", testProviderUID, newKey).Raw
+	newPin, err := hostidentity.SPKIPin(&newKey.PublicKey)
+	require.NoError(t, err)
+	prov := newProvider(t, p, Options{})
+	require.NoError(t, prov.Reconcile(renewalInventory(t, a, renewed, newPin)))
+	client := providerv1.NewProviderClient(served(t, prov))
+	_, err = client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	require.NoError(t, err)
+	got := a.installRequests()
+	require.Len(t, got, 2, "a stage and the activation recorded (the refused activation is not)")
+	assert.False(t, got[0].GetActivate())
+	assert.True(t, got[1].GetActivate())
+	assert.Equal(t, renewed, got[0].GetCertificate())
+	assert.Equal(t, renewed, got[1].GetCertificate())
+	assert.EqualValues(t, 3, a.installCalls.Load())
+}
