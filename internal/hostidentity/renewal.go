@@ -25,7 +25,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -128,9 +127,12 @@ type VerifiedRenewal struct {
 // exp.Version and RenewalVersion; it names exp's Provider, host,
 // installation and enrolment, and the certificate's; it names the digest of
 // the signer certificate; and its certificate request passes
-// CheckRenewalCSR: a new ECDSA P-256 key, self-signed, carrying exactly the
-// signer certificate's URI identities (same host, same enrolment record, same
-// epoch). Nothing in the body is decoded before the signature verifies.
+// CheckRenewalCSR: an ECDSA P-256 key other than the signer's, self-signed,
+// carrying exactly the signer certificate's URI identities (same host, same
+// enrolment record, same epoch). Nothing in the body is decoded before the
+// signature verifies. Whether the new key was pinned before is the caller's
+// to judge from its own state: while both keys are pinned (the overlap of a
+// renewal) the host still offers the request it is completing.
 func VerifyRenewal(blob *providerv1.SignedBlob, exp RenewalExpectation) (VerifiedRenewal, error) {
 	if blob == nil {
 		return VerifiedRenewal{}, refuseRenewal("no renewal request")
@@ -193,8 +195,8 @@ func VerifyRenewal(blob *providerv1.SignedBlob, exp RenewalExpectation) (Verifie
 	if err != nil {
 		return VerifiedRenewal{}, err
 	}
-	if keyPin == signerPin || slices.Contains(exp.Pins, keyPin) {
-		return VerifiedRenewal{}, refuseRenewal("the request's key is already pinned for the host")
+	if keyPin == signerPin {
+		return VerifiedRenewal{}, refuseRenewal("the request's key is the key that signed it")
 	}
 	enc, err := proto.MarshalOptions{Deterministic: true}.Marshal(blob)
 	if err != nil {

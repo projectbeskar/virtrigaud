@@ -236,6 +236,41 @@ spec:
                       enrolment, waiting for a certificate request that carries it.
                     pattern: ^[0-9a-f]{32}$
                     type: string
+                  renewal:
+                    description: |-
+                      Renewal is the progress of the agent's certificate renewal; unset when
+                      none is in progress. A mirror of the pins Secret, like KeyPins.
+                    properties:
+                      certificateRequest:
+                        description: |-
+                          CertificateRequest is "namespace/name" of the manager's certificate
+                          request for the renewal, once created.
+                        maxLength: 317
+                        type: string
+                      keyPin:
+                        description: |-
+                          KeyPin is the pin of the renewal's new key: the SHA-256 of its DER
+                          SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
+                        pattern: ^[0-9a-f]{64}$
+                        type: string
+                      overlapUntil:
+                        description: |-
+                          OverlapUntil is when the overlap in which both keys are pinned is
+                          expected to end. Past it, both keys stay pinned until the host shows
+                          the new key in use or the old certificate expires.
+                        format: date-time
+                        type: string
+                      phase:
+                        description: Phase is the renewal's phase.
+                        enum:
+                        - Requested
+                        - Issued
+                        - Overlap
+                        type: string
+                    required:
+                    - keyPin
+                    - phase
+                    type: object
                   requestURIs:
                     description: |-
                       RequestURIs are the exact URI subject alternative names a certificate
