@@ -14,8 +14,16 @@
 # It has no dependency on the agent's unit: stopping or restarting the agent
 # never involves it.
 #
+# It starts the agent only while vrtg-agent.service is enabled
+# (systemctl is-enabled: enabled, enabled-runtime, static, ...), so that
+# "systemctl disable vrtg-agent.service" keeps the agent off at boot, and
+# "systemctl mask" keeps it off entirely. The check is in the action, not an
+# ExecCondition=: a skipped unit is inactive, and Upholds= would start it
+# again at once, over and over, until its start limit failed it. Here the
+# unit always succeeds and stays active.
+#
 # Stopping this unit by hand is the exception: Upholds= starts it again, and
-# it starts the agent once more. Stop the agent, not this unit.
+# it starts the agent once more (if enabled). Stop the agent, not this unit.
 [Unit]
 Description=VirtRigaud: start the per-host agent once per boot (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
@@ -25,7 +33,7 @@ After=vrtg-agent-setup.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/systemctl --no-block start vrtg-agent.service
+ExecStart=/bin/sh -c 'if /usr/bin/systemctl is-enabled --quiet vrtg-agent.service; then exec /usr/bin/systemctl --no-block start vrtg-agent.service; fi'
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=

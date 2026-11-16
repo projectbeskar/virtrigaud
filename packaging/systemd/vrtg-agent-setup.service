@@ -15,6 +15,16 @@
 #
 # The fragments are named by file name, so that a fragment of the same name
 # in /etc (for example one that assigns other fixed ids) takes precedence.
+#
+# Between the two tools it checks that the agent's and the signer's state
+# directories and the host key, where they exist, are owned by the users'
+# current uids. If a fixed id was taken and systemd-sysusers allocated
+# another one (on a host whose /etc is rebuilt at boot, possibly a different
+# one at each boot), they are not: the unit fails, and the agent, the signer
+# and the shutdown unit, which require it, do not start. It fails before
+# systemd-tmpfiles, which would otherwise hand the directories to the new
+# uids. The files stay owned by the old uid, which another account may now
+# hold: reserve the ids (see the sysusers.d fragment).
 [Unit]
 Description=VirtRigaud: create the per-host agent's users and directories (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
@@ -27,10 +37,21 @@ Conflicts=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/systemd-sysusers virtrigaud-agent.conf
+ExecStart=/bin/sh -c 'check() { [ -e "$$1" ] || return 0; o=$$(stat -c %%u "$$1") && w=$$(id -u "$$2") || return 1; [ "$$o" = "$$w" ] && return 0; echo "$$1 is owned by uid $$o, not by $$2 (uid $$w): its uid changed; refusing to start the agent" >&2; return 1; }; check /var/lib/virtrigaud-agent virtrigaud-agent && check /var/lib/virtrigaud-signer virtrigaud-signer && check /var/lib/virtrigaud-signer/host.key virtrigaud-signer'
 ExecStart=/usr/bin/systemd-tmpfiles --create virtrigaud-agent.conf
 UMask=0022
+# systemd-sysusers rewrites /etc/passwd, group, shadow and gshadow (through
+# temporary files, backups and a lock file in /etc); systemd-tmpfiles
+# creates the state directories in /var/lib and the socket directory in /run
+# and sets their owners and modes. Nothing else is writable.
+ProtectSystem=strict
+ReadWritePaths=/etc /var/lib /run
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+AmbientCapabilities=
 NoNewPrivileges=yes
 ProtectHome=yes
+ProtectProc=invisible
+PrivateIPC=yes
 PrivateTmp=yes
 PrivateDevices=yes
 PrivateNetwork=yes

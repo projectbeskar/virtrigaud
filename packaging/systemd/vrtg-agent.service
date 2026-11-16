@@ -30,13 +30,18 @@
 # denies on some kernels (open_by_handle_at, in @privileged) and treats a
 # refusal as "not supported".
 #
+# It requires vrtg-agent-setup.service, which creates its user and
+# directories and refuses to let it start when its user's id no longer owns
+# its state directory; restarting that unit restarts this one too.
+#
 # Start-up opens and recovers the operation store before READY=1. A large
 # store on slow storage can take longer than systemd's default start
 # timeout, so the unit sets its own (TimeoutStartSec=).
 [Unit]
 Description=VirtRigaud per-host agent (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
-Wants=network-online.target vrtg-agent-setup.service vrtg-agent-signer.service
+Wants=network-online.target vrtg-agent-signer.service
+Requires=vrtg-agent-setup.service
 After=network-online.target local-fs.target vrtg-agent-setup.service vrtg-agent-signer.service
 StartLimitIntervalSec=300
 StartLimitBurst=10
@@ -91,6 +96,8 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
 SystemCallErrorNumber=EPERM
+# Filtered calls fail quietly; audit the privileged ones (systemd 247+).
+SystemCallLog=@privileged
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]

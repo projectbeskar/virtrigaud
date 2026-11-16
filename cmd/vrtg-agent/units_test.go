@@ -19,6 +19,8 @@ package main
 import (
 	"bufio"
 	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -365,18 +367,107 @@ func TestUnitsUseTheLibBinaryPath(t *testing.T) {
 	}
 }
 
-// TestUnitsWantTheSetupUnit: the agent, the signer, the shutdown unit and
-// the once-per-boot start unit want the setup unit and start after it, so
-// that their users and directories exist before they run.
-func TestUnitsWantTheSetupUnit(t *testing.T) {
-	for _, name := range []string{agentUnit, signerUnit, shutdownUnit, bootStartUnit} {
+// TestUnitsRequireTheSetupUnit: the agent, the signer and the shutdown unit
+// require the setup unit and start after it, so that their users and
+// directories exist before they run and none of them starts when it failed
+// (a user id moved under the state directories); the once-per-boot start
+// unit wants it.
+func TestUnitsRequireTheSetupUnit(t *testing.T) {
+	for _, name := range []string{agentUnit, signerUnit, shutdownUnit} {
 		u := parseUnit(t, name)
-		if !slices.Contains(u.unitNames("Unit", "Wants"), setupUnit) {
-			t.Errorf("%s: Wants = %v, want %s", name, u["Unit"]["Wants"], setupUnit)
+		if !slices.Contains(u.unitNames("Unit", "Requires"), setupUnit) {
+			t.Errorf("%s: Requires = %v, want %s", name, u["Unit"]["Requires"], setupUnit)
 		}
 		if !slices.Contains(u.unitNames("Unit", "After"), setupUnit) {
 			t.Errorf("%s: After = %v, want %s", name, u["Unit"]["After"], setupUnit)
 		}
+	}
+	b := parseUnit(t, bootStartUnit)
+	if !slices.Contains(b.unitNames("Unit", "Wants"), setupUnit) || !slices.Contains(b.unitNames("Unit", "After"), setupUnit) {
+		t.Errorf("%s: Wants = %v, After = %v", bootStartUnit, b["Unit"]["Wants"], b["Unit"]["After"])
+	}
+}
+
+// TestUnitsLogPrivilegedCalls: the agent's, the signer's and the shutdown
+// unit's filtered privileged calls fail quietly (EPERM) and are audited.
+func TestUnitsLogPrivilegedCalls(t *testing.T) {
+	for _, name := range []string{agentUnit, signerUnit, shutdownUnit} {
+		if got := parseUnit(t, name).one(t, "Service", "SystemCallLog"); got != "@privileged" {
+			t.Errorf("%s: SystemCallLog = %q", name, got)
+		}
+	}
+}
+
+// unitShell returns the script of an ExecStart=/bin/sh -c '...' line, with
+// systemd's escapes ($$, %%) undone.
+func unitShell(t *testing.T, line string) string {
+	t.Helper()
+	script, ok := strings.CutPrefix(line, "/bin/sh -c '")
+	if !ok || !strings.HasSuffix(script, "'") {
+		t.Fatalf("not a /bin/sh -c line: %s", line)
+	}
+	return strings.NewReplacer("$$", "$", "%%", "%").Replace(strings.TrimSuffix(script, "'"))
+}
+
+// TestSetupUnitRefusesMovedIDs: the setup unit's owner check passes when the
+// state directories and the host key are missing or owned by their users'
+// uids, and fails (so that the units requiring it do not start) when one is
+// owned by another uid or its user does not exist.
+func TestSetupUnitRefusesMovedIDs(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if me.Uid == "0" {
+		t.Skip("needs a user other than root")
+	}
+	script := unitShell(t, parseUnit(t, setupUnit)["Service"]["ExecStart"][1])
+	run := func(agentUser, signerUser string, mk ...string) error {
+		t.Helper()
+		root := t.TempDir()
+		for _, p := range mk {
+			full := filepath.Join(root, p)
+			if strings.HasSuffix(p, "/") {
+				if err := os.MkdirAll(full, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s := strings.NewReplacer(
+			"/var/lib/", root+"/var/lib/",
+			" virtrigaud-agent ", " "+agentUser+" ",
+			" virtrigaud-signer ", " "+signerUser+" ",
+		).Replace(script)
+		s = strings.TrimSuffix(s, " virtrigaud-signer") + " " + signerUser
+		cmd := exec.Command("sh", "-c", s)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+		return cmd.Run()
+	}
+	all := []string{"var/lib/virtrigaud-agent/", "var/lib/virtrigaud-signer/host.key"}
+	if err := run(me.Username, me.Username); err != nil {
+		t.Errorf("nothing exists yet: %v", err)
+	}
+	if err := run(me.Username, me.Username, all...); err != nil {
+		t.Errorf("owned by the users' uids: %v", err)
+	}
+	if err := run(me.Username, "root", all...); err == nil {
+		t.Error("the signer's files owned by another uid were accepted")
+	}
+	if err := run("root", me.Username, all...); err == nil {
+		t.Error("the agent's directory owned by another uid was accepted")
+	}
+	if err := run(me.Username, "no-such-user-for-this-test", all...); err == nil {
+		t.Error("a missing user was accepted")
 	}
 }
 
@@ -393,11 +484,19 @@ func TestSetupUnitProperties(t *testing.T) {
 			t.Errorf("[Service] %s = %q, want %q", key, got, want)
 		}
 	}
-	if got := u["Service"]["ExecStart"]; !slices.Equal(got, []string{
-		"/usr/bin/systemd-sysusers virtrigaud-agent.conf",
-		"/usr/bin/systemd-tmpfiles --create virtrigaud-agent.conf",
-	}) {
-		t.Errorf("ExecStart = %v", got)
+	if got := u["Service"]["ExecStart"]; len(got) != 3 || got[0] != "/usr/bin/systemd-sysusers virtrigaud-agent.conf" ||
+		!strings.HasPrefix(got[1], "/bin/sh -c 'check() ") || got[2] != "/usr/bin/systemd-tmpfiles --create virtrigaud-agent.conf" {
+		t.Errorf("ExecStart = %v: sysusers, the owner check, then tmpfiles", got)
+	}
+	// Writable: /etc for sysusers, the state and socket parents for tmpfiles;
+	// the capabilities those two need; nothing else.
+	for key, want := range map[string]string{
+		"ProtectSystem": "strict", "ReadWritePaths": "/etc /var/lib /run", "ProtectProc": "invisible", "PrivateIPC": "yes",
+		"CapabilityBoundingSet": "CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH", "AmbientCapabilities": "",
+	} {
+		if got := u.one(t, "Service", key); got != want {
+			t.Errorf("[Service] %s = %q, want %q", key, got, want)
+		}
 	}
 	if got := u.one(t, "Unit", "DefaultDependencies"); got != "no" {
 		t.Errorf("DefaultDependencies = %q", got)
@@ -432,7 +531,8 @@ func TestBootStartUnitProperties(t *testing.T) {
 	u := parseUnit(t, bootStartUnit)
 	for key, want := range map[string]string{
 		"Type": "oneshot", "RemainAfterExit": "yes", "NoNewPrivileges": "yes", "CapabilityBoundingSet": "",
-		"ExecStart": "/usr/bin/systemctl --no-block start " + agentUnit, "ProtectSystem": "strict",
+		"ExecStart": "/bin/sh -c 'if /usr/bin/systemctl is-enabled --quiet " + agentUnit + "; then exec /usr/bin/systemctl --no-block start " +
+			agentUnit + "; fi'", "ProtectSystem": "strict",
 		"RestrictAddressFamilies": "AF_UNIX",
 	} {
 		if got := u.one(t, "Service", key); got != want {
@@ -450,6 +550,18 @@ func TestBootStartUnitProperties(t *testing.T) {
 	}
 	if got := u["Service"]["ExecStop"]; len(got) != 0 {
 		t.Errorf("ExecStop = %v: stopping the start unit must not touch the agent", got)
+	}
+	// Enablement is checked in the action, never as a condition: a skipped
+	// unit would be inactive, and Upholds= would start it again and again.
+	for _, k := range []string{"ExecCondition"} {
+		if v, ok := u["Service"][k]; ok {
+			t.Errorf("[Service] %s = %v", k, v)
+		}
+	}
+	for k := range u["Unit"] {
+		if strings.HasPrefix(k, "Condition") || strings.HasPrefix(k, "Assert") {
+			t.Errorf("[Unit] %s is set", k)
+		}
 	}
 }
 

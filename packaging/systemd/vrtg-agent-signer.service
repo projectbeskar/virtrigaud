@@ -19,7 +19,7 @@
 [Unit]
 Description=VirtRigaud per-host agent host key signer (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
-Wants=vrtg-agent-setup.service
+Requires=vrtg-agent-setup.service
 After=local-fs.target vrtg-agent-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=10
@@ -82,6 +82,8 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
 SystemCallErrorNumber=EPERM
+# Filtered calls fail quietly; audit the privileged ones (systemd 247+).
+SystemCallLog=@privileged
 RestrictAddressFamilies=AF_UNIX
 
 [Install]

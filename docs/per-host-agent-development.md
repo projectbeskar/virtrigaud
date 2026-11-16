@@ -984,7 +984,10 @@ with pidfs), the default would kill the agent after it became ready. The
 probe reads the refusal as "not supported" (`pidfs_handle` reported absent).
 A test in `internal/agent/inventory` classifies every system call the
 collector makes against the agent unit's filter, and a test in
-`cmd/vrtg-agent` asserts the `EPERM` setting on every unit.
+`cmd/vrtg-agent` asserts the `EPERM` setting on every unit. The agent, the
+signer and the shutdown unit also set `SystemCallLog=@privileged` (systemd
+247 or later), so a filtered privileged call, which now fails quietly, is
+still recorded by the audit subsystem.
 
 `vrtg-agent.service`: `Type=notify`, `Restart=always`, `RestartSec=2`,
 `StartLimitIntervalSec=300`, `StartLimitBurst=10`, `KillMode=process`,
@@ -1059,19 +1062,27 @@ never pull the agent in). That ordering is decided when the agent runs real
 VMs.
 
 `vrtg-agent-setup.service`: a `oneshot` unit (`RemainAfterExit=yes`, no
-default dependencies) that runs `systemd-sysusers virtrigaud-agent.conf` and
-`systemd-tmpfiles --create virtrigaud-agent.conf`, ordered after
-`systemd-sysext.service`, `systemd-sysusers.service` and `local-fs.target`
-and before the agent, the signer and the shutdown unit, each of which wants
-it. A package install creates the users and directories when it is
-installed, and this unit then changes nothing (both tools are idempotent). It
-exists for hosts where the agent arrives as a system extension merged during
-the boot: the boot's own `systemd-sysusers.service` runs before the merge and
-never sees the extension's fragment, and on hosts whose `/etc` is rebuilt at
-every boot the users would be missing at every boot. The units would then
-fail with `217/USER`, and the shutdown unit would look active while its stop
-action could not run. The fragments are named by file name, so a fragment of
-the same name in `/etc/sysusers.d` or `/etc/tmpfiles.d` takes precedence.
+default dependencies) that runs `systemd-sysusers virtrigaud-agent.conf`, an
+owner check, and `systemd-tmpfiles --create virtrigaud-agent.conf`, ordered
+after `systemd-sysext.service`, `systemd-sysusers.service` and
+`local-fs.target` and before the agent, the signer and the shutdown unit,
+each of which requires it (so none of them starts when it failed; restarting
+it restarts them). A package install creates the users and directories when
+it is installed, and this unit then changes nothing (both tools are
+idempotent). It exists for hosts where the agent arrives as a system
+extension merged during the boot: the boot's own `systemd-sysusers.service`
+runs before the merge and never sees the extension's fragment, and on hosts
+whose `/etc` is rebuilt at every boot the users would be missing at every
+boot. The units would then fail with `217/USER`, and the shutdown unit would
+look active while its stop action could not run. The fragments are named by
+file name, so a fragment of the same name in `/etc/sysusers.d` or
+`/etc/tmpfiles.d` takes precedence. It runs as root with only what the two
+tools need: `ProtectSystem=strict` with `/etc` (sysusers rewrites `passwd`,
+`group`, `shadow`, `gshadow` through temporary, backup and lock files there),
+`/var/lib` and `/run` (tmpfiles creates the state and socket directories)
+writable, the capability set `CAP_CHOWN CAP_FOWNER CAP_FSETID
+CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH`, `ProtectProc=invisible`,
+`PrivateIPC=yes`, no network and a system call filter.
 
 Users: the `sysusers.d` fragment gives `virtrigaud-agent` the fixed id 564
 and `virtrigaud-signer` 565 (user and group), in the system range and away
@@ -1079,12 +1090,18 @@ from both ends of it (`systemd-sysusers` draws dynamic system ids downwards
 from 999, some distributions' `adduser` upwards from 100). Fixed ids keep the
 owners of the persistent state directories stable where `/etc/passwd` is
 rebuilt at every boot. If an id is already taken, `systemd-sysusers`
-allocates another one; on such a host it can differ between boots, and the
-agent and the signer then refuse to start (`StateDirInsecure`,
-`PKIInsecure`, or a key directory not owned by the signer): they fail closed,
-and no VM is touched. Check that both ids are free (`getent passwd 564 565`,
-`getent group 564 565`) before the first start, or choose others in a
-fragment named `virtrigaud-agent.conf` in `/etc/sysusers.d`.
+allocates another one; on such a host it can differ between boots. The setup
+unit's owner check then finds the agent's or the signer's state directory,
+or the host key, owned by a uid that is not its user's, and fails before
+`systemd-tmpfiles` would hand the directories to the new uid: the agent, the
+signer and the shutdown unit do not start (and the agent's own host checks
+would refuse too). That is fail-closed, not confidential: the files stay
+owned by the old uid, and whichever account holds that uid now (another
+service, or a user created later) can read the host key and the agent's
+state. Reserve the ids: check that both are free (`getent passwd 564 565`,
+`getent group 564 565`) before the first start and keep them out of other
+allocations in the host image, or choose other free ids in a fragment named
+`virtrigaud-agent.conf` in `/etc/sysusers.d` before the first start.
 
 Start at boot: on a host where the units are installed as files, the
 `[Install]` sections apply (`systemctl enable`). On a host where they arrive
@@ -1100,14 +1117,28 @@ unit that `multi-user.target` upholds is started even so. The drop-in
 - the agent is not upheld (`Upholds=` would start it again at once after a
   maintenance stop). `vrtg-agent-boot-start.service` is upheld instead: a
   `oneshot` with `RemainAfterExit=yes` whose only action is `systemctl
-  --no-block start vrtg-agent.service`, with no dependency on the agent's
-  unit. It runs once per boot and stays active, so `Upholds=` does not run it
+  --no-block start vrtg-agent.service` while `systemctl is-enabled
+  vrtg-agent.service` succeeds (enabled, enabled-runtime, static, ...), with
+  no dependency on the agent's unit. It runs once per boot and stays active, so `Upholds=` does not run it
   again: an agent stopped for maintenance stays stopped through restarts of
   the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
-  The agent's `Wants=` brings the signer and the setup unit up with it.
+  The agent's `Wants=` and `Requires=` bring the signer and the setup unit up with it.
   Stopping `vrtg-agent-boot-start.service` by hand is the exception:
-  `Upholds=` starts it again and it starts the agent once more. Stop the
-  agent, not that unit.
+  `Upholds=` starts it again and it starts the agent once more (if enabled).
+  Stop the agent, not that unit.
+
+Enablement: the agent starts at boot only while `vrtg-agent.service` is
+enabled, on both kinds of host. On a host with a system extension, enable it
+once the extension is merged (`systemctl enable vrtg-agent.service`; the
+link it writes under `/etc/systemd/system` must persist across boots, as it
+does on hosts that keep `/etc/systemd/system` on persistent storage, or be
+provisioned by the host's configuration at each boot); `.wants` links shipped
+inside the extension do not count as enabled. `systemctl disable
+vrtg-agent.service` keeps the agent off at the next boot; `systemctl mask
+vrtg-agent.service` keeps it off entirely, including a manual start. The
+check is made in the boot-start unit's action, not as an `ExecCondition=`:
+a skipped unit is inactive, and `Upholds=` would start it again and again
+until its start limit failed it.
 
 `Upholds=` needs systemd 249 or later.
 
@@ -1115,9 +1146,10 @@ unit that `multi-user.target` upholds is started even so. The drop-in
 (with the binary path replaced, since it does not exist on a build machine)
 and checks what the analyzer cannot see: `SystemCallErrorNumber=` wherever a
 system call filter is set, no binary under `/usr/libexec`, a signer that can
-write exactly its key and socket directories, and a `multi-user.target`
+write exactly its key and socket directories, a `multi-user.target`
 drop-in that upholds the shutdown and boot-start units and never the agent
-or the signer. The CI lint job runs it.
+or the signer, and `SystemCallLog=@privileged` and `Requires=` on the setup
+unit for the agent, the signer and the shutdown unit. The CI lint job runs it.
 
 ## Enrolment
 

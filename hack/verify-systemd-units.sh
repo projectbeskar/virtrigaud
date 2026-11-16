@@ -11,7 +11,9 @@
 #  - the signer can write its key directory (a certificate renewal creates
 #    the pending key there) and nothing else besides its socket directory;
 #  - the multi-user.target drop-in upholds the shutdown unit and the
-#    once-per-boot start unit, and never the agent itself.
+#    once-per-boot start unit, and never the agent itself;
+#  - the agent, the signer and the shutdown unit audit filtered privileged
+#    calls and require the setup unit (which refuses moved user ids).
 #
 # The units start a binary under /usr/lib/virtrigaud that does not exist on a
 # build machine, so each unit is copied to a temporary directory with that
@@ -82,6 +84,14 @@ for f in "${UNIT_DIR}"/*.service; do
 			problem "${name}: SystemCallFilter= without SystemCallErrorNumber=: a filtered call kills the process"
 			;;
 		esac
+	fi
+done
+for name in vrtg-agent.service vrtg-agent-signer.service vrtg-vm-shutdown.service; do
+	if [ "$(value "${UNIT_DIR}/${name}" SystemCallLog)" != "@privileged" ]; then
+		problem "${name}: SystemCallLog=@privileged missing: filtered privileged calls would not be audited"
+	fi
+	if ! value "${UNIT_DIR}/${name}" Requires | tr ' ' '\n' | grep -qx vrtg-agent-setup.service; then
+		problem "${name}: does not require vrtg-agent-setup.service: it would start when its users' ids moved"
 	fi
 done
 signer="${UNIT_DIR}/vrtg-agent-signer.service"
