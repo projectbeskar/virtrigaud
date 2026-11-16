@@ -164,6 +164,31 @@ const (
 	// ConfirmOnlyFrozen: a freeze confirmation discards only a frozen
 	// enrolment, never the active one.
 	ConfirmOnlyFrozen Name = "confirm-only-frozen"
+	// SignerRenewalURIs: the signer builds a renewal certificate request only
+	// for a host URI identity and an enrolment record.
+	SignerRenewalURIs Name = "signer-renewal-uris"
+	// SignerActivatePin: the signer puts in use only the pending key the
+	// caller names.
+	SignerActivatePin Name = "signer-activate-pin"
+	// RenewChain: a renewed certificate is staged only when it chains to the
+	// pinned host identity issuer and is valid now.
+	RenewChain Name = "renew-chain"
+	// RenewProfile: a renewed certificate is staged only when it meets the
+	// agent certificate profile.
+	RenewProfile Name = "renew-profile"
+	// RenewSameIdentity: a renewed certificate is staged only when it carries
+	// exactly the current certificate's identities (same enrolment, same
+	// epoch).
+	RenewSameIdentity Name = "renew-same-identity"
+	// RenewPendingKey: a renewed certificate is staged only when it certifies
+	// the key of the host's own pending renewal.
+	RenewPendingKey Name = "renew-pending-key"
+	// RenewActivateStaged: only the staged certificate, byte for byte, is put
+	// in use.
+	RenewActivateStaged Name = "renew-activate-staged"
+	// RenewalOnlyWhenAsked: a pending renewal request is put only in the
+	// answer of a GetHostInfo that asked for it.
+	RenewalOnlyWhenAsked Name = "renewal-only-when-asked"
 )
 
 // All lists every guard, in a fixed order.

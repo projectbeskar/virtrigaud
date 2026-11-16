@@ -6,8 +6,11 @@ flags (which this chart does not set). Off by default.
 Grants exactly: approve on the named cert-manager signers (resourceNames, no
 wildcard), create on subjectaccessreviews (the per-Host enrol check), get/list
 on admission webhook configurations (the fail-closed cert-manager check), and,
-in the enrolment namespace only, get/list/watch on certificaterequests, update
-on certificaterequests/status, and the pins Secrets. Only the manager may write
+in the enrolment namespace only, create/delete/get/list/watch on
+certificaterequests (create and delete: the manager's own certificate renewal
+requests; with approve this lets the manager obtain host-agent certificates by
+itself, see config/rbac/host-enrolment/README.md), update on
+certificaterequests/status, and the pins Secrets. Only the manager may write
 Secrets in the enrolment namespace.
 
 It renders only with experimental.hostEnrolment.developmentBuild=true, an
@@ -74,7 +77,7 @@ metadata:
 rules:
 - apiGroups: ["cert-manager.io"]
   resources: ["certificaterequests"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["create", "delete", "get", "list", "watch"]
 - apiGroups: ["cert-manager.io"]
   resources: ["certificaterequests/status"]
   verbs: ["update"]

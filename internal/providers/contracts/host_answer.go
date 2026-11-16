@@ -71,6 +71,10 @@ type HostAnswerQuery struct {
 	// highest inventory version the caller implements, or 0 for none. The
 	// signed inventory echoes it.
 	InventoryVersion uint32
+	// RenewalVersion asks for the host's pending certificate renewal request
+	// in the signed answer: the highest renewal version the caller
+	// implements, or 0 for none.
+	RenewalVersion uint32
 }
 
 // VMAnswerQuery names one VM placement for a Describe that asks for a signed

@@ -44,8 +44,10 @@ message SignedBlob {
   // sent.
   bytes signer_certificate = 3;
   // body_type is the full protobuf name of the message in body, from a
-  // closed set: "provider.v1.OperationAnswer", "provider.v1.VMAnswer" or
-  // "provider.v1.HostAnswer". A verifier refuses any other value.
+  // closed set: "provider.v1.OperationAnswer", "provider.v1.VMAnswer",
+  // "provider.v1.HostAnswer", or "provider.v1.RenewalRequest" (only in
+  // HostAnswer.pending_renewal). A verifier refuses any other value, and a
+  // value other than the one the field it arrived in carries.
   string body_type = 4;
 }
 
@@ -273,6 +275,48 @@ message HostAnswer {
   // another answer. It is a statement by the host, not a proof: a host whose
   // agent is compromised can report anything. Additive.
   HostInventory inventory = 9;
+
+  // pending_renewal is the host's pending request to renew its identity
+  // certificate for a new key: a SignedBlob of a RenewalRequest, signed by
+  // the key of the host's current identity certificate, whose
+  // signer_certificate is exactly this answer's. Set only in the answer to a
+  // GetHostInfoRequest whose renewal_version is at least 1, and only while
+  // the host has a renewal pending; never in another answer. Additive.
+  SignedBlob pending_renewal = 10;
+}
+
+// RenewalRequest is a per-host agent's request to renew its identity
+// certificate, the body of the SignedBlob in HostAnswer.pending_renewal. The
+// agent generates a new key on the host for it; the key never leaves the
+// host. certificate_request is self-signed by the new key (proof of
+// possession of the new key); the SignedBlob around this message is signed
+// by the key of the current certificate (proof that the holder of the
+// pinned key asks for the renewal). It names the same enrolment as the
+// current certificate: a renewal never changes the host's identities.
+message RenewalRequest {
+  // renewal_version is the version of this message's content the agent
+  // used: the lower of the request's renewal_version and the highest version
+  // the agent implements.
+  uint32 renewal_version = 1;
+  // provider_uid is the metadata.uid of the Provider the host is enrolled
+  // with, as in the certificate.
+  string provider_uid = 2;
+  // host_id is the identity of the Host.
+  string host_id = 3;
+  // install_id is the random 16-byte identifier of the installation.
+  bytes install_id = 4;
+  // enrolment_id is the 16-byte identifier of the enrolment the current
+  // certificate certifies; the renewed certificate certifies the same one.
+  bytes enrolment_id = 5;
+  // current_certificate_sha256 is the SHA-256 digest of the DER encoding of
+  // the current identity certificate (the signer_certificate of the
+  // SignedBlob that carries this message): 32 bytes.
+  bytes current_certificate_sha256 = 6;
+  // certificate_request is the DER-encoded PKCS #10 certificate signing
+  // request for the new key, signed by the new key, carrying exactly the
+  // URI subject alternative names of the current certificate: at most 4096
+  // bytes.
+  bytes certificate_request = 7;
 }
 
 // HostInventory is a host's report of the components it runs virtual

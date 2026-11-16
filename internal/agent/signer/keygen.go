@@ -69,6 +69,12 @@ func CheckKeyDir(dir string, uid uint32) error {
 // Run it as the signer's user: the file belongs to the caller, so the agent's
 // user, which is another user, cannot read it.
 func CreateKey(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, err error) {
+	return createKeyAt(path, uid)
+}
+
+// createKeyAt is CreateKey for any key file in a private directory: the host
+// key at enrolment, the pending key of a renewal.
+func createKeyAt(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, err error) {
 	dir := filepath.Dir(path)
 	if err := CheckKeyDir(dir, uid); err != nil {
 		return nil, false, err
@@ -99,7 +105,7 @@ func CreateKey(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, er
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, false, fmt.Errorf("draw a temporary file name: %w", err)
 	}
-	tmp := filepath.Join(dir, ".host.key."+hex.EncodeToString(nonce[:]))
+	tmp := filepath.Join(dir, "."+filepath.Base(path)+"."+hex.EncodeToString(nonce[:]))
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- inside the signer's private key directory, name drawn at random, O_EXCL
 	if err != nil {
 		return nil, false, fmt.Errorf("create the host key file: %w", err)

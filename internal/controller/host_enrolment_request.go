@@ -103,6 +103,18 @@ type HostEnrolmentRequestReconciler struct {
 	// Admission gates approvals on the periodic admission check (nil: no
 	// gate; tests only — the manager always sets it).
 	Admission *AdmissionGate
+	// APIReader reads the pins Secret of a renewal decision from the API
+	// server, so a renewal is never denied or withdrawn on a stale cache
+	// (nil: the Client; tests only).
+	APIReader client.Reader
+}
+
+// liveReader returns the APIReader, or the Client when none is set.
+func (r *HostEnrolmentRequestReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // admissionSuspendedRequeue is how soon an undecided request is retried
@@ -121,7 +133,8 @@ func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl
 	if err := r.Get(ctx, req.NamespacedName, cr); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !certrequest.IsEnrolment(cr) || !cr.GetDeletionTimestamp().IsZero() {
+	renewal := certrequest.IsRenewal(cr)
+	if (!certrequest.IsEnrolment(cr) && !renewal) || !cr.GetDeletionTimestamp().IsZero() {
 		return ctrl.Result{}, nil
 	}
 	var iss HostCertificateIssuer
@@ -132,6 +145,21 @@ func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl
 		}
 	}
 	if iss == nil {
+		return ctrl.Result{}, nil
+	}
+	if renewal {
+		// A request that names itself a renewal is judged only as one: it is
+		// approved only when the manager created it (decideRenewal).
+		switch {
+		case !certrequest.Decided(cr):
+			if r.Admission != nil && !r.Admission.OK() {
+				log.FromContext(ctx).Info("Not deciding a host-agent renewal request while approvals are suspended", "request", req.String())
+				return ctrl.Result{RequeueAfter: admissionSuspendedRequeue}, nil
+			}
+			return ctrl.Result{}, r.decideRenewal(ctx, cr, iss)
+		case certrequest.IsTrue(cr, certrequest.ConditionApproved) && !certrequest.Failed(cr):
+			return ctrl.Result{}, r.completeRenewal(ctx, cr, iss)
+		}
 		return ctrl.Result{}, nil
 	}
 	switch {

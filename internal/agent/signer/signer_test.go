@@ -213,17 +213,18 @@ func TestProtocolRefusals(t *testing.T) {
 	assert.EqualValues(t, 0, r.srv.signed.Load(), "nothing was signed")
 }
 
-// TestOversizedFrame: a frame longer than MaxFrameBytes closes the connection
-// without a response and without the payload being read.
+// TestOversizedFrame: a frame longer than MaxSignFrameBytes (a signer that
+// serves no renewal) closes the connection without a response and without
+// the payload being read.
 func TestOversizedFrame(t *testing.T) {
 	r := serve(t, "", ServerOptions{}, nil)
-	req := binary.BigEndian.AppendUint16(nil, MaxFrameBytes+1)
-	req = append(req, make([]byte, MaxFrameBytes+1)...)
+	req := binary.BigEndian.AppendUint16(nil, MaxSignFrameBytes+1)
+	req = append(req, make([]byte, MaxSignFrameBytes+1)...)
 	_, err := roundTrip(t, r.socket, req)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, os.ErrDeadlineExceeded)
 	// A frame of exactly the maximum is read (and refused as a bad request).
-	resp, err := roundTrip(t, r.socket, append(binary.BigEndian.AppendUint16(nil, MaxFrameBytes), make([]byte, MaxFrameBytes)...))
+	resp, err := roundTrip(t, r.socket, append(binary.BigEndian.AppendUint16(nil, MaxSignFrameBytes), make([]byte, MaxSignFrameBytes)...))
 	require.NoError(t, err)
 	assert.Equal(t, StatusBadRequest, Status(resp[1]))
 	// The server still serves.

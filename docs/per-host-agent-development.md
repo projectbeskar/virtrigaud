@@ -340,10 +340,10 @@ and a client may not send keepalive pings more often than every 15 seconds
 
 | Method | Answer |
 |--------|--------|
-| `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)). `host_id` naming another host, a nonce that is not 16 bytes, `continuity_seq` without a nonce, or `inventory_version` without a nonce: `InvalidArgument`. |
+| `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)); with `renewal_version` of at least 1, a development build puts its pending renewal request in it (see [Certificate renewal](#certificate-renewal)). `host_id` naming another host, a nonce that is not 16 bytes, or `continuity_seq`, `inventory_version` or `renewal_version` without a nonce: `InvalidArgument`. |
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
 | `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. A freeze confirmation it carries is applied first (see [Freeze confirmation](#freeze-confirmation)). |
-| `agent.v1.AgentService/InstallRenewedCertificate` | `Unimplemented`. |
+| `agent.v1.AgentService/InstallRenewedCertificate` | Development builds: stages a renewed certificate (`activate` false) or puts the staged one in use (`activate` true), and answers with a signed `HostAnswer` (see [Certificate renewal](#certificate-renewal)). The nonce and a certificate are required. Release builds: `Unimplemented`. |
 | Every mutating Provider method (the operation kind table) | `Unavailable` with `UNATTESTED` before the agent is ready; `FailedPrecondition` with `QUARANTINED` while the store is quarantined. Once ready: a release build answers `Unimplemented`; a development build runs the operation path (see [Operations](#operations)). |
 | `provider.v1.Provider/TaskStatus` | Development builds: the operation's state from its record or tombstone, by task reference, or by `op_id` with a signed `OperationAnswer` (see [Operations](#operations)). Release builds: `Unimplemented`. |
 | `provider.v1.Provider/Describe` | Development builds: whether the owner's VM has a placement on the host, and with `answer_nonce` a signed `VMAnswer` about one placement (see [Operations](#operations)). Release builds: `Unimplemented`. |
@@ -353,8 +353,9 @@ A signed answer is made only for a request with a nonce, and only while the
 store's active enrolment is the one the host certificate names; otherwise the
 read answers without `host_answer`. Its body carries the nonce, the enrolment,
 the store's chain position, newest checkpoint and trust state (read together),
-the agent's API version (2), grant versions (`[1]`), mode (`identity`), store
-schema version and clock floor. It is signed with the host key, by the signer process, over
+the agent's API version (3), grant versions (`[1]`), mode (`identity`), store
+schema version, clock floor and, in a development build, the digest of a
+staged renewed certificate (`staged_certificate_sha256`). It is signed with the host key, by the signer process, over
 `"virtrigaud.host-signed.v1" 0x00 ‖ be16(len(body_type)) ‖ body_type ‖ be32(len(body)) ‖ body`
 (ECDSA P-256, SHA-256, low-S), as defined in
 [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#the-signature-input); a test
@@ -725,14 +726,19 @@ regulated profile; until it exists, a signed host answer is no stronger than
 the agent process that relays it.
 
 **Protocol** (package `internal/agent/signer`). One request and one response
-per connection, each a frame of a 2-byte big-endian length (at most 256 bytes;
-a longer announcement closes the connection unread) and that many payload
-bytes. A request is the version byte (1), an operation byte and its body:
+per connection, each a frame of a 2-byte big-endian length (at most 256 bytes
+for a request to a signer that serves no renewal, every release build; 6 KiB
+otherwise, which fits a renewal request's names and its certificate request;
+a longer announcement closes the connection unread) and that many payload bytes. A
+request is the version byte (1), an operation byte and its body:
 
 | Operation | Body | Response body |
 |-----------|------|---------------|
 | `1` public key | none | the public key, PKIX DER |
 | `2` sign | hash byte `1` (SHA-256), purpose byte (`1` handshake, `2` answer), then exactly 32 digest bytes | the signature, ASN.1 DER |
+| `3` renewal request (development builds) | URI count byte (1 to 8), then each URI as a 2-byte length (1 to 512) and its bytes: a host URI identity and an enrolment record | the certificate request for the pending key, DER |
+| `4` activate renewal (development builds) | the 32-byte SHA-256 of the pending key's DER SubjectPublicKeyInfo | the public key now in use, PKIX DER |
+| `5` discard renewal (development builds) | the 32-byte pin of the pending key | none |
 
 A response is the version byte, a status byte (`0` ok, `1` bad request,
 `2` rate limited, `3` internal error) and the body. The only hash is SHA-256
@@ -820,6 +826,95 @@ connections from using the handshake budget up in the first place). The signer l
 rate-limited requests, malformed requests, refused peers and refused
 connections, and its totals when it stops; it never logs a digest, a
 signature or key material.
+
+### Certificate renewal
+
+Development builds renew the host certificate for a new key before it
+expires; release builds make no renewal request, put none in an answer and
+answer `InstallRenewedCertificate` with `Unimplemented`, and their signer
+serves no renewal operation.
+
+- **Timer.** Every few seconds (the clock floor's period), and at start, the
+  agent checks whether its certificate is at least two thirds through its
+  lifetime and not expired. If so, and no renewal is pending, it asks the
+  signer for a certificate request for its pending key carrying exactly the
+  URI names of the current certificate (signer operation `3`). The signer
+  creates the pending key on first use (ECDSA P-256, `0600`, as
+  `host.key.pending` beside the host key in its own directory; the agent never
+  holds it) and signs only a certificate request it builds itself from those
+  names, never a digest the agent chose. The agent keeps the request as
+  `pki/renewal.csr` (`0600`) and when it made it as `pki/renewal.since`. A
+  request that was never staged is discarded with the signer's pending key
+  once it has waited half the lifetime the certificate had left when it was
+  made (the manager denied it, it failed or it was lost), and a request for a
+  new key follows. A staged renewal is never discarded this way: the manager
+  may have pinned its key. A failed request is retried after 30 seconds,
+  doubling up to 10 minutes. The signer's renewal operations have their own
+  budget (1 per second, burst 10).
+- **Request.** A `GetHostInfo` whose `renewal_version` is at least 1 gets, in
+  the signed answer, `pending_renewal`: a `RenewalRequest` (the current
+  enrolment, the digest of the current certificate, the certificate request)
+  signed with the current key under the host-signed domain separator with
+  body type `provider.v1.RenewalRequest`, and with the current certificate as
+  signer certificate. No other answer carries it. The signed request is kept
+  in memory and reused while neither the certificate nor the request changes.
+- **Stage** (`InstallRenewedCertificate`, `activate` false). The agent stages
+  only a certificate that is one DER certificate of at most 8 KiB, chains
+  directly to its pinned host identity issuer for server authentication and
+  is valid now, meets the certificate profile, carries exactly the URI names
+  of the current certificate (same host, same enrolment record, same start
+  epoch), and certifies its pending key (not the current one). Anything else
+  is `InvalidArgument` and nothing is written; no pending renewal is
+  `FailedPrecondition`. A staged certificate is kept as `pki/renewal.crt`
+  (`0600`) and named, by its SHA-256, in every host answer. Staging the same
+  certificate again changes nothing; staging another valid one replaces it.
+- **Activate** (`activate` true). Only the staged certificate, byte for byte,
+  is put in use (anything else: `FailedPrecondition`), after the same checks
+  again. The signer renames the pending key over the host key file (one
+  rename; signer operation `4`, which names the key by its pin) and swaps it
+  in; the staged certificate then replaces `host.crt`; the renewal files are
+  removed; and the TLS certificate and the answer signer are replaced at
+  once. The answer is signed with the new key and names nothing staged. A
+  certificate already in use answers success to a stage or an activation,
+  so a repeated call is harmless.
+- **Interrupted activation.** From the signer's switch on, the activation runs
+  on its own 30-second deadline, not the caller's, so a Provider call that
+  gives up does not stop it halfway. If anything fails once the signer may
+  hold the new key (the signer cannot be reached, the certificate cannot be
+  promoted or the identity cannot be loaded), the agent finishes it in
+  process: it promotes the staged certificate when it certifies the signer's
+  key and loads the identity with a client for that key, at once if it can,
+  else at the next tick (every few seconds) or at the Provider's next
+  activation, including when `host.crt` already holds the certificate. A tick
+  waits for the signer without holding the renewal lock, so answers are not
+  delayed. Until it is finished the agent refuses operations with the
+  unattested cause `renewal_activation_incomplete` (in the service status and
+  in the refusals' `ErrorInfo`), and logs a failed attempt at most once a
+  minute. A tick that keeps failing is retried at the next tick three times,
+  then after 5 seconds doubling to a minute. A tick acts on its signer
+  connection only if no activation was running when it started or began
+  before it took the renewal lock.
+- **Crash safety.** Every file is written to a temporary file, synced and
+  renamed, and the directory synced. A stop between stage and activation
+  leaves the current certificate and key in use and the staged certificate
+  named; the activation then completes after the restart. A stop between the
+  signer's switch and the replacement of `host.crt` leaves a certificate for
+  the old key and a signer holding the new one: at the next start (and on
+  SIGHUP), before the identity is loaded, the agent promotes the staged
+  certificate when it certifies the signer's key, is valid and names the
+  same host and enrolment. The host is left with the current pair or the
+  renewed pair, never neither.
+- **Re-enrolment.** A pending renewal whose request no longer carries the
+  current certificate's names (the host was re-enrolled) is discarded, with
+  the signer's pending key (signer operation `5`).
+- **Audit.** The request, the staging and the activation are logged with the
+  enrolment id, the key pins, the certificate's SHA-256 and its expiry; a
+  refused certificate is logged with the reason. No key, certificate or
+  request bytes are logged.
+
+The manager decides when the staged certificate may be put in use
+([details](host-agent-enrolment.md#certificate-renewal)); the Provider
+delivers it ([details](clustered-agent-provider-development.md#renewed-certificates)).
 
 ## Signals
 
@@ -1082,9 +1177,11 @@ that is already enrolled is never changed by this file.
   effect in doubt, and never perform an effect it cannot reconstruct
   (documented on `executor.Operation.Payload`). How a real executor parks a
   step and how the manager re-delivers the request for it is a follow-up.
-- The re-enrolment freeze, compaction and certificate installation are not
-  reachable from the agent process yet, so their crash points are tested in
-  the store library only.
+- The re-enrolment freeze and compaction are not reachable from the agent
+  process yet, so their crash points are tested in the store library only.
+  The renewal's crash points (between stage and activation, and between the
+  signer's switch to the new key and the promotion of the certificate) are
+  tested on the agent process, with the activation stopped by a test hook.
 - The host key is held by a separate signer process, but the signer is a
   digest oracle: `crypto/tls` hands it a digest, so it cannot check what it
   signs. A compromised agent process cannot exfiltrate the key or use it later,
@@ -1131,8 +1228,8 @@ that is already enrolled is never changed by this file.
 - The provisioning marker is checked with `lstat` and then read with
   `O_NOFOLLOW`, not checked on the open descriptor; it holds no secret.
 - `GetHostInfo` reports the component inventory but no CPU, memory or storage capacity, and the inventory is a detective control (see [Host inventory](#host-inventory)).
-- Certificate renewal (`InstallRenewedCertificate`) and rotation are not
-  available. Revocation is enforced by the Provider, which stops routing to
+- Certificate renewal is served by development builds only (see
+  [Certificate renewal](#certificate-renewal)). Revocation is enforced by the Provider, which stops routing to
   a revoked host (see
   [the Provider's inventory Secret watch](clustered-agent-provider-development.md#following-the-inventory-secret));
   the agent itself refuses an expired certificate at start, without opening

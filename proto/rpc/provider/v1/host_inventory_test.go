@@ -243,11 +243,17 @@ func TestHostInventory_EnumValuesPinned(t *testing.T) {
 	})
 }
 
-// TestHostInventory_BodyTypesUnchanged confirms the new messages added no
-// signed body type: the closed set stays the three published strings.
+// TestHostInventory_BodyTypesUnchanged confirms the inventory messages added
+// no signed body type: the closed set is the three answer bodies and the
+// renewal request (host_renewal_test.go), nothing of the inventory.
 func TestHostInventory_BodyTypesUnchanged(t *testing.T) {
-	if len(hostSignedBodyTypes) != 3 {
-		t.Fatalf("body type set has %d members, want 3", len(hostSignedBodyTypes))
+	if len(hostSignedBodyTypes) != 4 {
+		t.Fatalf("body type set has %d members, want 4", len(hostSignedBodyTypes))
+	}
+	for _, bt := range hostSignedBodyTypes {
+		if strings.Contains(bt, "Inventory") || strings.Contains(bt, "Component") {
+			t.Errorf("body type %q is an inventory message", bt)
+		}
 	}
 	if got := string((&HostAnswer{}).ProtoReflect().Descriptor().FullName()); got != "provider.v1.HostAnswer" {
 		t.Errorf("HostAnswer full name = %q", got)

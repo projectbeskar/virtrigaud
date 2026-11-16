@@ -104,6 +104,13 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 		if c := meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentStoreRegressed); c != nil {
 			setHostCondition(host, HostConditionAgentStoreRegressed, metav1.ConditionFalse, reasonHostStoreNotRegressed, "")
 		}
+		// A renewal advances on a verified answer of this manager's own
+		// request: recorded, the new key pinned, the old key unpinned.
+		for _, ev := range r.HostAnswers.checkRenewal(ctx, provider, host.Name, v) {
+			if r.Recorder != nil {
+				r.Recorder.Event(host, ev.typ, ev.reason, ev.message)
+			}
+		}
 		// A predecessor whose freeze was confirmed is removed once the host
 		// shows, signed, that it discarded it.
 		for _, id := range r.HostAnswers.checkFreezeDiscards(ctx, provider, reader, host.Name) {

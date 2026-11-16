@@ -371,6 +371,56 @@ type HostAgentStatus struct {
 	// CertificateExpiry is when the pinned agent certificate expires.
 	// +optional
 	CertificateExpiry *metav1.Time `json:"certificateExpiry,omitempty"`
+
+	// Renewal is the progress of the agent's certificate renewal; unset when
+	// none is in progress. A mirror of the pins Secret, like KeyPins.
+	// +optional
+	Renewal *HostAgentRenewal `json:"renewal,omitempty"`
+}
+
+// HostAgentRenewalPhase is the phase of a per-host agent certificate
+// renewal.
+// +kubebuilder:validation:Enum=Requested;Issued;Overlap
+type HostAgentRenewalPhase string
+
+// Phases of a per-host agent certificate renewal.
+const (
+	// HostAgentRenewalRequested: the agent's signed renewal request is
+	// verified; the manager's certificate request is created or awaits
+	// approval and issuance.
+	HostAgentRenewalRequested HostAgentRenewalPhase = "Requested"
+	// HostAgentRenewalIssued: the renewed certificate is issued and validated
+	// and published for the Provider to stage on the host; its key is not
+	// pinned yet.
+	HostAgentRenewalIssued HostAgentRenewalPhase = "Issued"
+	// HostAgentRenewalOverlap: the host showed, signed, that it staged the
+	// renewed certificate; both keys are pinned until a signed answer by the
+	// new key shows it in use.
+	HostAgentRenewalOverlap HostAgentRenewalPhase = "Overlap"
+)
+
+// HostAgentRenewal is the progress of a per-host agent certificate renewal.
+// It holds identifiers and a public key pin only.
+type HostAgentRenewal struct {
+	// Phase is the renewal's phase.
+	Phase HostAgentRenewalPhase `json:"phase"`
+
+	// KeyPin is the pin of the renewal's new key: the SHA-256 of its DER
+	// SubjectPublicKeyInfo, as 64 lowercase hexadecimal characters.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	KeyPin string `json:"keyPin"`
+
+	// CertificateRequest is "namespace/name" of the manager's certificate
+	// request for the renewal, once created.
+	// +optional
+	// +kubebuilder:validation:MaxLength=317
+	CertificateRequest string `json:"certificateRequest,omitempty"`
+
+	// OverlapUntil is when the overlap in which both keys are pinned is
+	// expected to end. Past it, both keys stay pinned until the host shows
+	// the new key in use or the old certificate expires.
+	// +optional
+	OverlapUntil *metav1.Time `json:"overlapUntil,omitempty"`
 }
 
 // HostInventoryAllowList is the result of comparing one host component with

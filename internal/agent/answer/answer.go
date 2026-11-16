@@ -95,8 +95,10 @@ const (
 // Versions this agent reports.
 const (
 	// AgentAPIVersion is the version of the agent's RPC surface. Version 2
-	// adds the host inventory to the answer of GetHostInfo.
-	AgentAPIVersion uint32 = 2
+	// adds the host inventory to the answer of GetHostInfo; version 3 adds
+	// the pending certificate renewal request to it and serves
+	// InstallRenewedCertificate (development builds).
+	AgentAPIVersion uint32 = 3
 	// GrantVersion is the operation grant version the agent implements.
 	GrantVersion uint32 = 1
 )
@@ -142,6 +144,13 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	if !slices.Contains(bodyTypes, bodyType) {
 		return nil, fmt.Errorf("%w: %s is not a host answer body", ErrSign, bodyType)
 	}
+	return signBody(signer, certDER, bodyType, body, MaxBlobBytes)
+}
+
+// signBody signs body of bodyType (a member of the closed set the caller
+// checked) with signer for certDER; the encoded SignedBlob is at most
+// maxBlob bytes.
+func signBody(signer crypto.Signer, certDER []byte, bodyType string, body proto.Message, maxBlob int) (*providerv1.SignedBlob, error) {
 	if len(certDER) == 0 || len(certDER) > MaxCertBytes {
 		return nil, fmt.Errorf("%w: signer certificate of %d bytes", ErrSign, len(certDER))
 	}
@@ -180,8 +189,8 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 		return nil, fmt.Errorf("%w: the signature does not verify", ErrSign)
 	}
 	blob := &providerv1.SignedBlob{Body: raw, Signature: sig, SignerCertificate: bytes.Clone(certDER), BodyType: bodyType}
-	if proto.Size(blob) > MaxBlobBytes {
-		return nil, fmt.Errorf("%w: %w: signed answer exceeds %d bytes", ErrSign, inventory.ErrTooLarge, MaxBlobBytes)
+	if proto.Size(blob) > maxBlob {
+		return nil, fmt.Errorf("%w: %w: signed answer exceeds %d bytes", ErrSign, inventory.ErrTooLarge, maxBlob)
 	}
 	return blob, nil
 }
@@ -244,6 +253,13 @@ type Host struct {
 	// checked against; zero uses inventory.MaxInventoryBytes. Only tests set
 	// it.
 	InventoryMaxBytes int
+	// RenewalRequested is the request's renewal_version; 0 when it asked for
+	// no renewal request.
+	RenewalRequested uint32
+	// PendingRenewal is the host's signed pending renewal request
+	// (SignRenewalRequest); it is put in the answer only when
+	// RenewalRequested is at least 1.
+	PendingRenewal *providerv1.SignedBlob
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no
@@ -286,6 +302,9 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 			}
 		}
 		a.Inventory = proto.CloneOf(h.Inventory)
+	}
+	if h.PendingRenewal != nil && (h.RenewalRequested != 0 || guard.Off(guard.RenewalOnlyWhenAsked)) {
+		a.PendingRenewal = proto.CloneOf(h.PendingRenewal)
 	}
 	return a, nil
 }

@@ -70,7 +70,8 @@ func assertHostEnrolmentRBAC(t *testing.T, docs [][]byte, wantNS string, wantSig
 			assert.Equal(t, wantNS, role.Namespace)
 			require.Len(t, role.Rules, 3)
 			assert.Equal(t, []string{"certificaterequests"}, role.Rules[0].Resources)
-			assert.ElementsMatch(t, []string{"get", "list", "watch"}, role.Rules[0].Verbs, "no create: the manager only decides requests")
+			assert.ElementsMatch(t, []string{"create", "delete", "get", "list", "watch"}, role.Rules[0].Verbs,
+				"create and delete for the manager's own renewal requests; no update of the spec")
 			assert.Equal(t, []string{"certificaterequests/status"}, role.Rules[1].Resources)
 			assert.Equal(t, []string{"update"}, role.Rules[1].Verbs)
 			assert.Equal(t, []string{"secrets"}, role.Rules[2].Resources, "pins Secrets, in the enrolment namespace only")

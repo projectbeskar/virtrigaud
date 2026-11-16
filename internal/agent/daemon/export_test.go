@@ -46,3 +46,12 @@ func SetSignerPoll(t testing.TB, d time.Duration) {
 
 // StoreOwnerMismatch exposes storeOwnerMismatch.
 var StoreOwnerMismatch = storeOwnerMismatch
+
+// SetActivationTimeout shortens the deadline of a certificate activation
+// until t ends.
+func SetActivationTimeout(t testing.TB, d time.Duration) {
+	t.Helper()
+	old := activationTimeout
+	activationTimeout = d
+	t.Cleanup(func() { activationTimeout = old })
+}

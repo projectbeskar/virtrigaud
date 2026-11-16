@@ -71,5 +71,5 @@ func TestHostInventoryAnswered(t *testing.T) {
 	assert.Equal(t, providerv1.ComponentState_COMPONENT_STATE_READY, ch.GetState())
 	assert.Nil(t, r.inventoryOf(0), "no inventory unless asked for")
 	assert.Nil(t, r.hello().GetInventory(), "never in the internal service")
-	assert.EqualValues(t, 2, r.hello().GetAgentApiVersion())
+	assert.GreaterOrEqual(t, r.hello().GetAgentApiVersion(), uint32(2), "version 2 added the inventory")
 }

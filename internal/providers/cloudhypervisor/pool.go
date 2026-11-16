@@ -116,6 +116,19 @@ type hostEntry struct {
 	// the earliest time of the next one (a backoff).
 	freezeFailures int
 	freezeNextTry  time.Time
+	// renewalDeliveredGen and renewalDeliveredKey name the renewed
+	// certificate and phase last delivered to the agent and the connection
+	// it went on.
+	renewalDeliveredGen uint64
+	renewalDeliveredKey string
+	// renewalUnsupportedGen is the connection whose agent answered
+	// InstallRenewedCertificate Unimplemented: nothing is relayed on it
+	// again.
+	renewalUnsupportedGen uint64
+	// renewalFailures counts consecutive failed relays, and renewalNextTry is
+	// the earliest time of the next one (a backoff).
+	renewalFailures int
+	renewalNextTry  time.Time
 }
 
 // transportInfo is one established transport of an entry's connection.
@@ -403,6 +416,13 @@ func (p *pool) reconcile(inv hostsecret.Inventory) error {
 				// An invalid confirmation is dropped; the host stays routed.
 				p.log.Warn("host inventory: invalid freeze confirmation dropped", "host", logID(h.ID), "error", err.Error())
 				h.FreezeConfirmation = nil
+			}
+		}
+		if len(h.RenewedCertificate) > 0 {
+			if err := hostsecret.ValidateRenewedCertificate(h.RenewedCertificate); err != nil {
+				// An invalid renewed certificate is dropped; the host stays routed.
+				p.log.Warn("host inventory: invalid renewed certificate dropped", "host", logID(h.ID), "error", err.Error())
+				h.RenewedCertificate = nil
 			}
 		}
 		want[h.ID] = h

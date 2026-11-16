@@ -190,6 +190,13 @@ type Hooks struct {
 	BeforeRecover func(ctx context.Context)
 	// Started receives the trust state once the start-up sequence ends.
 	Started func(state providerv1.AgentState)
+	// RenewalStep runs at each step of a certificate activation
+	// (RenewalStep* constants); an error stops the activation there, as a
+	// crash would.
+	RenewalStep func(step string) error
+	// HealConnected runs when a tick that finishes an interrupted
+	// activation has reached the signer, before it takes the renewal lock.
+	HealConnected func()
 }
 
 // Options configures Run.
@@ -264,6 +271,8 @@ type Options struct {
 type agentState struct {
 	store *opstore.Store
 	floor atomic.Pointer[clockfloor.Floor]
+	// renewal is the certificate renewal (nil: none, a release build).
+	renewal *renewer
 }
 
 var _ server.Agent = (*agentState)(nil)
@@ -296,6 +305,9 @@ func (a *agentState) UnattestedCause() string {
 	}
 	if a.store.Freezing() {
 		return server.CauseFreezeIncomplete
+	}
+	if a.renewal.activationIncomplete() {
+		return server.CauseRenewalIncomplete
 	}
 	switch a.ClockFloorState() {
 	case clockfloor.StateOK:
@@ -336,7 +348,7 @@ func (o Options) testOverrides() []string {
 	for name, on := range map[string]bool{
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
 		"TrustFileOwner": o.TrustFileOwner != nil, "InventoryRoot": o.InventoryRoot != "", "Listener": o.Listener != nil, "Now": o.Now != nil,
-		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil,
+		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil || o.Hooks.RenewalStep != nil || o.Hooks.HealConnected != nil,
 		"StepDeadlines": o.StepDeadlines != nil,
 	} {
 		if on {
@@ -368,6 +380,8 @@ type daemon struct {
 	// by logEnrolment once the credentials naming the enrolment are in use.
 	// Used only by the goroutine that runs the start-up and the reloads.
 	pendingEnrolLog func()
+	// renewal is the certificate renewal; nil in a release build.
+	renewal *renewer
 }
 
 // Run runs the agent until ctx ends or a stop signal arrives on signals, and
@@ -463,6 +477,11 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 	d.creds = server.NewCredentialStore(creds)
 	d.log.Info("host checks passed", "host", creds.Identity.HostURI)
+	var renewals server.Renewals
+	if config.DevBuild {
+		d.renewal = newRenewer(ctx, d)
+		renewals = d.renewal
+	}
 
 	// Steps 1 to 3: single writer, open, local continuity checks.
 	hooks, rotate := devJournalHooks(d.log)
@@ -487,7 +506,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 		return fmt.Errorf("open the operation store: %w", err)
 	}
-	agent := &agentState{store: st}
+	agent := &agentState{store: st, renewal: d.renewal}
 	closeStore := func() {
 		if err := st.Close(); err != nil {
 			d.log.Error(err, "close the operation store")
@@ -541,7 +560,8 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		return err
 	}
 	srv, err := server.New(server.Options{Agent: agent, Credentials: d.creds, Version: d.o.Version,
-		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Operations: ops, Inventory: coll, Freezes: freezes})
+		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Operations: ops, Inventory: coll, Freezes: freezes,
+		Renewals: renewals})
 	if err != nil {
 		closeStore()
 		return err
@@ -635,6 +655,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	if lastCause != "" {
 		d.log.Error(nil, "the host refuses operations", "cause", lastCause)
 	}
+	if d.renewal != nil && ctx.Err() == nil {
+		d.renewal.tick(ctx)
+	}
 	ticker := time.NewTicker(d.o.ObserveEvery)
 	defer ticker.Stop()
 	for {
@@ -651,7 +674,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			return fmt.Errorf("%w: %v", ErrRunPanicked, r)
 		case <-reload:
 			_ = d.notifier.Notify(systemd.NotifyReloading)
-			if err := d.reload(ctx, st); err != nil {
+			if err := d.renewal.exclusive(func() error { return d.reload(ctx, st) }); err != nil {
 				reason := reloadRefusalReason(err)
 				d.log.Error(err, "reload refused; the running credentials stay in use", "reason", reason)
 				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent) + "; reload refused: " + reason)
@@ -660,6 +683,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent) + "; credentials reloaded")
 			}
 		case <-ticker.C:
+			if d.renewal != nil {
+				d.renewal.tick(ctx)
+			}
 			if f := agent.floor.Load(); f != nil {
 				if js, _ := st.Journal().State(); js == journal.StateLost {
 					// The store can no longer commit; the floor goes on in memory.
@@ -782,6 +808,9 @@ func (d *daemon) loadCredentials(ctx context.Context) (*server.Credentials, erro
 	if err != nil {
 		return nil, err
 	}
+	if config.DevBuild {
+		d.recoverRenewal(tc, sg)
+	}
 	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid), sg)
 	if err != nil {
 		return nil, err
@@ -829,6 +858,9 @@ func (d *daemon) reload(ctx context.Context, st *opstore.Store) error {
 	tc, err := trust.LoadConfig(d.trustDir, trust.TrustFileReader(d.trustOwner))
 	if err != nil {
 		return err
+	}
+	if config.DevBuild {
+		d.recoverRenewal(tc, sg)
 	}
 	id, err := trust.LoadIdentity(cfg.PKIDir(), tc, d.o.Now(), trust.KeyFileReader(d.uid), sg)
 	if err != nil {

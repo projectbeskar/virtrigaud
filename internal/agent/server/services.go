@@ -50,6 +50,9 @@ func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHo
 	if req.GetInventoryVersion() != 0 && len(req.GetAnswerNonce()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "inventory_version is set without answer_nonce")
 	}
+	if req.GetRenewalVersion() != 0 && len(req.GetAnswerNonce()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "renewal_version is set without answer_nonce")
+	}
 	hostID := p.s.opts.Credentials.Load().Identity.HostID()
 	if req.GetHostId() != "" && req.GetHostId() != hostID {
 		return nil, status.Error(codes.InvalidArgument, "host_id names another host")
@@ -61,7 +64,7 @@ func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHo
 	return &providerv1.HostInfo{
 		Id:         hostID,
 		Health:     health,
-		HostAnswer: p.s.hostAnswerWithInventory(ctx, req.GetAnswerNonce(), req.GetContinuitySeq(), req.GetInventoryVersion()),
+		HostAnswer: p.s.hostAnswerWithInventory(ctx, req.GetAnswerNonce(), req.GetContinuitySeq(), req.GetInventoryVersion(), req.GetRenewalVersion()),
 	}, nil
 }
 
@@ -128,10 +131,27 @@ func (s *Server) applyFreezeConfirmation(ctx context.Context, forEnrolment []byt
 	}
 }
 
-// InstallRenewedCertificate is not served yet: certificate renewal arrives
-// with a later change.
-func (a *agentService) InstallRenewedCertificate(context.Context, *agentv1.InstallRenewedCertificateRequest) (*agentv1.InstallRenewedCertificateResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "certificate renewal is not served by this agent")
+// InstallRenewedCertificate stages a renewed certificate, or puts the staged
+// one in use (Renewals.Install), and answers with a signed HostAnswer: after
+// activation it is signed with the new key and names no staged certificate.
+// It needs no grant: the agent accepts only a certificate that chains to its
+// pinned issuer, carries its current identities and certifies the key of its
+// own pending renewal. An agent that serves no renewal (a release build)
+// answers Unimplemented.
+func (a *agentService) InstallRenewedCertificate(ctx context.Context, req *agentv1.InstallRenewedCertificateRequest) (*agentv1.InstallRenewedCertificateResponse, error) {
+	if a.s.opts.Renewals == nil {
+		return nil, status.Error(codes.Unimplemented, "certificate renewal is not served by this agent")
+	}
+	if err := checkNonce(req.GetAnswerNonce(), true); err != nil {
+		return nil, err
+	}
+	if len(req.GetCertificate()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "certificate is empty")
+	}
+	if err := a.s.opts.Renewals.Install(ctx, req.GetCertificate(), req.GetActivate()); err != nil {
+		return nil, err
+	}
+	return &agentv1.InstallRenewedCertificateResponse{HostAnswer: a.s.hostAnswer(ctx, req.GetAnswerNonce(), 0)}, nil
 }
 
 // trustReady returns the agent's trust state.
