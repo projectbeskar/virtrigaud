@@ -179,7 +179,7 @@ func (r *HostEnrolmentReconciler) cachedBlockers(ctx context.Context, host *infr
 	var vms []infravirtrigaudiov1beta1.VirtualMachine
 	for _, index := range []string{specProviderIndex, placementProviderIndex} {
 		var list infravirtrigaudiov1beta1.VirtualMachineList
-		if err := r.Client.List(ctx, &list, client.MatchingFields{index: key}); err != nil {
+		if err := r.List(ctx, &list, client.MatchingFields{index: key}); err != nil {
 			return b, false
 		}
 		for i := range list.Items {
