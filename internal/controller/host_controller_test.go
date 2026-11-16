@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
@@ -327,4 +328,48 @@ func TestHostReconciler_HostGone_NoError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, res.RequeueAfter)
 	assert.False(t, res.Requeue)
+}
+
+// A revoked Host of a clustered Provider for per-host agents is not polled:
+// GetHostInfo is never called, Ready=False says Revoked, and it is rechecked
+// at the heartbeat cadence (no error, no short backoff, no log per poll).
+// A revoked libvirt Host (spec.revoked does not apply to it) is still polled.
+func TestHostReconciler_RevokedAgentHost_NotPolled(t *testing.T) {
+	s := coverageTestScheme(t)
+	prov := clusterProvider("prov-a")
+	prov.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
+	host := hostCR("host-rev", "prov-a", nil)
+	host.Spec.Revoked = true
+
+	calls := 0
+	stub := &stubProvider{GetHostInfoFn: func(_ context.Context, id string) (contracts.HostInfo, error) {
+		calls++
+		return healthyHostInfo(id), nil
+	}}
+	r := newHostReconciler(s, &stubResolver{provider: stub}, prov, host)
+	if !devgate.Compiled {
+		_, err := r.Reconcile(context.Background(), hostReq("host-rev"))
+		require.NoError(t, err)
+		assert.Equal(t, 1, calls, "a release build does not read spec.revoked")
+		return
+	}
+	for i := 0; i < 2; i++ {
+		res, err := r.Reconcile(context.Background(), hostReq("host-rev"))
+		require.NoError(t, err)
+		assert.Equal(t, hostHeartbeatInterval, res.RequeueAfter)
+	}
+	assert.Zero(t, calls, "a revoked agent Host is never polled")
+	got := getHost(t, r.Client, "host-rev")
+	ready := hostReadyCondition(t, got)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, reasonHostRevoked, ready.Reason)
+	assert.Equal(t, infravirtrigaudiov1beta1.HostHealthUnknown, got.Status.Health)
+
+	libvirtProv := clusterProvider("prov-b")
+	lvHost := hostCR("host-lv", "prov-b", nil)
+	lvHost.Spec.Revoked = true
+	r = newHostReconciler(s, &stubResolver{provider: stub}, libvirtProv, lvHost)
+	_, err := r.Reconcile(context.Background(), hostReq("host-lv"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "spec.revoked does not apply to a libvirt Host")
 }

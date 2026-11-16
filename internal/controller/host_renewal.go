@@ -148,6 +148,7 @@ const (
 	eventReasonAgentRenewalEarly         = "AgentRenewalActivatedEarly"
 	eventReasonAgentRenewalNoIdentity    = "AgentRenewalNoManagerIdentity"
 	eventReasonAgentRenewalPinnedExpiry  = "AgentRenewalPinnedAtExpiry"
+	eventReasonAgentRenewalOverdue       = "AgentRenewalOverdue"
 )
 
 // Denial reasons of renewal requests.
@@ -196,8 +197,10 @@ type renewalState struct {
 	// staged before the new key is pinned.
 	Certificate       []byte `json:"certificate,omitempty"`
 	CertificateSHA256 string `json:"certificateSHA256,omitempty"`
-	// NotAfter is when the renewed certificate expires.
-	NotAfter *metav1.Time `json:"notAfter,omitempty"`
+	// NotAfter is when the renewed certificate expires, and NotBefore when
+	// its validity begins.
+	NotAfter  *metav1.Time `json:"notAfter,omitempty"`
+	NotBefore *metav1.Time `json:"notBefore,omitempty"`
 	// PinnedAt is when the new key was pinned beside the old one, and
 	// OverlapUntil when the overlap is expected to end.
 	PinnedAt     *metav1.Time `json:"pinnedAt,omitempty"`
@@ -339,6 +342,17 @@ func newRenewalRequestName(src io.Reader) (string, error) {
 	return renewalRequestPrefix + hex.EncodeToString(b), nil
 }
 
+// reasonAgentRenewalOverdue is the AgentEnrolled reason (status True) of a
+// Host whose pinned certificate is past currentEnrolment.renewalOverdueAt
+// with no renewal in progress.
+const reasonAgentRenewalOverdue = "RenewalOverdue"
+
+// ptrTime returns t, truncated to the second in UTC, as a *metav1.Time.
+func ptrTime(t time.Time) *metav1.Time {
+	m := metav1.NewTime(t.UTC().Truncate(time.Second))
+	return &m
+}
+
 // hostHashLabel returns the value of certrequest.LabelHostHash for a Host.
 func hostHashLabel(namespace, name string) string {
 	sum := sha256.Sum256([]byte(namespace + "/" + name))
@@ -368,7 +382,7 @@ func (st *hostEnrolmentState) completeRenewalPins() []string {
 	}
 	cur.KeyPins = []string{r.KeyPin}
 	if r.NotAfter != nil {
-		cur.NotAfter = *r.NotAfter
+		cur.NotAfter, cur.NotBefore = *r.NotAfter, r.NotBefore
 	}
 	st.Renewal, st.RenewalAttempts = nil, nil
 	return removed
@@ -1081,6 +1095,7 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 	}
 	na := metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second))
 	ren.Certificate, ren.CertificateSHA256, ren.NotAfter = bytes.Clone(issued.Leaf.Raw), hostidentity.CertificateSHA256(issued.Leaf.Raw), &na
+	ren.NotBefore = ptrTime(issued.Leaf.NotBefore)
 	if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 		return err
 	}

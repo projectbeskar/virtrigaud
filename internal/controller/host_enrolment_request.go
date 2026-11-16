@@ -433,9 +433,10 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 		// A re-key moves the replaced enrolment to the predecessors: its
 		// attempts are still asked about and their VMs held, never re-sent.
 		replaced = l.state.rekey(&currentEnrolment{
-			Record:   a.Record,
-			KeyPins:  []string{a.KeyPin},
-			NotAfter: metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second)),
+			Record:    a.Record,
+			KeyPins:   []string{a.KeyPin},
+			NotAfter:  metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second)),
+			NotBefore: ptrTime(issued.Leaf.NotBefore),
 		}, r.now())
 		l.state.retire(a.Record.EnrolmentID)
 		l.state.Pending, l.state.Authorised, l.state.LastDenial, l.state.LastRejection = nil, nil, nil, nil

@@ -24,7 +24,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -57,6 +60,69 @@ func TestCompleteRenewalPins(t *testing.T) {
 	assert.Equal(t, na, st.Current.NotAfter)
 	assert.Nil(t, st.Renewal)
 	assert.Nil(t, st.completeRenewalPins(), "nothing to complete")
+
+	// The renewed certificate's start replaces the old one's.
+	nb := metav1.NewTime(time.Now().Truncate(time.Second))
+	st.Renewal = &renewalState{KeyPin: oldPin, NotAfter: &na, NotBefore: &nb}
+	st.completeRenewalPins()
+	require.NotNil(t, st.Current.NotBefore)
+	assert.Equal(t, nb, *st.Current.NotBefore)
+}
+
+// TestRenewalOverdueAt: five sixths of the pinned certificate's lifetime;
+// nothing without its recorded start.
+func TestRenewalOverdueAt(t *testing.T) {
+	nb := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	c := &currentEnrolment{NotAfter: metav1.NewTime(nb.Add(30 * time.Hour)), NotBefore: &nb}
+	at, ok := c.renewalOverdueAt()
+	require.True(t, ok)
+	assert.Equal(t, nb.Add(25*time.Hour), at)
+	c.NotBefore = nil
+	_, ok = c.renewalOverdueAt()
+	assert.False(t, ok, "a state without the certificate's start derives no deadline")
+	_, ok = (*currentEnrolment)(nil).renewalOverdueAt()
+	assert.False(t, ok)
+}
+
+// TestMirrorReportsAnOverdueRenewal: past five sixths of the pinned
+// certificate's lifetime with no renewal in progress, AgentEnrolled stays
+// True with reason RenewalOverdue and one Warning event is emitted on the
+// transition; before it, or with a renewal in progress, the reason is
+// Enrolled.
+func TestMirrorReportsAnOverdueRenewal(t *testing.T) {
+	s := coverageTestScheme(t)
+	host := &infravirtrigaudiov1beta1.Host{ObjectMeta: metav1.ObjectMeta{Name: "h1", Namespace: "infra"},
+		Spec: infravirtrigaudiov1beta1.HostSpec{Identity: "id-1"}}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(host).WithStatusSubresource(&infravirtrigaudiov1beta1.Host{}).Build()
+	rec := record.NewFakeRecorder(8)
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := start.Add(10 * time.Hour)
+	r := &HostEnrolmentReconciler{Client: c, Recorder: rec, Now: func() time.Time { return now },
+		Config: &HostEnrolmentConfig{Namespace: "host-agent-pki", TrustDomain: "cluster.test"}}
+	nb := metav1.NewTime(start)
+	st := &hostEnrolmentState{Current: enrolmentFor(strings.Repeat("c3", 16), "uid", 2, strings.Repeat("aa", 32))}
+	st.Current.NotBefore, st.Current.NotAfter = &nb, metav1.NewTime(start.Add(30*time.Hour))
+	reason := func() string {
+		t.Helper()
+		got := &infravirtrigaudiov1beta1.Host{}
+		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(host), got))
+		cond := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled)
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionTrue, cond.Status)
+		host = got
+		return cond.Reason
+	}
+	require.NoError(t, r.mirror(context.Background(), host, st, "uid"))
+	assert.Equal(t, infravirtrigaudiov1beta1.HostReasonAgentEnrolled, reason(), "before the deadline")
+	now = start.Add(26 * time.Hour)
+	require.NoError(t, r.mirror(context.Background(), host, st, "uid"))
+	assert.Equal(t, reasonAgentRenewalOverdue, reason())
+	require.NoError(t, r.mirror(context.Background(), host, st, "uid"))
+	assert.Len(t, rec.Events, 1, "one event on the transition")
+	assert.Contains(t, <-rec.Events, eventReasonAgentRenewalOverdue)
+	st.Renewal = &renewalState{KeyPin: strings.Repeat("bb", 32)}
+	require.NoError(t, r.mirror(context.Background(), host, st, "uid"))
+	assert.Equal(t, infravirtrigaudiov1beta1.HostReasonAgentEnrolled, reason(), "a renewal in progress is not overdue")
 }
 
 // TestRekeyClearsRenewal: a re-key ends a renewal of the replaced enrolment;

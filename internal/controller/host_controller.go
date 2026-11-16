@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -96,6 +97,10 @@ const (
 	// are still bound to it (or have a create pending on it), so the in-use
 	// finalizer holds the deletion (ADR-0007 Addendum A, A1).
 	reasonHostInUse = "HostInUse"
+	// reasonHostRevoked is Ready=False on a per-host agent Host whose
+	// spec.revoked is set: its agent identity is revoked, the Provider no
+	// longer fronts it, and the heartbeat no longer polls it.
+	reasonHostRevoked = "Revoked"
 )
 
 // Reason labels for metrics.RecordError from the Host reconciler. Kept small and
@@ -345,6 +350,16 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	if !isClusterTopology(provider) {
 		r.setHostUnavailable(ctx, host, reasonProviderNotClustered,
 			fmt.Sprintf("Provider %s is not clustered (spec.topology != cluster); a Host requires a clustered Provider", provider.Name))
+		return r.persist(ctx, host, base, hostHeartbeatInterval)
+	}
+
+	// 2b. A revoked per-host agent Host is left out of its Provider's
+	//     inventory: polling it would only fail every heartbeat. It is not
+	//     polled, and Ready says why (development builds: spec.revoked is
+	//     used only there).
+	if devgate.Compiled && host.Spec.Revoked && providerRunsHostAgents(provider) {
+		r.setHostUnavailable(ctx, host, reasonHostRevoked,
+			"spec.revoked is true: the host's agent identity is revoked and its Provider no longer fronts it; it is not polled")
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}
 

@@ -538,6 +538,24 @@ type currentEnrolment struct {
 	Record   enrolmentRecord `json:"record"`
 	KeyPins  []string        `json:"keyPins"`
 	NotAfter metav1.Time     `json:"notAfter"`
+	// NotBefore is when the pinned certificate's validity began; unset in a
+	// state written before it was recorded (then no renewal deadline is
+	// derived).
+	NotBefore *metav1.Time `json:"notBefore,omitempty"`
+}
+
+// renewalOverdueAt returns when the pinned certificate's renewal is overdue:
+// halfway between the point at which the agent asks to renew it (two thirds
+// of its lifetime) and its expiry, that is five sixths of its lifetime. A
+// host that has not asked by then is not renewing (its signer cannot write
+// the pending key, say), while there is still time to act. ok is false when
+// the certificate's start is not recorded.
+func (c *currentEnrolment) renewalOverdueAt() (at time.Time, ok bool) {
+	if c == nil || c.NotBefore == nil || !c.NotAfter.After(c.NotBefore.Time) {
+		return time.Time{}, false
+	}
+	life := c.NotAfter.Sub(c.NotBefore.Time)
+	return c.NotBefore.Add(life / 6 * 5), true
 }
 
 // epoch returns the start epoch of a record (FirstStartEpoch when unset).
@@ -1066,6 +1084,12 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if d := c.NotAfter.Sub(r.now()) + time.Second; d > time.Second && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
 			res.RequeueAfter = d
 		}
+		// Report an overdue renewal on time.
+		if at, ok := c.renewalOverdueAt(); ok && st.Renewal == nil {
+			if d := at.Sub(r.now()) + time.Second; d > time.Second && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
+				res.RequeueAfter = d
+			}
+		}
 		// Close an open re-key window on time.
 		if st.Rekey != nil {
 			if d := st.Rekey.Until.Sub(r.now()) + time.Second; d > 0 && (res.RequeueAfter == 0 || d < res.RequeueAfter) {
@@ -1212,6 +1236,12 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 		case st.Current != nil:
 			cond.Status = metav1.ConditionTrue
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentEnrolled, "the agent certificate is validated and its key is pinned"
+			if at, ok := st.Current.renewalOverdueAt(); ok && st.Renewal == nil && !r.now().Before(at) && !host.Spec.Revoked {
+				cond.Reason = reasonAgentRenewalOverdue
+				cond.Message = "the agent certificate is validated and its key is pinned, but the host has not asked to renew it, " +
+					"which it does at two thirds of its lifetime; it expires at " + st.Current.NotAfter.UTC().Format(time.RFC3339) +
+					": check the agent's and the host key signer's logs on the host, or re-key the Host"
+			}
 			if st.rekeyOpen(r.now()) {
 				cond.Message += "; a re-key window is open until " + st.Rekey.Until.UTC().Format(time.RFC3339)
 			}
@@ -1230,6 +1260,10 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 		}
 	}
 	host.Status.Agent = agent
+	if prev := meta.FindStatusCondition(base.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled); cond.Reason == reasonAgentRenewalOverdue &&
+		(prev == nil || prev.Reason != reasonAgentRenewalOverdue) {
+		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalOverdue, cond.Message)
+	}
 	meta.SetStatusCondition(&host.Status.Conditions, cond)
 	if equality.Semantic.DeepEqual(base.Status, host.Status) {
 		return nil
