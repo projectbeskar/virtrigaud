@@ -248,6 +248,11 @@ func (e *hostEntry) transportBegan(gen uint64) {
 	}
 	e.genUsed = true
 	e.transport = transportInfo{gen: gen, live: true, began: e.opts.Now(), notAfter: e.leafNotAfter}
+	// A refusal is a property of one transport: an established transport
+	// starts without one (the alert, if any, is read after this).
+	if e.refusedGen == gen {
+		e.refusedGen = 0
+	}
 }
 
 // transportEnded records that the transport of connection gen ended, and

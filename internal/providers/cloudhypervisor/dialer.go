@@ -158,13 +158,15 @@ type alertCreds struct {
 	onAlert func()
 }
 
-// ClientHandshake implements credentials.TransportCredentials.
+// ClientHandshake implements credentials.TransportCredentials. A failed
+// handshake is never reported as a refusal: a TLS 1.3 server's refusal of
+// the client certificate arrives after the client's handshake, on the first
+// read, and an alert during the handshake (an agent whose signer is away, a
+// handshake over its cap) says nothing about the certificate; gRPC then
+// redials the same connection.
 func (c *alertCreds) ClientHandshake(ctx context.Context, authority string, raw net.Conn) (net.Conn, credentials.AuthInfo, error) {
 	conn, info, err := c.TransportCredentials.ClientHandshake(ctx, authority, raw)
 	if err != nil {
-		if isRemoteTLSAlert(err) {
-			c.onAlert()
-		}
 		return nil, nil, err
 	}
 	return &alertConn{Conn: conn, onAlert: c.onAlert}, info, nil
@@ -190,15 +192,34 @@ func (c *alertConn) Read(b []byte) (int, error) {
 	if n > 0 {
 		c.read.Store(true)
 	}
-	if err != nil && n == 0 && !c.read.Load() && isRemoteTLSAlert(err) {
+	if err != nil && n == 0 && !c.read.Load() && isCertificateAlert(err) {
 		c.onAlert()
 	}
 	return n, err
 }
 
-// isRemoteTLSAlert reports whether err is a fatal TLS alert the peer sent.
-func isRemoteTLSAlert(err error) bool {
-	return strings.Contains(err.Error(), remoteTLSAlert)
+// certificateAlerts are the fatal TLS alerts a TLS server sends when it
+// refuses the client certificate (crypto/tls's texts). Any other alert, an
+// internal error above all, is not a refusal of the certificate.
+var certificateAlerts = []string{
+	"bad certificate", "certificate required", "unknown certificate authority", "certificate unknown", "access denied",
+}
+
+// isCertificateAlert reports whether err is a fatal TLS alert the peer sent
+// to refuse the client certificate.
+func isCertificateAlert(err error) bool {
+	msg := err.Error()
+	i := strings.Index(msg, remoteTLSAlert)
+	if i < 0 {
+		return false
+	}
+	rest := msg[i+len(remoteTLSAlert):]
+	for _, a := range certificateAlerts {
+		if strings.HasPrefix(rest, a) {
+			return true
+		}
+	}
+	return false
 }
 
 // dialAgent returns a lazy client connection to an agent at endpoint: nothing

@@ -276,13 +276,19 @@ its Provider identity issuer (`provider-ca.pem`) and carries exactly one URI,
 UID>`, naming a Provider in its `provider-sans`; the trailing Provider UID is
 required. In TLS 1.3 the agent checks the client certificate after the
 client has finished its handshake, so a refusal reaches the Provider as a
-fatal TLS alert instead of the agent's first frame: the host is unavailable
-with cause `ProviderCertificateRefused` (not `AgentUnreachable`), nothing is
-sent to the agent (a mutating call is definitely not performed), and the
-agent logs `refused a Provider client certificate after the TLS handshake`
+certificate alert (bad certificate, certificate required, unknown
+certificate authority, certificate unknown or access denied) instead of the
+agent's first frame: the host is unavailable with cause
+`ProviderCertificateRefused` (not `AgentUnreachable`), the agent never read a
+request (a mutating call is definitely not performed), and the agent logs `refused a Provider client certificate after the TLS handshake`
 with the rule that failed, at most once per interval with the number held
 back. Repeated refusals count toward the host's circuit breaker, so once it
-opens the cause reads `BreakerOpen` until a probe is let through.
+opens the cause reads `BreakerOpen` until a probe is let through. Only such
+an alert read before any data from the agent on an established transport
+counts: an alert during the handshake itself (an agent whose host key signer
+is away, or that is over its handshake limit, answers `internal error`) or
+after the agent's first frame is reported as before (`AgentUnreachable`, or
+an unknown outcome for a mutating call that was sent).
 
 On every new connection the Provider first calls `agent.v1.AgentService/Hello`
 with a fresh nonce and its API version, and verifies the host-signed answer:

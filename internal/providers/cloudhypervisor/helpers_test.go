@@ -183,6 +183,8 @@ type fakeAgent struct {
 	// installMode answers InstallRenewedCertificate: 0 records and
 	// succeeds, 1 is Unimplemented, 2 fails with Internal.
 	installMode atomic.Int32
+	// handshakesFailed counts handshakes ended by failHandshakes.
+	handshakesFailed atomic.Int32
 	// installCalls counts InstallRenewedCertificate calls, answered or not.
 	installCalls atomic.Int32
 	installs     []*agentv1.InstallRenewedCertificateRequest
@@ -202,6 +204,11 @@ type fakeAgentOptions struct {
 	// the handshake, as an agent does with a Provider identity it does not
 	// allow.
 	refuseClient bool
+	// failHandshakes makes the agent end that many handshakes with an
+	// internal error alert before anything is negotiated, as an agent
+	// whose host key signer is away, or that is over its handshake cap,
+	// does.
+	failHandshakes int32
 }
 
 func newFakeAgent(t *testing.T, p *pki, name string, o fakeAgentOptions) *fakeAgent {
@@ -225,6 +232,17 @@ func newFakeAgent(t *testing.T, p *pki, name string, o fakeAgentOptions) *fakeAg
 	}
 	if o.refuseClient {
 		srvTLS.VerifyConnection = func(tls.ConnectionState) error { return errors.New("not an allowed Provider") }
+	}
+	if o.failHandshakes > 0 {
+		var left atomic.Int32
+		left.Store(o.failHandshakes)
+		srvTLS.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			if left.Add(-1) >= 0 {
+				f.handshakesFailed.Add(1)
+				return nil, errors.New("no server credentials")
+			}
+			return nil, nil
+		}
 	}
 	f.srv = grpc.NewServer(grpc.Creds(credentials.NewTLS(srvTLS)), grpc.UnknownServiceHandler(f.unknown))
 	agentv1.RegisterAgentServiceServer(f.srv, &helloServer{f: f})

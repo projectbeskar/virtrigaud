@@ -87,7 +87,7 @@ const (
 	// identity certificate (a fatal TLS alert during the handshake): it does
 	// not chain to the agent's Provider identity issuer, or its URI is not
 	// this Provider's identity with the Provider UID, or the Provider is not
-	// in the agent's trust configuration. Nothing was sent to the agent.
+	// in the agent's trust configuration. The agent never read a request.
 	CauseProviderCertificateRefused = "ProviderCertificateRefused"
 	// CauseBreakerOpen: the host's circuit breaker is open.
 	CauseBreakerOpen = "BreakerOpen"
@@ -445,10 +445,10 @@ func mapCallError(ctx context.Context, host string, mutating bool, cs *callState
 	case errors.Is(err, errBreakerOpen):
 		return hostUnavailable(host, true, CauseBreakerOpen)
 	case !cs.answered.Load() && errors.Is(err, errProviderRefused):
-		// The agent ended the connection with a fatal TLS alert before it
+		// The agent ended the transport with a certificate alert before it
 		// sent a single byte of its own: it refused the Provider's
-		// certificate at the handshake and never read a request, so nothing
-		// was performed, a mutating call included.
+		// certificate and never read a request, so nothing was performed, a
+		// mutating call included.
 		return hostUnavailable(host, true, CauseProviderCertificateRefused)
 	case errors.Is(err, errNotConnected):
 		return hostUnavailable(host, true, CauseAgentUnreachable)
