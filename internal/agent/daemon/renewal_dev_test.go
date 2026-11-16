@@ -542,6 +542,11 @@ func TestRenewalActivationSignerAway(t *testing.T) {
 	if _, err := r.install(der, true); status.Code(err) != codes.Unavailable {
 		t.Fatalf("activation with the signer away: %v", err)
 	}
+	defer func() {
+		if t.Failed() {
+			t.Logf("notes: %v\n%s", h.notes.snapshot(), h.logs.text())
+		}
+	}()
 	waitFor(t, "the service status naming the incomplete activation", func() bool {
 		for _, n := range h.notes.snapshot() {
 			if strings.Contains(n, server.CauseRenewalIncomplete) {

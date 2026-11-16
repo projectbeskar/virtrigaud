@@ -94,13 +94,16 @@ type renewer struct {
 	broken atomic.Bool
 	// healLogAt is when a failed heal was last logged (rate-limited).
 	healLogAt time.Time
+	// activations counts activations, so a tick that reached the signer
+	// before one ran does not act on what the signer held then.
+	activations atomic.Uint64
 }
 
 // healLogEvery is the shortest interval between two log lines about a heal
 // that keeps failing.
 const healLogEvery = time.Minute
 
-// setHealPending sets healPending and its mirror.
+// setHealPending sets healPending and its mirror. The lock must be held.
 func (r *renewer) setHealPending(on bool) {
 	r.healPending = on
 	r.broken.Store(on)
@@ -170,13 +173,15 @@ func (r *renewer) exclusive(f func() error) error {
 func (r *renewer) tick(ctx context.Context) {
 	if r.broken.Load() {
 		// Reach the signer without holding the lock, so answers are not
-		// delayed while it is away; finish under the lock.
+		// delayed while it is away; finish under the lock, unless an
+		// activation ran in between (what the signer held may have changed).
+		gen := r.activations.Load()
 		hctx, cancel := context.WithTimeout(ctx, healTickTimeout)
 		nc, cerr := signer.Connect(hctx, r.d.signerOptions(r.run))
 		cancel()
 		r.mu.Lock()
 		err := cerr
-		if err == nil && r.healPending {
+		if err == nil && r.healPending && r.activations.Load() == gen {
 			err = r.healWith(nc)
 		}
 		if err != nil && r.d.o.Now().Sub(r.healLogAt) >= healLogEvery {
@@ -356,7 +361,9 @@ func (r *renewer) Install(ctx context.Context, der []byte, activate bool) error 
 			"notAfter", leaf.NotAfter.UTC().Format(time.RFC3339), "enrolment", hex.EncodeToString(cur.Identity.Record.EnrolmentID))
 		return nil
 	}
-	if err := r.activateLocked(ctx, cur, leaf); err != nil {
+	err = r.activateLocked(ctx, cur, leaf)
+	r.broken.Store(r.healPending)
+	if err != nil {
 		if errors.Is(err, errRenewalStopped) {
 			return status.Error(codes.Unavailable, err.Error())
 		}
@@ -385,7 +392,10 @@ func (r *renewer) activateLocked(ctx context.Context, cur *server.Credentials, l
 	}
 	// From here the signer may hold the new key even if the call fails (its
 	// answer may be lost after the rename).
-	r.setHealPending(true)
+	// The mirror read by ticks is set only when the activation returns
+	// unfinished (Install), so no tick acts on the signer mid-activation.
+	r.activations.Add(1)
+	r.healPending = true
 	if _, err := c.ActivateRenewal(actx, pin); err != nil {
 		return errors.Join(fmt.Errorf("the signer did not put the new key in use: %w", err), r.healLocked(actx))
 	}
