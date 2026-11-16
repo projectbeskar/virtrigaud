@@ -473,6 +473,34 @@ state. With `answer_nonce` and `binding_id`, the signed `VMAnswer` says
 VM tombstone); otherwise `CREATING`, `PRESENT`, `OTHER_BINDING` or
 `NO_RECORD`. The absence of a record never says deleted.
 
+### Store size
+
+The operation store refuses new operations (`RESOURCE_EXHAUSTED`, definitely
+not performed) while its live size is above 256 MiB. What it holds per
+finished operation, measured on ext4:
+
+| What | Live bytes per finished operation |
+|------|-----------------------------------|
+| op_id tombstone only (a compacted operation) | about 600 B |
+| tombstone plus the operation's record and step journal (not compacted) | about 1.6 KB |
+
+So the threshold is reached after about 160,000 operations whose records were
+never compacted, or about 430,000 compacted ones. A development build
+compacts the store (`opstore.Store.Compact`): once the agent is ready, then
+every hour, and at once when the store reaches three quarters of the
+threshold (checked every minute). Compaction drops the record and step
+journal of finished operations only. It never drops an op_id tombstone (a
+re-delivery of a finished operation is answered from it and never runs
+again), a VM tombstone, a witness file, or the record of an operation that
+still holds its VM (an unknown outcome, or a dirty failure not yet resolved).
+Each batch of 256 records is one transaction, so operations are admitted and
+run between batches. The agent logs each compaction (`store compacted`, the
+number of records dropped, the live size before and after), and logs once,
+as an error, when a compacted store stays above three quarters of the
+threshold: tombstones are never dropped, so such a host refuses new
+operations once it reaches the threshold, and no path reclaims tombstones
+yet. A release build runs no operation and does not compact.
+
 **Crash hook.** A development build reads `VRTG_AGENT_DEV_CRASH_AT`, a
 comma-separated sequence of crash points of the journal and the operation
 store (for example `before-accept,after-store-commit`), and kills its own
@@ -925,31 +953,76 @@ delivers it ([details](clustered-agent-provider-development.md#renewed-certifica
 
 ## systemd units
 
-`packaging/systemd/` holds reference units and `sysusers.d` / `tmpfiles.d`
-fragments; they are not installed by anything.
+`packaging/systemd/` holds reference units, a `multi-user.target` drop-in and
+`sysusers.d` / `tmpfiles.d` fragments; they are not installed by anything.
+They expect the binary at `/usr/lib/virtrigaud/vrtg-agent` (not under
+`/usr/libexec`, which some immutable hosts do not merge from a system
+extension) and install as:
+
+| File | Installed as |
+|------|--------------|
+| `vrtg-agent.service`, `vrtg-agent-signer.service`, `vrtg-vm-shutdown.service`, `vrtg-agent-setup.service`, `vrtg-agent-boot-start.service` | `/usr/lib/systemd/system/` |
+| `multi-user.target.d/virtrigaud-agent.conf` | `/usr/lib/systemd/system/multi-user.target.d/virtrigaud-agent.conf` |
+| `virtrigaud-agent.sysusers.conf` | `/usr/lib/sysusers.d/virtrigaud-agent.conf` |
+| `virtrigaud-agent.tmpfiles.conf` | `/usr/lib/tmpfiles.d/virtrigaud-agent.conf` |
+
+Every unit that filters system calls sets `SystemCallErrorNumber=EPERM`: a
+filtered call fails with `EPERM` instead of killing the process (systemd's
+default). The host inventory's persistent process handle probe calls
+`open_by_handle_at`, which `~@privileged` filters; on kernels where taking a
+file handle of a process file descriptor succeeds (RHEL 9's 5.14, kernels
+with pidfs), the default would kill the agent after it became ready. The
+probe reads the refusal as "not supported" (`pidfs_handle` reported absent).
+A test in `internal/agent/inventory` classifies every system call the
+collector makes against the agent unit's filter, and a test in
+`cmd/vrtg-agent` asserts the `EPERM` setting on every unit.
 
 `vrtg-agent.service`: `Type=notify`, `Restart=always`, `RestartSec=2`,
 `StartLimitIntervalSec=300`, `StartLimitBurst=10`, `KillMode=process`,
 `User=virtrigaud-agent`, `StateDirectory=virtrigaud-agent` (`0700`),
 `RestartPreventExitStatus=2` (a configuration error is not retried),
-`NoNewPrivileges=yes`, an empty capability bounding set, `ProtectSystem=strict`,
-`ProtectProc=invisible`, `PrivateIPC=yes`, `LimitNOFILE=4096`, `TasksMax=128`,
-`MemoryMax=256M` and further sandboxing. It sets no `Delegate=` and creates no
-scope. No other unit upholds it, so it can be stopped for maintenance.
+`TimeoutStartSec=5min`, `NoNewPrivileges=yes`, an empty capability bounding
+set, `ProtectSystem=strict`, `ProtectProc=invisible`, `PrivateIPC=yes`,
+`LimitNOFILE=4096`, `TasksMax=128`, `MemoryMax=256M` and further sandboxing.
+It sets no `Delegate=` and creates no scope. No other unit upholds it, so it
+can be stopped for maintenance.
+
+Start-up opens and recovers the operation store before `READY=1` (steps 1
+to 8). The open reads and verifies every record, so its time grows with the
+store: about 0.7 s for 10,000 finished operations and 6 s for 100,000
+(uncompacted), and 18 s for a store of a million tombstones, cold, on a
+virtio disk; slower storage takes longer. The unit's `TimeoutStartSec=5min`
+replaces systemd's default of 90 seconds, which a store near the size
+threshold on slow storage could exceed (the start would then be killed and
+retried until the start limit fails the unit). While it opens and recovers,
+the agent's service status says so (`STATUS=opening the operation store`,
+then `STATUS=establishing continuity and recovering interrupted
+operations`).
+
+Memory: the store is a memory-mapped file, so the agent's resident size
+includes the pages of the store it has read, besides its heap: about 30 MB
+idle at 10,000 tombstones, 80 MB at 100,000, and about the store's size for a
+store opened cold (it reads every page). Mapped file pages count toward the
+unit's `MemoryMax=256M` but are reclaimable page cache: under the limit the
+kernel drops them before it would kill the process, at the cost of reading
+them again. The store refuses new operations above 256 MiB (see
+[Store size](#store-size)), which bounds the mapping; the agent has not been
+measured running under the unit's memory limit at that size.
 
 `vrtg-agent-signer.service`: the host key signer. `Type=notify` (`READY=1`
 once it serves), `Restart=always`, the same start-rate limit and sandboxing as
 the agent, and its own user and group (`virtrigaud-signer`) and, beyond the
 agent's, a private network namespace with `RestrictAddressFamilies=AF_UNIX`,
-a `MemoryMax` of `64M`, `MemorySwapMax=0` and `LimitCORE=0` (the key is never
-never dumped, and swapped out neither, hibernation aside), its state directory (`/var/lib/virtrigaud-signer`,
-`0700`, made by `tmpfiles.d`) read-only (`ReadOnlyPaths=`; the signer never
-writes there, so the unit has no `StateDirectory=`) and read-write access to
-`/run/virtrigaud-signer` only. It sets no
-`PrivateUsers=`, which would hide the agent's uid from `SO_PEERCRED`.
-`ExecReload` sends SIGHUP (reload the key file). The `sysusers.d` fragment
-declares both users, and the `tmpfiles.d` fragment the signer's state
-directory and the socket directory.
+a `MemoryMax` of `64M`, `MemorySwapMax=0` and `LimitCORE=0` (the key is
+never dumped, and not swapped out either, hibernation aside). It can write
+only two directories (`ReadWritePaths=`; `ProtectSystem=strict` keeps
+everything else read-only): its state directory
+(`/var/lib/virtrigaud-signer`, `0700`, made by `tmpfiles.d`, so the unit has
+no `StateDirectory=`), where a [certificate renewal](#certificate-renewal)
+writes the pending key and renames it over the host key, and the socket
+directory `/run/virtrigaud-signer`. It sets no `PrivateUsers=`, which would
+hide the agent's uid from `SO_PEERCRED`. `ExecReload` sends SIGHUP (reload
+the key file).
 
 The agent's unit has `Wants=` and `After=vrtg-agent-signer.service`: starting
 the agent starts the signer first, and as the signer is `Type=notify`,
@@ -976,9 +1049,66 @@ ordered against the agent's unit either (`After=` would only order the two,
 never pull the agent in). That ordering is decided when the agent runs real
 VMs.
 
+`vrtg-agent-setup.service`: a `oneshot` unit (`RemainAfterExit=yes`, no
+default dependencies) that runs `systemd-sysusers virtrigaud-agent.conf` and
+`systemd-tmpfiles --create virtrigaud-agent.conf`, ordered after
+`systemd-sysext.service`, `systemd-sysusers.service` and `local-fs.target`
+and before the agent, the signer and the shutdown unit, each of which wants
+it. A package install creates the users and directories when it is
+installed, and this unit then changes nothing (both tools are idempotent). It
+exists for hosts where the agent arrives as a system extension merged during
+the boot: the boot's own `systemd-sysusers.service` runs before the merge and
+never sees the extension's fragment, and on hosts whose `/etc` is rebuilt at
+every boot the users would be missing at every boot. The units would then
+fail with `217/USER`, and the shutdown unit would look active while its stop
+action could not run. The fragments are named by file name, so a fragment of
+the same name in `/etc/sysusers.d` or `/etc/tmpfiles.d` takes precedence.
+
+Users: the `sysusers.d` fragment gives `virtrigaud-agent` the fixed id 564
+and `virtrigaud-signer` 565 (user and group), in the system range and away
+from both ends of it (`systemd-sysusers` draws dynamic system ids downwards
+from 999, some distributions' `adduser` upwards from 100). Fixed ids keep the
+owners of the persistent state directories stable where `/etc/passwd` is
+rebuilt at every boot. If an id is already taken, `systemd-sysusers`
+allocates another one; on such a host it can differ between boots, and the
+agent and the signer then refuse to start (`StateDirInsecure`,
+`PKIInsecure`, or a key directory not owned by the signer): they fail closed,
+and no VM is touched. Check that both ids are free (`getent passwd 564 565`,
+`getent group 564 565`) before the first start, or choose others in a
+fragment named `virtrigaud-agent.conf` in `/etc/sysusers.d`.
+
+Start at boot: on a host where the units are installed as files, the
+`[Install]` sections apply (`systemctl enable`). On a host where they arrive
+in a system extension merged during the boot, the extension's `.wants` links
+start nothing (the boot transaction was computed before the merge), but a
+unit that `multi-user.target` upholds is started even so. The drop-in
+`multi-user.target.d/virtrigaud-agent.conf` sets
+`Upholds=vrtg-vm-shutdown.service vrtg-agent-boot-start.service`:
+
+- the shutdown unit is upheld, so it is active, and its stop action armed,
+  whenever the host is up; `Upholds=` starts it again after a maintenance
+  stop, which stops no VM;
+- the agent is not upheld (`Upholds=` would start it again at once after a
+  maintenance stop). `vrtg-agent-boot-start.service` is upheld instead: a
+  `oneshot` with `RemainAfterExit=yes` whose only action is `systemctl
+  --no-block start vrtg-agent.service`, with no dependency on the agent's
+  unit. It runs once per boot and stays active, so `Upholds=` does not run it
+  again: an agent stopped for maintenance stays stopped through restarts of
+  the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
+  The agent's `Wants=` brings the signer and the setup unit up with it.
+  Stopping `vrtg-agent-boot-start.service` by hand is the exception:
+  `Upholds=` starts it again and it starts the agent once more. Stop the
+  agent, not that unit.
+
+`Upholds=` needs systemd 249 or later.
+
 `hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
-(with the binary path replaced, since it does not exist on a build machine);
-the CI lint job runs it.
+(with the binary path replaced, since it does not exist on a build machine)
+and checks what the analyzer cannot see: `SystemCallErrorNumber=` wherever a
+system call filter is set, no binary under `/usr/libexec`, a signer that can
+write exactly its key and socket directories, and a `multi-user.target`
+drop-in that upholds the shutdown and boot-start units and never the agent
+or the signer. The CI lint job runs it.
 
 ## Enrolment
 
@@ -1177,8 +1307,9 @@ that is already enrolled is never changed by this file.
   effect in doubt, and never perform an effect it cannot reconstruct
   (documented on `executor.Operation.Payload`). How a real executor parks a
   step and how the manager re-delivers the request for it is a follow-up.
-- The re-enrolment freeze and compaction are not reachable from the agent
-  process yet, so their crash points are tested in the store library only.
+- The re-enrolment freeze's crash points are tested in the store library
+  only. Compaction runs in the agent process (see [Store size](#store-size));
+  its crash point between batches is tested in the store library.
   The renewal's crash points (between stage and activation, and between the
   signer's switch to the new key and the promotion of the certificate) are
   tested on the agent process, with the activation stopped by a test hook.

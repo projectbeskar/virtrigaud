@@ -18,6 +18,7 @@ package opstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
@@ -40,7 +41,11 @@ const DefaultCompactBatch = 256
 //     (OutcomeUnknown, and a dirty failure until it is resolved).
 //
 // A record is dropped only when its tombstone is present. Compact returns the
-// number of records dropped. It is safe to interrupt between batches.
+// number of records dropped. It is safe to interrupt between batches, and to
+// run while the store admits and runs operations: each batch holds the
+// store's lock for one scan and one transaction, and drops only records of
+// finished operations, which nothing changes again. The agent runs it
+// periodically and when the store nears its size threshold (package daemon).
 func (s *Store) Compact(ctx context.Context, batch int) (int, error) {
 	if batch <= 0 {
 		batch = DefaultCompactBatch
@@ -60,6 +65,10 @@ func (s *Store) Compact(ctx context.Context, batch int) (int, error) {
 		}
 	}
 }
+
+// errBatchFull ends a compaction scan that found one more record to drop
+// than the batch holds.
+var errBatchFull = errors.New("compaction batch full")
 
 func (s *Store) compactBatch(ctx context.Context, batch int) (int, bool, error) {
 	s.mu.Lock()
@@ -85,13 +94,13 @@ func (s *Store) compactBatch(ctx context.Context, batch int) (int, bool, error) 
 			}
 			if len(keys) == batch {
 				more = true
-				return nil
+				return errBatchFull
 			}
 			keys = append(keys, k)
 			ids = append(ids, rec.GetIdentity())
 			return nil
 		})
-	}); err != nil {
+	}); err != nil && !errors.Is(err, errBatchFull) {
 		return 0, false, err
 	}
 	if len(keys) == 0 {

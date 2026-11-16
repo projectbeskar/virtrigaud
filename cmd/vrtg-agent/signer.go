@@ -93,7 +93,7 @@ func signerCommand(args []string, log logr.Logger, stderr io.Writer) int {
 		SocketPath: *socket, KeyFile: *keyFile, OwnerUID: own, AgentUID: agentUID,
 		SignsPerSecond: *perSecond, SignBurst: *burst, LogInterval: *every,
 		HandshakeSignsPerSecond: *hsPerSecond, HandshakeSignBurst: *hsBurst,
-		Notifier: systemd.NewNotifier(), Log: log, Renewal: config.DevBuild,
+		Notifier: systemd.NewNotifier(), Log: log, Renewal: config.DevBuild, RemoveStrayTemps: config.DevBuild,
 	}, signals); err != nil {
 		log.Error(err, "the signer stopped")
 		return 1

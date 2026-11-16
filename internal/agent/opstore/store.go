@@ -216,6 +216,10 @@ func (s *Store) Freezing() bool { return s.freezing.Load() }
 // Journal returns the underlying journal.
 func (s *Store) Journal() *journal.Store { return s.j }
 
+// MaxStoreBytes returns the store size above which new operations are
+// refused (Options.MaxStoreBytes, or DefaultMaxStoreBytes).
+func (s *Store) MaxStoreBytes() int64 { return s.opts.MaxStoreBytes }
+
 // Close closes the store. It writes nothing.
 func (s *Store) Close() error { return s.j.Close() }
 

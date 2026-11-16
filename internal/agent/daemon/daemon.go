@@ -73,6 +73,13 @@ limitations under the License.
 // finds damage quarantines the store (journal_corrupt): the loss is logged and
 // the service status shows it, like any other quarantine.
 //
+// # Compaction
+//
+// A development build compacts the operation store (opstore.Store.Compact)
+// once the agent is ready, then every DefaultCompactEvery, and at once when
+// the store reaches three quarters of its size threshold (see compactLoop).
+// A release build runs no operation and does not compact.
+//
 // # Signals
 //
 // SIGTERM or SIGINT drains: the server stops accepting calls and waits for
@@ -265,6 +272,12 @@ type Options struct {
 	// StepDeadlines bounds each operation step's run per kind (test
 	// override); nil uses opstore.DefaultStepDeadline for every kind.
 	StepDeadlines map[providerv1.OperationKind]time.Duration
+	// CompactEvery replaces DefaultCompactEvery, the period of the store
+	// compaction (test override).
+	CompactEvery time.Duration
+	// MaxStoreBytes replaces opstore.DefaultMaxStoreBytes, the store size
+	// above which new operations are refused (test override).
+	MaxStoreBytes int64
 }
 
 // agentState is what the server reads about the agent.
@@ -349,7 +362,7 @@ func (o Options) testOverrides() []string {
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
 		"TrustFileOwner": o.TrustFileOwner != nil, "InventoryRoot": o.InventoryRoot != "", "Listener": o.Listener != nil, "Now": o.Now != nil,
 		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil || o.Hooks.RenewalStep != nil || o.Hooks.HealConnected != nil,
-		"StepDeadlines": o.StepDeadlines != nil,
+		"StepDeadlines": o.StepDeadlines != nil, "CompactEvery": o.CompactEvery != 0, "MaxStoreBytes": o.MaxStoreBytes != 0,
 	} {
 		if on {
 			set = append(set, name)
@@ -483,7 +496,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		renewals = d.renewal
 	}
 
-	// Steps 1 to 3: single writer, open, local continuity checks.
+	// Steps 1 to 3: single writer, open, local continuity checks. A large
+	// store takes a while to open; the service status says what start-up
+	// is doing until READY=1.
+	_ = d.notifier.Notify("STATUS=opening the operation store")
 	hooks, rotate := devJournalHooks(d.log)
 	st, err := opstore.Open(ctx, opstore.Options{
 		Journal: journal.Options{Dir: d.o.Config.StateDir, FS: d.o.JournalFS, Events: d.journalEvent,
@@ -491,6 +507,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		Executor:      d.o.Executor,
 		Audit:         d.auditEvent,
 		StepDeadlines: d.o.StepDeadlines,
+		MaxStoreBytes: d.o.MaxStoreBytes,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -505,6 +522,14 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			d.log.Error(err, "the operation store cannot be opened")
 		}
 		return fmt.Errorf("open the operation store: %w", err)
+	}
+	// A write in the key material directory that was killed leaves a
+	// temporary file that nothing else removes. The store's lock is held, so
+	// no write of this agent's is in flight.
+	if config.DevBuild {
+		if removed := enrol.RemoveStrayTemps(d.o.Config.PKIDir()); len(removed) > 0 {
+			d.log.Info("removed temporary files left by an interrupted write", "directory", d.o.Config.PKIDir(), "files", removed)
+		}
 	}
 	agent := &agentState{store: st, renewal: d.renewal}
 	closeStore := func() {
@@ -595,9 +620,16 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		coll.Run(invCtx)
 	}()
 
+	// The store compaction (development builds) starts once the agent is
+	// ready and runs until it drains; the drain waits for it, so it never
+	// writes a closed store.
+	compactCtx, stopCompact := context.WithCancel(ctx)
+	compactDone := make(chan struct{})
+
 	drain := func() {
 		stopScrub()
 		stopInv()
+		stopCompact()
 		_ = d.notifier.Notify(systemd.NotifyStopping)
 		dctx, cancel := context.WithTimeout(context.Background(), d.o.Config.DrainTimeout)
 		defer cancel()
@@ -610,6 +642,11 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		case <-invDone:
 		case <-dctx.Done():
 			d.log.Error(dctx.Err(), "the host inventory collector did not stop within the drain timeout; abandoned")
+		}
+		select {
+		case <-compactDone:
+		case <-dctx.Done():
+			d.log.Error(dctx.Err(), "the store compaction did not stop within the drain timeout; abandoned")
 		}
 		srv.Shutdown(dctx)
 		// Runs stop between steps; an interrupted step is left to the next
@@ -631,6 +668,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 
 	// Steps 6 to 8.
+	_ = d.notifier.Notify("STATUS=establishing continuity and recovering interrupted operations")
 	for _, ref := range d.establish(ctx, st, agent.floor.Load()) {
 		if ops != nil && !guard.Off(guard.RecoveredOpsRun) {
 			_ = pool.Start(ref, nil)
@@ -646,6 +684,14 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		if d.o.Hooks.Started != nil {
 			d.o.Hooks.Started(state)
 		}
+	}
+	if config.DevBuild && ctx.Err() == nil {
+		go func() {
+			defer close(compactDone)
+			d.compactLoop(compactCtx, st)
+		}()
+	} else {
+		close(compactDone)
 	}
 
 	// The cause that keeps a ready host from running operations (an incomplete

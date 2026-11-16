@@ -28,6 +28,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 )
@@ -79,7 +80,7 @@ func createKeyAt(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, 
 	if err := CheckKeyDir(dir, uid); err != nil {
 		return nil, false, err
 	}
-	removeStrayTemps(dir)
+	removeStrayTemps(dir, filepath.Base(path))
 	_, statErr := os.Lstat(path)
 	switch {
 	case statErr == nil && !guard.Off(guard.EnrolKeyNeverReplaced):
@@ -140,24 +141,49 @@ func createKeyAt(path string, uid uint32) (key *ecdsa.PrivateKey, created bool, 
 	return k, true, nil
 }
 
-// strayTempGlob matches the temporary files CreateKey leaves behind when it
-// is killed between creating one and linking it into place.
-const strayTempGlob = ".host.key.*"
-
-// removeStrayTemps removes the regular files a killed CreateKey left in dir.
-// They hold key material that was never installed. Errors are ignored: a file
-// that cannot be removed is not in the way, because every run draws a new
-// name.
-func removeStrayTemps(dir string) {
-	names, err := filepath.Glob(filepath.Join(dir, strayTempGlob))
+// removeStrayTemps removes the regular files a killed key write left in dir:
+// ".<base>.<16 hex>" (the host key's) and ".<base>.pending.<16 hex>" (a
+// renewal's pending key's), where base is the host key file's name. They
+// hold key material that was never installed. Errors are ignored: a file
+// that cannot be removed is not in the way, because every write draws a new
+// name. It returns the names removed.
+func removeStrayTemps(dir, base string) []string {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return nil
 	}
-	for _, n := range names {
-		if fi, err := os.Lstat(n); err == nil && fi.Mode().IsRegular() {
-			_ = os.Remove(n)
+	var removed []string
+	for _, e := range entries {
+		if !isStrayKeyTemp(e.Name(), base) {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() && os.Remove(p) == nil {
+			removed = append(removed, e.Name())
 		}
 	}
+	return removed
+}
+
+// isStrayKeyTemp reports whether name is a temporary file of the key file
+// base or of its pending renewal key: "." + that name + "." + 16 hex digits.
+func isStrayKeyTemp(name, base string) bool {
+	for _, file := range []string{base, base + pendingKeySuffix} {
+		if rest, ok := strings.CutPrefix(name, "."+file+"."); ok && len(rest) == 16 && isLowerHex(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLowerHex reports whether s holds only lowercase hexadecimal digits.
+func isLowerHex(s string) bool {
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // syncDir syncs a directory so a created or linked entry survives a crash.

@@ -112,7 +112,7 @@ func TestCreateKeyRefusals(t *testing.T) {
 
 func TestCreateKeyRemovesStrayTemporaryFiles(t *testing.T) {
 	dir := keyDir(t)
-	stray := filepath.Join(dir, ".host.key.deadbeef")
+	stray := filepath.Join(dir, ".host.key.00112233deadbeef")
 	require.NoError(t, os.WriteFile(stray, []byte("left by a killed run"), 0o600))
 	other := filepath.Join(dir, "unrelated")
 	require.NoError(t, os.WriteFile(other, []byte("x"), 0o600))
@@ -123,4 +123,21 @@ func TestCreateKeyRemovesStrayTemporaryFiles(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "the stray key material is gone")
 	_, err = os.Lstat(other)
 	assert.NoError(t, err, "other files are left alone")
+}
+
+// TestIsStrayKeyTemp: only the temporary names a key write draws, for the
+// host key and its pending renewal key, are strays.
+func TestIsStrayKeyTemp(t *testing.T) {
+	for name, want := range map[string]bool{
+		".host.key.00112233deadbeef":          true,
+		".host.key.pending.00112233deadbeef":  true,
+		"host.key":                            false,
+		"host.key.pending":                    false,
+		".host.key.deadbeef":                  false,
+		".host.key.00112233DEADBEEF":          false,
+		".host.key.pending.0011223344556677x": false,
+		".other.key.00112233deadbeef":         false,
+	} {
+		assert.Equal(t, want, isStrayKeyTemp(name, "host.key"), name)
+	}
 }
