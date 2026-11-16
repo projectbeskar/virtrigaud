@@ -713,6 +713,10 @@ const (
 	// ReasonOperationProviderMismatch: the host refused the operation as
 	// coming from another Provider than the one it is enrolled with. Held.
 	ReasonOperationProviderMismatch = "OperationProviderMismatch"
+	// ReasonOperationHostRekeyed: the host was re-keyed between the moment
+	// an attempt was minted and its first send, so it is never sent: it is
+	// asked about as a predecessor's. Held (development builds only).
+	ReasonOperationHostRekeyed = "OperationHostRekeyed"
 	// ReasonOperationDeleteUnconfirmed: the VM is being deleted and the host
 	// (or a Describe) reports no such VM, or its Provider is gone. That does
 	// not confirm a Delete, so the finalizer is kept: it is released only by

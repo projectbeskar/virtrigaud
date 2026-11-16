@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -347,4 +348,54 @@ func TestCheckFreezeDiscards(t *testing.T) {
 	assert.Equal(t, []string{hex.EncodeToString(prev)}, removed)
 	assert.Equal(t, [][]byte{prev}, trust.discarded)
 	assert.Empty(t, answers.checkFreezeDiscards(ctx, prov, opReader{stub}, "host-alpha"), "nothing left to check")
+}
+
+// rekeyingTrust is a staticTrust whose host is re-keyed once rekeyed is set.
+type rekeyingTrust struct {
+	*staticTrust
+	rekeyed atomic.Bool
+	next    HostTrust
+}
+
+func (r *rekeyingTrust) HostTrust(ctx context.Context, p *infravirtrigaudiov1beta1.Provider, hostID string) (HostTrust, error) {
+	if r.rekeyed.Load() {
+		return r.next, nil
+	}
+	return r.staticTrust.HostTrust(ctx, p, hostID)
+}
+
+// TestIdentityCreate_RekeyBeforeFirstSendIsNotSent: an attempt minted under
+// an enrolment that the host replaced before its first send is never sent;
+// the VM is held, with no outcome concluded.
+func TestIdentityCreate_RekeyBeforeFirstSendIsNotSent(t *testing.T) {
+	stub := newIdentityStub()
+	r, req := identityFixture(t, stub)
+	st, ok := r.HostAnswers.Trust.(*staticTrust)
+	require.True(t, ok)
+	cur, err := st.HostTrust(context.Background(), nil, "host-alpha")
+	require.NoError(t, err)
+	next := cur
+	next.Enrolment.EnrolmentID = bytes.Repeat([]byte{0x77}, 16)
+	next.Predecessors = [][]byte{cur.Enrolment.EnrolmentID}
+	rt := &rekeyingTrust{staticTrust: st, next: next}
+	r.HostAnswers.Trust = rt
+	// The host is re-keyed after the attempt's marker is written and its
+	// position persisted, before its first send.
+	r.operationCrashHook = func(_ context.Context, p operationCrashPoint) bool {
+		if p == crashAfterPrepared {
+			rt.rekeyed.Store(true)
+		}
+		return false
+	}
+	stub.onSend = func(contracts.PreparedOperation) (contracts.OperationAnswer, error) {
+		t.Fatal("an attempt minted under the replaced enrolment was sent")
+		return contracts.OperationAnswer{}, nil
+	}
+	reconcileN(t, r, req, 1)
+	assert.Empty(t, stub.sent())
+	vm := idVM(t, r)
+	assert.Equal(t, k8s.ReasonOperationHostRekeyed, readyReason(vm))
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhasePrepared, a.Phase, "no outcome is concluded")
 }

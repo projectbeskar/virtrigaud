@@ -677,6 +677,17 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if r.operationCrashed(ctx, crashAfterPrepared) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
+	// The enrolment was read before the marker was written: read the Host's
+	// enrolment again, now that the marker is visible to the freeze check,
+	// and never send an attempt minted under an enrolment that is no longer
+	// the host's current one (a re-key in between). It is then asked about
+	// as a predecessor's, never sent.
+	if now, terr := r.HostAnswers.Trust.HostTrust(ctx, ia.providerCR, host); terr != nil ||
+		!bytes.Equal(now.Enrolment.EnrolmentID, enrol.EnrolmentID) {
+		logger.Info("The host's enrolment changed before the attempt was first sent; it is not sent", "kind", opReq.Kind,
+			"attempt", attemptNo, "opID", opIDHex, "host", host)
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationHostRekeyed, msgOperationHostRekeyed, operationHoldRecheckInterval), nil
+	}
 	ia.noteResult(&prepared, nil)
 	return r.sendAttempt(ctx, vm, ia, &marker, prepared, true)
 }
@@ -811,6 +822,12 @@ var errNoEnrolmentSource = errors.New("the host's operation-identity enrolment c
 // earlier enrolment that the host still holds frozen: the attempt may be
 // asked about by op_id, never re-sent.
 var errIntentPredecessor = errors.New("the intent names a predecessor enrolment of the host")
+
+// msgOperationHostRekeyed is the hold of an attempt minted just before its
+// host was re-keyed.
+var msgOperationHostRekeyed = "the host was re-keyed after this attempt was minted and before it was first sent, so it is never sent; " +
+	"it is asked about as a predecessor enrolment's attempt (the host has no record of it) and held for an operator " +
+	"(orphan-on-delete or force-delete)"
 
 // errIntentPredecessorDiscarded is checkIntent's answer for an intent issued
 // under a predecessor enrolment the host has since discarded; it is an
