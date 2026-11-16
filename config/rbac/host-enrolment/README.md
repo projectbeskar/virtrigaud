@@ -47,12 +47,27 @@ Residual: with `create` on `certificaterequests`, `update` on their status
 and `approve` on the signer, the manager can obtain a host-agent certificate
 by itself. Its renewal approval rules (co-signed by the currently pinned key,
 identities unchanged) live in its own code; whoever controls the manager's
-ServiceAccount can get a certificate for any Host's names. As defence in
-depth, install cert-manager's approver-policy with a
-`CertificateRequestPolicy` for the host-agent issuer that limits requests from
-the manager's ServiceAccount to one `spiffe://<trust domain>/virtrigaud/host/...`
-URI and the `urn:virtrigaud:` URIs, no DNS, IP or e-mail names, no CA, the
-usages `digital signature` and `server auth`, and at most 30 days.
+ServiceAccount can have the issuer sign any Host's names (the certificate is
+pinned for no Host, but it is CA-valid). `admission/` holds two optional
+controls, not referenced by `kustomization.yaml`; edit their placeholders
+before applying them:
+
+- `admission/manager-certificaterequests.yaml` (recommended): a
+  `ValidatingAdmissionPolicy` and binding (Kubernetes 1.30 or later) that
+  only denies. A `CertificateRequest` the manager's ServiceAccount creates is
+  refused unless it is a renewal request of the manager's shape (enrolment
+  namespace, renewal label and Host annotation, the host-agent ClusterIssuer,
+  no CA, exactly the usages `digital signature` and `server auth`, at most 30
+  days). It approves nothing. It cannot see the names inside the PKCS #10
+  request.
+- `admission/approver-policy.yaml`: a cert-manager approver-policy
+  `CertificateRequestPolicy` bound to the manager's ServiceAccount, which
+  checks the names (spiffe host URIs and `urn:virtrigaud:` URIs only, the
+  host's name as common name, which every agent request carries). It is an
+  approver, not a filter: approver-policy approves the requests it allows
+  itself, which replaces the manager's approval decision for its renewal
+  requests and approves allowed-shape requests the manager never would. See
+  `docs/host-agent-enrolment.md` (RBAC) before using it.
 
 Residual: a principal with `update` or `delete` on `certificaterequests` in
 the enrolment namespace can delete or relabel each new renewal request, so

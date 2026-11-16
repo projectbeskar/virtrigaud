@@ -62,7 +62,9 @@ default approver must be disabled for the host-agent issuer** (run
 cert-manager with `--controllers=*,-certificaterequests-approver` and approve
 other issuers with approver-policy, or make sure the default approver has no
 `approve` permission on this signer). Otherwise cert-manager approves before
-the manager can check anything.
+the manager can check anything. The same holds for approver-policy: a
+`CertificateRequestPolicy` that selects the host-agent issuer and is bound to
+a requester approves that requester's requests itself (see [RBAC](#rbac)).
 
 The requester is checked first, before the manager reads any Host, Provider
 or Secret: a request from anyone else is denied with no trace on the Host (no
@@ -340,7 +342,9 @@ be re-keyed before its certificate expires.
    `enrolment.virtrigaud.io/agent=true`, `enrolment.virtrigaud.io/renewal=true`
    and `enrolment.virtrigaud.io/host-hash`, the Host annotation, the host's
    request, the usages `digital signature` and `server auth`, and the current
-   certificate's lifetime (at most 30 days). An object of that name that the
+   certificate's lifetime in whole hours, rounded down, at least 1 hour and
+   at most 30 days (a 30-minute certificate is renewed for 1 hour, a
+   90-minute one for 1 hour). An object of that name that the
    manager did not create (another requester, Host or request) is left alone
    and another name is drawn. The request's name appears in
    `status.agent.renewal` once it exists.
@@ -434,6 +438,18 @@ new key in use, or until the old certificate expires, when the old key can no
 longer authenticate the host anyway and is unpinned
 (`AgentRenewalCompletedAtExpiry`); the new key then stays pinned. An expired
 overlap never leaves a host with zero valid pins.
+
+**Overdue.** The agent asks to renew at two thirds of its certificate's
+lifetime. When the certificate passes five sixths of its lifetime and no
+renewal is in progress on the manager's side, nothing from the host has
+reached the manager (the agent's signer could not write the pending key, for
+example, or the agent is down): `AgentEnrolled` stays `True` with reason
+`RenewalOverdue` and a message naming the expiry, and an
+`AgentRenewalOverdue` Warning event is emitted when the reason appears. Look
+at the agent's and the signer's logs on the host, or re-key the Host before
+the certificate expires. A pinned certificate recorded before this check
+existed has no recorded start and is not checked until its next renewal or
+re-key.
 
 A re-key or a revocation ends a renewal (a re-key records its new key as a
 previous key). `Host.status.agent.renewal` mirrors the phase (`Requested`,
@@ -610,13 +626,50 @@ With `create` on `certificaterequests`, `update` on their status and
 `approve` on the signer, the manager can obtain a host-agent certificate by
 itself: its approval rules (a renewal co-signed by the currently pinned key,
 unchanged identities) are enforced by its own code, not by the API server.
-Whoever controls the manager's ServiceAccount can therefore get a certificate
-for any Host's URI names. As defence in depth, install cert-manager's
-approver-policy with a `CertificateRequestPolicy` for the host-agent issuer
-that, for requests from the manager's ServiceAccount, allows only one
-`spiffe://<trust domain>/virtrigaud/host/...` URI plus the
-`urn:virtrigaud:` URIs, no DNS, IP or e-mail names, no CA, the usages
-`digital signature` and `server auth`, and a duration of at most 30 days.
+Whoever controls the manager's ServiceAccount can therefore have the issuer
+sign a certificate for any Host's URI names. Such a certificate is pinned for
+no Host (the Provider and the manager accept only pinned keys), but it is
+CA-valid. Two optional controls narrow what that ServiceAccount can request;
+they do different things:
+
+- **Deny-only admission (recommended).**
+  `config/rbac/host-enrolment/admission/manager-certificaterequests.yaml` is
+  a `ValidatingAdmissionPolicy` and its binding (Kubernetes 1.30 or later)
+  that refuses, at admission, every `CertificateRequest` created by the
+  manager's ServiceAccount unless it is shaped like the manager's renewal
+  requests: in the enrolment namespace, labelled as an agent renewal and
+  naming a Host, for the host-agent ClusterIssuer, not a CA, with exactly the
+  usages `digital signature` and `server auth`, and a lifetime of at most 30
+  days. It approves nothing, so the manager's approval rules stay the only
+  approval decision. It cannot check the names inside the PKCS #10 request
+  (`spec.request` is DER, which admission expressions cannot parse); the
+  manager checks those itself, and a URI name constraint on the host-agent
+  sub-CA (permitted URI domain: the trust domain) narrows them at the CA. An
+  envtest spec applies the sample to a real API server.
+- **approver-policy (only if you accept what it does).**
+  `config/rbac/host-enrolment/admission/approver-policy.yaml` is a
+  cert-manager approver-policy `CertificateRequestPolicy` bound (`use`) to the
+  manager's ServiceAccount. approver-policy is an approver, not a filter: for
+  requests from a requester bound to a policy, approver-policy itself
+  approves those the policy allows and denies the others, in practice before
+  the manager evaluates them. Installed this way, it replaces the manager's
+  approval decision for the manager's own renewal requests (the manager still
+  validates the issued certificate before it publishes or pins anything), and
+  it approves requests of the allowed shape that the manager would never
+  approve, including a request for a Host that does not exist. What it adds
+  is a check of the names inside the request: only
+  `spiffe://<trust domain>/virtrigaud/host/...` and `urn:virtrigaud:` URIs, no
+  DNS, IP or e-mail names; it cannot require exactly one host URI. The policy
+  must allow a subject common name: every agent request, enrolment and
+  renewal, carries the host's name as its common name, and a policy without
+  `allowed.commonName` denies every renewal (the manager gives a key up after
+  5 denials). A test checks the sample against a request built by the
+  agent's own code. Do not bind approver-policy to administrators'
+  requests: the manager decides those.
+
+Neither control changes the residual for a holder of the ServiceAccount,
+which also holds `approve` on the signer; the admission policy narrows the
+shape of what it can create, approver-policy the names.
 
 A principal with `update` or `delete` on `certificaterequests` in the
 enrolment namespace can delete or relabel each new renewal request; each
@@ -636,6 +689,28 @@ that grant wildcard verbs (`*`) on `hosts`, or on every resource: a wildcard
 verb satisfies `enrol` and `rekey`, so whoever holds one can enrol and re-key
 any Host in its scope. Grant `rekey` separately and sparingly: it replaces the
 pinned key of a Host that is in service.
+
+## Deployment
+
+The Helm chart cannot run enrolment yet. It renders the enrolment RBAC
+(`experimental.hostEnrolment`), but it cannot pass the manager's
+`--dev-host-enrolment-*` and `--dev-operation-signer-key-file` flags or mount
+the sub-CA bundle and the operation signer key, and it ships no development
+build of the manager. Run a development build of the manager with those
+flags and files by other means (with its own ServiceAccount, so that the API
+server authorises it by `config/rbac/` and `config/rbac/host-enrolment/`).
+
+The manager's connection to a clustered Provider for per-host agents must be
+TLS: the manager sends that Provider's mutating calls as signed operations,
+and refuses plaintext or unverified TLS to it. Set
+`spec.runtime.service.tls.enabled: true` with a `secretRef` on the Provider
+([details](clustered-agent-provider-development.md#flags)). The Provider's own
+identity certificate, which it presents to the agents, comes from its
+credentials Secret
+([details](clustered-agent-provider-development.md#provider-identity-certificate)).
+
+A revoked Host (`spec.revoked`) is no longer polled by the heartbeat: its
+`Ready` condition is `False` with reason `Revoked`.
 
 ## Not done yet
 

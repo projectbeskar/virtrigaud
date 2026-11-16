@@ -1,0 +1,85 @@
+# Optional cert-manager approver-policy CertificateRequestPolicy for the
+# CertificateRequests the manager creates (certificate renewals).
+# Development builds only; not referenced by any kustomization: apply it on
+# purpose after editing the placeholders (see ../README.md). Needs
+# approver-policy installed.
+#
+# Read this before applying it: approver-policy is an approver, not a
+# filter. For a request whose requester is bound to this policy (the
+# RoleBinding below binds the manager's ServiceAccount) approver-policy
+# itself approves every request the policy allows, and denies the others,
+# usually before the manager looks at it. The manager's renewal approval
+# rules (its own request, the Host's renewal in progress, re-verified
+# co-signature, a key never pinned) then no longer decide whether a
+# certificate is issued; the manager still validates the issued certificate
+# and pins nothing that does not carry the Host's names and the co-signed
+# key. It also approves requests of this shape that the manager would never
+# approve (any spiffe host URI, for a Host that does not exist). What it
+# adds over the deny-only manager-certificaterequests.yaml is a check of the
+# names inside the request: only spiffe host URIs and urn:virtrigaud: URIs,
+# no DNS, IP or e-mail names. It cannot require exactly one spiffe URI.
+#
+# The common name is allowed because every agent request (enrolment and
+# renewal) carries the host's name as its subject common name
+# (internal/agent/enrol/csr.go); without it every renewal is denied.
+#
+# Placeholders: example.test (the trust domain), host-agent-pki (the
+# enrolment namespace), host-agent-ca (the host-agent ClusterIssuer),
+# virtrigaud-system / virtrigaud-controller-manager (the manager's
+# ServiceAccount).
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  name: virtrigaud-host-agent-manager
+spec:
+  allowed:
+    commonName:
+      value: "*"
+    uris:
+      values:
+      - "spiffe://example.test/virtrigaud/host/*"
+      - "urn:virtrigaud:*"
+      required: true
+    usages:
+    - "digital signature"
+    - "server auth"
+    isCA: false
+  constraints:
+    maxDuration: 720h
+    privateKey:
+      algorithm: ECDSA
+      minSize: 256
+      maxSize: 256
+  selector:
+    issuerRef:
+      group: cert-manager.io
+      kind: ClusterIssuer
+      name: host-agent-ca
+    namespace:
+      matchNames:
+      - host-agent-pki
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: virtrigaud-host-agent-manager-policy
+  namespace: host-agent-pki
+rules:
+- apiGroups: ["policy.cert-manager.io"]
+  resources: ["certificaterequestpolicies"]
+  verbs: ["use"]
+  resourceNames: ["virtrigaud-host-agent-manager"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: virtrigaud-host-agent-manager-policy
+  namespace: host-agent-pki
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: virtrigaud-host-agent-manager-policy
+subjects:
+- kind: ServiceAccount
+  name: virtrigaud-controller-manager
+  namespace: virtrigaud-system
