@@ -109,12 +109,12 @@ func TestFailRenewalBackoff(t *testing.T) {
 		assert.Equal(t, i >= maxRenewalFailures, gaveUp)
 		assert.True(t, st.renewalHeldBack(pin, now))
 		if i < maxRenewalFailures {
-			assert.False(t, st.renewalHeldBack(pin, now.Add(renewalBackoff(i)+time.Second)))
+			assert.False(t, st.renewalHeldBack(pin, now.Add(renewalBackoff(i, renewalRetryFloor)+time.Second)))
 		}
 	}
 	assert.True(t, st.renewalHeldBack(pin, now.Add(1000*time.Hour)), "given up for good")
 	assert.False(t, st.renewalHeldBack(strings.Repeat("cc", 32), now), "another key is not held back")
-	assert.Equal(t, renewalRetryMax, renewalBackoff(40))
+	assert.Equal(t, renewalRetryMax, renewalBackoff(40, renewalRetryBase))
 	pinned := metav1.Now()
 	st.Renewal = &renewalState{KeyPin: pin, PinnedAt: &pinned}
 	_, gaveUp := st.failRenewal(now, "x")
@@ -142,4 +142,24 @@ func TestManagerIdentity(t *testing.T) {
 	name, err := newRenewalRequestName(strings.NewReader(strings.Repeat("x", 12)))
 	require.NoError(t, err)
 	assert.Equal(t, renewalRequestPrefix+"787878787878787878787878", name)
+}
+
+// TestRenewalBackoffFitsShortLifetimes: the first retry of a renewal comes
+// well within the bound after which the agent draws a new key (half the
+// lifetime left when it asked), down to one-hour certificates; long
+// lifetimes keep the 10-minute base.
+func TestRenewalBackoffFitsShortLifetimes(t *testing.T) {
+	assert.Equal(t, renewalRetryBase, renewalRetryBaseFor(10*24*time.Hour))
+	assert.Equal(t, renewalRetryFloor, renewalRetryBaseFor(2*time.Minute))
+	for _, life := range []time.Duration{time.Hour, 6 * time.Hour, 24 * time.Hour, 30 * 24 * time.Hour} {
+		now := time.Now()
+		left := life / 3 // renewal at two thirds of the lifetime
+		st := &hostEnrolmentState{Current: enrolmentFor(strings.Repeat("c3", 16), "uid", 2, strings.Repeat("aa", 32)),
+			Renewal: &renewalState{KeyPin: strings.Repeat("bb", 32)}}
+		st.Current.NotAfter = metav1.NewTime(now.Add(left))
+		a, _ := st.failRenewal(now, "refused")
+		wait := a.NextTry.Sub(now)
+		assert.LessOrEqual(t, wait, left/4+time.Second, "lifetime %s: the retry comes well before the agent's new-key bound (left/2)", life)
+		assert.LessOrEqual(t, wait, renewalRetryBase+time.Second)
+	}
 }

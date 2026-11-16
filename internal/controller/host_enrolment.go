@@ -1048,12 +1048,14 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		changed, renewalRecheck = changed || renewalChanged, recheck
 	}
-	r.collectRenewalRequests(ctx, host, st)
 	if changed {
 		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
+	// Only after the save: finished renewal requests beyond the retained
+	// ones go (decided on a live read of the pins Secret).
+	r.collectRenewalRequests(ctx, host)
 	res := ctrl.Result{}
 	res.RequeueAfter = freezeRecheckAfter
 	if renewalRecheck > 0 && (res.RequeueAfter == 0 || renewalRecheck < res.RequeueAfter) {

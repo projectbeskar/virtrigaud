@@ -447,7 +447,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(h.Status.Agent.Renewal).To(BeNil())
 		Expect(h.Status.Agent.KeyPins).To(Equal([]string{newPin}))
 		Expect(resolveHostRenewal(ctx, k8sClient, e.cfg, h)).To(BeNil())
-		Expect(renewalRequests(e)).To(BeEmpty(), "the finished renewal request is deleted")
+		Expect(renewalRequests(e)).To(HaveLen(1), "the finished renewal request is retained for audit")
 
 		// Answers by the old key are no answers now.
 		e.host.mu.Lock()
@@ -638,7 +638,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(st.RenewalAttempts[0].Failures).To(Equal(1))
 		Expect(drainRenewalEvents(e.rec)).To(ContainSubstring(eventReasonAgentRenewalRestarted))
 		reconcileHost(e)
-		Expect(renewalRequests(e)).To(BeEmpty(), "the refused request is deleted")
+		Expect(renewalRequests(e)).To(HaveLen(1), "a finished request is retained (the newest few)")
 
 		// Within the backoff the same key is not recorded again.
 		Expect(heartbeat(e)).To(Equal(answerVerified))
@@ -661,7 +661,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(heartbeat(e)).To(Equal(answerVerified))
 		Expect(state(e).Renewal).To(BeNil(), "a given-up key is never renewed again")
 		reconcileHost(e)
-		Expect(renewalRequests(e)).To(BeEmpty())
+		Expect(renewalRequests(e)).To(HaveLen(renewalRequestsRetained), "only the newest finished requests are kept")
 
 		// The host draws a new key: it is renewed.
 		e.host.startRenewal(e.hostURI, "host-a")
@@ -725,6 +725,68 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		reconcileHost(e)
 		Expect(state(e).Renewal.CertificateRequestUID).NotTo(BeEmpty())
 		Expect(getCR(e, name).GetUID()).To(Equal(squat.GetUID()), "the other principal's object is left alone")
+	})
+
+	It("pins the issued key at the old certificate's expiry when no evidence arrived, on live state only", func() {
+		issued := func(e *renewalEnv) []byte {
+			cr := reconcileCR(e, requested(e))
+			der := issue(e, cr, hostidentitytest.IssueOptions{})
+			reconcileCR(e, cr)
+			return der
+		}
+		// The Provider activated early and the evidence never arrived.
+		e := newRenewalEnv()
+		der := issued(e)
+		newPin := state(e).Renewal.KeyPin
+		e.host.stage(der)
+		e.host.activate()
+		e.now = state(e).Current.NotAfter.Add(-time.Minute)
+		reconcileHost(e)
+		Expect(state(e).Current.KeyPins).To(Equal([]string{e.oldPin}), "nothing before the expiry")
+		e.now = state(e).Current.NotAfter.Add(time.Minute)
+		h := reconcileHost(e)
+		st := state(e)
+		Expect(st.Current.KeyPins).To(Equal([]string{newPin}), "the issued key is the only pin")
+		Expect(st.Renewal).To(BeNil())
+		Expect(h.Status.Agent.KeyPins).To(Equal([]string{newPin}))
+		Expect(drainRenewalEvents(e.rec)).To(ContainSubstring(eventReasonAgentRenewalPinnedExpiry))
+
+		// A revocation before the expiry prevents it.
+		e2 := newRenewalEnv()
+		issued(e2)
+		h2 := hostObj(e2)
+		h2.Spec.Revoked = true
+		Expect(k8sClient.Update(ctx, h2)).To(Succeed())
+		reconcileHost(e2)
+		e2.now = time.Now().Add(21 * 24 * time.Hour)
+		reconcileHost(e2)
+		Expect(state(e2).Current).To(BeNil())
+
+		// A replaced renewal (the host offered another key) prevents it.
+		e3 := newRenewalEnv()
+		issued(e3)
+		e3.host.startRenewal(e3.hostURI, "host-a")
+		Expect(heartbeat(e3)).To(Equal(answerVerified))
+		Expect(state(e3).Renewal.Certificate).To(BeEmpty(), "the renewal restarted for the new key")
+		e3.now = state(e3).Current.NotAfter.Add(time.Minute)
+		reconcileHost(e3)
+		Expect(state(e3).Current.KeyPins).To(Equal([]string{e3.oldPin}), "no pin without an issued certificate")
+
+		// A re-key before the expiry prevents it.
+		e4 := newRenewalEnv()
+		issued(e4)
+		h4 := hostObj(e4)
+		l, err := loadHostEnrolment(ctx, k8sClient, e4.cfg, h4)
+		Expect(err).NotTo(HaveOccurred())
+		rekeyed := strings.Repeat("dd", 32)
+		next := &currentEnrolment{Record: l.state.Current.Record, KeyPins: []string{rekeyed}, NotAfter: metav1.NewTime(time.Now().Add(20 * 24 * time.Hour))}
+		next.Record.EnrolmentID = strings.Repeat("6b", 16)
+		next.Record.StartEpoch = 4
+		l.state.rekey(next, time.Now())
+		Expect(saveHostEnrolment(ctx, k8sClient, e4.cfg, h4, &l)).To(Succeed())
+		e4.now = time.Now().Add(21 * 24 * time.Hour)
+		reconcileHost(e4)
+		Expect(state(e4).Current.KeyPins).To(Equal([]string{rekeyed}), "the re-keyed enrolment's pin only")
 	})
 
 	It("pins and completes on an answer signed by exactly the issued certificate when the host activated early", func() {

@@ -105,16 +105,25 @@ const renewalRequestPrefix = "virtrigaud-renewal-"
 
 // Bounds of retried renewals. A renewal whose issued certificate is refused,
 // or whose request is denied, fails or disappears, starts again for the same
-// key after a backoff from renewalRetryBase doubling up to renewalRetryMax;
-// after maxRenewalFailures failures that key is given up (the agent draws a
-// new key when its request goes unanswered) and the operator is told to fix
-// the issuer. maxRenewalAttempts bounds the keys remembered.
+// key after a backoff that doubles from a base up to renewalRetryMax; after
+// maxRenewalFailures failures that key is given up (the agent draws a new
+// key when its request goes unanswered) and the operator is told to fix the
+// issuer. The base is an eighth of the current certificate's remaining
+// lifetime, between renewalRetryFloor and renewalRetryBase, so a short-lived
+// certificate is retried well within the half of its remaining lifetime after
+// which the agent draws a new key. maxRenewalAttempts bounds the keys
+// remembered.
 const (
 	renewalRetryBase   = 10 * time.Minute
+	renewalRetryFloor  = time.Minute
 	renewalRetryMax    = 6 * time.Hour
 	maxRenewalFailures = 5
 	maxRenewalAttempts = 8
 )
+
+// renewalRequestsRetained is how many finished renewal requests are kept per
+// Host for audit (the newest); older finished ones are deleted.
+const renewalRequestsRetained = 3
 
 // renewalRequestRecheck is how often a renewal whose request is created but
 // not yet issued is looked at again (besides the request's own events).
@@ -138,6 +147,7 @@ const (
 	eventReasonAgentRenewalGivenUp       = "AgentRenewalGivenUp"
 	eventReasonAgentRenewalEarly         = "AgentRenewalActivatedEarly"
 	eventReasonAgentRenewalNoIdentity    = "AgentRenewalNoManagerIdentity"
+	eventReasonAgentRenewalPinnedExpiry  = "AgentRenewalPinnedAtExpiry"
 )
 
 // Denial reasons of renewal requests.
@@ -214,9 +224,17 @@ type renewalAttempt struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// renewalBackoff returns the wait after the n-th failure (n from 1).
-func renewalBackoff(n int) time.Duration {
-	return min(renewalRetryBase<<min(n-1, 10), renewalRetryMax)
+// renewalRetryBaseFor returns the backoff base for a certificate with
+// remaining lifetime left: left/8, between renewalRetryFloor and
+// renewalRetryBase.
+func renewalRetryBaseFor(left time.Duration) time.Duration {
+	return min(max(left/8, renewalRetryFloor), renewalRetryBase)
+}
+
+// renewalBackoff returns the wait after the n-th failure (n from 1) from
+// base.
+func renewalBackoff(n int, base time.Duration) time.Duration {
+	return min(base<<min(n-1, 10), renewalRetryMax)
 }
 
 // failRenewal ends the renewal in progress (before its new key is pinned)
@@ -228,6 +246,10 @@ func (st *hostEnrolmentState) failRenewal(now time.Time, reason string) (renewal
 	if r == nil || r.PinnedAt != nil {
 		return renewalAttempt{}, false
 	}
+	var left time.Duration
+	if st.Current != nil {
+		left = st.Current.NotAfter.Sub(now)
+	}
 	st.Renewal = nil
 	i := slices.IndexFunc(st.RenewalAttempts, func(a renewalAttempt) bool { return a.KeyPin == r.KeyPin })
 	if i < 0 {
@@ -237,7 +259,7 @@ func (st *hostEnrolmentState) failRenewal(now time.Time, reason string) (renewal
 	a := &st.RenewalAttempts[i]
 	a.Failures++
 	a.Reason = reason
-	a.NextTry = metav1.NewTime(now.Add(renewalBackoff(a.Failures)).UTC().Truncate(time.Second))
+	a.NextTry = metav1.NewTime(now.Add(renewalBackoff(a.Failures, renewalRetryBaseFor(left))).UTC().Truncate(time.Second))
 	out := *a
 	if n := len(st.RenewalAttempts); n > maxRenewalAttempts {
 		st.RenewalAttempts = slices.Clone(st.RenewalAttempts[n-maxRenewalAttempts:])
@@ -591,10 +613,21 @@ func (r *HostEnrolmentReconciler) reconcileRenewal(ctx context.Context, host *in
 		}
 		return changed, recheck, nil
 	}
-	if ren.CertificateRequestUID != "" {
-		if len(ren.Certificate) > 0 {
-			return false, 0, nil
+	if len(ren.Certificate) > 0 {
+		// Issued, its key not pinned yet. At the old certificate's expiry the
+		// old key can no longer authenticate the host; a host whose Provider
+		// put the renewed certificate in use early, and whose evidence never
+		// reached the manager, would stay unreachable for good. The issued key
+		// (manager-issued, validated for the current enrolment, held by the
+		// host by its proof of possession and the co-signature) is pinned
+		// then, after checking the live state.
+		if !now.Before(cur.NotAfter.Time) {
+			pinned, err := r.pinRenewalAtExpiry(ctx, host, st)
+			return pinned, 0, err
 		}
+		return false, cur.NotAfter.Sub(now) + time.Second, nil
+	}
+	if ren.CertificateRequestUID != "" {
 		if why := r.renewalRequestBroken(ctx, ren); why != "" {
 			a, gaveUp := st.failRenewal(now, why)
 			for _, ev := range restartedEvents(a, gaveUp, why) {
@@ -617,6 +650,65 @@ func (r *HostEnrolmentReconciler) reconcileRenewal(ctx context.Context, host *in
 		return created, renewalRequestRecheck, nil
 	}
 	return created, 0, err
+}
+
+// pinRenewalAtExpiry pins the issued key of a renewal whose key was never
+// pinned, once the old certificate has expired, on the live state only: the
+// Host exists, is not deleting or revoked and still runs an agent of the
+// enrolment's Provider; the pins Secret read from the API server holds the
+// same current enrolment and the same renewal, still unpinned; and the
+// issued certificate validates again now against the current enrolment and
+// the renewal's key. The new key becomes the only pin (the old one belongs
+// to an expired certificate), so the host is never left without a pin.
+func (r *HostEnrolmentReconciler) pinRenewalAtExpiry(ctx context.Context, host *infravirtrigaudiov1beta1.Host,
+	st *hostEnrolmentState) (bool, error) {
+	ren, cur := st.Renewal, st.Current
+	live := &infravirtrigaudiov1beta1.Host{}
+	if err := r.liveReader().Get(ctx, types.NamespacedName{Namespace: host.Namespace, Name: host.Name}, live); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if live.UID != host.UID || !live.DeletionTimestamp.IsZero() || live.Spec.Revoked || live.Spec.Identity != host.Spec.Identity {
+		return false, nil
+	}
+	provider, agent, err := hostRunsAgent(ctx, r.liveReader(), live)
+	if err != nil || !agent || cur.Record.ProviderUID != string(provider.UID) {
+		return false, err
+	}
+	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, live)
+	if err != nil || l.reset {
+		return false, err
+	}
+	lc, lr := l.state.Current, l.state.Renewal
+	if lc == nil || lc.Record != cur.Record || lr == nil || lr.PinnedAt != nil || lr.KeyPin != ren.KeyPin ||
+		lr.CertificateSHA256 != ren.CertificateSHA256 || !bytes.Equal(lr.Certificate, ren.Certificate) {
+		return false, nil
+	}
+	rec, err := cur.Record.toRecord()
+	if err != nil {
+		return false, err
+	}
+	hostURI, err := hostidentity.HostURI(r.Config.TrustDomain, live.Namespace, live.Name)
+	if err != nil {
+		return false, err
+	}
+	roots, err := hostidentity.RootPool(r.Config.CABundle)
+	if err != nil {
+		return false, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ren.Certificate})
+	if _, err := hostidentity.ValidateIssued(hostidentity.Authorisation{HostName: live.Name, HostURI: hostURI, Record: rec,
+		KeyPin: ren.KeyPin}, certPEM, roots, r.now()); err != nil {
+		log.FromContext(ctx).Info("Not pinning a renewed key at the old certificate's expiry: the issued certificate no longer validates",
+			"host", hostKey(host.Namespace, host.Name), "error", err.Error())
+		return false, nil
+	}
+	removed := st.completeRenewalPins()
+	log.FromContext(ctx).Info("Pinned a host's renewed key at the old certificate's expiry; the host showed no staged certificate in time",
+		"host", hostKey(host.Namespace, host.Name), "keyPin", ren.KeyPin, "removedKeyPins", removed)
+	r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalPinnedExpiry, fmt.Sprintf("the old certificate expired before the "+
+		"host showed its renewed certificate staged; the issued key %s is pinned (the only pin) so a host that put it in use can "+
+		"be reached again; old key pins %v are removed", ren.KeyPin, removed))
+	return true, nil
 }
 
 // renewalRequestBroken returns why the recorded request of a renewal can no
@@ -731,16 +823,27 @@ func (r *HostEnrolmentReconciler) drawRenewalRequestName(ren *renewalState) erro
 	return nil
 }
 
-// collectRenewalRequests deletes the manager's renewal CertificateRequests of
-// a Host that no renewal needs any more: every one but the request of the
-// renewal in progress (completed, refused, restarted, or of a renewal that
-// ended). Only requests labelled as renewals of this Host and recorded under
-// the manager's identity are deleted, each with UID and resourceVersion
+// collectRenewalRequests deletes the manager's finished renewal
+// CertificateRequests of a Host beyond the newest renewalRequestsRetained
+// (kept for audit). It runs after the reconcile's own save. A request is
+// deleted only when all hold: it is not the request of the renewal in
+// progress, read from the API server (never from a cache that may lag); it
+// is finished (Denied, Failed, refused, or issued); it is older than
+// renewalRequestRecheck; it is labelled as this Host's renewal and recorded
+// under the manager's identity. Deletes carry UID and resourceVersion
 // preconditions. Failures are logged; the next reconcile tries again.
-func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState) {
+func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, host *infravirtrigaudiov1beta1.Host) {
 	id, ok := r.Config.managerIdentity()
 	if !ok {
 		return
+	}
+	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
+	if err != nil {
+		return
+	}
+	keep := ""
+	if !l.reset && l.state.Renewal != nil {
+		keep = l.state.Renewal.CertificateRequest
 	}
 	list := certrequest.NewList()
 	if err := r.List(ctx, list, client.InNamespace(r.Config.Namespace), client.MatchingLabels{
@@ -749,13 +852,11 @@ func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, ho
 		log.FromContext(ctx).Info("Cannot list a Host's renewal requests", "host", hostKey(host.Namespace, host.Name), "error", err.Error())
 		return
 	}
-	keep := ""
-	if st.Renewal != nil {
-		keep = st.Renewal.CertificateRequest
-	}
+	now := r.now()
+	var finished []*unstructured.Unstructured
 	for i := range list.Items {
 		cr := &list.Items[i]
-		if cr.GetNamespace()+"/"+cr.GetName() == keep {
+		if cr.GetNamespace()+"/"+cr.GetName() == keep || !renewalRequestFinished(cr) {
 			continue
 		}
 		in, err := certrequest.RequestOf(cr)
@@ -763,14 +864,30 @@ func (r *HostEnrolmentReconciler) collectRenewalRequests(ctx context.Context, ho
 		if err != nil || in.Username != id.Username || !ok || ns != host.Namespace || hn != host.Name {
 			continue
 		}
+		finished = append(finished, cr)
+	}
+	slices.SortFunc(finished, func(a, b *unstructured.Unstructured) int {
+		return b.GetCreationTimestamp().Compare(a.GetCreationTimestamp().Time)
+	})
+	for i, cr := range finished {
+		if i < renewalRequestsRetained || now.Sub(cr.GetCreationTimestamp().Time) < renewalRequestRecheck {
+			continue
+		}
 		uid, rv := cr.GetUID(), cr.GetResourceVersion()
 		if err := r.Delete(ctx, cr, client.Preconditions{UID: &uid, ResourceVersion: &rv}); client.IgnoreNotFound(err) != nil {
 			log.FromContext(ctx).Info("Cannot delete a finished renewal request", "request", cr.GetNamespace()+"/"+cr.GetName(), "error", err.Error())
 			continue
 		}
-		log.FromContext(ctx).Info("Deleted a finished renewal request", "request", cr.GetNamespace()+"/"+cr.GetName(),
+		log.FromContext(ctx).Info("Deleted a finished renewal request beyond the retained ones", "request", cr.GetNamespace()+"/"+cr.GetName(),
 			"host", hostKey(host.Namespace, host.Name))
 	}
+}
+
+// renewalRequestFinished reports whether a renewal request is finished:
+// denied, failed, refused or issued.
+func renewalRequestFinished(cr *unstructured.Unstructured) bool {
+	return certrequest.IsTrue(cr, certrequest.ConditionDenied) || certrequest.Failed(cr) ||
+		certrequest.IsTrue(cr, certrequest.ConditionRefused) || certrequest.IsTrue(cr, certrequest.ConditionReady)
 }
 
 // decideRenewal approves a renewal CertificateRequest only when all of these
