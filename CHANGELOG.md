@@ -5,6 +5,43 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-16 18:00] - Per-host agent fixes from running it on real hosts: units, enrolment guidance, Provider identity, compaction (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `packaging/systemd/vrtg-agent.service`, `vrtg-agent-signer.service`, `vrtg-vm-shutdown.service`: `SystemCallErrorNumber=EPERM` on every unit. The default filter action killed the agent (SIGSYS) on kernels where a process file descriptor yields a file handle (the host inventory's persistent handle probe reaches `open_by_handle_at`, in `@privileged`); the probe now gets EPERM and reports the feature absent. `internal/agent/inventory/host_linux.go` takes the two handle calls through test seams; `internal/agent/inventory/syscalls_test.go` classifies every system call the collector makes against the agent unit's filter.
+- `packaging/systemd/*.service`: the binary path is `/usr/lib/virtrigaud/vrtg-agent` (`/usr/libexec` is not merged from a system extension on some immutable hosts).
+- `packaging/systemd/vrtg-agent-signer.service`: the signer can write its key directory (`ReadWritePaths=/var/lib/virtrigaud-signer /run/virtrigaud-signer`, no `ReadOnlyPaths=`): a certificate renewal writes the pending key there and renames it over the host key; renewal was impossible under the shipped unit.
+- `internal/controller/provider_controller.go`: the rendered Provider Deployment of a clustered Provider for per-host agents passes `--agent-client-cert` and `--agent-client-key` (required by the Provider, which exited at start without them), pointing at `tls.crt` and `tls.key` of its credentials Secret (`spec.credentialSecretRef`, already mounted read-only).
+- `internal/agent/server/server.go`, `internal/providers/cloudhypervisor/dialer.go`, `pool.go`, `route.go`: the agent logs (rate-limited) each Provider client certificate it refuses after the TLS 1.3 handshake, for example a URI without the Provider UID; the Provider detects the agent's fatal TLS alert per connection and reports the host unavailable with the new cause `ProviderCertificateRefused` instead of `AgentUnreachable` (nothing was sent; a mutating call is definitely not performed).
+- `internal/controller/host_controller.go`: a revoked Host of a clustered Provider for per-host agents is no longer polled every 15 s with an error log; `Ready=False/Revoked`.
+- `internal/agent/executor/fake/fake.go`, `script.go`: the fake executor writes a define's VM file before its effect marker (a crash between them made inspection report a define whose VM was missing, and the operation failed dirty) and appends each effect to a synced `intents.log` before performing it.
+- `config/rbac/host-enrolment/admission/approver-policy.yaml`, `docs/host-agent-enrolment.md`: the documented approver-policy allowed no subject common name, which every agent request carries, so it denied every renewal; the sample allows it.
+
+### Added
+- `packaging/systemd/vrtg-agent-setup.service`: a oneshot ordered after `systemd-sysext.service` and before the agent, the signer and the shutdown unit (each wants it) that runs `systemd-sysusers` and `systemd-tmpfiles --create` for the agent's fragments, so the users exist when the units arrive in a system extension merged after the boot's own sysusers pass. `virtrigaud-agent.sysusers.conf`: fixed ids 564 (agent) and 565 (signer); collision handling documented.
+- `packaging/systemd/vrtg-agent-boot-start.service`, `packaging/systemd/multi-user.target.d/virtrigaud-agent.conf`: `multi-user.target` upholds the shutdown unit and a `RemainAfterExit` oneshot that runs `systemctl --no-block start vrtg-agent.service` once per boot, so an agent in a late-merged system extension starts at boot while a maintenance stop of the agent is not undone.
+- `packaging/systemd/vrtg-agent.service`: `TimeoutStartSec=5min`; the agent reports the start-up step in its service status while the store opens and recovers.
+- `internal/agent/daemon/compact.go`, `internal/agent/opstore/compact.go`, `store.go`: a development agent compacts its operation store once ready, every hour, and at once when it reaches three quarters of its size threshold; tombstones, VM tombstones, witness files and records that still hold a VM are never dropped; a compacted store that stays near the threshold is logged once. A compaction scan stops at a full batch.
+- `internal/agent/enrol/temps.go`, `internal/agent/signer/keygen.go`, `run.go`, `internal/agent/daemon/daemon.go`: at start (development builds) the agent removes temporary files an interrupted atomic write left in its key material directory, and the signer those of the host key and pending key.
+- `internal/controller/host_enrolment.go`, `host_renewal.go`, `host_enrolment_request.go`: a pinned agent certificate past five sixths of its lifetime with no renewal in progress keeps `AgentEnrolled=True` with reason `RenewalOverdue` and emits an `AgentRenewalOverdue` Warning event; the pins state records each pinned certificate's start.
+- `config/rbac/host-enrolment/admission/manager-certificaterequests.yaml`: a deny-only `ValidatingAdmissionPolicy` for the CertificateRequests the manager's ServiceAccount creates (renewal shape, namespace, issuer, no CA, exact usages, at most 30 days).
+- `hack/verify-systemd-units.sh`: also checks `SystemCallErrorNumber=` wherever a filter is set, no `/usr/libexec` binary, the signer's writable paths, and the `multi-user.target` drop-in.
+- Tests: unit properties of every unit, the drop-in and the fixed ids; the probe under EPERM; compaction by the running agent and the near-threshold report; temporary file sweeps; fake executor crash points; the Provider's refusal cause and the agent's refusal log; rendered client certificate flags and mount; renewal overdue and revoked Hosts; the approver-policy sample against a request built by the agent's code; envtest of the admission policy against a real API server.
+
+### Changed
+- `docs/host-agent-enrolment.md`, `config/rbac/host-enrolment/README.md`: approver-policy is described as what it is, an approver that replaces the manager's decision for the requests it matches (and approves allowed-shape requests the manager never would), not defence in depth; the deny-only admission policy is recommended, with what it cannot check. Renewal lifetime rounding (whole hours, at least 1 h), the overdue reason, revoked Hosts, that the Helm chart cannot run enrolment yet and that the manager-to-Provider connection must be TLS are documented.
+- `docs/per-host-agent-development.md`: the units and their installation paths, filtered calls, the setup and boot-start units, fixed ids, the start timeout and memory behaviour against `MemoryMax`, store size per operation (about 600 B per tombstone, 1.6 KB uncompacted) and compaction, the fake executor's crash ordering. `docs/clustered-agent-provider-development.md`: where the Provider identity certificate comes from, its URI with the Provider UID, the new cause and the TLS requirement.
+
+### Why
+Running the per-host agent, its signer and its units on real hosts (several systemd versions and kernels, an immutable host with system extensions) and enrolment with real cert-manager showed that the shipped units could kill the agent, could not renew, did not start or create their users from a system extension, that the documented approver-policy denied every renewal while approving requests on its own, and that the rendered Provider could not start. These fixes make the shipped artefacts and documentation work as described.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-16 09:30] - Renew a per-host agent's certificate and rotate its pinned key (development builds only)
 **Author:** @wrkode (William Rizzo)
 
