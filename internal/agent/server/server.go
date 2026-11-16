@@ -263,6 +263,24 @@ type Options struct {
 	// Freezes applies freeze confirmations relayed in AgentStatus. Nil
 	// ignores them: a release build never sets it.
 	Freezes FreezeConfirmer
+	// Renewals is the host's certificate renewal. Nil serves none
+	// (InstallRenewedCertificate is Unimplemented and no answer carries a
+	// renewal request): a release build never sets it.
+	Renewals Renewals
+}
+
+// Renewals is the host's certificate renewal, as the server serves it.
+type Renewals interface {
+	// PendingRequest returns the host's pending renewal request for a
+	// GetHostInfo that asked for renewal version requested (at least 1),
+	// signed with the current key; nil when there is none.
+	PendingRequest(ctx context.Context, requested uint32) *providerv1.SignedBlob
+	// StagedSHA256 returns the SHA-256 of the staged renewed certificate,
+	// nil when none is staged.
+	StagedSHA256() []byte
+	// Install stages a renewed certificate (activate false) or puts the
+	// staged one in use (activate true); the error is a gRPC status.
+	Install(ctx context.Context, certificate []byte, activate bool) error
 }
 
 // FreezeConfirmer applies a relayed freeze confirmation (the operation store,
@@ -513,14 +531,14 @@ func (s *Server) streamGate(srv any, ss grpc.ServerStream, info *grpc.StreamServ
 
 // hostAnswer signs a HostAnswer for nonce, or returns nil when none can be
 // made (no nonce, no matching enrolment, a store that cannot be read). It
-// carries no inventory.
+// carries no inventory and no renewal request.
 func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uint64) *providerv1.SignedBlob {
-	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0)
+	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0, 0)
 }
 
 // helloAnswer is hostAnswer for Hello, under the separate Hello answer limit.
 func (s *Server) helloAnswer(ctx context.Context, nonce []byte) *providerv1.SignedBlob {
-	return s.signAnswerUnder(ctx, s.hellos, nonce, 0, func(h answer.Host) (proto.Message, error) {
+	return s.signAnswerUnder(ctx, s.hellos, nonce, 0, 0, func(h answer.Host) (proto.Message, error) {
 		view, err := s.opts.Agent.HostView(ctx, 0)
 		if err != nil {
 			return nil, fmt.Errorf("the store cannot be read: %w", err)
@@ -531,10 +549,11 @@ func (s *Server) helloAnswer(ctx context.Context, nonce []byte) *providerv1.Sign
 }
 
 // hostAnswerWithInventory is hostAnswer for a request that asked for the host
-// inventory in version inventoryVersion (0: it asked for none). See signWith
-// for what happens when the inventory cannot be signed.
-func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, continuitySeq uint64, inventoryVersion uint32) *providerv1.SignedBlob {
-	return s.signAnswer(ctx, nonce, inventoryVersion, func(h answer.Host) (proto.Message, error) {
+// inventory in version inventoryVersion and for the pending renewal request
+// in version renewalVersion (0: it asked for none). See signWith for what
+// happens when the inventory cannot be signed.
+func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, continuitySeq uint64, inventoryVersion, renewalVersion uint32) *providerv1.SignedBlob {
+	return s.signAnswerUnder(ctx, s.answers, nonce, inventoryVersion, renewalVersion, func(h answer.Host) (proto.Message, error) {
 		view, err := s.opts.Agent.HostView(ctx, continuitySeq)
 		if err != nil {
 			return nil, fmt.Errorf("the store cannot be read: %w", err)
@@ -553,11 +572,13 @@ func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, cont
 // (a GetHostInfo that asked for it), the host inventory; it reads the store
 // itself, in one read.
 func (s *Server) signAnswer(ctx context.Context, nonce []byte, inventoryVersion uint32, build func(answer.Host) (proto.Message, error)) *providerv1.SignedBlob {
-	return s.signAnswerUnder(ctx, s.answers, nonce, inventoryVersion, build)
+	return s.signAnswerUnder(ctx, s.answers, nonce, inventoryVersion, 0, build)
 }
 
-// signAnswerUnder is signAnswer under the per-identity limit lim.
-func (s *Server) signAnswerUnder(ctx context.Context, lim *sourceLimiter, nonce []byte, inventoryVersion uint32,
+// signAnswerUnder is signAnswer under the per-identity limit lim; a request
+// that asked for renewal version renewalVersion (a GetHostInfo) also gets
+// the pending renewal request, when there is one.
+func (s *Server) signAnswerUnder(ctx context.Context, lim *sourceLimiter, nonce []byte, inventoryVersion, renewalVersion uint32,
 	build func(answer.Host) (proto.Message, error)) *providerv1.SignedBlob {
 	if len(nonce) == 0 {
 		return nil
@@ -579,6 +600,13 @@ func (s *Server) signAnswerUnder(ctx context.Context, lim *sourceLimiter, nonce 
 	}
 	if inventoryVersion != 0 && s.opts.Inventory != nil {
 		h.Inventory = s.opts.Inventory.Inventory(inventoryVersion)
+	}
+	if s.opts.Renewals != nil {
+		h.StagedCertificateSHA256 = s.opts.Renewals.StagedSHA256()
+		if renewalVersion != 0 {
+			h.RenewalRequested = renewalVersion
+			h.PendingRenewal = s.opts.Renewals.PendingRequest(ctx, renewalVersion)
+		}
 	}
 	return s.signWith(c, h, build)
 }

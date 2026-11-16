@@ -93,7 +93,7 @@ func TestHostAnswerInventory(t *testing.T) {
 		assert.True(t, proto.Equal(valid(), a.GetInventory()))
 		a.Inventory.Components[0].Name = "changed"
 		assert.Equal(t, "cloud-hypervisor", h.Inventory.GetComponents()[0].GetName(), "the answer holds a copy")
-		assert.EqualValues(t, 2, answer.AgentAPIVersion)
+		assert.GreaterOrEqual(t, answer.AgentAPIVersion, uint32(2), "version 2 added the inventory")
 	})
 	t.Run("asked, nothing to report", func(t *testing.T) {
 		h := testHost(p)

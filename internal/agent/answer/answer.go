@@ -95,8 +95,10 @@ const (
 // Versions this agent reports.
 const (
 	// AgentAPIVersion is the version of the agent's RPC surface. Version 2
-	// adds the host inventory to the answer of GetHostInfo.
-	AgentAPIVersion uint32 = 2
+	// adds the host inventory to the answer of GetHostInfo; version 3 adds
+	// the pending certificate renewal request to it and serves
+	// InstallRenewedCertificate (development builds).
+	AgentAPIVersion uint32 = 3
 	// GrantVersion is the operation grant version the agent implements.
 	GrantVersion uint32 = 1
 )
@@ -251,6 +253,13 @@ type Host struct {
 	// checked against; zero uses inventory.MaxInventoryBytes. Only tests set
 	// it.
 	InventoryMaxBytes int
+	// RenewalRequested is the request's renewal_version; 0 when it asked for
+	// no renewal request.
+	RenewalRequested uint32
+	// PendingRenewal is the host's signed pending renewal request
+	// (SignRenewalRequest); it is put in the answer only when
+	// RenewalRequested is at least 1.
+	PendingRenewal *providerv1.SignedBlob
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no
@@ -293,6 +302,9 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 			}
 		}
 		a.Inventory = proto.CloneOf(h.Inventory)
+	}
+	if h.PendingRenewal != nil && (h.RenewalRequested != 0 || guard.Off(guard.RenewalOnlyWhenAsked)) {
+		a.PendingRenewal = proto.CloneOf(h.PendingRenewal)
 	}
 	return a, nil
 }

@@ -80,7 +80,7 @@ func TestGetHostInfoInventory(t *testing.T) {
 		assert.EqualValues(t, 1, inv.GetInventoryVersion(), "min(requested, supported)")
 		assert.Equal(t, providerv1.InventoryState_INVENTORY_STATE_COMPLETE, inv.GetState())
 		require.NoError(t, inventory.Validate(inv, requested))
-		assert.EqualValues(t, 2, a.GetAgentApiVersion())
+		assert.GreaterOrEqual(t, a.GetAgentApiVersion(), uint32(2), "version 2 added the inventory")
 	}
 
 	t.Run("requested 0 gives no inventory", func(t *testing.T) {
