@@ -1042,6 +1042,12 @@ message GetHostInfoRequest {
   // answer_nonce. No built-in provider reads it. Additive and
   // backward-compatible.
   uint32 inventory_version = 4;
+  // renewal_version asks the host's per-host agent to put its pending
+  // certificate renewal request, when it has one, in the signed answer
+  // (HostAnswer.pending_renewal): the highest version of RenewalRequest the
+  // caller implements, or 0 for none. Set only together with answer_nonce.
+  // No built-in provider reads it. Additive and backward-compatible.
+  uint32 renewal_version = 5;
 }
 
 // Capability check - what features does this provider support

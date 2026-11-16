@@ -55,6 +55,7 @@ var hostSignedBodyTypes = []string{
 	"provider.v1.OperationAnswer",
 	"provider.v1.VMAnswer",
 	"provider.v1.HostAnswer",
+	"provider.v1.RenewalRequest",
 }
 
 // fill returns n bytes, each equal to b, so that every byte field in these
@@ -137,6 +138,7 @@ func fullHostAnswer() *HostAnswer {
 		ClockFloor:              timestamppb.New(time.Unix(1700000000, 5)),
 		StagedCertificateSha256: fill(0x0e, 32),
 		Inventory:               fullHostInventory(),
+		PendingRenewal:          fullRenewalBlob(),
 	}
 }
 
@@ -341,10 +343,11 @@ func TestHostAnswer_FieldNumbersPinned(t *testing.T) {
 		{"clock_floor", 7, protoreflect.MessageKind, timestampMessageName, false},
 		{"staged_certificate_sha256", 8, protoreflect.BytesKind, "", false},
 		{"inventory", 9, protoreflect.MessageKind, hostInventoryMessageName, false},
+		{"pending_renewal", 10, protoreflect.MessageKind, signedBlobMessageName, false},
 	}, true)
 }
 
-// TestHostAnswer_AdditiveRequestFieldsPinned pins the fourteen additive
+// TestHostAnswer_AdditiveRequestFieldsPinned pins the fifteen additive
 // fields on six existing messages, the field count of each message (so no
 // other field was added with them) and that each added field is the
 // highest number of its message.
@@ -377,7 +380,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			{"answer_nonce", 2, protoreflect.BytesKind, "", false},
 			{"continuity_seq", 3, protoreflect.Uint64Kind, "", false},
 			{"inventory_version", 4, protoreflect.Uint32Kind, "", false},
-		}, 4, "inventory_version"},
+			{"renewal_version", 5, protoreflect.Uint32Kind, "", false},
+		}, 5, "renewal_version"},
 		{&HostInfo{}, []fieldSpec{
 			{"host_answer", 12, protoreflect.MessageKind, signedBlobMessageName, false},
 		}, 12, "host_answer"},
@@ -394,8 +398,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			t.Errorf("%s: %s is not the highest field number (%d)", md.FullName(), c.highest, highestFieldNumber(md))
 		}
 	}
-	if added != 14 {
-		t.Errorf("pinned %d additive fields, want 14", added)
+	if added != 15 {
+		t.Errorf("pinned %d additive fields, want 15", added)
 	}
 }
 
@@ -466,9 +470,10 @@ func TestHostAnswer_BodyTypesClosedSet(t *testing.T) {
 		(&OperationAnswer{}).ProtoReflect().Descriptor().FullName(),
 		(&VMAnswer{}).ProtoReflect().Descriptor().FullName(),
 		(&HostAnswer{}).ProtoReflect().Descriptor().FullName(),
+		(&RenewalRequest{}).ProtoReflect().Descriptor().FullName(),
 	}
-	if len(hostSignedBodyTypes) != 3 {
-		t.Fatalf("closed body_type set has %d entries, want 3", len(hostSignedBodyTypes))
+	if len(hostSignedBodyTypes) != 4 {
+		t.Fatalf("closed body_type set has %d entries, want 4", len(hostSignedBodyTypes))
 	}
 	for i, bt := range hostSignedBodyTypes {
 		if protoreflect.FullName(bt) != want[i] {
