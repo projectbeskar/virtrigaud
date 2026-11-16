@@ -420,7 +420,11 @@ enrolment's, the pins Secret still holds the same enrolment and the same
 unpinned renewal, and the issued certificate still validates. The host is
 then reachable again. The window is bounded by the old certificate's expiry
 (at most a third of its lifetime after the renewal started). A re-key, a
-revocation or a renewal replaced by a new key before then prevents it.
+revocation or a renewal replaced by a new key before then prevents it. The
+pinned key may be one the host no longer holds (its agent discarded an
+unanswered request and drew a new key that never reached the manager): the
+host then stays unreachable, as it would have with only the expired pin, and
+re-keying the Host is the recovery.
 
 **Overlap.** The overlap is expected to end within a heartbeat or two. After
 24 hours the manager reports `AgentRenewalOverlapExpired`, but removes no

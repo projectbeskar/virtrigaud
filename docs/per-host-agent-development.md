@@ -890,7 +890,10 @@ serves no renewal operation.
   delayed. Until it is finished the agent refuses operations with the
   unattested cause `renewal_activation_incomplete` (in the service status and
   in the refusals' `ErrorInfo`), and logs a failed attempt at most once a
-  minute.
+  minute. A tick that keeps failing is retried at the next tick three times,
+  then after 5 seconds doubling to a minute. A tick acts on its signer
+  connection only if no activation was running when it started or began
+  before it took the renewal lock.
 - **Crash safety.** Every file is written to a temporary file, synced and
   renamed, and the directory synced. A stop between stage and activation
   leaves the current certificate and key in use and the staged certificate
