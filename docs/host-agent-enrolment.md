@@ -193,7 +193,8 @@ three steps:
    intent cannot be read or authenticated holds every predecessor. The
    manager first looks at its cache: if the cache already shows every due
    predecessor held, it waits without reading the API server. Otherwise it
-   confirms with a paginated read from the API server (500 objects a page).
+   confirms with a paginated read from the API server (500 objects a page);
+   an intent authenticated in the cache pass is not read again.
    The decision is recorded in the pins Secret
    (`confirmedFrozenEnrolmentIDs`, with the time each predecessor became one
    in `predecessorSince`) and reported with an `AgentFreezeConfirmed` event
@@ -241,6 +242,22 @@ enrolment: after recording the attempt and before its first send, the
 manager reads the Host's enrolment again and, if it changed, does not send
 it. The VM is held with the reason `OperationHostRekeyed` for an operator
 (`orphan-on-delete` or force-delete), as for any attempt of a predecessor.
+If the enrolment cannot be read at that point (a transient API error), the
+attempt is not sent either, and the VM is not held: the next reconcile asks
+about the attempt and decides again.
+
+**Liveness cost.** An attempt held this way, or any attempt of a
+predecessor, is never concluded on its own. The host's `NO_RECORD` (or
+`RETIRED`) answer about an attempt under a predecessor enrolment is not taken
+as proof that it was never performed, so the attempt stays open (`Prepared`
+or `Sent`), its VM stays held, and the attempt keeps that predecessor from
+being confirmed. The predecessor then stays listed and counts towards the
+bound of 8 until an operator settles the VM: set the annotation
+`virtrigaud.io/orphan-on-delete=true` and delete the VirtualMachine (the
+manager forgets it and leaves whatever the host has), or set
+`virtrigaud.io/force-delete` on it.
+Once the VM and its attempts are gone, the predecessor is confirmed at the
+next check.
 
 ### Start epochs
 

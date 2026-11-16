@@ -768,6 +768,12 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   ([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)). An attempt still
   open under a predecessor whose records the host discarded early (an unsigned relay
   cannot be trusted) is answered `UNKNOWN_TO_AGENT` and held.
+- An attempt under a predecessor enrolment is never concluded by the manager: the host's
+  `NO_RECORD` or `RETIRED` about it is not taken as never performed. Such an attempt
+  (including one held as `OperationHostRekeyed`) keeps its VM held and its predecessor
+  unconfirmed, and so counts towards the bound of 8 re-keys, until an operator settles the
+  VM with `virtrigaud.io/orphan-on-delete` and a delete, or with `virtrigaud.io/force-delete`
+  ([details](host-agent-enrolment.md#confirming-a-predecessors-freeze)).
 - Store positions are mirrored nowhere in the Host's status; they live only in the pins
   Secret.
 - A Reconfigure's `RestartRequired` and honest-result flags come from the unsigned answer to
