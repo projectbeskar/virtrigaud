@@ -10,15 +10,20 @@
 # would only order the two units, never pull the agent in). Whether it must be
 # ordered against the agent's unit is decided when the agent runs real VMs; it
 # is not ordered against it today.
+#
+# Its stop action runs as the agent's user: vrtg-agent-setup.service, which
+# it wants and starts after, creates that user first (on a host where the
+# units come from a system extension merged after systemd-sysusers ran).
 [Unit]
 Description=VirtRigaud: stop the per-host agent's VMs at host shutdown (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
-After=local-fs.target dbus.service
+Wants=vrtg-agent-setup.service
+After=local-fs.target dbus.service vrtg-agent-setup.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStop=/usr/libexec/virtrigaud/vrtg-agent shutdown-vms
+ExecStop=/usr/lib/virtrigaud/vrtg-agent shutdown-vms
 TimeoutStopSec=330
 User=virtrigaud-agent
 Group=virtrigaud-agent
@@ -52,6 +57,7 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX
 
 [Install]

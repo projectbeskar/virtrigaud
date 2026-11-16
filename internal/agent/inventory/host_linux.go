@@ -104,22 +104,33 @@ func openPidfdSelf() (fd int, ok bool, err error) {
 	return -1, false, err
 }
 
+// The two calls of the persistent process handle probe, replaced in tests.
+// open_by_handle_at is in systemd's @privileged system call group, which the
+// agent's reference unit filters: there it fails with EPERM
+// (SystemCallErrorNumber=EPERM), which the probe reads as "not supported".
+// Without that setting the filter would kill the agent on every kernel where
+// name_to_handle_at on a process file descriptor succeeds.
+var (
+	nameToHandleAt = unix.NameToHandleAt
+	openByHandleAt = unix.OpenByHandleAt
+)
+
 // PidfsHandle implements Host: a file handle taken from the agent's own
 // process file descriptor must open the same process again (open_by_handle_at
 // on a descriptor of the same file system), which compares equal by inode.
-// Any refusal of either call means the host does not support persistent
-// process handles to this agent.
+// Any refusal of either call (EPERM from a system call filter included) means
+// the host does not support persistent process handles to this agent.
 func (SystemHost) PidfsHandle() (bool, error) {
 	fd, ok, err := openPidfdSelf()
 	if err != nil || !ok {
 		return false, err
 	}
 	defer func() { _ = unix.Close(fd) }()
-	h, _, err := unix.NameToHandleAt(fd, "", unix.AT_EMPTY_PATH)
+	h, _, err := nameToHandleAt(fd, "", unix.AT_EMPTY_PATH)
 	if err != nil {
 		return false, nil //nolint:nilerr // a refusal means "not supported"
 	}
-	again, err := unix.OpenByHandleAt(fd, h, unix.O_RDONLY|unix.O_CLOEXEC)
+	again, err := openByHandleAt(fd, h, unix.O_RDONLY|unix.O_CLOEXEC)
 	if err != nil {
 		return false, nil //nolint:nilerr // a refusal means "not supported"
 	}

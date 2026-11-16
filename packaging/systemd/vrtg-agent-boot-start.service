@@ -1,0 +1,54 @@
+# Reference unit that starts the per-host agent once per boot. Development
+# builds only: no release artefact ships the agent or this unit.
+#
+# On a host where the agent arrives as a system extension merged during the
+# boot, the .wants links of the extension's [Install] sections start nothing:
+# the boot transaction was computed before the merge. A unit upheld by
+# multi-user.target (see multi-user.target.d/virtrigaud-agent.conf) is
+# started even so. The agent itself must not be upheld, or an operator could
+# not stop it for maintenance: systemd would start it again at once. This
+# unit is upheld instead. It is a oneshot that stays active
+# (RemainAfterExit=yes) once it has asked systemd to start the agent
+# (--no-block: it does not wait for the agent), so Upholds= does not run it
+# again in the same boot, and an agent stopped for maintenance stays stopped.
+# It has no dependency on the agent's unit: stopping or restarting the agent
+# never involves it.
+#
+# Stopping this unit by hand is the exception: Upholds= starts it again, and
+# it starts the agent once more. Stop the agent, not this unit.
+[Unit]
+Description=VirtRigaud: start the per-host agent once per boot (development builds only)
+Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
+Wants=vrtg-agent-setup.service
+After=vrtg-agent-setup.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/systemctl --no-block start vrtg-agent.service
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
