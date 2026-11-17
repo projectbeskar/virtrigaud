@@ -99,7 +99,7 @@ const tlsBlockMissingMessage = "TLS is on-by-default in v0.3.7. To proceed: (a) 
 
 // providerCredentialsMountPath is the in-pod path where the manager mounts
 // the Provider's credentials Secret (spec.credentialSecretRef).
-const providerCredentialsMountPath = "/etc/virtrigaud/credentials"
+const providerCredentialsMountPath = "/etc/virtrigaud/credentials" // #nosec G101 -- a mount path, not a credential
 
 // The keys of the credentials Secret of a clustered Provider for per-host
 // agents that hold its Provider identity certificate and key (a
