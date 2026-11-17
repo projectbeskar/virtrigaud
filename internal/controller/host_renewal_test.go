@@ -235,19 +235,19 @@ func TestRenewalBackoffFitsShortLifetimes(t *testing.T) {
 	}
 }
 
-// TestMirroredRequeuesConflicts: a status mirror that lost an optimistic-lock
+// TestRequeueOnConflict: an enrolment reconcile that lost an optimistic-lock
 // race is requeued without an error; other errors are returned unchanged.
-func TestMirroredRequeuesConflicts(t *testing.T) {
+func TestRequeueOnConflict(t *testing.T) {
 	conflict := fmt.Errorf("mirror enrolment status of Host a/b: %w",
 		apierrors.NewConflict(schema.GroupResource{Group: "infra.virtrigaud.io", Resource: "hosts"}, "b", errors.New("modified")))
-	res, err := mirrored(ctrl.Result{RequeueAfter: time.Minute}, conflict)
+	res, err := requeueOnConflict(ctrl.Result{RequeueAfter: time.Minute}, conflict)
 	require.NoError(t, err)
 	assert.True(t, res.Requeue)
 	other := errors.New("boom")
-	res, err = mirrored(ctrl.Result{RequeueAfter: time.Minute}, other)
+	res, err = requeueOnConflict(ctrl.Result{RequeueAfter: time.Minute}, other)
 	assert.Equal(t, other, err)
 	assert.Equal(t, time.Minute, res.RequeueAfter)
-	res, err = mirrored(ctrl.Result{RequeueAfter: time.Minute}, nil)
+	res, err = requeueOnConflict(ctrl.Result{RequeueAfter: time.Minute}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, time.Minute, res.RequeueAfter)
 }

@@ -943,8 +943,16 @@ type HostEnrolmentReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
 
-// Reconcile implements reconcile.Reconciler.
+// Reconcile implements reconcile.Reconciler. An optimistic-lock conflict
+// (the pins Secret or the Host's status written by another reconciler since
+// it was read) is requeued at once without an error log; the next reconcile
+// re-reads both and derives its decision again.
 func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	return requeueOnConflict(r.reconcile(ctx, req))
+}
+
+// reconcile is Reconcile without the conflict handling.
+func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	host := &infravirtrigaudiov1beta1.Host{}
 	if err := r.Get(ctx, req.NamespacedName, host); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -963,7 +971,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	if host.Spec.Identity == "" {
-		return mirrored(ctrl.Result{}, r.mirror(ctx, host, nil, ""))
+		return ctrl.Result{}, r.mirror(ctx, host, nil, "")
 	}
 	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
 	if err != nil {
@@ -1097,15 +1105,17 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 	}
-	return mirrored(res, r.mirror(ctx, host, st, string(provider.UID)))
+	return res, r.mirror(ctx, host, st, string(provider.UID))
 }
 
-// mirrored returns the result of a reconcile that ended with the status
-// mirror: a mirror that lost an optimistic-lock race with another writer of
-// the Host's status (a revocation writes it from several reconcilers within
-// a second) is retried at once, without an error log; any other error is
-// returned.
-func mirrored(res ctrl.Result, err error) (ctrl.Result, error) {
+// requeueOnConflict returns the result of an enrolment reconcile: one that
+// lost an optimistic-lock race (the Host's status, written by several
+// reconcilers within a second of a revocation; a pins Secret written by the
+// heartbeat mid-renewal; a CertificateRequest's status approved by another
+// approver first) is retried at once, without an error log. Every write
+// carries the resourceVersion it read, so nothing was overwritten, and the
+// retry re-reads and decides again. Any other error is returned.
+func requeueOnConflict(res ctrl.Result, err error) (ctrl.Result, error) {
 	if apierrors.IsConflict(err) {
 		return ctrl.Result{Requeue: true}, nil
 	}

@@ -124,8 +124,20 @@ const admissionSuspendedRequeue = time.Minute
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile implements reconcile.Reconciler.
+// Reconcile implements reconcile.Reconciler. An optimistic-lock conflict
+// (the request approved by another approver, or the pins Secret written,
+// since it was read) is requeued at once without an error log: the next
+// reconcile re-reads the request and the pins Secret and decides again. A
+// request another approver approved is not re-decided (it is decided); the
+// manager's own record of its approval decides whether the issued
+// certificate is ever published (completeRenewal), so a request it would
+// have denied is never accepted.
 func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	return requeueOnConflict(r.reconcile(ctx, req))
+}
+
+// reconcile is Reconcile without the conflict handling.
+func (r *HostEnrolmentRequestReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	if req.Namespace != r.Config.Namespace {
 		return ctrl.Result{}, nil
 	}
@@ -158,6 +170,17 @@ func (r *HostEnrolmentRequestReconciler) Reconcile(ctx context.Context, req ctrl
 			}
 			return ctrl.Result{}, r.decideRenewal(ctx, cr, iss)
 		case certrequest.IsTrue(cr, certrequest.ConditionApproved) && !certrequest.Failed(cr):
+			// Approved by another approver before the manager decided it:
+			// apply the manager's rules first (re-read, no condition written).
+			unjudged, err := r.approvedElsewhereUnjudged(ctx, cr)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if unjudged {
+				if err := r.judgeRenewal(ctx, cr, iss, true); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
 			return ctrl.Result{}, r.completeRenewal(ctx, cr, iss)
 		}
 		return ctrl.Result{}, nil

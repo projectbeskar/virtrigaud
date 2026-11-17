@@ -710,7 +710,22 @@ credentials Secret
 ([details](clustered-agent-provider-development.md#provider-identity-certificate)).
 
 A revoked Host (`spec.revoked`) is no longer polled by the heartbeat: its
-`Ready` condition is `False` with reason `Revoked`.
+`Ready` condition is `False` with reason `Revoked`. Nor is a Host whose
+pinned agent certificate has expired (`status.agent.certificateExpiry` in
+the past): `Ready=False` with reason `CertificateExpired`, rechecked every
+minute without a call, and polled again once a re-key pins a new
+certificate.
+
+With approver-policy bound to the manager, a renewal request is often
+approved by approver-policy before the manager decides it. The manager then
+applies its own rules to the approved request (it writes no condition): if
+they hold, it records its approval and publishes the issued certificate; if
+they do not, its certificate is never published (the request is marked
+refused once issued) and a `AgentRenewalDenied` Warning says so. An
+optimistic-lock conflict (the request or the pins Secret written by someone
+else since it was read) is retried at once without an error log; every
+write carries the version it read, and the retry decides again from a
+fresh read.
 
 ## Not done yet
 

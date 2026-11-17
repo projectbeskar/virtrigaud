@@ -472,6 +472,41 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 			ContainSubstring(eventReasonAgentRenewalIssued), ContainSubstring(eventReasonAgentRenewalPinned), ContainSubstring(eventReasonAgentRenewed)))
 	})
 
+	It("applies its own rules to a renewal request another approver approved first, and publishes only what it would approve", func() {
+		approveElsewhere := func(cr *unstructured.Unstructured) {
+			Expect(certrequest.SetCondition(cr, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+				"Approved by CertificateRequestPolicy", time.Now())).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+		}
+
+		// The manager's rules hold: it records its approval and publishes.
+		e := newRenewalEnv()
+		cr := requested(e)
+		approveElsewhere(cr)
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionDenied)).To(BeFalse(), "an approved request is never also denied")
+		Expect(state(e).Renewal.Approved).To(BeTrue(), "the manager's own rules hold: its approval is recorded")
+		der := issue(e, cr, hostidentitytest.IssueOptions{})
+		reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).To(Equal(der), "published")
+
+		// The manager's rules deny it (the Host is revoked): nothing is
+		// recorded as its approval and the certificate is never published.
+		e = newRenewalEnv()
+		cr = requested(e)
+		h := hostObj(e)
+		h.Spec.Revoked = true
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		approveElsewhere(cr)
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionDenied)).To(BeFalse())
+		Expect(state(e).Renewal.Approved).To(BeFalse(), "approved by someone else is never the manager's approval")
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "a certificate the manager would deny is marked refused")
+		Expect(state(e).Renewal == nil || len(state(e).Renewal.Certificate) == 0).To(BeTrue(), "and never published")
+	})
+
 	It("marks an issued renewal certificate refused once its renewal is withdrawn and its key was never pinned", func() {
 		e := newRenewalEnv()
 		cr := reconcileCR(e, requested(e))
