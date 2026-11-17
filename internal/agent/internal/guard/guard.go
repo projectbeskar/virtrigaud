@@ -202,6 +202,9 @@ const (
 	// RenewProfile: a renewed certificate is staged only when it meets the
 	// agent certificate profile.
 	RenewProfile Name = "renew-profile"
+	// RenewMinLifetime: a renewed certificate is staged only when its lifetime
+	// is at least hostidentity.MinLifetime (it could not finish a renewal).
+	RenewMinLifetime Name = "renew-min-lifetime"
 	// RenewSameIdentity: a renewed certificate is staged only when it carries
 	// exactly the current certificate's identities (same enrolment, same
 	// epoch).
@@ -237,6 +240,7 @@ func All() []Name {
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
 		EnrolLoaderCheck, EnrolEpochAhead, ReenrolEpochAhead, ConfirmForActive, ConfirmOnlyFrozen,
 		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired,
+		RenewMinLifetime,
 		EnrolStatePersistent, SignerKeyDirPersistent,
 	}
 }

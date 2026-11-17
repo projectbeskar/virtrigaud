@@ -257,6 +257,7 @@ func TestValidateIssued(t *testing.T) {
 		"another CA":             otherCA.Issue(t, csr, hostidentitytest.IssueOptions{}),
 		"another key":            ca.Issue(t, csr, hostidentitytest.IssueOptions{PublicKey: &hostidentitytest.NewKey(t).PublicKey}),
 		"another host's SAN":     ca.Issue(t, csr, hostidentitytest.IssueOptions{URIs: hostidentity.RequestURIs(otherHost, testRecord())}),
+		"lifetime too short":     ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}),
 		"lifetime too long":      ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: 40 * 24 * time.Hour}),
 		"client and server auth": ca.Issue(t, csr, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}}),
 		"server auth and any":    ca.Issue(t, csr, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageAny}}),
@@ -305,4 +306,63 @@ func TestCheckLeafProfile(t *testing.T) {
 	} {
 		assert.Error(t, hostidentity.CheckLeafProfile(leaf(o), testHostName), name)
 	}
+}
+
+// TestCheckLeafMinLifetime: the floor applies to an issued certificate only;
+// CheckLeafProfile (which also judges an already pinned certificate) neither
+// has it nor changes its MaxLifetime bound.
+func TestCheckLeafMinLifetime(t *testing.T) {
+	ca := hostidentitytest.NewCA(t)
+	key := hostidentitytest.NewKey(t)
+	csr := hostidentitytest.NewCSR(t, key, hostidentitytest.CSROptions{URIs: hostidentity.RequestURIs(testHostURI(t), testRecord())})
+	leaf := func(d time.Duration) *x509.Certificate {
+		certs, err := hostidentity.ParseCertificates(ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: d}))
+		require.NoError(t, err)
+		return certs[0]
+	}
+	tests := []struct {
+		name     string
+		lifetime time.Duration
+		floorErr bool
+		profErr  bool
+	}{
+		{name: "exactly the minimum", lifetime: hostidentity.MinLifetime},
+		{name: "one second below the minimum", lifetime: hostidentity.MinLifetime - time.Second, floorErr: true},
+		{name: "one second", lifetime: time.Second, floorErr: true},
+		{name: "exactly the maximum", lifetime: hostidentity.MaxLifetime},
+		{name: "above the maximum", lifetime: hostidentity.MaxLifetime + time.Second, profErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			l := leaf(tc.lifetime)
+			err := hostidentity.CheckLeafMinLifetime(l)
+			if tc.floorErr {
+				require.ErrorIs(t, err, hostidentity.ErrLifetimeTooShort)
+			} else {
+				require.NoError(t, err)
+			}
+			if tc.profErr {
+				require.Error(t, hostidentity.CheckLeafProfile(l, testHostName))
+			} else {
+				require.NoError(t, hostidentity.CheckLeafProfile(l, testHostName), "a pinned short certificate keeps passing the profile")
+			}
+		})
+	}
+}
+
+// TestValidateIssuedMinLifetime: an issued certificate of exactly the minimum
+// is accepted, one second less is refused with ErrLifetimeTooShort.
+func TestValidateIssuedMinLifetime(t *testing.T) {
+	ca := hostidentitytest.NewCA(t)
+	roots, err := hostidentity.RootPool(ca.PEM)
+	require.NoError(t, err)
+	key := hostidentitytest.NewKey(t)
+	csr := hostidentitytest.NewCSR(t, key, hostidentitytest.CSROptions{URIs: hostidentity.RequestURIs(testHostURI(t), testRecord())})
+	auth, err := hostidentity.Authorise(testPolicy(t), goodRequest(csr))
+	require.NoError(t, err)
+	_, err = hostidentity.ValidateIssued(auth, ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime}), roots, time.Now())
+	require.NoError(t, err)
+	_, err = hostidentity.ValidateIssued(auth, ca.Issue(t, csr, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}), roots, time.Now())
+	require.ErrorIs(t, err, hostidentity.ErrIssued)
+	require.ErrorIs(t, err, hostidentity.ErrLifetimeTooShort)
 }

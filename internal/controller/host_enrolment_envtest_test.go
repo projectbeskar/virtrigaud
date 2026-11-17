@@ -947,6 +947,40 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 			To(Equal(infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected))
 	})
 
+	It("refuses an issued certificate shorter than the minimum lifetime, pins nothing and reports why", func() {
+		e := newEnv()
+		rec := record.NewFakeRecorder(16)
+		e.reqR.Recorder = rec
+		h := reconcileHost(e, createHost(e, "host-a", "serial-0001", "ch").Name)
+		csr := csrFor(h, nil)
+		cr := reconcileCR(e, submit(e, h.Name, csr, adminOpts()))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		issue(e, cr, csr, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second})
+		cr = reconcileCR(e, cr)
+		st, _ := loadState(e, h.Name)
+		Expect(st.Current).To(BeNil(), "nothing is pinned")
+		Expect(st.Authorised).To(BeNil())
+		Expect(st.LastRejection).NotTo(BeNil())
+		Expect(st.LastRejection.Message).To(ContainSubstring(hostidentity.ReasonIssuedLifetimeTooShort))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "the request is marked refused")
+		Expect(drainRenewalEvents(rec)).To(And(ContainSubstring(eventReasonAgentCertLifetimeTooShort), ContainSubstring(hostidentity.ReasonIssuedLifetimeTooShort)))
+		h = reconcileHost(e, h.Name)
+		cond := meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled)
+		Expect(cond.Reason).To(Equal(infravirtrigaudiov1beta1.HostReasonAgentCertificateRejected))
+		Expect(cond.Message).To(ContainSubstring(hostidentity.ReasonIssuedLifetimeTooShort))
+	})
+
+	It("pins an issued certificate that lives exactly the minimum lifetime", func() {
+		e := newEnv()
+		h := reconcileHost(e, createHost(e, "host-a", "serial-0001", "ch").Name)
+		csr := csrFor(h, nil)
+		cr := reconcileCR(e, submit(e, h.Name, csr, adminOpts()))
+		issue(e, cr, csr, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime})
+		reconcileCR(e, cr)
+		st, _ := loadState(e, h.Name)
+		Expect(st.Current).NotTo(BeNil())
+	})
+
 	It("denies a second request while one is authorised and in flight", func() {
 		e := newEnv()
 		h := reconcileHost(e, createHost(e, "host-a", "serial-0001", "ch").Name)

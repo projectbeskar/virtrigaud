@@ -238,6 +238,9 @@ func TestInstallRefusals(t *testing.T) {
 		{name: "lifetime above the profile", cert: func(t *testing.T, f *fixture) []byte {
 			return f.issue(t, hostidentitytest.IssueOptions{Lifetime: 31 * 24 * time.Hour})
 		}},
+		{name: "lifetime below the minimum", cert: func(t *testing.T, f *fixture) []byte {
+			return f.issue(t, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second})
+		}},
 		{name: "client authentication usage", cert: func(t *testing.T, f *fixture) []byte {
 			return f.issue(t, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}})
 		}},
@@ -487,4 +490,23 @@ func TestInstallRefusesAStaleRequest(t *testing.T) {
 		PKIDir: f.pkiDir, UID: signer.EUID(), CSR: f.csr, RequestURIs: rev, Certificate: cert, Trust: f.cfg, Signer: f.key, Now: f.now,
 	})
 	require.NoError(t, err)
+}
+
+// TestInstallAcceptsTheMinimumLifetime: a certificate of exactly
+// hostidentity.MinLifetime is installed (the floor is inclusive).
+func TestInstallAcceptsTheMinimumLifetime(t *testing.T) {
+	f := newFixture(t)
+	_, err := f.install(f.issue(t, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime}), false)
+	require.NoError(t, err)
+	_, statErr := os.Lstat(f.hostCrt())
+	require.NoError(t, statErr)
+}
+
+// TestInstallRefusesAShortCertificateForItsLifetime: the refusal names the
+// lifetime, not another reason.
+func TestInstallRefusesAShortCertificateForItsLifetime(t *testing.T) {
+	f := newFixture(t)
+	_, err := f.install(f.issue(t, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}), false)
+	require.ErrorIs(t, err, enrol.ErrInstall)
+	require.ErrorIs(t, err, hostidentity.ErrLifetimeTooShort)
 }

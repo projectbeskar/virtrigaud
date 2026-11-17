@@ -891,6 +891,29 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		reconcileCR(e, cr)
 	}
 
+	It("refuses an issued renewal certificate shorter than the minimum lifetime, publishes nothing and reports why", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		csr, err := certrequest.CSR(cr)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(certrequest.SetCertificate(cr, e.ca.Issue(GinkgoT(), csr, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}),
+			e.ca.PEM)).To(Succeed())
+		Expect(certrequest.SetCondition(cr, certrequest.ConditionReady, certrequest.StatusTrue, certrequest.ReasonIssued, "issued", time.Now())).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+		drainRenewalEvents(e.rec)
+		reconcileCR(e, cr)
+		st := state(e)
+		Expect(st.Renewal).To(BeNil(), "nothing is published or pinned")
+		Expect(st.RenewalAttempts).To(HaveLen(1))
+		Expect(st.RenewalAttempts[0].Failures).To(Equal(1))
+		Expect(st.RenewalAttempts[0].Reason).To(ContainSubstring(hostidentity.ReasonIssuedLifetimeTooShort))
+		events := drainRenewalEvents(e.rec)
+		Expect(events).To(ContainSubstring(eventReasonAgentCertLifetimeTooShort))
+		Expect(events).NotTo(ContainSubstring(eventReasonAgentRenewalIssued))
+		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeTrue())
+	})
+
 	It("backs off a renewal whose issued certificate is refused, gives the key up after five failures, and deletes the requests", func() {
 		e := newRenewalEnv()
 		cr := reconcileCR(e, requested(e))
@@ -989,6 +1012,47 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		reconcileHost(e)
 		Expect(state(e).Renewal.CertificateRequestUID).NotTo(BeEmpty())
 		Expect(getCR(e, name).GetUID()).To(Equal(squat.GetUID()), "the other principal's object is left alone")
+	})
+
+	It("never pins a stored renewed certificate shorter than the minimum lifetime, on an answer or at the old certificate's expiry", func() {
+		// short replaces the issued certificate in the stored renewal with
+		// one of too short a lifetime, as stored before the floor existed.
+		short := func(e *renewalEnv) []byte {
+			cr := reconcileCR(e, requested(e))
+			issue(e, cr, hostidentitytest.IssueOptions{})
+			reconcileCR(e, cr)
+			h := hostObj(e)
+			l, err := loadHostEnrolment(ctx, k8sClient, e.cfg, h)
+			Expect(err).NotTo(HaveOccurred())
+			b, _ := pem.Decode(e.ca.Issue(GinkgoT(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: e.host.csr}),
+				hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}))
+			l.state.Renewal.Certificate = b.Bytes
+			l.state.Renewal.CertificateSHA256 = hostidentity.CertificateSHA256(b.Bytes)
+			Expect(saveHostEnrolment(ctx, k8sClient, e.cfg, h, &l)).To(Succeed())
+			return b.Bytes
+		}
+		// An answer that shows the short certificate staged.
+		e := newRenewalEnv()
+		e.host.stage(short(e))
+		drainRenewalEvents(e.rec)
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		st := state(e)
+		Expect(st.Renewal).To(BeNil(), "the renewal failed")
+		Expect(st.Current.KeyPins).To(Equal([]string{e.oldPin}), "nothing is pinned")
+		Expect(st.RenewalAttempts).To(HaveLen(1))
+		Expect(st.RenewalAttempts[0].Reason).To(ContainSubstring(hostidentity.ReasonIssuedLifetimeTooShort))
+		Expect(drainRenewalEvents(e.rec)).To(ContainSubstring(eventReasonAgentCertLifetimeTooShort))
+
+		// The old certificate's expiry.
+		e2 := newRenewalEnv()
+		short(e2)
+		drainRenewalEvents(e2.rec)
+		e2.now = state(e2).Current.NotAfter.Add(time.Minute)
+		reconcileHost(e2)
+		st = state(e2)
+		Expect(st.Renewal).To(BeNil(), "the renewal failed")
+		Expect(st.Current.KeyPins).To(Equal([]string{e2.oldPin}), "nothing is pinned")
+		Expect(drainRenewalEvents(e2.rec)).To(ContainSubstring(eventReasonAgentCertLifetimeTooShort))
 	})
 
 	It("pins the issued key at the old certificate's expiry when no evidence arrived, on live state only", func() {
