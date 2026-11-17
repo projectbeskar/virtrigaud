@@ -111,8 +111,14 @@ maint-burst)
 restart-burst)
   cursor=$(journalctl -n 1 --show-cursor -o cat --no-pager | sed -n 's/^-- cursor: //p')
   # Whether the agent runs is decided before the burst: during it, a
-  # running agent is restarted and may look stopped for a moment.
+  # running agent is restarted and may look stopped for a moment. An agent
+  # still starting or stopping is waited for (at most 30 s), so that one about
+  # to run is not taken for a maintenance-stopped one.
+  for _ in $(seq 30); do
+    case "$(systemctl show -p ActiveState --value vrtg-agent.service)" in activating|deactivating|reloading) sleep 1 ;; *) break ;; esac
+  done
   agent_was=$(systemctl show -p ActiveState --value vrtg-agent.service)
+  case "$agent_was" in active|inactive|failed) ;; *) log "FAIL the agent is still $agent_was after 30 s: cannot tell whether it runs"; fails=$((fails + 1)) ;; esac
   t0=$(date +%s.%N)
   # The shutdown unit N times; the setup unit 3 times, about what a package
   # upgrade does. A setup restart also restarts the agent and the signer
