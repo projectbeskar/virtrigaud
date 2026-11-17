@@ -158,7 +158,7 @@ func prepareLab(d labDirs, agent, signer account) (*lab, error) {
 	if err := os.Chown(d.Trust, 0, int(agent.GID)); err != nil {
 		return nil, fmt.Errorf("chown trust directory: %w", err)
 	}
-	if err := os.Chmod(d.Trust, 0o750); err != nil {
+	if err := os.Chmod(d.Trust, 0o750); err != nil { // #nosec G302 -- a directory the agent's group must read and enter
 		return nil, fmt.Errorf("chmod trust directory: %w", err)
 	}
 	// The agent's key material directory: only the host certificate.

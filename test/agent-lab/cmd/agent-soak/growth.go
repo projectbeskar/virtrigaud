@@ -451,7 +451,9 @@ func growthCommand(args []string, stdout, stderr io.Writer) int {
 	memMax := fs.String("memory-max", "", "run the agent in a systemd scope with this MemoryMax (for example 256M)")
 	probe := fs.Int("probe", 200, "Create operations sent over gRPC at each count to measure acknowledgement latency")
 	out := fs.String("out", "", "result file (default WORK/growth.json)")
-	fs.Parse(args) //nolint:errcheck // ContinueOnError with an exit below
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 	agentU, signerU, err := h.accounts()
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
