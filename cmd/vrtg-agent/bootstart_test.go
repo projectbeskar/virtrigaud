@@ -45,6 +45,8 @@ func (s *startRecorder) Enabled(context.Context, string) (bool, error) { return 
 
 func (s *startRecorder) Active(context.Context, string) (bool, error) { return !s.setupFailed, nil }
 
+func (s *startRecorder) StartedThisBoot(context.Context, string) (bool, error) { return false, nil }
+
 func (s *startRecorder) StartNoBlock(_ context.Context, unit string) error {
 	if unit != systemd.AgentUnit {
 		panic("unexpected unit " + unit)

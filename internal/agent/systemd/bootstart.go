@@ -24,6 +24,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // AgentUnit is the per-host agent's unit.
@@ -46,6 +48,25 @@ type UnitStarter interface {
 	StartNoBlock(ctx context.Context, unit string) error
 	// Active reports whether unit is active (systemctl is-active succeeds).
 	Active(ctx context.Context, unit string) (bool, error)
+	// StartedThisBoot reports whether unit was started (left the inactive
+	// state) at any time since this boot began.
+	StartedThisBoot(ctx context.Context, unit string) (bool, error)
+}
+
+// StartedThisBoot implements UnitStarter from the unit's
+// InactiveExitTimestampMonotonic: the monotonic clock restarts at each
+// boot, so a non-zero value means the unit left the inactive state during
+// this boot.
+func (s Systemctl) StartedThisBoot(ctx context.Context, unit string) (bool, error) {
+	out, err := exec.CommandContext(ctx, s.bin(), "show", "--property=InactiveExitTimestampMonotonic", "--value", unit).Output() // #nosec G204 -- fixed binary, a unit name of ours
+	if err != nil {
+		return false, fmt.Errorf("systemctl show %s: %w", unit, err)
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return false, fmt.Errorf("systemctl show %s: InactiveExitTimestampMonotonic %q: %w", unit, strings.TrimSpace(string(out)), err)
+	}
+	return v != 0, nil
 }
 
 // Active implements UnitStarter: systemctl is-active --quiet exits 0 for an
@@ -102,6 +123,11 @@ const (
 	BootStartNotEnabled
 	// BootStartStarted: a start job for the agent was queued.
 	BootStartStarted
+	// BootStartStartedByOther: the agent was already started during this
+	// boot (by hand, or by its own [Install] links): that is the boot's
+	// decision; the marker is made and nothing is started, so a later
+	// restart of the boot-start unit never starts an agent stopped since.
+	BootStartStartedByOther
 	// BootStartSetupNotActive: the setup unit is not active (it failed):
 	// nothing was decided, no marker was made, so a later run in the same
 	// boot (after the cause is fixed) still acts once.
@@ -126,20 +152,25 @@ func BootStart(ctx context.Context, runtimeDir, unit string, s UnitStarter) (Boo
 	if _, err := os.Lstat(filepath.Join(runtimeDir, BootStartMarker)); err == nil {
 		return BootStartAlreadyDecided, nil
 	}
+	// Any start of the agent during this boot is the boot's decision.
+	if started, err := s.StartedThisBoot(ctx, unit); err != nil {
+		return 0, fmt.Errorf("boot-start: %w", err)
+	} else if started {
+		if err := createMarker(runtimeDir); err != nil && !errors.Is(err, fs.ErrExist) {
+			return 0, err
+		}
+		return BootStartStartedByOther, nil
+	}
 	if ok, err := s.Active(ctx, SetupUnit); err != nil {
 		return 0, fmt.Errorf("boot-start: %w", err)
 	} else if !ok {
 		return BootStartSetupNotActive, nil
 	}
-	f, err := os.OpenFile(filepath.Join(runtimeDir, BootStartMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- the unit's own runtime directory
-	switch {
+	switch err := createMarker(runtimeDir); {
 	case errors.Is(err, fs.ErrExist):
 		return BootStartAlreadyDecided, nil
 	case err != nil:
-		return 0, fmt.Errorf("boot-start: create the marker: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return 0, fmt.Errorf("boot-start: close the marker: %w", err)
+		return 0, err
 	}
 	enabled, err := s.Enabled(ctx, unit)
 	if err != nil {
@@ -152,4 +183,20 @@ func BootStart(ctx context.Context, runtimeDir, unit string, s UnitStarter) (Boo
 		return 0, fmt.Errorf("boot-start: %w", err)
 	}
 	return BootStartStarted, nil
+}
+
+// createMarker creates the boot's marker in runtimeDir, exclusively: an
+// error matching fs.ErrExist means it was there.
+func createMarker(runtimeDir string) error {
+	f, err := os.OpenFile(filepath.Join(runtimeDir, BootStartMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- the unit's own runtime directory
+	if errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	if err != nil {
+		return fmt.Errorf("boot-start: create the marker: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("boot-start: close the marker: %w", err)
+	}
+	return nil
 }

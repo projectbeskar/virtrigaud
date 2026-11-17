@@ -36,6 +36,15 @@ type fakeStarter struct {
 	markerAtStart  bool
 	enabledChecked int
 	setupFailed    bool
+	// startedThisBoot is the agent's InactiveExitTimestampMonotonic != 0.
+	startedThisBoot bool
+}
+
+func (f *fakeStarter) StartedThisBoot(_ context.Context, unit string) (bool, error) {
+	if unit != systemd.AgentUnit {
+		panic("unexpected unit " + unit)
+	}
+	return f.startedThisBoot, nil
 }
 
 func (f *fakeStarter) Active(_ context.Context, unit string) (bool, error) {
@@ -112,6 +121,36 @@ func TestBootStartWaitsForSetup(t *testing.T) {
 	}
 }
 
+// TestBootStartAfterAManualStartThisBoot: setup fails at boot (nothing is
+// decided), the operator fixes it, starts the agent by hand and stops it for
+// maintenance; a package's try-restart of the boot-start unit then finds
+// that the agent was already started this boot, makes the marker and starts
+// nothing. The first boot of an agent never started yet starts it once.
+func TestBootStartAfterAManualStartThisBoot(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeStarter{marker: filepath.Join(dir, systemd.BootStartMarker), enabled: true, setupFailed: true}
+	if got, _ := systemd.BootStart(context.Background(), dir, systemd.AgentUnit, f); got != systemd.BootStartSetupNotActive {
+		t.Fatalf("boot with setup failed: %v", got)
+	}
+	f.setupFailed, f.startedThisBoot = false, true // fixed, started by hand, stopped again
+	got, err := systemd.BootStart(context.Background(), dir, systemd.AgentUnit, f)
+	if err != nil || got != systemd.BootStartStartedByOther || f.starts != 0 {
+		t.Fatalf("try-restart after a manual start: %v %v, starts %d", got, err, f.starts)
+	}
+	if _, err := os.Stat(f.marker); err != nil {
+		t.Fatal("the boot's decision was not recorded")
+	}
+	if got, _ := systemd.BootStart(context.Background(), dir, systemd.AgentUnit, f); got != systemd.BootStartAlreadyDecided || f.starts != 0 {
+		t.Fatal("a further restart started the agent")
+	}
+
+	first := t.TempDir()
+	g := &fakeStarter{marker: filepath.Join(first, systemd.BootStartMarker), enabled: true}
+	if got, err := systemd.BootStart(context.Background(), first, systemd.AgentUnit, g); err != nil || got != systemd.BootStartStarted || g.starts != 1 {
+		t.Fatalf("first boot: %v %v, starts %d", got, err, g.starts)
+	}
+}
+
 // TestBootStartFailsSafe: any failure leaves the agent unstarted, and the
 // marker created before a failed start is kept (a later run starts nothing:
 // at most a missed start, never a second one).
@@ -136,5 +175,28 @@ func TestBootStartFailsSafe(t *testing.T) {
 	}
 	if got, err := systemd.BootStart(ctx, dir, systemd.AgentUnit, f); err != nil || got != systemd.BootStartAlreadyDecided || f.starts != 1 {
 		t.Fatalf("after a failed start: %v %v starts %d", got, err, f.starts)
+	}
+}
+
+// TestSystemctlStartedThisBoot: InactiveExitTimestampMonotonic 0 means the
+// unit was not started this boot, any other number that it was; output that
+// is not a number is an error (and the agent is then not started).
+func TestSystemctlStartedThisBoot(t *testing.T) {
+	for out, want := range map[string]bool{"0": false, "123456789": true} {
+		bin := filepath.Join(t.TempDir(), "systemctl")
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\necho "+out+"\n"), 0o700); err != nil { // #nosec G306 -- a test script
+			t.Fatal(err)
+		}
+		got, err := systemd.Systemctl{Path: bin}.StartedThisBoot(context.Background(), systemd.AgentUnit)
+		if err != nil || got != want {
+			t.Fatalf("%q: %v %v, want %v", out, got, err, want)
+		}
+	}
+	bin := filepath.Join(t.TempDir(), "systemctl")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho n/a\n"), 0o700); err != nil { // #nosec G306 -- a test script
+		t.Fatal(err)
+	}
+	if _, err := (systemd.Systemctl{Path: bin}).StartedThisBoot(context.Background(), systemd.AgentUnit); err == nil {
+		t.Fatal("a value that is not a number was accepted")
 	}
 }

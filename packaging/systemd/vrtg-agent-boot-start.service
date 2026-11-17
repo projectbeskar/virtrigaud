@@ -27,7 +27,9 @@
 # It runs after vrtg-agent-setup.service (it wants it and is ordered after
 # it), and creates its marker only once the setup unit is active: when setup
 # failed, it logs a warning, leaves no marker and starts nothing, so a later
-# start of this unit (after the cause is fixed) still acts once. It does not
+# start of this unit (after the cause is fixed) still acts once. Any start
+# of the agent earlier in the boot (by hand, say, after setup was fixed) is
+# the boot's decision: it then makes its marker and starts nothing. It does not
 # require the setup unit: it is upheld, and Upholds= would start it again,
 # without end, while setup failed.
 #

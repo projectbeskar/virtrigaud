@@ -1223,7 +1223,14 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   it) and makes its marker only once that unit is active: when setup failed
   it logs a warning that says to fix the cause and start the agent by hand,
   makes no marker and succeeds, so a later start of the unit, after the fix,
-  still acts once in that boot. It runs once per boot and stays active, so `Upholds=` does not run it
+  still acts once in that boot. Any start of the agent during the boot is
+  that boot's decision: before anything else the command reads the agent
+  unit's `InactiveExitTimestampMonotonic` (`systemctl show`; the monotonic
+  clock restarts at each boot, so a non-zero value means the agent was
+  started this boot, by hand or by its own `[Install]` links). Then it
+  makes the marker and starts nothing, so an agent started by hand after a
+  failed setup and stopped for maintenance is not started again by a
+  package's restart of the unit. It runs once per boot and stays active, so `Upholds=` does not run it
   again: an agent stopped for maintenance stays stopped through restarts of
   the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
   The agent's `Wants=` and `Requires=` bring the signer and the setup unit up with it.
