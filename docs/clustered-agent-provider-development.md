@@ -305,7 +305,11 @@ an alert read before any data from the agent on an established transport
 counts: an alert during the handshake itself (an agent whose host key signer
 is away, or that is over its handshake limit, answers `internal error`) or
 after the agent's first frame is reported as before (`AgentUnreachable`, or
-an unknown outcome for a mutating call that was sent).
+an unknown outcome for a mutating call that was sent). When the agent closes the
+connection before the Provider's first write reaches it, the Provider reads
+a reset instead of the alert and also reports `AgentUnreachable` (never a
+refusal without the alert); the next attempts normally see the alert, and
+the agent's log line is the authoritative record.
 
 On every new connection the Provider first calls `agent.v1.AgentService/Hello`
 with a fresh nonce and its API version, and verifies the host-signed answer:

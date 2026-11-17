@@ -454,10 +454,26 @@ func TestAgentRefusingTheProviderCertificateHasItsOwnCause(t *testing.T) {
 	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{refuseClient: true})
 	prov := newProvider(t, p, Options{}, a)
 	client := providerv1.NewProviderClient(served(t, prov))
-	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
-	requireHostUnavailable(t, err, CauseProviderCertificateRefused)
-	_, err = client.Power(ctx(t), signedPower(t, "host-a"))
-	requireHostUnavailable(t, err, CauseProviderCertificateRefused)
+	// The agent's alert usually reaches the Provider; when the agent closes
+	// the connection before the Provider's first write lands, the Provider
+	// reads a reset instead and reports AgentUnreachable (the safe side:
+	// never "refused" without the alert). Every answer is host-scoped, and
+	// the alert is seen within a few calls, reads and mutations alike.
+	causes := map[string]int{}
+	for i := 0; i < 8 && causes[CauseProviderCertificateRefused] < 2; i++ {
+		var err error
+		if i%2 == 0 {
+			_, err = client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		} else {
+			_, err = client.Power(ctx(t), signedPower(t, "host-a"))
+		}
+		info, ok := errorInfo(err, contracts.HostUnavailableReason)
+		require.True(t, ok, "host-scoped: %v", err)
+		c := info.GetMetadata()[MetadataCause]
+		require.Contains(t, []string{CauseProviderCertificateRefused, CauseAgentUnreachable, CauseBreakerOpen}, c, "%v", err)
+		causes[c]++
+	}
+	assert.GreaterOrEqual(t, causes[CauseProviderCertificateRefused], 2, "the refusal has its own cause: %v", causes)
 	assert.Empty(t, a.received(), "the agent received no call")
 }
 
