@@ -366,13 +366,11 @@ func (s *Store) recoverOp(ctx context.Context, rec *pb.OpRecord) (still bool, er
 func (s *Store) recoverUnknown(ctx context.Context, rec *pb.OpRecord, reason string) error {
 	rec.State, rec.Reason = StateOutcomeUnknown, reason
 	id := rec.GetIdentity()
-	buf := &auditBuf{}
+	buf := s.newAuditBuf()
 	err := s.saveOp(ctx, rec, func(tx *journal.Tx) error {
 		return buf.write(tx, AuditEvent{Event: "outcome_unknown", Ref: OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()},
 			VMUID: id.GetVmUid(), Reason: reason, State: StateOutcomeUnknown})
 	})
-	if err == nil {
-		s.flush(buf)
-	}
+	s.settle(buf, err)
 	return err
 }

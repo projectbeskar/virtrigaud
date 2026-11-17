@@ -106,7 +106,9 @@ func wantFrozenOnce(t *testing.T, h *harness, ops chunkedOps, exact bool) {
 	defer h.auditMu.Unlock()
 	count := map[string]int{}
 	for _, ev := range h.audit {
-		if ev.Reason == opstore.ReasonProviderChanged && (ev.Event == "frozen" || ev.Event == "terminal") {
+		// Replayed events are the store emitting again, after a restart, what
+		// may not have reached the sink: not a second freeze.
+		if !ev.Replayed && ev.Reason == opstore.ReasonProviderChanged && (ev.Event == "frozen" || ev.Event == "terminal") {
 			count[ev.Ref.String()]++
 		}
 	}

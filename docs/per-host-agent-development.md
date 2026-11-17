@@ -504,6 +504,18 @@ minute).
   updates like any other change, so the store verifies after a trim and a
   reopen (tested).
 
+  Only events known to have reached the system journal are removed. The
+  journal line is written after the commit, so an event can be committed
+  and the agent stop before it is logged. The store keeps an audit cursor:
+  the highest commit sequence through which every event was logged (it never
+  passes a transaction whose events are not logged yet). Each trim first
+  writes that cursor to the store in a transaction of its own (one per
+  compaction, none per operation) and removes only events at or below it.
+  At start the agent logs again every event above the persisted cursor, with
+  `"replayed"=true`: after a crash the system journal may hold an event
+  twice, never miss one. The first start of an agent with this change
+  replays the whole stored window once.
+
 Each batch drops at most 256 records in one transaction and reads at most
 4,096 records before it lets go of the store's lock, and the next batch
 resumes where it stopped, so operations are admitted and run between

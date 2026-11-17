@@ -18,6 +18,7 @@ package opstore
 
 import (
 	"context"
+	"encoding/binary"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 )
@@ -74,4 +75,29 @@ func AuditKeys(ctx context.Context, s *Store) ([][]byte, error) {
 		})
 	})
 	return out, err
+}
+
+// HoldAuditPending registers seq as a transaction whose audit events are not
+// emitted yet, and returns its release (test only).
+func HoldAuditPending(s *Store, seq uint64) (release func()) {
+	s.auditPendingAdd(seq)
+	return func() { s.auditPendingDone(seq) }
+}
+
+// AuditKeySeq is auditKeySeq (test only).
+func AuditKeySeq(k []byte) uint64 { return auditKeySeq(k) }
+
+// PersistedAuditCursor reads the audit cursor from the meta bucket (test
+// only).
+func PersistedAuditCursor(ctx context.Context, s *Store) (uint64, bool, error) {
+	var out uint64
+	var found bool
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		b, err := tx.Get(bucketMeta, keyAuditEmitted)
+		if len(b) == 8 {
+			out, found = binary.BigEndian.Uint64(b), true
+		}
+		return err
+	})
+	return out, found, err
 }

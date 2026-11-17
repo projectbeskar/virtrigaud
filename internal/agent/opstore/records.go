@@ -57,6 +57,11 @@ var keyFreeze = []byte("freeze")
 // keyClockFloor is the key of the clock floor record in bucketMeta.
 var keyClockFloor = []byte("clock_floor")
 
+// keyAuditEmitted is the key, in bucketMeta, of the audit cursor: be64 of the
+// highest commit sequence through which every audit event was emitted to the
+// sink (Options.Audit). TrimAudit removes only events at or below it.
+var keyAuditEmitted = []byte("audit_emitted")
+
 // buckets lists every bucket of the operation store.
 func buckets() []string {
 	return []string{bucketMeta, bucketEnrolments, bucketOps, bucketTombstones, bucketVMs, bucketVMTombstones,

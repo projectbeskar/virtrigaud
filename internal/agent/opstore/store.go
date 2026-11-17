@@ -133,6 +133,10 @@ type AuditEvent struct {
 	Reason string
 	// State is the operation's state after the event.
 	State OpState
+	// Replayed marks an event the store emits again at open because it may
+	// not have reached the sink before the agent stopped (it was committed
+	// after the last persisted audit cursor). The sink may have it already.
+	Replayed bool
 }
 
 // Errors returned by the store.
@@ -171,6 +175,15 @@ type Store struct {
 	recovered atomic.Bool
 	running   map[string]bool
 	dirs      map[string]bool
+
+	// auditMu guards the audit cursor state: auditPending counts, by commit
+	// sequence, the transactions whose audit events are not emitted yet;
+	// auditHigh is the highest sequence registered or replayed;
+	// auditPersisted is the cursor last written to bucketMeta.
+	auditMu        sync.Mutex
+	auditPending   map[uint64]int
+	auditHigh      uint64
+	auditPersisted uint64
 }
 
 // Open opens the journal and the store. The store starts not ready: call
@@ -202,6 +215,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		_ = j.Close()
 		return nil, fmt.Errorf("open operation store: %w", err)
 	}
+	s.replayAudit(ctx)
 	if err := j.View(ctx, func(tx *journal.Tx) error {
 		fm, err := readFreeze(tx)
 		s.freezing.Store(fm != nil)
@@ -271,14 +285,26 @@ func auditKey(seq uint64, i int) []byte {
 	return k
 }
 
-// auditTx writes ev into the audit bucket in tx and remembers it for the
-// sink, which is told only after the commit.
+// auditBuf collects the audit events one transaction writes, for the sink,
+// which is told only after the commit (settle). The transaction's sequence
+// is registered as pending with the store from the first event on, so the
+// audit cursor never passes an event the sink has not received.
 type auditBuf struct {
-	n      int
-	events []AuditEvent
+	s          *Store
+	n          int
+	events     []AuditEvent
+	seq        uint64
+	registered bool
 }
 
+// newAuditBuf returns an empty audit buffer of s.
+func (s *Store) newAuditBuf() *auditBuf { return &auditBuf{s: s} }
+
 func (a *auditBuf) write(tx *journal.Tx, ev AuditEvent) error {
+	if !a.registered && a.s != nil {
+		a.seq, a.registered = tx.Seq(), true
+		a.s.auditPendingAdd(a.seq)
+	}
 	rec := &pb.AuditEvent{
 		Event:       ev.Event,
 		OpId:        ev.Ref.OpID,
@@ -297,10 +323,57 @@ func (a *auditBuf) write(tx *journal.Tx, ev AuditEvent) error {
 	return nil
 }
 
-func (s *Store) flush(a *auditBuf) {
-	for _, ev := range a.events {
-		s.emit(ev)
+// settle ends an audit buffer: after a commit (err nil) its events are
+// emitted to the sink and only then is its sequence released, so the audit
+// cursor can pass it. A transaction that failed releases its sequence
+// without emitting: it committed nothing, or (an error after the commit) the
+// journal is lost and refuses every later write, trims included, and the
+// next open replays what it holds above the persisted cursor.
+func (s *Store) settle(a *auditBuf, err error) {
+	if err == nil {
+		for _, ev := range a.events {
+			s.emit(ev)
+		}
 	}
+	if a.registered {
+		s.auditPendingDone(a.seq)
+	}
+}
+
+// auditPendingAdd registers seq as committed (or committing) without its
+// events emitted yet.
+func (s *Store) auditPendingAdd(seq uint64) {
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	if s.auditPending == nil {
+		s.auditPending = map[uint64]int{}
+	}
+	s.auditPending[seq]++
+	s.auditHigh = max(s.auditHigh, seq)
+}
+
+// auditPendingDone releases one registration of seq.
+func (s *Store) auditPendingDone(seq uint64) {
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	if s.auditPending[seq] <= 1 {
+		delete(s.auditPending, seq)
+		return
+	}
+	s.auditPending[seq]--
+}
+
+// auditEmittedThrough returns the highest sequence through which every audit
+// event was emitted: just below the oldest pending transaction, or the
+// highest sequence registered (or replayed at open) when none is pending.
+func (s *Store) auditEmittedThrough() uint64 {
+	s.auditMu.Lock()
+	defer s.auditMu.Unlock()
+	through := s.auditHigh
+	for seq := range s.auditPending {
+		through = min(through, seq-1)
+	}
+	return through
 }
 
 // Enrolment describes one enrolment of the host.

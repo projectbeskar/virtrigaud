@@ -487,7 +487,7 @@ func (s *Store) fail(ctx context.Context, rec *pb.OpRecord, reason string) error
 // outcomeUnknown records OutcomeUnknown. The record keeps holding its VM.
 func (s *Store) outcomeUnknown(ctx context.Context, rec *pb.OpRecord, reason string) error {
 	rec.State, rec.Reason = StateOutcomeUnknown, reason
-	buf := &auditBuf{}
+	buf := s.newAuditBuf()
 	id := rec.GetIdentity()
 	s.mu.Lock()
 	err := s.saveOp(ctx, rec, func(tx *journal.Tx) error {
@@ -495,9 +495,7 @@ func (s *Store) outcomeUnknown(ctx context.Context, rec *pb.OpRecord, reason str
 			VMUID: id.GetVmUid(), Kind: providerv1.OperationKind(id.GetKind()), Reason: reason, State: StateOutcomeUnknown})
 	})
 	s.mu.Unlock()
-	if err == nil {
-		s.flush(buf)
-	}
+	s.settle(buf, err)
 	return err
 }
 
@@ -506,13 +504,11 @@ func (s *Store) outcomeUnknown(ctx context.Context, rec *pb.OpRecord, reason str
 // tombstone.
 func (s *Store) finish(ctx context.Context, rec *pb.OpRecord, state OpState, reason string) error {
 	rec.State, rec.Reason = state, reason
-	buf := &auditBuf{}
+	buf := s.newAuditBuf()
 	s.mu.Lock()
 	err := s.saveOp(ctx, rec, func(tx *journal.Tx) error { return terminalWrites(tx, rec, buf) })
 	s.mu.Unlock()
-	if err == nil {
-		s.flush(buf)
-	}
+	s.settle(buf, err)
 	return err
 }
 

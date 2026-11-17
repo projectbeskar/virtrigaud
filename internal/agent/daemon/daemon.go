@@ -1284,5 +1284,5 @@ func (d *daemon) journalEvent(ev journal.Event) {
 func (d *daemon) auditEvent(ev opstore.AuditEvent) {
 	d.log.Info("operation event", "event", ev.Event, "op", hex.EncodeToString(ev.Ref.OpID),
 		"enrolment", hex.EncodeToString(ev.Ref.EnrolmentID), "vm", ev.VMUID, "kind", ev.Kind.String(),
-		"actor", ev.Actor, "reason", ev.Reason, "state", ev.State.String())
+		"actor", ev.Actor, "reason", ev.Reason, "state", ev.State.String(), "replayed", ev.Replayed)
 }

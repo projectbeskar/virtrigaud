@@ -204,10 +204,10 @@ func (s *Store) Admit(ctx context.Context, r Request) (Decision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, buf, err := s.admitLocked(ctx, r)
+	s.settle(buf, err)
 	if err != nil {
 		return Decision{}, err
 	}
-	s.flush(buf)
 	if d.Outcome != OutcomeAccepted {
 		ev := AuditEvent{Event: "known", Ref: OpRef{EnrolmentID: r.EnrolmentID, OpID: r.OpID}, VMUID: r.VMUID,
 			Kind: r.Kind, Actor: r.Actor, State: d.Op.State}
@@ -222,7 +222,7 @@ func (s *Store) Admit(ctx context.Context, r Request) (Decision, error) {
 func refused(r Refusal) Decision { return Decision{Outcome: OutcomeRefused, Refusal: r} }
 
 func (s *Store) admitLocked(ctx context.Context, r Request) (Decision, *auditBuf, error) {
-	buf := &auditBuf{}
+	buf := s.newAuditBuf()
 	switch st, _ := s.j.State(); {
 	case st == journal.StateLost:
 		return refused(RefusalQuarantined), buf, nil
