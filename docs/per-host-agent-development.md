@@ -256,6 +256,31 @@ answered `UNKNOWN_TO_AGENT` (never a definite not-performed), and a re-sent
 grant of it is refused without running anything. A false confirmation
 therefore costs only liveness. A release build ignores the field.
 
+Applying a confirmation commits one transaction and returns, so the call
+that relayed it is not held up. That transaction retires the enrolment
+(from then on its operations are answered as discarded), releases the VMs
+its operations held, records it as a discard in progress and removes its
+first 2,048 records; a small predecessor is removed completely. The agent's
+compaction removes the rest at its next check (within a minute while the
+store is recovered and not in a freeze or quarantined, whatever the
+compaction backoff), in transactions of at most 2,048 records each with the
+store lock released between them, so the memory and the latency of one
+commit do not depend on how many records the predecessor left. A full store
+holds hundreds of thousands of them, and removing them in one transaction
+exceeded the unit's `MemoryMax=256M`. The discard in progress survives a
+crash or a restart; a repeated confirmation of the same enrolment changes
+nothing. The store shrinks chunk by chunk; a full store refuses new
+operations until it is below its threshold. The first transaction also
+reads every VM record of the host once, so its cost grows with the host's
+VMs, not with the predecessor's records. Compaction holds the discard lock
+for one transaction at a time, so a confirmation relayed meanwhile waits for
+one chunk at most. At most 32 discards can be pending at once; a further
+confirmation is refused, with an error in the agent's log, until compaction
+has finished one, and the predecessor stays frozen until the confirmation is
+relayed again. Compaction removes records only of an enrolment the store
+has retired; a discard marker naming any other quarantines the store
+(`inconsistent_store`).
+
 ### Host checks
 
 | Check | Refusal reason |

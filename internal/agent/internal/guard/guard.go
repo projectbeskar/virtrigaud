@@ -174,6 +174,22 @@ const (
 	// ConfirmOnlyFrozen: a freeze confirmation discards only a frozen
 	// enrolment, never the active one.
 	ConfirmOnlyFrozen Name = "confirm-only-frozen"
+	// RetiredNotHeld: a retired enrolment's operations are answered as
+	// discarded (admission, lookups, answers) while a confirmed discard is
+	// still removing their records.
+	RetiredNotHeld Name = "retired-not-held"
+	// DiscardChunked: one transaction of a confirmed discard removes at most
+	// the discard chunk's records.
+	DiscardChunked Name = "discard-chunked"
+	// DiscardResume: compaction finishes a confirmed discard that a crash
+	// interrupted.
+	DiscardResume Name = "discard-resume"
+	// DiscardPrompt: the agent compacts at its next check while a confirmed
+	// discard has records left, whatever the compaction backoff.
+	DiscardPrompt Name = "discard-prompt"
+	// DiscardOnlyRetired: compaction removes the records of an enrolment the
+	// discard marker names only when it is retired.
+	DiscardOnlyRetired Name = "discard-only-retired"
 	// SignerRenewalURIs: the signer builds a renewal certificate request only
 	// for a host URI identity and an enrolment record.
 	SignerRenewalURIs Name = "signer-renewal-uris"
@@ -213,5 +229,6 @@ func All() []Name {
 		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun, InventoryValidate, InventoryOnlyWhenAsked,
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
 		EnrolLoaderCheck, EnrolEpochAhead, ReenrolEpochAhead, ConfirmForActive, ConfirmOnlyFrozen,
+		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired,
 	}
 }

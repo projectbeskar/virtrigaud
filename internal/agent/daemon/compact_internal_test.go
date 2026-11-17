@@ -26,18 +26,21 @@ import (
 func TestCompactDue(t *testing.T) {
 	now := time.Now()
 	for _, c := range []struct {
-		name string
-		last time.Time
-		near bool
-		want bool
+		name       string
+		last       time.Time
+		near       bool
+		discarding bool
+		want       bool
 	}{
-		{"never ran", time.Time{}, false, true},
-		{"within the period", now.Add(-30 * time.Minute), false, false},
-		{"period passed", now.Add(-time.Hour), false, true},
-		{"near the threshold, last one a check period ago", now.Add(-compactCheckEvery), true, true},
-		{"near the threshold, last one just now", now.Add(-time.Second), true, false},
+		{"never ran", time.Time{}, false, false, true},
+		{"within the period", now.Add(-30 * time.Minute), false, false, false},
+		{"period passed", now.Add(-time.Hour), false, false, true},
+		{"near the threshold, last one a check period ago", now.Add(-compactCheckEvery), true, false, true},
+		{"near the threshold, last one just now", now.Add(-time.Second), true, false, false},
+		{"a confirmed discard has records left, whatever the backoff", now.Add(-time.Second), true, true, true},
+		{"a confirmed discard has records left, within the period", now.Add(-30 * time.Minute), false, true, true},
 	} {
-		if got := compactDue(now, c.last, time.Hour, 0, c.near); got != c.want {
+		if got := compactDue(now, c.last, time.Hour, 0, c.near, c.discarding); got != c.want {
 			t.Errorf("%s: compactDue = %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -73,7 +76,7 @@ func TestNearBackoff(t *testing.T) {
 		}
 	}
 	now := time.Now()
-	if compactDue(now, now.Add(-30*time.Minute), every, b.wait, true) {
+	if compactDue(now, now.Add(-30*time.Minute), every, b.wait, true, false) {
 		t.Fatal("due before the backed-off wait")
 	}
 	b.grew(maxBytes-1+maxBytes/compactGrowthDen-1, maxBytes, every)
@@ -89,7 +92,7 @@ func TestNearBackoff(t *testing.T) {
 	if b.wait != compactCheckEvery {
 		t.Fatalf("wait after a compaction that dropped records = %v", b.wait)
 	}
-	if !compactDue(now, now.Add(-compactCheckEvery), every, b.wait, true) {
+	if !compactDue(now, now.Add(-compactCheckEvery), every, b.wait, true, false) {
 		t.Fatal("not due after the reset wait")
 	}
 }

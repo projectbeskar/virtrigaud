@@ -54,7 +54,12 @@ func (s *Store) Compact(ctx context.Context, batch int) (int, error) {
 	if batch <= 0 {
 		batch = DefaultCompactBatch
 	}
-	total := 0
+	// First finish a confirmed discard that a crash or a cancelled call
+	// left: its records are garbage the store answers as discarded.
+	total, err := s.resumeDiscard(ctx)
+	if err != nil {
+		return total, fmt.Errorf("compact: resume discard: %w", err)
+	}
 	var after []byte
 	for {
 		n, more, next, err := s.compactBatch(ctx, batch, after)

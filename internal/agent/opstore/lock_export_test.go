@@ -31,6 +31,13 @@ func HoldLock(s *Store) { s.mu.Lock() }
 // ReleaseLock releases the lock HoldLock took.
 func ReleaseLock(s *Store) { s.mu.Unlock() }
 
+// HoldDiscard takes the discard semaphore, for a test of a caller that must
+// not wait for it past its context.
+func HoldDiscard(s *Store) { s.discardSem <- struct{}{} }
+
+// ReleaseDiscard releases what HoldDiscard took.
+func ReleaseDiscard(s *Store) { <-s.discardSem }
+
 // CompactBatch runs one compaction batch after the key after (test only).
 func CompactBatch(ctx context.Context, s *Store, batch int, after []byte) (dropped int, more bool, next []byte, err error) {
 	return s.compactBatch(ctx, batch, after)
