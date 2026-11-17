@@ -183,3 +183,47 @@ func bytes16(b byte) []byte {
 	}
 	return out
 }
+
+// TestProviderIdentityApproverPolicySample: the approver-policy sample for
+// the Provider identity certificate allows the documented Certificate's URI
+// and nothing broader than that Provider's identity, the client usages, no
+// CA, ECDSA P-256 and at most 30 days, for the Provider identity issuer in
+// the Provider's namespace, bound for "use" to cert-manager's
+// ServiceAccount only.
+func TestProviderIdentityApproverPolicySample(t *testing.T) {
+	docs := readAdmissionSample(t, "provider-identity-approver-policy.yaml")
+	require.Len(t, docs, 3)
+	p := &unstructured.Unstructured{}
+	require.NoError(t, yaml.Unmarshal(docs[0], &p.Object))
+	assert.Equal(t, "CertificateRequestPolicy", p.GetKind())
+	uris, _, _ := unstructured.NestedStringSlice(p.Object, "spec", "allowed", "uris", "values")
+	usages, _, _ := unstructured.NestedStringSlice(p.Object, "spec", "allowed", "usages")
+	maxDuration, _, _ := unstructured.NestedString(p.Object, "spec", "constraints", "maxDuration")
+	issuer, _, _ := unstructured.NestedString(p.Object, "spec", "selector", "issuerRef", "name")
+	for _, k := range []string{"dnsNames", "ipAddresses", "emailAddresses", "commonName", "subject"} {
+		_, has, _ := unstructured.NestedFieldNoCopy(p.Object, "spec", "allowed", k)
+		assert.False(t, has, "spec.allowed.%s must not be set", k)
+	}
+	require.Len(t, uris, 1)
+	assert.True(t, wildcardMatch(uris[0], "spiffe://example.test/virtrigaud/provider/infra/ch/0f5c2a70-3a4e-4c3c-9a7e-5d1b2c3d4e5f"))
+	assert.False(t, wildcardMatch(uris[0], "spiffe://example.test/virtrigaud/provider/infra/other/0f5c2a70"), "another Provider")
+	assert.False(t, wildcardMatch(uris[0], "spiffe://example.test/virtrigaud/host/infra/kvm-01"), "a host identity")
+	assert.ElementsMatch(t, []string{"digital signature", "client auth"}, usages)
+	assert.Equal(t, "720h", maxDuration)
+	assert.Equal(t, "provider-identity-ca", issuer)
+
+	// The documented Certificate is the shape the policy allows.
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "clustered-agent-provider-development.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(doc), "spiffe://example.test/virtrigaud/provider/infra/ch/<Provider UID>")
+	assert.Contains(t, string(doc), `usages: ["digital signature", "client auth"]`)
+
+	binding := &rbacv1.RoleBinding{}
+	require.NoError(t, yaml.UnmarshalStrict(docs[2], binding))
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, rbacv1.Subject{Kind: "ServiceAccount", Name: "cert-manager", Namespace: "cert-manager"}, binding.Subjects[0])
+	role := &rbacv1.Role{}
+	require.NoError(t, yaml.UnmarshalStrict(docs[1], role))
+	assert.Equal(t, []string{p.GetName()}, role.Rules[0].ResourceNames)
+	assert.Equal(t, []string{"use"}, role.Rules[0].Verbs)
+}

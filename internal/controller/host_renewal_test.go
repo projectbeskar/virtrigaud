@@ -18,15 +18,20 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -228,4 +233,21 @@ func TestRenewalBackoffFitsShortLifetimes(t *testing.T) {
 		assert.LessOrEqual(t, wait, left/4+time.Second, "lifetime %s: the retry comes well before the agent's new-key bound (left/2)", life)
 		assert.LessOrEqual(t, wait, renewalRetryBase+time.Second)
 	}
+}
+
+// TestMirroredRequeuesConflicts: a status mirror that lost an optimistic-lock
+// race is requeued without an error; other errors are returned unchanged.
+func TestMirroredRequeuesConflicts(t *testing.T) {
+	conflict := fmt.Errorf("mirror enrolment status of Host a/b: %w",
+		apierrors.NewConflict(schema.GroupResource{Group: "infra.virtrigaud.io", Resource: "hosts"}, "b", errors.New("modified")))
+	res, err := mirrored(ctrl.Result{RequeueAfter: time.Minute}, conflict)
+	require.NoError(t, err)
+	assert.True(t, res.Requeue)
+	other := errors.New("boom")
+	res, err = mirrored(ctrl.Result{RequeueAfter: time.Minute}, other)
+	assert.Equal(t, other, err)
+	assert.Equal(t, time.Minute, res.RequeueAfter)
+	res, err = mirrored(ctrl.Result{RequeueAfter: time.Minute}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, time.Minute, res.RequeueAfter)
 }

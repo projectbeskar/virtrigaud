@@ -449,6 +449,14 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(resolveHostRenewal(ctx, k8sClient, e.cfg, h)).To(BeNil())
 		Expect(renewalRequests(e)).To(HaveLen(1), "the finished renewal request is retained for audit")
 
+		// A manager restart reconciles the finished request again, with no
+		// renewal in progress: its certificate is the host's pinned one and
+		// is never marked "never install it".
+		e.reqR = &HostEnrolmentRequestReconciler{Client: e.reqR.Client, APIReader: e.reqR.APIReader, Config: e.reqR.Config,
+			Recorder: e.reqR.Recorder, Now: e.reqR.Now}
+		finished := reconcileCR(e, getCR(e, renewalRequests(e)[0]))
+		Expect(certrequest.IsTrue(finished, certrequest.ConditionRefused)).To(BeFalse(), "the current certificate's request is not refused")
+
 		// Answers by the old key are no answers now.
 		e.host.mu.Lock()
 		e.host.key, e.host.cert = oldKey, oldCert
@@ -462,6 +470,22 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		}
 		Expect(strings.Join(reasons, "\n")).To(And(ContainSubstring(eventReasonAgentRenewalRequested), ContainSubstring(eventReasonAgentRenewalApproved),
 			ContainSubstring(eventReasonAgentRenewalIssued), ContainSubstring(eventReasonAgentRenewalPinned), ContainSubstring(eventReasonAgentRenewed)))
+	})
+
+	It("marks an issued renewal certificate refused once its renewal is withdrawn and its key was never pinned", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		// The renewal is withdrawn (a re-key or a restart dropped it) before
+		// the issuance is seen; the issued key was never pinned.
+		h := hostObj(e)
+		l, err := loadHostEnrolment(ctx, k8sClient, e.cfg, h)
+		Expect(err).NotTo(HaveOccurred())
+		l.state.Renewal = nil
+		Expect(saveHostEnrolment(ctx, k8sClient, e.cfg, h, &l)).To(Succeed())
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "a certificate never published is marked refused")
 	})
 
 	It("never records a renewal co-signed by another key, or one that changes the identities", func() {

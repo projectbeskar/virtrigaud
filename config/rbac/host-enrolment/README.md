@@ -68,6 +68,12 @@ before applying them:
   itself, which replaces the manager's approval decision for its renewal
   requests and approves allowed-shape requests the manager never would. See
   `docs/host-agent-enrolment.md` (RBAC) before using it.
+- `admission/provider-identity-approver-policy.yaml`: an approver-policy
+  `CertificateRequestPolicy` for a clustered Provider's identity certificate
+  (the Provider identity issuer, the Provider's namespace, its own URI only),
+  bound to cert-manager's ServiceAccount; with the default approver disabled
+  a Certificate for it needs an approver. See
+  `docs/clustered-agent-provider-development.md`.
 
 Residual: a principal with `update` or `delete` on `certificaterequests` in
 the enrolment namespace can delete or relabel each new renewal request, so

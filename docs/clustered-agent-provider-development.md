@@ -82,6 +82,20 @@ spec:
     name: provider-identity-ca         # the issuer of the agents' provider-ca.pem
 ```
 
+The Certificate's request needs an approver: per-host agent enrolment
+requires cert-manager's default approver to be disabled (see
+[`host-agent-enrolment.md`](host-agent-enrolment.md#authorisation-rules)), so
+nothing approves it otherwise and no Secret is written.
+`config/rbac/host-enrolment/admission/provider-identity-approver-policy.yaml`
+is a cert-manager approver-policy `CertificateRequestPolicy` for the Provider
+identity issuer, bound (`use`) to cert-manager's ServiceAccount in the
+Provider's namespace, that approves exactly this shape: that Provider's URI
+(any UID), the usages `digital signature` and `client auth`, ECDSA P-256, at
+most 30 days, no other name. Whoever can create Certificates in that
+namespace can then obtain the Provider's identity, which its agents accept:
+grant that to no one but the Provider's administrators. Approving the
+request by hand (`cmctl approve`) works too.
+
 The Provider reads the certificate at start only: after the Secret is
 renewed, restart the Provider's pod (`kubectl rollout restart`) before the
 old certificate expires. A certificate whose URI lacks the Provider UID is

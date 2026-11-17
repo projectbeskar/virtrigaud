@@ -1068,6 +1068,12 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 		return err
 	}
 	if l.reset || cur == nil || ren == nil || !ren.Approved || ren.CertificateRequestUID != string(cr.GetUID()) {
+		if issuedKeyWasPinned(chain, &l.state) {
+			// A finished renewal (its certificate is, or was, the host's
+			// pinned one; every manager restart reconciles its request again)
+			// is never marked "never install".
+			return nil
+		}
 		return r.markRenewalWithdrawn(ctx, cr)
 	}
 	if len(ren.Certificate) > 0 {
@@ -1131,6 +1137,25 @@ func (r *HostEnrolmentRequestReconciler) validateRenewed(ctx context.Context, ho
 	}
 	return hostidentity.ValidateIssued(hostidentity.Authorisation{HostName: host.Name, HostURI: hostURI, Record: rec, KeyPin: ren.KeyPin},
 		chain, roots, r.now())
+}
+
+// issuedKeyWasPinned reports whether the leaf of an issued chain certifies a
+// key that is pinned for the Host now (st.Current) or was pinned before
+// (st.PreviousKeyPins): the certificate of a renewal that completed. A chain
+// that does not parse is not one.
+func issuedKeyWasPinned(chain []byte, st *hostEnrolmentState) bool {
+	certs, err := hostidentity.ParseCertificates(chain)
+	if err != nil || len(certs) == 0 {
+		return false
+	}
+	pin, err := hostidentity.SPKIPin(certs[0].PublicKey)
+	if err != nil {
+		return false
+	}
+	if st.Current != nil && slices.Contains(st.Current.KeyPins, pin) {
+		return true
+	}
+	return slices.Contains(st.PreviousKeyPins, pin)
 }
 
 // markRenewalWithdrawn marks as refused a renewal request that holds a

@@ -963,7 +963,7 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 	if host.Spec.Identity == "" {
-		return ctrl.Result{}, r.mirror(ctx, host, nil, "")
+		return mirrored(ctrl.Result{}, r.mirror(ctx, host, nil, ""))
 	}
 	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
 	if err != nil {
@@ -1097,7 +1097,19 @@ func (r *HostEnrolmentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 	}
-	return res, r.mirror(ctx, host, st, string(provider.UID))
+	return mirrored(res, r.mirror(ctx, host, st, string(provider.UID)))
+}
+
+// mirrored returns the result of a reconcile that ended with the status
+// mirror: a mirror that lost an optimistic-lock race with another writer of
+// the Host's status (a revocation writes it from several reconcilers within
+// a second) is retried at once, without an error log; any other error is
+// returned.
+func mirrored(res ctrl.Result, err error) (ctrl.Result, error) {
+	if apierrors.IsConflict(err) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return res, err
 }
 
 // updateRekeyWindow opens or closes the re-key window of an enrolled Host
