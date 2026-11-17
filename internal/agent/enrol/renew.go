@@ -211,7 +211,8 @@ func (p Pending) MatchesCurrent(cur *x509.Certificate) bool {
 // at now: one DER certificate of at most hostidentity.MaxAnswerCertBytes;
 // it chains directly to a pinned host identity issuer for server
 // authentication and is valid at now; it meets the certificate profile
-// (hostidentity.CheckLeafProfile); it carries exactly the current
+// (hostidentity.CheckLeafProfile) and lasts at least hostidentity.MinLifetime;
+// it carries exactly the current
 // certificate's URI names (same host, same enrolment record, same epoch);
 // and it certifies the pending key, which is not the current key.
 func CheckRenewed(der []byte, cur *trust.Identity, p Pending, tc *trust.Config, now time.Time) (*x509.Certificate, error) {
@@ -236,6 +237,12 @@ func CheckRenewed(der []byte, cur *trust.Identity, p Pending, tc *trust.Config, 
 	// manager approved.
 	if err := hostidentity.CheckLeafProfile(leaf, cur.HostName); err != nil && !guard.Off(guard.RenewProfile) {
 		return nil, fmt.Errorf("%w: %v", ErrRenewed, err)
+	}
+	// A renewed certificate too short to finish its own renewal is refused
+	// here, before it is staged (an installed one is not: see
+	// hostidentity.CheckLeafMinLifetime).
+	if err := hostidentity.CheckLeafMinLifetime(leaf); err != nil && !guard.Off(guard.RenewMinLifetime) {
+		return nil, fmt.Errorf("%w: %w", ErrRenewed, err)
 	}
 	if !guard.Off(guard.RenewSameIdentity) {
 		rec, err := hostidentity.RecordFromURIs(leaf.URIs, cur.HostURI)

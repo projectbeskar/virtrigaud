@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-17 22:00] - Host agent: refuse an issued certificate shorter than the minimum lifetime (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/hostidentity/profile.go`, `issued.go`: new `CheckLeafMinLifetime` (error wraps `ErrLifetimeTooShort`) and `ValidateIssued` now refuse an issued certificate whose lifetime (`NotAfter` minus `NotBefore`) is below `MinLifetime` (15 minutes), exactly and without tolerance. The floor was applied only to the requested lifetime, so a sub-CA near its expiry or an external PKI that shortens lifetimes could get a leaf pinned that cannot finish a renewal (the agent discards an unanswered renewal request after a sixth of the lifetime) and the Host went dark. It is a separate function, not part of `CheckLeafProfile`, whose callers on already-pinned certificates (`internal/providers/cloudhypervisor/dialer.go`, `internal/hostidentity/answer.go`) are unchanged: a pinned certificate stays in use until it expires.
+- `internal/controller/host_enrolment_request.go`, `host_renewal.go`, `host_enrolment.go`: at first enrolment and at renewal such a certificate is not pinned or published, the request is marked refused, and the Host gets an `AgentCertificateLifetimeTooShort` warning event and (enrolment) a `CertificateRejected` condition message carrying the reason `IssuedLifetimeTooShort` (on a re-key the condition stays `Enrolled`, so the event is the only report); a renewal restarts under its backoff. The event is emitted as soon as the refusal is saved, before the request's status is written. A renewed certificate of that kind stored before the upgrade is refused the same way on an answer and at the old certificate's expiry (renewal failed, event), not pinned. No CRD or protobuf change.
+- `internal/agent/enrol/renew.go`, `install.go`, `internal/agent/internal/guard/guard.go`: the agent refuses to install an enrolment certificate (through `ValidateIssued`) or stage a renewed one (`CheckRenewed`, mutation guard `renew-min-lifetime`, listed in `guard.All()`; the daemon test `TestRenewalStageRefusals` issues the short leaf valid at the agent's clock and asserts the lifetime as the cause, so the mutation fails a behavioural test) shorter than 15 minutes. Loading an installed certificate at start (`trust.LoadIdentity`) is unchanged.
+- Tests: `internal/hostidentity/hostidentitytest` (`IssueOptions.NotBefore`), `internal/hostidentity/hostidentity_test.go`, `internal/agent/enrol/enrol_test.go`, `internal/agent/daemon/renewal_dev_test.go`, `internal/controller/host_enrolment_envtest_test.go`, `host_renewal_envtest_test.go`.
+- `docs/host-agent-enrolment.md`, `docs/per-host-agent-development.md`: the floor on the issued certificate.
+
+### Why
+A certificate issued shorter than the 15-minute floor could be pinned although it cannot finish a renewal, leaving the Host unreachable; only the requested lifetime was checked, not the issued one.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Development builds only; release builds do not serve the per-host agent. No breaking change.
+
 ## [2026-11-17 19:00] - Per-host agent: discard a re-keyed Host's predecessor in bounded chunks (development builds only)
 **Author:** @wrkode (William Rizzo)
 

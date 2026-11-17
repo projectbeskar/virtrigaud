@@ -351,6 +351,14 @@ func TestRenewalStageRefusals(t *testing.T) {
 			t.Errorf("%s: stage = %v, want InvalidArgument", name, err)
 		}
 	}
+	// Valid at the agent's clock, so that only the minimum lifetime refuses it.
+	short := h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{
+		Lifetime: hostidentity.MinLifetime - time.Second, NotBefore: time.Now().Add(renewalAge - time.Minute)})
+	sb, _ := pem.Decode(short)
+	_, serr := r.install(sb.Bytes, false)
+	if status.Code(serr) != codes.InvalidArgument || !strings.Contains(status.Convert(serr).Message(), hostidentity.ErrLifetimeTooShort.Error()) {
+		t.Errorf("too short: stage = %v, want InvalidArgument naming the lifetime", serr)
+	}
 	if exists(t, h.pkiPath(enrol.FileRenewalCert)) {
 		t.Fatal("a refused certificate was staged")
 	}

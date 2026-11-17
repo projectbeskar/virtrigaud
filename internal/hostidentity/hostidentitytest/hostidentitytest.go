@@ -80,6 +80,8 @@ func NewCA(t T) *CA {
 type IssueOptions struct {
 	// Lifetime defaults to 30 days.
 	Lifetime time.Duration
+	// NotBefore is the start of the validity; it defaults to a minute ago.
+	NotBefore time.Time
 	// IsCA sets the CA bit.
 	IsCA bool
 	// ExtKeyUsage defaults to client and server authentication.
@@ -127,7 +129,10 @@ func (ca *CA) Issue(t T, csrPEM []byte, o IssueOptions) []byte {
 	if o.KeyUsage == 0 {
 		o.KeyUsage = x509.KeyUsageDigitalSignature
 	}
-	now := time.Now().Add(-time.Minute)
+	now := o.NotBefore
+	if now.IsZero() {
+		now = time.Now().Add(-time.Minute)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
 		Subject:               subject,

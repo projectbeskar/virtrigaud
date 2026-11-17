@@ -180,11 +180,14 @@ const (
 	eventReasonAgentEnrolmentApproved = "AgentEnrolmentApproved"
 	eventReasonAgentEnrolled          = "AgentEnrolled"
 	eventReasonAgentCertRejected      = "AgentCertificateRejected"
-	eventReasonAgentRevoked           = "AgentRevoked"
-	eventReasonAgentRecordRetired     = "AgentEnrolmentRecordRetired"
-	eventReasonAgentRekeyed           = "AgentRekeyed"
-	eventReasonAgentRekeyWindow       = "AgentRekeyWindow"
-	eventReasonAgentStartEpochFloor   = "AgentStartEpochFloor"
+	// eventReasonAgentCertLifetimeTooShort: an issued certificate (enrolment
+	// or renewal) lived less than hostidentity.MinLifetime and was not pinned.
+	eventReasonAgentCertLifetimeTooShort = "AgentCertificateLifetimeTooShort"
+	eventReasonAgentRevoked              = "AgentRevoked"
+	eventReasonAgentRecordRetired        = "AgentEnrolmentRecordRetired"
+	eventReasonAgentRekeyed              = "AgentRekeyed"
+	eventReasonAgentRekeyWindow          = "AgentRekeyWindow"
+	eventReasonAgentStartEpochFloor      = "AgentStartEpochFloor"
 )
 
 // errForeignPinsSecret is returned when a Secret with a Host's pins Secret
