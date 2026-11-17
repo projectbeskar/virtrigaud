@@ -1052,10 +1052,13 @@ persistent process handles: the agent's filter refuses `open_by_handle_at`.
 That is fail-safe while the agent supervises no VM process; when it does and
 needs pidfs handles, the agent unit's filter must allow that one call
 (`SystemCallFilter=open_by_handle_at` after the `~@privileged` line, which
-systemd applies in order). The agent, the
-signer and the shutdown unit also set `SystemCallLog=@privileged` (systemd
-247 or later), so a filtered privileged call, which now fails quietly, is
-still recorded by the audit subsystem.
+systemd applies in order). A filtered call returns `EPERM` and leaves no
+audit record: seccomp applies the action of highest precedence, so
+`SystemCallLog=` would never log a call the filter refuses (the units set
+none; a test asserts it). Making refused calls auditable would mean killing
+the process or allowing the call, which costs availability or enforcement;
+the agent cannot tell a filtered `EPERM` from any other, so it does not log
+them either.
 
 `vrtg-agent.service`: `Type=notify`, `Restart=always`, `RestartSec=2`,
 `StartLimitIntervalSec=300`, `StartLimitBurst=10`, `KillMode=process`,
@@ -1133,9 +1136,11 @@ VMs.
 default dependencies) that runs `systemd-sysusers virtrigaud-agent.conf`, an
 owner check, and `systemd-tmpfiles --create virtrigaud-agent.conf`, ordered
 after `systemd-sysext.service`, `systemd-sysusers.service` and
-`local-fs.target` and before the agent, the signer and the shutdown unit,
-each of which requires it (so none of them starts when it failed; restarting
-it restarts them). A package install creates the users and directories when
+`local-fs.target` and before the agent, the signer and the shutdown unit.
+The agent and the signer require it (neither starts when it failed;
+restarting it restarts them); the upheld units, the shutdown unit and the
+boot-start unit, only want it and start after it (see the start limits
+below for why). A package install creates the users and directories when
 it is installed, and this unit then changes nothing (both tools are
 idempotent). It exists for hosts where the agent arrives as a system
 extension merged during the boot: the boot's own `systemd-sysusers.service`
@@ -1159,11 +1164,19 @@ from 999, some distributions' `adduser` upwards from 100). Fixed ids keep the
 owners of the persistent state directories stable where `/etc/passwd` is
 rebuilt at every boot. If an id is already taken, `systemd-sysusers`
 allocates another one; on such a host it can differ between boots. The setup
-unit's owner check then finds the agent's or the signer's state directory,
-or the host key, owned by a uid that is not its user's, and fails before
-`systemd-tmpfiles` would hand the directories to the new uid: the agent, the
-signer and the shutdown unit do not start (and the agent's own host checks
-would refuse too). That is fail-closed, not confidential: the files stay
+unit's owner check decides by content: every regular file under
+`/var/lib/virtrigaud-agent` and `/var/lib/virtrigaud-signer` (`host-id`,
+`pki/host.crt`, the operation store, `host.key`, ...) must be owned by its
+user's current uid (`find -xdev -type f ! -uid`, symbolic links not
+followed). The directories' own owners are not checked: the boot's
+`systemd-tmpfiles-setup.service` may already have applied the agent's
+`tmpfiles.d` fragment to them (re-owning them, but not the files inside),
+and an immutable host's bind mount root, or a dedicated state file system,
+starts out owned by root; the setup unit's own `systemd-tmpfiles` run then
+sets them. A state directory with no files, or only files of the right uid,
+passes. A file of another uid fails the unit, which names the files (the
+first ten), so the agent and the signer do not start (and the agent's own
+host checks would refuse too). That is fail-closed, not confidential: the files stay
 owned by the old uid, and whichever account holds that uid now (another
 service, or a user created later) can read the host key and the agent's
 state. Reserve the ids: check that both are free (`getent passwd 564 565`,
@@ -1194,7 +1207,11 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   enabled-runtime, static, ...), it runs `systemctl --no-block start
   vrtg-agent.service`. The marker is made before the start, so an
   interruption can only miss a start (start the agent by hand), never start
-  it twice. It runs once per boot and stays active, so `Upholds=` does not run it
+  it twice. It runs after the setup unit (it wants it and is ordered after
+  it) and makes its marker only once that unit is active: when setup failed
+  it logs a warning that says to fix the cause and start the agent by hand,
+  makes no marker and succeeds, so a later start of the unit, after the fix,
+  still acts once in that boot. It runs once per boot and stays active, so `Upholds=` does not run it
   again: an agent stopped for maintenance stays stopped through restarts of
   the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
   The agent's `Wants=` and `Requires=` bring the signer and the setup unit up with it.
@@ -1216,21 +1233,34 @@ check is made in the boot-start unit's action, not as an `ExecCondition=`:
 a skipped unit is inactive, and `Upholds=` would start it again and again
 until its start limit failed it.
 
-`Upholds=` needs systemd 249 or later. It restarts an upheld unit whenever
-it is found inactive or failed, and the shutdown unit requires the setup
-unit, so a setup unit that keeps failing (moved user ids, say) would be
-started again and again. The shutdown, boot-start and setup units therefore
-set `StartLimitIntervalSec=300` and `StartLimitBurst=5`: such a unit is
-started at most five times in five minutes, then stays failed. The journal
-then shows the setup unit's own error (for the owner check: `... is owned by
-uid N, not by virtrigaud-agent (uid M): its uid changed; refusing to start
-the agent`) a few times, followed by `Start request repeated too quickly`
-and `Failed with result 'start-limit-hit'` for the setup unit and the units
-that require it. Fix the cause, then `systemctl reset-failed` (or reboot).
-The shutdown unit then stays failed for the rest of that boot: its stop
-action never runs, so the VMs are not stopped gracefully at the next host
-shutdown. Alert on `systemctl --failed` (or the units' failed state in the
-host's monitoring) so that this is seen before the host is shut down.
+`Upholds=` needs systemd 249 or later. It starts an upheld unit again
+whenever it is found inactive or failed, without end: systemd only paces it
+(at most 16 starts in 10 seconds, its auto-start rate limit) and does not
+apply the unit's own start limit to a start job that fails on a dependency.
+An upheld unit that required a failing setup unit would therefore be retried
+forever, with a "Dependency failed" line each time. So no upheld unit can
+fail because setup failed: the shutdown and boot-start units only want the
+setup unit (and start after it); the shutdown unit's start runs nothing, and
+the boot-start unit's action succeeds and makes no marker when setup is not
+active. Nothing upholds the setup unit: it runs when the boot pulls in the
+units that want or require it, and the setup, shutdown and boot-start units
+also set `StartLimitIntervalSec=300` and `StartLimitBurst=5`, so even a
+repeated start ends in `start-limit-hit`.
+
+When setup fails (a moved user id, say), the journal shows, once or a few
+times at boot, the setup unit's own error (for the owner check: `N file(s)
+under /var/lib/... are not owned by virtrigaud-agent (uid M): its uid
+changed; refusing to start the agent. The first:` and the files), the setup
+unit `failed`, the agent and the signer `Dependency failed` (only when
+something starts them), and one warning of the boot-start unit; it does not
+repeat. The shutdown unit is active, and its stop action stays fail-closed:
+without the user it does not run (`217/USER`), and with a moved uid it
+cannot read the agent's state and stops nothing. Either way the VMs are not
+stopped gracefully at the next host shutdown. Alert on `systemctl --failed`
+(the setup unit is failed) or the host monitoring's equivalent, so that
+this is seen before the host is shut down. Fix the cause, then `systemctl
+reset-failed vrtg-agent-setup.service` and `systemctl start
+vrtg-agent.service` (or reboot).
 
 `hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
 (with the binary path replaced, since it does not exist on a build machine)
@@ -1238,8 +1268,8 @@ and checks what the analyzer cannot see: `SystemCallErrorNumber=` wherever a
 system call filter is set, no binary under `/usr/libexec`, a signer that can
 write exactly its key and socket directories, a `multi-user.target`
 drop-in that upholds the shutdown and boot-start units and never the agent
-or the signer, `SystemCallLog=@privileged` and `Requires=` on the setup
-unit for the agent, the signer and the shutdown unit, and a boot-start unit
+or the signer, no `SystemCallLog=`, `Requires=` on the setup unit for the
+agent and the signer and none for the upheld units, and a boot-start unit
 that runs `vrtg-agent boot-start` with a preserved runtime directory. The CI lint job runs it.
 
 ## Enrolment

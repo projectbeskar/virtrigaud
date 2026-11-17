@@ -12,8 +12,9 @@
 #    the pending key there) and nothing else besides its socket directory;
 #  - the multi-user.target drop-in upholds the shutdown unit and the
 #    once-per-boot start unit, and never the agent itself;
-#  - the agent, the signer and the shutdown unit audit filtered privileged
-#    calls and require the setup unit (which refuses moved user ids);
+#  - no unit sets SystemCallLog= (a call refused with EPERM is never logged);
+#  - the agent and the signer require the setup unit (which refuses moved
+#    user ids); the upheld units only want it and start after it;
 #  - the boot-start unit acts once per boot ("vrtg-agent boot-start" with a
 #    runtime directory kept across restarts of the unit);
 #  - every unit Upholds= reaches (the shutdown and boot-start units, and the
@@ -90,12 +91,22 @@ for f in "${UNIT_DIR}"/*.service; do
 		esac
 	fi
 done
-for name in vrtg-agent.service vrtg-agent-signer.service vrtg-vm-shutdown.service; do
-	if [ "$(value "${UNIT_DIR}/${name}" SystemCallLog)" != "@privileged" ]; then
-		problem "${name}: SystemCallLog=@privileged missing: filtered privileged calls would not be audited"
+for f in "${UNIT_DIR}"/*.service; do
+	if [ -n "$(value "${f}" SystemCallLog)" ]; then
+		problem "$(basename "${f}"): SystemCallLog= set: a call the filter refuses with EPERM is never logged (seccomp applies the stronger action)"
 	fi
+done
+for name in vrtg-agent.service vrtg-agent-signer.service; do
 	if ! value "${UNIT_DIR}/${name}" Requires | tr ' ' '\n' | grep -qx vrtg-agent-setup.service; then
 		problem "${name}: does not require vrtg-agent-setup.service: it would start when its users' ids moved"
+	fi
+done
+for name in vrtg-vm-shutdown.service vrtg-agent-boot-start.service; do
+	if value "${UNIT_DIR}/${name}" Requires | tr ' ' '\n' | grep -qx vrtg-agent-setup.service; then
+		problem "${name}: an upheld unit requires vrtg-agent-setup.service: Upholds= would retry both without end while setup fails"
+	fi
+	if ! value "${UNIT_DIR}/${name}" After | tr ' ' '\n' | grep -qx vrtg-agent-setup.service; then
+		problem "${name}: not ordered after vrtg-agent-setup.service"
 	fi
 done
 if [ "$(value "${UNIT_DIR}/vrtg-agent.service" LogRateLimitIntervalSec)" != "0" ]; then

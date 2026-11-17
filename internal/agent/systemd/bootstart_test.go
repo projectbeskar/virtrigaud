@@ -35,6 +35,14 @@ type fakeStarter struct {
 	starts         int
 	markerAtStart  bool
 	enabledChecked int
+	setupFailed    bool
+}
+
+func (f *fakeStarter) Active(_ context.Context, unit string) (bool, error) {
+	if unit != systemd.SetupUnit {
+		panic("unexpected unit " + unit)
+	}
+	return !f.setupFailed, nil
 }
 
 func (f *fakeStarter) Enabled(context.Context, string) (bool, error) {
@@ -79,6 +87,28 @@ func TestBootStartOncePerBoot(t *testing.T) {
 	disabled.enabled = true
 	if got, _ := systemd.BootStart(context.Background(), dir, systemd.AgentUnit, disabled); got != systemd.BootStartAlreadyDecided || disabled.starts != 0 {
 		t.Fatal("enabling later in the boot and restarting the unit started the agent")
+	}
+}
+
+// TestBootStartWaitsForSetup: while the setup unit is not active the
+// command decides nothing (no marker, no start); once setup succeeds, a
+// later run in the same boot acts, once.
+func TestBootStartWaitsForSetup(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeStarter{marker: filepath.Join(dir, systemd.BootStartMarker), enabled: true, setupFailed: true}
+	got, err := systemd.BootStart(context.Background(), dir, systemd.AgentUnit, f)
+	if err != nil || got != systemd.BootStartSetupNotActive || f.starts != 0 {
+		t.Fatalf("setup failed: %v %v, starts %d", got, err, f.starts)
+	}
+	if _, err := os.Stat(f.marker); err == nil {
+		t.Fatal("a marker was made although setup failed")
+	}
+	f.setupFailed = false
+	if got, err := systemd.BootStart(context.Background(), dir, systemd.AgentUnit, f); err != nil || got != systemd.BootStartStarted || f.starts != 1 {
+		t.Fatalf("after setup: %v %v, starts %d", got, err, f.starts)
+	}
+	if got, _ := systemd.BootStart(context.Background(), dir, systemd.AgentUnit, f); got != systemd.BootStartAlreadyDecided || f.starts != 1 {
+		t.Fatal("a second run started the agent again")
 	}
 }
 

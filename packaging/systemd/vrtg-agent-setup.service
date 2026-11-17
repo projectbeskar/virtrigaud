@@ -11,20 +11,27 @@
 # (217/USER), the shutdown unit's stop action included. This unit runs both
 # tools for the agent's fragments only, after the merge and before the agent,
 # the signer and the shutdown unit, which each want it. Both tools are
-# idempotent: on a package install it changes nothing.
+# idempotent: on a package install it changes nothing. The agent and the
+# signer require it; the shutdown unit and the boot-start unit want it.
 #
 # The fragments are named by file name, so that a fragment of the same name
 # in /etc (for example one that assigns other fixed ids) takes precedence.
 #
-# Between the two tools it checks that the agent's and the signer's state
-# directories and the host key, where they exist, are owned by the users'
-# current uids. If a fixed id was taken and systemd-sysusers allocated
-# another one (on a host whose /etc is rebuilt at boot, possibly a different
-# one at each boot), they are not: the unit fails, and the agent, the signer
-# and the shutdown unit, which require it, do not start. It fails before
-# systemd-tmpfiles, which would otherwise hand the directories to the new
-# uids. The files stay owned by the old uid, which another account may now
-# hold: reserve the ids (see the sysusers.d fragment).
+# Between the two tools it checks ownership by content: every regular file
+# under the agent's and the signer's state directories (host-id, pki/host.crt,
+# the operation store, host.key, ...) must be owned by its user's current
+# uid. find runs with -xdev and does not follow symbolic links. The
+# directories' own owners are not checked: the boot's
+# systemd-tmpfiles-setup.service may already have applied the agent's
+# tmpfiles.d fragment to them, and an immutable host's bind mount root, or a
+# dedicated state file system, starts out owned by root; this unit's
+# systemd-tmpfiles run then sets them. If a fixed id was taken and
+# systemd-sysusers allocated another one (on a host whose /etc is rebuilt at
+# boot, possibly a different one at each boot), the files are not owned by
+# the current uid: the unit fails, the files are listed, and the agent and
+# the signer, which require it, do not start. The files stay owned by the old
+# uid, which another account may now hold: reserve the ids (see the
+# sysusers.d fragment).
 [Unit]
 Description=VirtRigaud: create the per-host agent's users and directories (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
@@ -32,12 +39,11 @@ DefaultDependencies=no
 After=systemd-sysext.service systemd-sysusers.service local-fs.target
 Before=vrtg-agent.service vrtg-agent-signer.service vrtg-vm-shutdown.service shutdown.target
 Conflicts=shutdown.target
-# Bounded restarts: Upholds= (through multi-user.target, and the shutdown
-# unit's Requires= on the setup unit) starts this unit again whenever it is
-# found inactive or failed. A unit that keeps failing is started at most 5
-# times in 5 minutes, then stays failed ("Start request repeated too
-# quickly", result start-limit-hit) until "systemctl reset-failed" or a
-# reboot.
+# Nothing upholds this unit, and the upheld units only want it, so a failure
+# is not retried by Upholds=. It is started when a unit that requires or
+# wants it starts; a unit that keeps failing is started at most 5 times in
+# 5 minutes, then stays failed ("Start request repeated too quickly", result
+# start-limit-hit) until "systemctl reset-failed" or a reboot.
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -45,7 +51,7 @@ StartLimitBurst=5
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/systemd-sysusers virtrigaud-agent.conf
-ExecStart=/bin/sh -c 'check() { [ -e "$$1" ] || return 0; o=$$(stat -c %%u "$$1") && w=$$(id -u "$$2") || return 1; [ "$$o" = "$$w" ] && return 0; echo "$$1 is owned by uid $$o, not by $$2 (uid $$w): its uid changed; refusing to start the agent" >&2; return 1; }; check /var/lib/virtrigaud-agent virtrigaud-agent && check /var/lib/virtrigaud-signer virtrigaud-signer && check /var/lib/virtrigaud-signer/host.key virtrigaud-signer'
+ExecStart=/bin/sh -c 'check() { [ -d "$$1" ] || return 0; w=$$(id -u "$$2") || return 1; bad=$$(find "$$1" -xdev -type f ! -uid "$$w" -print) || return 1; [ -z "$$bad" ] && return 0; n=$$(printf "%%s\n" "$$bad" | wc -l); echo "$$n file(s) under $$1 are not owned by $$2 (uid $$w): its uid changed; refusing to start the agent. The first:" >&2; printf "%%s\n" "$$bad" | head -n 10 >&2; return 1; }; check /var/lib/virtrigaud-agent virtrigaud-agent && check /var/lib/virtrigaud-signer virtrigaud-signer'
 ExecStart=/usr/bin/systemd-tmpfiles --create virtrigaud-agent.conf
 UMask=0022
 # systemd-sysusers rewrites /etc/passwd, group, shadow and gshadow (through

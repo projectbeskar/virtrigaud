@@ -82,8 +82,6 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
 SystemCallErrorNumber=EPERM
-# Filtered calls fail quietly; audit the privileged ones (systemd 247+).
-SystemCallLog=@privileged
 RestrictAddressFamilies=AF_UNIX
 
 [Install]

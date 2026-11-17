@@ -38,9 +38,12 @@ type startRecorder struct {
 	enabled       bool
 	starts        int
 	markerAtStart bool
+	setupFailed   bool
 }
 
 func (s *startRecorder) Enabled(context.Context, string) (bool, error) { return s.enabled, nil }
+
+func (s *startRecorder) Active(context.Context, string) (bool, error) { return !s.setupFailed, nil }
 
 func (s *startRecorder) StartNoBlock(_ context.Context, unit string) error {
 	if unit != systemd.AgentUnit {
@@ -79,6 +82,19 @@ func TestBootStartCommand(t *testing.T) {
 	// A failure is a warning that tells the operator what to do.
 	if !strings.Contains(logs.String(), `"level":"WARN"`) || !strings.Contains(logs.String(), "start it by hand: systemctl start vrtg-agent.service") {
 		t.Fatalf("failure log: %s", logs.String())
+	}
+	// Setup failed: exit 0 (the upheld unit must not fail), no marker, a
+	// warning with what to do.
+	third := t.TempDir()
+	logs.Reset()
+	if code := bootStart([]string{"--runtime-dir", third}, newLogger(&logs), &stderr, &startRecorder{dir: third, enabled: true, setupFailed: true}); code != 0 {
+		t.Fatalf("setup failed: exit %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(third, systemd.BootStartMarker)); err == nil {
+		t.Fatal("a marker was made although setup failed")
+	}
+	if !strings.Contains(logs.String(), `"level":"WARN"`) || !strings.Contains(logs.String(), "systemctl start vrtg-agent.service") {
+		t.Fatalf("setup-failed log: %s", logs.String())
 	}
 	if code := bootStart([]string{"extra"}, logr.Discard(), &stderr, s); code != 2 {
 		t.Fatalf("bad arguments: exit %d", code)

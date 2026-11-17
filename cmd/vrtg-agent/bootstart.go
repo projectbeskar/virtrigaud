@@ -71,6 +71,10 @@ func bootStart(args []string, log logr.Logger, stderr io.Writer, s systemd.UnitS
 		return 1
 	case got == systemd.BootStartAlreadyDecided:
 		log.Info("the agent's start at boot was already decided in this boot; nothing is done (a reboot re-arms it)")
+	case got == systemd.BootStartSetupNotActive:
+		slog.New(logr.ToSlogHandler(log)).Warn("the agent's users and directories could not be set up (" + systemd.SetupUnit +
+			" is not active): the agent is not started at boot; fix the cause (systemctl status " + systemd.SetupUnit +
+			"), then start it by hand: systemctl start " + systemd.AgentUnit)
 	case got == systemd.BootStartNotEnabled:
 		log.Info("the agent's unit is not enabled; it is not started at boot", "unit", systemd.AgentUnit)
 	default:

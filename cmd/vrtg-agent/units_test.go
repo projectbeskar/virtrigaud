@@ -369,13 +369,24 @@ func TestUnitsUseTheLibBinaryPath(t *testing.T) {
 	}
 }
 
-// TestUnitsRequireTheSetupUnit: the agent, the signer and the shutdown unit
-// require the setup unit and start after it, so that their users and
-// directories exist before they run and none of them starts when it failed
-// (a user id moved under the state directories); the once-per-boot start
-// unit wants it.
+// TestUnitsRequireTheSetupUnit: the agent and the signer require the setup
+// unit and start after it, so that their users and directories exist before
+// they run and neither starts when it failed (a user id moved under the
+// state files). The upheld units (the shutdown unit and the once-per-boot
+// start unit) want it and start after it, and never require it: Upholds=
+// starts a failed upheld unit again without end, so a Requires= on a failing
+// setup unit would retry both forever.
 func TestUnitsRequireTheSetupUnit(t *testing.T) {
-	for _, name := range []string{agentUnit, signerUnit, shutdownUnit} {
+	for _, name := range []string{shutdownUnit, bootStartUnit} {
+		u := parseUnit(t, name)
+		if slices.Contains(u.unitNames("Unit", "Requires"), setupUnit) || slices.Contains(u.unitNames("Unit", "BindsTo"), setupUnit) {
+			t.Errorf("%s: an upheld unit requires the setup unit", name)
+		}
+		if !slices.Contains(u.unitNames("Unit", "Wants"), setupUnit) || !slices.Contains(u.unitNames("Unit", "After"), setupUnit) {
+			t.Errorf("%s: Wants = %v, After = %v, want %s in both", name, u["Unit"]["Wants"], u["Unit"]["After"], setupUnit)
+		}
+	}
+	for _, name := range []string{agentUnit, signerUnit} {
 		u := parseUnit(t, name)
 		if !slices.Contains(u.unitNames("Unit", "Requires"), setupUnit) {
 			t.Errorf("%s: Requires = %v, want %s", name, u["Unit"]["Requires"], setupUnit)
@@ -384,18 +395,15 @@ func TestUnitsRequireTheSetupUnit(t *testing.T) {
 			t.Errorf("%s: After = %v, want %s", name, u["Unit"]["After"], setupUnit)
 		}
 	}
-	b := parseUnit(t, bootStartUnit)
-	if !slices.Contains(b.unitNames("Unit", "Wants"), setupUnit) || !slices.Contains(b.unitNames("Unit", "After"), setupUnit) {
-		t.Errorf("%s: Wants = %v, After = %v", bootStartUnit, b["Unit"]["Wants"], b["Unit"]["After"])
-	}
 }
 
-// TestUnitsLogPrivilegedCalls: the agent's, the signer's and the shutdown
-// unit's filtered privileged calls fail quietly (EPERM) and are audited.
-func TestUnitsLogPrivilegedCalls(t *testing.T) {
-	for _, name := range []string{agentUnit, signerUnit, shutdownUnit} {
-		if got := parseUnit(t, name).one(t, "Service", "SystemCallLog"); got != "@privileged" {
-			t.Errorf("%s: SystemCallLog = %q", name, got)
+// TestNoSystemCallLog: no unit sets SystemCallLog=. seccomp applies the
+// action of highest precedence, so a call the filter refuses with EPERM is
+// never logged; the setting would only suggest an audit that never happens.
+func TestNoSystemCallLog(t *testing.T) {
+	for _, name := range serviceUnits {
+		if v, ok := parseUnit(t, name)["Service"]["SystemCallLog"]; ok {
+			t.Errorf("%s: SystemCallLog = %v", name, v)
 		}
 	}
 }
@@ -411,10 +419,13 @@ func unitShell(t *testing.T, line string) string {
 	return strings.NewReplacer("$$", "$", "%%", "%").Replace(strings.TrimSuffix(script, "'"))
 }
 
-// TestSetupUnitRefusesMovedIDs: the setup unit's owner check passes when the
-// state directories and the host key are missing or owned by their users'
-// uids, and fails (so that the units requiring it do not start) when one is
-// owned by another uid or its user does not exist.
+// TestSetupUnitRefusesMovedIDs: the setup unit's owner check decides by
+// content: it passes when the state directories are missing, empty, or hold
+// only regular files owned by their users' uids, whatever the directories'
+// own owners (a bind mount root recreated as root at boot, or directories a
+// boot-time tmpfiles run already re-owned); it fails, naming the files, when
+// a regular file is owned by another uid, or its user does not exist. A
+// symbolic link is not followed.
 func TestSetupUnitRefusesMovedIDs(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
@@ -427,13 +438,23 @@ func TestSetupUnitRefusesMovedIDs(t *testing.T) {
 		t.Skip("needs a user other than root")
 	}
 	script := unitShell(t, parseUnit(t, setupUnit)["Service"]["ExecStart"][1])
-	run := func(agentUser, signerUser string, mk ...string) error {
+	run := func(agentUser, signerUser string, mk ...string) (string, error) {
 		t.Helper()
 		root := t.TempDir()
 		for _, p := range mk {
 			full := filepath.Join(root, p)
-			if strings.HasSuffix(p, "/") {
+			switch {
+			case strings.HasSuffix(p, "/"):
 				if err := os.MkdirAll(full, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			case strings.HasSuffix(p, "@"):
+				full = strings.TrimSuffix(full, "@")
+				if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("/etc/passwd", full); err != nil {
 					t.Fatal(err)
 				}
 				continue
@@ -448,27 +469,40 @@ func TestSetupUnitRefusesMovedIDs(t *testing.T) {
 		s := strings.NewReplacer(
 			"/var/lib/", root+"/var/lib/",
 			" virtrigaud-agent ", " "+agentUser+" ",
-			" virtrigaud-signer ", " "+signerUser+" ",
 		).Replace(script)
 		s = strings.TrimSuffix(s, " virtrigaud-signer") + " " + signerUser
 		cmd := exec.Command("sh", "-c", s)
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
-		return cmd.Run()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return stderr.String(), err
 	}
-	all := []string{"var/lib/virtrigaud-agent/", "var/lib/virtrigaud-signer/host.key"}
-	if err := run(me.Username, me.Username); err != nil {
+	files := []string{"var/lib/virtrigaud-agent/host-id", "var/lib/virtrigaud-agent/pki/host.crt", "var/lib/virtrigaud-signer/host.key"}
+	if _, err := run(me.Username, me.Username); err != nil {
 		t.Errorf("nothing exists yet: %v", err)
 	}
-	if err := run(me.Username, me.Username, all...); err != nil {
-		t.Errorf("owned by the users' uids: %v", err)
+	if _, err := run(me.Username, me.Username, files...); err != nil {
+		t.Errorf("files owned by the users' uids: %v", err)
 	}
-	if err := run(me.Username, "root", all...); err == nil {
-		t.Error("the signer's files owned by another uid were accepted")
+	// The directories' owner (here the test's user, and the users root) is
+	// not a reason: empty state directories pass.
+	if out, err := run("root", "root", "var/lib/virtrigaud-agent/pki/", "var/lib/virtrigaud-signer/"); err != nil {
+		t.Errorf("empty state directories of another owner were refused: %v %s", err, out)
 	}
-	if err := run("root", me.Username, all...); err == nil {
-		t.Error("the agent's directory owned by another uid was accepted")
+	// A symbolic link is not followed (its target is root's /etc/passwd).
+	if out, err := run(me.Username, me.Username, "var/lib/virtrigaud-agent/link@"); err != nil {
+		t.Errorf("a symbolic link was followed: %v %s", err, out)
 	}
-	if err := run(me.Username, "no-such-user-for-this-test", all...); err == nil {
+	out, err := run(me.Username, "root", files...)
+	if err == nil || !strings.Contains(out, "host.key") {
+		t.Errorf("the signer's key owned by another uid was accepted, or not named: %v %s", err, out)
+	}
+	out, err = run("root", me.Username, files...)
+	if err == nil || !strings.Contains(out, "host-id") || !strings.Contains(out, "pki/host.crt") {
+		t.Errorf("the agent's files owned by another uid were accepted, or not named: %v %s", err, out)
+	}
+	if _, err := run(me.Username, "no-such-user-for-this-test", files...); err == nil {
 		t.Error("a missing user was accepted")
 	}
 }

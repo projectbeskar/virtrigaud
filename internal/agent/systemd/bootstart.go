@@ -29,6 +29,9 @@ import (
 // AgentUnit is the per-host agent's unit.
 const AgentUnit = "vrtg-agent.service"
 
+// SetupUnit is the unit that creates the agent's users and directories.
+const SetupUnit = "vrtg-agent-setup.service"
+
 // BootStartMarker is the file, in the boot-start unit's runtime directory,
 // whose existence records that this boot's decision to start the agent was
 // made.
@@ -41,6 +44,23 @@ type UnitStarter interface {
 	Enabled(ctx context.Context, unit string) (bool, error)
 	// StartNoBlock queues a start job for unit without waiting for it.
 	StartNoBlock(ctx context.Context, unit string) error
+	// Active reports whether unit is active (systemctl is-active succeeds).
+	Active(ctx context.Context, unit string) (bool, error)
+}
+
+// Active implements UnitStarter: systemctl is-active --quiet exits 0 for an
+// active unit and non-zero otherwise; a systemctl that cannot be run is an
+// error.
+func (s Systemctl) Active(ctx context.Context, unit string) (bool, error) {
+	err := exec.CommandContext(ctx, s.bin(), "is-active", "--quiet", unit).Run() // #nosec G204 -- fixed binary, a unit name of ours
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.As(err, &exit):
+		return false, nil
+	}
+	return false, fmt.Errorf("systemctl is-active %s: %w", unit, err)
 }
 
 var _ UnitStarter = Systemctl{}
@@ -82,10 +102,16 @@ const (
 	BootStartNotEnabled
 	// BootStartStarted: a start job for the agent was queued.
 	BootStartStarted
+	// BootStartSetupNotActive: the setup unit is not active (it failed):
+	// nothing was decided, no marker was made, so a later run in the same
+	// boot (after the cause is fixed) still acts once.
+	BootStartSetupNotActive
 )
 
-// BootStart starts the agent at most once per boot. It first creates the
-// marker in runtimeDir (a directory that survives restarts of the unit but
+// BootStart starts the agent at most once per boot, once the setup unit
+// succeeded: while the setup unit is not active it does nothing and makes
+// no marker (BootStartSetupNotActive). It then creates the marker in
+// runtimeDir (a directory that survives restarts of the unit but
 // not a reboot), exclusively: if it exists, the decision was made earlier in
 // this boot and nothing is done, so a restart of the boot-start unit never
 // starts an agent stopped for maintenance. The marker is created before the
@@ -96,6 +122,14 @@ const (
 func BootStart(ctx context.Context, runtimeDir, unit string, s UnitStarter) (BootStartOutcome, error) {
 	if runtimeDir == "" || !filepath.IsAbs(runtimeDir) {
 		return 0, fmt.Errorf("boot-start: runtime directory %q is not an absolute path", runtimeDir)
+	}
+	if _, err := os.Lstat(filepath.Join(runtimeDir, BootStartMarker)); err == nil {
+		return BootStartAlreadyDecided, nil
+	}
+	if ok, err := s.Active(ctx, SetupUnit); err != nil {
+		return 0, fmt.Errorf("boot-start: %w", err)
+	} else if !ok {
+		return BootStartSetupNotActive, nil
 	}
 	f, err := os.OpenFile(filepath.Join(runtimeDir, BootStartMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- the unit's own runtime directory
 	switch {

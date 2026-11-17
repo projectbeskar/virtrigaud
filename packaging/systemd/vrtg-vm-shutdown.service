@@ -13,18 +13,24 @@
 #
 # Its stop action runs as the agent's user: vrtg-agent-setup.service, which
 # it wants and starts after, creates that user first (on a host where the
-# units come from a system extension merged after systemd-sysusers ran).
+# units come from a system extension merged after systemd-sysusers ran). It
+# wants the setup unit and does not require it: this unit is upheld, and
+# Upholds= starts a failed upheld unit again, without end (at most 16 times
+# in 10 seconds), so a Requires= on a setup unit that keeps failing would
+# retry both forever. It starts even when setup failed (its start runs
+# nothing), and its stop action stays fail-closed: without the user it is
+# not run at all (217/USER), and with a moved uid it cannot read the agent's
+# state and stops nothing.
 [Unit]
 Description=VirtRigaud: stop the per-host agent's VMs at host shutdown (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
-Requires=vrtg-agent-setup.service
+Wants=vrtg-agent-setup.service
 After=local-fs.target dbus.service vrtg-agent-setup.service
-# Bounded restarts: Upholds= (through multi-user.target, and the shutdown
-# unit's Requires= on the setup unit) starts this unit again whenever it is
-# found inactive or failed. A unit that keeps failing is started at most 5
-# times in 5 minutes, then stays failed ("Start request repeated too
-# quickly", result start-limit-hit) until "systemctl reset-failed" or a
-# reboot.
+# Bounded restarts: Upholds= starts this unit again whenever it is found
+# inactive or failed; its start runs nothing and does not depend on the
+# setup unit's success, so it does not fail. Should it fail anyway, it is
+# started at most 5 times in 5 minutes, then stays failed (result
+# start-limit-hit) until "systemctl reset-failed" or a reboot.
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -66,8 +72,6 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
 SystemCallErrorNumber=EPERM
-# Filtered calls fail quietly; audit the privileged ones (systemd 247+).
-SystemCallLog=@privileged
 RestrictAddressFamilies=AF_UNIX
 
 [Install]
