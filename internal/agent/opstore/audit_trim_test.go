@@ -19,12 +19,14 @@ package opstore_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal/journaltest"
@@ -32,11 +34,14 @@ import (
 )
 
 // lifecycle runs n create, power and delete cycles and returns the requests.
-func lifecycle(h *harness, n int) []opstore.Request {
+func lifecycle(h *harness, n int) []opstore.Request { return lifecycleAs(h, "vm", n) }
+
+// lifecycleAs is lifecycle on VMs named prefix-<i>.
+func lifecycleAs(h *harness, prefix string, n int) []opstore.Request {
 	var out []opstore.Request
 	for i := 0; i < n; i++ {
 		b := rid()
-		vm := fmt.Sprintf("vm-%d", i)
+		vm := fmt.Sprintf("%s-%d", prefix, i)
 		for _, r := range []opstore.Request{h.req(vm, b, kCreate, 1), h.req(vm, b, kPowerOn, 1), h.req(vm, b, kDelete, 1)} {
 			h.do(r)
 			out = append(out, r)
@@ -378,4 +383,176 @@ func TestReplayAudit_HoldsNothingPerEvent(t *testing.T) {
 	if found != 2 {
 		t.Fatalf("found %d of replayAudit and replaySkip", found)
 	}
+}
+
+// replayFailures returns the EventAuditReplayFailed events of evs.
+func replayFailures(evs []opstore.AuditEvent) []opstore.AuditEvent {
+	var out []opstore.AuditEvent
+	for _, ev := range evs {
+		if ev.Event == opstore.EventAuditReplayFailed {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// TestReplayAudit_FailedRecordPinsTheCursor: a replay that stops at an
+// event it cannot decode reports it once, and for the rest of the process
+// the audit cursor never passes the last transaction whose events were all
+// emitted, however many new transactions follow, and nothing above it is
+// trimmed.
+func TestReplayAudit_FailedRecordPinsTheCursor(t *testing.T) {
+	h := newHarness(t)
+	h.opts = func(o *opstore.Options) { o.AuditRetainEvents = 1 }
+	h.fresh()
+	ctx := context.Background()
+	lifecycle(h, 6)
+	keys, err := opstore.AuditKeys(ctx, h.s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := opstore.AuditKeySeq(keys[len(keys)-1]) // the newest: within the one-event replay window
+	if err := opstore.PutRawAudit(ctx, h.s, bad, 1<<20, []byte{0xff, 0xff, 0xff}); err != nil {
+		t.Fatal(err)
+	}
+	takeAudit(h)
+	h.restart()
+	fails := replayFailures(takeAudit(h))
+	if len(fails) != 1 || fails[0].Seq >= bad {
+		t.Fatalf("replay failures %+v, want one with a ceiling below seq %d", fails, bad)
+	}
+	ceiling := fails[0].Seq
+	lifecycleAs(h, "later", 4) // new transactions raise the high-water mark
+	if err := h.s.PersistAuditCursor(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, _, _ := opstore.PersistedAuditCursor(ctx, h.s); cursor > ceiling {
+		t.Fatalf("cursor %d persisted past the ceiling %d", cursor, ceiling)
+	}
+	if _, err := h.s.TrimAudit(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	left, _ := opstore.AuditKeys(ctx, h.s)
+	for _, k := range keys {
+		if opstore.AuditKeySeq(k) > ceiling && !containsKey(left, k) {
+			t.Fatalf("event of seq %d trimmed above the ceiling %d", opstore.AuditKeySeq(k), ceiling)
+		}
+	}
+}
+
+// TestReplayAudit_UnreadableCursorFreezes: a cursor that cannot be read
+// (here, one of the wrong size) is reported once, and in that process the
+// cursor is never written and nothing is trimmed.
+func TestReplayAudit_UnreadableCursorFreezes(t *testing.T) {
+	h := newHarness(t)
+	h.opts = func(o *opstore.Options) { o.AuditRetainEvents = 1 }
+	h.fresh()
+	ctx := context.Background()
+	lifecycle(h, 3)
+	if err := opstore.PutRawAuditCursor(ctx, h.s, []byte{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	takeAudit(h)
+	h.restart()
+	if fails := replayFailures(takeAudit(h)); len(fails) != 1 {
+		t.Fatalf("replay failures %+v, want one", fails)
+	}
+	before, _ := opstore.AuditKeys(ctx, h.s)
+	lifecycleAs(h, "later", 2)
+	if err := h.s.PersistAuditCursor(ctx); err == nil {
+		t.Fatal("the cursor was written although it could not be read")
+	}
+	if n, err := h.s.TrimAudit(ctx, 0); err != nil || n != 0 {
+		t.Fatalf("trimmed %d (%v) with a frozen cursor", n, err)
+	}
+	after, _ := opstore.AuditKeys(ctx, h.s)
+	if len(after) < len(before) {
+		t.Fatal("events were removed")
+	}
+}
+
+// TestReplayAudit_FailedCountPinsTheCursorAtItsStart: a replay whose count
+// fails emits nothing and pins the cursor where it was.
+func TestReplayAudit_FailedCountPinsTheCursorAtItsStart(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	ctx := context.Background()
+	lifecycle(h, 3)
+	if err := h.s.PersistAuditCursor(ctx); err != nil {
+		t.Fatal(err)
+	}
+	start, _, _ := opstore.PersistedAuditCursor(ctx, h.s)
+	lifecycleAs(h, "second", 2)
+	restore := opstore.SetReplaySkipFault(errors.New("count failed"))
+	takeAudit(h)
+	h.restart()
+	restore()
+	if fails := replayFailures(takeAudit(h)); len(fails) != 1 || fails[0].Seq != start {
+		t.Fatalf("replay failures %+v, want one pinned at %d", fails, start)
+	}
+	lifecycleAs(h, "third", 2)
+	if err := h.s.PersistAuditCursor(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, _, _ := opstore.PersistedAuditCursor(ctx, h.s); cursor != start {
+		t.Fatalf("cursor %d, want it pinned at %d", cursor, start)
+	}
+}
+
+func containsKey(keys [][]byte, k []byte) bool {
+	for _, x := range keys {
+		if bytes.Equal(x, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNonStoredEventsAreLimited: re-deliveries answered "known" beyond the
+// limit in one window are not emitted, a summary with their count is
+// emitted at the first one of the next window, and stored events are never
+// limited.
+func TestNonStoredEventsAreLimited(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	opstore.SetNonStoredClock(h.s, func() time.Time { return now })
+	r := h.req("vm-1", rid(), kCreate, 1)
+	h.do(r)
+	takeAudit(h)
+	const extra = 7
+	for i := 0; i < opstore.NonStoredBurst+extra; i++ {
+		if d := h.admit(r); d.Outcome != opstore.OutcomeKnown {
+			t.Fatalf("%+v", d)
+		}
+	}
+	known := 0
+	for _, ev := range takeAudit(h) {
+		if ev.Event == "known" {
+			known++
+		}
+	}
+	if known != opstore.NonStoredBurst {
+		t.Fatalf("%d known events emitted in one window, want %d", known, opstore.NonStoredBurst)
+	}
+	now = now.Add(2 * time.Second)
+	h.admit(r)
+	evs := takeAudit(h)
+	if len(evs) != 2 || evs[0].Event != opstore.EventNonStoredSuppressed || !strings.Contains(evs[0].Reason, fmt.Sprintf("%d ", extra)) ||
+		evs[1].Event != "known" {
+		t.Fatalf("next window: %+v", evs)
+	}
+	// Stored events are not limited: a burst of operations emits all of them.
+	lifecycleAs(h, "burst", opstore.NonStoredBurst)
+	stored := 0
+	for _, ev := range takeAudit(h) {
+		if ev.Seq != 0 {
+			stored++
+		}
+	}
+	if stored < 3*opstore.NonStoredBurst {
+		t.Fatalf("only %d stored events emitted", stored)
+	}
+	_ = ctx
 }

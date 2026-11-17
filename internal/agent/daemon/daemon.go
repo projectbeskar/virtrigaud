@@ -1284,8 +1284,15 @@ func (d *daemon) journalEvent(ev journal.Event) {
 
 // auditEvent logs an operation store event. It holds identity fields only.
 func (d *daemon) auditEvent(ev opstore.AuditEvent) {
-	if ev.Event == opstore.EventReplaySkipped {
-		slog.New(logr.ToSlogHandler(d.log)).Warn("audit replay capped", "reason", ev.Reason, "seq", ev.Seq)
+	switch ev.Event {
+	case opstore.EventReplaySkipped:
+		slog.New(logr.ToSlogHandler(d.log)).Warn("audit replay capped", "reason", ev.Reason, "firstSeq", ev.FirstSeq, "lastSeq", ev.Seq)
+		return
+	case opstore.EventAuditReplayFailed:
+		d.log.Error(nil, "audit replay failed", "reason", ev.Reason, "seq", ev.Seq)
+		return
+	case opstore.EventNonStoredSuppressed:
+		slog.New(logr.ToSlogHandler(d.log)).Warn("operation events not logged", "reason", ev.Reason)
 		return
 	}
 	d.log.Info("operation event", "seq", ev.Seq, "event", ev.Event, "op", hex.EncodeToString(ev.Ref.OpID),

@@ -63,6 +63,9 @@ func (s *Store) TrimAudit(ctx context.Context, batch int) (int, error) {
 		batch = DefaultCompactBatch
 	}
 	cursor, err := s.persistAuditCursor(ctx)
+	if errors.Is(err, errAuditFrozen) {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("trim audit: %w", err)
 	}
@@ -108,8 +111,11 @@ func (s *Store) persistAuditCursor(ctx context.Context) (uint64, error) {
 	defer s.mu.Unlock()
 	through := s.auditEmittedThrough()
 	s.auditMu.Lock()
-	persisted := s.auditPersisted
+	persisted, frozen := s.auditPersisted, s.auditFrozen && !guard.Off(guard.AuditReplayCeiling)
 	s.auditMu.Unlock()
+	if frozen {
+		return 0, errAuditFrozen
+	}
 	if through <= persisted {
 		return persisted, nil
 	}
@@ -133,6 +139,16 @@ func auditKeySeq(k []byte) uint64 {
 	}
 	return binary.BigEndian.Uint64(k[:8])
 }
+
+// errAuditFrozen is returned by persistAuditCursor when the replay at open
+// could not read the cursor: nothing is persisted or trimmed for the life of
+// the process.
+var errAuditFrozen = errors.New("the audit cursor could not be read at open; it is not written and nothing is trimmed until the next start")
+
+// EventAuditReplayFailed is the audit event the replay emits, once, when it
+// could not finish: Reason says how far the cursor may move (or that it is
+// frozen) for the life of the process.
+const EventAuditReplayFailed = "audit_replay_failed"
 
 // replayChunk is the number of audit events one read transaction of the
 // replay visits.
@@ -167,20 +183,44 @@ func (s *Store) replayAudit(ctx context.Context) {
 	var cursor uint64
 	err := s.j.View(ctx, func(tx *journal.Tx) error {
 		b, err := tx.Get(bucketMeta, keyAuditEmitted)
-		if len(b) == 8 {
+		switch {
+		case err != nil:
+			return err
+		case len(b) == 8:
 			cursor = binary.BigEndian.Uint64(b)
+		case len(b) != 0:
+			return fmt.Errorf("%w: audit cursor of %d bytes", errCorruptRecord, len(b))
 		}
-		return err
+		return nil
 	})
 	s.auditMu.Lock()
 	s.auditPersisted, s.auditHigh = cursor, cursor
 	s.auditMu.Unlock()
-	if err != nil || !s.opts.ReplayAudit {
+	if err != nil {
+		// Without the cursor nothing is known to have been emitted: no
+		// persisting and no trimming in this process.
+		s.auditMu.Lock()
+		s.auditFrozen = true
+		s.auditMu.Unlock()
+		s.emit(AuditEvent{Event: EventAuditReplayFailed, Reason: "the audit cursor could not be read (" + err.Error() +
+			"): audit events are neither replayed, nor trimmed, nor the cursor written until the next start"})
 		return
 	}
+	if !s.opts.ReplayAudit {
+		return
+	}
+	failed := func(through uint64, err error) {
+		s.auditMu.Lock()
+		s.auditCeiling, s.auditCeilingSet = through, true
+		s.auditMu.Unlock()
+		s.emit(AuditEvent{Event: EventAuditReplayFailed, Seq: through, Reason: fmt.Sprintf("the audit replay stopped (%v): "+
+			"events after seq %d are not known to have been emitted, so the audit cursor stays at or below it and "+
+			"nothing above it is trimmed until the next start", err, through)})
+	}
 	start := auditKey(cursor, math.MaxUint32)
-	skip, err := s.replaySkip(ctx, start)
+	skip, err := replaySkipFault(s.replaySkip(ctx, start))
 	if err != nil {
+		failed(cursor, err)
 		return
 	}
 	var (
@@ -188,6 +228,7 @@ func (s *Store) replayAudit(ctx context.Context) {
 		skipped             int
 		firstSkip, lastSkip uint64
 		high                uint64
+		cur, completed      = cursor, cursor
 		done                bool
 	)
 	for !done {
@@ -197,18 +238,22 @@ func (s *Store) replayAudit(ctx context.Context) {
 				if visited == replayChunk {
 					return errTrimBatchFull
 				}
-				visited++
-				after = k
 				seq := auditKeySeq(k)
-				high = max(high, seq)
+				if seq != cur {
+					// Every event of the previous transaction was handled.
+					completed, cur = cur, seq
+				}
 				if skipped < skip {
+					visited++
+					after = k
+					high = max(high, seq)
 					if skipped == 0 {
 						firstSkip = seq
 					}
 					skipped++
 					lastSkip = seq
 					if skipped == skip {
-						s.emit(AuditEvent{Event: EventReplaySkipped, Replayed: true, Seq: lastSkip,
+						s.emit(AuditEvent{Event: EventReplaySkipped, Replayed: true, Seq: lastSkip, FirstSeq: firstSkip,
 							Reason: fmt.Sprintf("%d audit events above the audit cursor (seq %d to %d) were not replayed: a replay "+
 								"is capped at the %d newest events", skipped, firstSkip, lastSkip, s.opts.AuditRetainEvents)})
 					}
@@ -218,6 +263,9 @@ func (s *Store) replayAudit(ctx context.Context) {
 				if err := unmarshalRecord(v, rec); err != nil {
 					return err
 				}
+				visited++
+				after = k
+				high = max(high, seq)
 				s.emit(AuditEvent{Event: rec.GetEvent(),
 					Ref:   OpRef{EnrolmentID: rec.GetEnrolmentId(), OpID: rec.GetOpId()},
 					VMUID: rec.GetVmUid(), Kind: providerv1.OperationKind(rec.GetKind()), Actor: rec.GetActor(),
@@ -228,10 +276,10 @@ func (s *Store) replayAudit(ctx context.Context) {
 		switch {
 		case errors.Is(err, errTrimBatchFull):
 		case err != nil:
-			// What was replayed stays replayed; the cursor does not move
-			// past what could not be read.
-			high = 0
-			done = true
+			// What was replayed stays replayed; the cursor never passes
+			// the last transaction whose events were all emitted.
+			failed(completed, err)
+			return
 		default:
 			done = true
 		}
@@ -243,6 +291,10 @@ func (s *Store) replayAudit(ctx context.Context) {
 	s.auditHigh = max(s.auditHigh, high)
 	s.auditMu.Unlock()
 }
+
+// replaySkipFault lets a test make the replay's count fail (test only: nil
+// in every build).
+var replaySkipFault = func(n int, err error) (int, error) { return n, err }
 
 // replaySkip returns how many of the oldest audit events after start the
 // replay skips: those beyond the retention window's event count. It counts

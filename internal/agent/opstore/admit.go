@@ -215,7 +215,7 @@ func (s *Store) Admit(ctx context.Context, r Request) (Decision, error) {
 		if d.Outcome == OutcomeRefused {
 			ev.Event, ev.Reason, ev.State = "refused", d.Refusal.String(), 0
 		}
-		s.emit(ev)
+		s.emitNonStored(ev)
 	}
 	return d, nil
 }

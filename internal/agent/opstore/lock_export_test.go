@@ -19,6 +19,7 @@ package opstore
 import (
 	"context"
 	"encoding/binary"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 )
@@ -100,4 +101,37 @@ func PersistedAuditCursor(ctx context.Context, s *Store) (uint64, bool, error) {
 		return err
 	})
 	return out, found, err
+}
+
+// SetNonStoredClock replaces the clock of the non-stored event limit (test
+// only).
+func SetNonStoredClock(s *Store, now func() time.Time) { s.nonStored.now = now }
+
+// NonStoredBurst is nonStoredBurst (test only).
+const NonStoredBurst = nonStoredBurst
+
+// SetReplaySkipFault makes the replay's count fail with err (test only); the
+// returned function restores it.
+func SetReplaySkipFault(err error) (restore func()) {
+	old := replaySkipFault
+	replaySkipFault = func(n int, e error) (int, error) {
+		if err != nil {
+			return 0, err
+		}
+		return n, e
+	}
+	return func() { replaySkipFault = old }
+}
+
+// PutRawAudit writes value as the audit record of key (seq, i), as if a
+// commit had stored it (test only).
+func PutRawAudit(ctx context.Context, s *Store, seq uint64, i int, value []byte) error {
+	_, err := s.j.Update(ctx, func(tx *journal.Tx) error { return tx.Put(bucketAudit, auditKey(seq, i), value) })
+	return err
+}
+
+// PutRawAuditCursor writes value as the audit cursor (test only).
+func PutRawAuditCursor(ctx context.Context, s *Store, value []byte) error {
+	_, err := s.j.Update(ctx, func(tx *journal.Tx) error { return tx.Put(bucketMeta, keyAuditEmitted, value) })
+	return err
 }

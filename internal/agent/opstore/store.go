@@ -141,6 +141,9 @@ type AuditEvent struct {
 	// not have reached the sink before the agent stopped (it was committed
 	// after the last persisted audit cursor). The sink may have it already.
 	Replayed bool
+	// FirstSeq, on an EventReplaySkipped event, is the sequence of the first
+	// skipped event (Seq is the last).
+	FirstSeq uint64
 	// Seq is the commit sequence of the transaction that stored the event
 	// (its audit key's), the same in its first emission and in a replay;
 	// zero for an event the store does not keep (a refusal, a re-delivery).
@@ -193,6 +196,16 @@ type Store struct {
 	auditPending   map[uint64]int
 	auditHigh      uint64
 	auditPersisted uint64
+	// auditCeiling, when auditCeilingSet, bounds the audit cursor for the
+	// life of the process: the replay at open failed after emitting every
+	// event through it, so nothing above it may be called emitted, persisted
+	// or trimmed. auditFrozen (the cursor itself could not be read) forbids
+	// persisting the cursor and trimming altogether.
+	auditCeiling    uint64
+	auditCeilingSet bool
+	auditFrozen     bool
+	// nonStored limits the audit events emitted without being stored.
+	nonStored nonStoredGate
 }
 
 // Open opens the journal and the store. The store starts not ready: call
@@ -278,6 +291,18 @@ func (s *Store) EstablishContinuity(ctx context.Context) error {
 		return fmt.Errorf("operation store: %w", err)
 	}
 	return nil
+}
+
+// emitNonStored emits an audit event the store does not keep, within the
+// non-stored limit (nonStoredGate).
+func (s *Store) emitNonStored(ev AuditEvent) {
+	ok, summary := s.nonStored.admit()
+	if summary != nil {
+		s.emit(*summary)
+	}
+	if ok {
+		s.emit(ev)
+	}
 }
 
 func (s *Store) emit(ev AuditEvent) {
@@ -382,6 +407,9 @@ func (s *Store) auditEmittedThrough() uint64 {
 	through := s.auditHigh
 	for seq := range s.auditPending {
 		through = min(through, seq-1)
+	}
+	if s.auditCeilingSet && !guard.Off(guard.AuditReplayCeiling) {
+		through = min(through, s.auditCeiling)
 	}
 	return through
 }

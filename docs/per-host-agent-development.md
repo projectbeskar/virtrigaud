@@ -504,7 +504,13 @@ minute).
   is retained or forwarded: the agent's unit sets
   `LogRateLimitIntervalSec=0`, and in regulated environments forward the
   journal (`systemd-journal-upload`, or the host's log shipper) to a store
-  that outlives the host. The store keeps a bounded window of the newest
+  that outlives the host, or size the journal (`SystemMaxUse=`) to hold at
+  least the audit window. The events the store does not keep, a
+  re-delivery answered `known` and an admission `refused`, which a caller
+  with a valid operation signature can repeat at will, are limited inside
+  the agent instead: at most 20 per second, and one warning, `operation
+  events not logged`, with the count of the rest at the next one. Stored
+  events are never limited. The store keeps a bounded window of the newest
   events: at
   most 100,000 events and 32 MiB of record bytes, whichever is smaller
   (`--audit-retain-events`, `--audit-retain-bytes`, development builds). The
@@ -527,11 +533,17 @@ minute).
   streams (it holds no events in memory) and replays at most the window's
   event count, the newest events; for any older ones above the cursor it
   logs one warning, `audit replay capped`, with their count and sequence
-  range. A store written before the cursor existed (no cursor) is replayed
+  range (`firstSeq`, `lastSeq`). Such a backlog loses detail: that warning
+  is then the only record of the skipped events. A store written before the cursor existed (no cursor) is replayed
   the same way: the builds that wrote it logged each event at its commit,
   so its older events reached the journal then. Once ready, the agent
   writes the cursor (one transaction), so a crash loop does not replay the
-  same events at every start. A release build replays nothing.
+  same events at every start. A release build replays nothing. A replay
+  that fails (an event that cannot be decoded, say) is logged once as an
+  error, `audit replay failed`, and for the rest of that process the cursor
+  never passes the last transaction whose events were all emitted, so
+  nothing above it is trimmed; when the cursor itself cannot be read, it is
+  neither written nor anything trimmed until the next start.
 
 Each batch drops at most 256 records in one transaction and reads at most
 4,096 records before it lets go of the store's lock, and the next batch

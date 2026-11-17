@@ -43,6 +43,10 @@ const (
 	// AuditTrimEmittedOnly: audit retention removes only events at or below
 	// the persisted audit cursor (emitted to the sink).
 	AuditTrimEmittedOnly Name = "audit-trim-emitted-only"
+	// AuditReplayCeiling: after a failed replay at open, the audit cursor
+	// never passes the last event emitted contiguously, and stays where it
+	// is when it could not be read.
+	AuditReplayCeiling Name = "audit-replay-ceiling"
 	// AnchorBeforeAck: a commit returns only after its anchor record is
 	// appended.
 	AnchorBeforeAck Name = "anchor-before-ack"
@@ -200,7 +204,7 @@ const (
 // All lists every guard, in a fixed order.
 func All() []Name {
 	return []Name{
-		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AuditTrimOnlyAudit, AuditTrimEmittedOnly, AnchorBeforeAck, AnchorFsync,
+		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AuditTrimOnlyAudit, AuditTrimEmittedOnly, AuditReplayCeiling, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,
