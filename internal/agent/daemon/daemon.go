@@ -661,6 +661,8 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			d.log.Error(dctx.Err(), "the store compaction did not stop within the drain timeout; abandoned")
 		}
 		srv.Shutdown(dctx)
+		// No more calls: summarise what the non-stored limit held back.
+		st.FlushNonStored(true)
 		// Runs stop between steps; an interrupted step is left to the next
 		// start's recovery.
 		stopPool()
@@ -743,6 +745,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 				_ = d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent) + "; credentials reloaded")
 			}
 		case <-ticker.C:
+			// The summary of a flood of non-stored audit events whose
+			// window has closed (no goroutine of its own).
+			st.FlushNonStored(false)
 			if d.renewal != nil {
 				d.renewal.tick(ctx)
 			}
@@ -1292,7 +1297,7 @@ func (d *daemon) auditEvent(ev opstore.AuditEvent) {
 		d.log.Error(nil, "audit replay failed", "reason", ev.Reason, "seq", ev.Seq)
 		return
 	case opstore.EventNonStoredSuppressed:
-		slog.New(logr.ToSlogHandler(d.log)).Warn("operation events not logged", "reason", ev.Reason)
+		slog.New(logr.ToSlogHandler(d.log)).Warn("operation events not logged", "reason", ev.Reason, "topActor", ev.Actor)
 		return
 	}
 	d.log.Info("operation event", "seq", ev.Seq, "event", ev.Event, "op", hex.EncodeToString(ev.Ref.OpID),

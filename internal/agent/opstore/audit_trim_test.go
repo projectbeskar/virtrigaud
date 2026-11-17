@@ -556,3 +556,30 @@ func TestNonStoredEventsAreLimited(t *testing.T) {
 	}
 	_ = ctx
 }
+
+// TestNonStoredFloodThatStopsIsFlushed: when a flood of re-deliveries stops,
+// the store's flush summarises the last window once it has closed, naming
+// the kinds and the actor.
+func TestNonStoredFloodThatStopsIsFlushed(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	now := time.Unix(1_700_000_000, 0)
+	opstore.SetNonStoredClock(h.s, func() time.Time { return now })
+	r := h.req("vm-1", rid(), kCreate, 1)
+	h.do(r)
+	for i := 0; i < opstore.NonStoredBurst+5; i++ {
+		h.admit(r)
+	}
+	takeAudit(h)
+	h.s.FlushNonStored(false)
+	if evs := takeAudit(h); len(evs) != 0 {
+		t.Fatalf("flushed before the window closed: %+v", evs)
+	}
+	now = now.Add(2 * time.Second)
+	h.s.FlushNonStored(false)
+	evs := takeAudit(h)
+	if len(evs) != 1 || evs[0].Event != opstore.EventNonStoredSuppressed || !strings.Contains(evs[0].Reason, "known=5") ||
+		evs[0].Actor != r.Actor {
+		t.Fatalf("flush after the flood stopped: %+v", evs)
+	}
+}

@@ -509,8 +509,11 @@ minute).
   re-delivery answered `known` and an admission `refused`, which a caller
   with a valid operation signature can repeat at will, are limited inside
   the agent instead: at most 20 per second, and one warning, `operation
-  events not logged`, with the count of the rest at the next one. Stored
-  events are never limited. The store keeps a bounded window of the newest
+  events not logged`, for the rest of each window: their count, the counts
+  by kind (`known`, `refused:<reason>`) and the actor named most often
+  (`topActor`). It is logged at the next such event, or within five seconds
+  of the window closing if the flood stopped, and at the agent's drain.
+  Stored events are never limited. The store keeps a bounded window of the newest
   events: at
   most 100,000 events and 32 MiB of record bytes, whichever is smaller
   (`--audit-retain-events`, `--audit-retain-bytes`, development builds). The

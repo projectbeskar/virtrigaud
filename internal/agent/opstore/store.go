@@ -296,12 +296,22 @@ func (s *Store) EstablishContinuity(ctx context.Context) error {
 // emitNonStored emits an audit event the store does not keep, within the
 // non-stored limit (nonStoredGate).
 func (s *Store) emitNonStored(ev AuditEvent) {
-	ok, summary := s.nonStored.admit()
+	ok, summary := s.nonStored.admit(ev)
 	if summary != nil {
 		s.emit(*summary)
 	}
 	if ok {
 		s.emit(ev)
+	}
+}
+
+// FlushNonStored emits the summary of the non-stored audit events that
+// were not emitted, once their window has closed, or at once with force
+// (the agent's drain), so that the last window of a flood that stopped is
+// summarised too. The agent calls it from its periodic tick.
+func (s *Store) FlushNonStored(force bool) {
+	if summary := s.nonStored.flush(force); summary != nil {
+		s.emit(*summary)
 	}
 }
 
