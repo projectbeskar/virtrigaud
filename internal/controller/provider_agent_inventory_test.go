@@ -176,6 +176,8 @@ func TestAgentProviderClientCertificate(t *testing.T) {
 	require.NotNil(t, spec.SecurityContext)
 	require.NotNil(t, spec.SecurityContext.FSGroup)
 	assert.Equal(t, int64(65532), *spec.SecurityContext.FSGroup, "the fsGroup that may read the key")
+	require.NotNil(t, spec.SecurityContext.FSGroupChangePolicy)
+	assert.Equal(t, corev1.FSGroupChangeOnRootMismatch, *spec.SecurityContext.FSGroupChangePolicy)
 
 	single := agentProvider("single")
 	single.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologySingle
@@ -192,6 +194,33 @@ func TestAgentProviderClientCertificate(t *testing.T) {
 				assert.Nil(t, v.Secret.DefaultMode, "other Providers keep their volume mode: %s", p.Name)
 			}
 		}
+	}
+}
+
+// TestAgentProviderFSGroupLeavesMigrationVolumes: a migration PVC mounted in
+// the pod of the clustered Provider for per-host agents is not re-owned on
+// every mount (the pod's fsGroup change policy is OnRootMismatch, never the
+// recursive Always), and a Provider whose credentials hold no identity key
+// gets no fsGroup at all, so its migration PVCs are never re-owned.
+func TestAgentProviderFSGroupLeavesMigrationVolumes(t *testing.T) {
+	mounts := []migrationStorageMount{{pvcName: "mig-pvc", volumeName: "migration-storage-0"}}
+	r := &ProviderReconciler{}
+	for _, p := range []*infravirtrigaudiov1beta1.Provider{agentProvider("ch"), clusterProvider("lv")} {
+		volumes := r.buildPodVolumes(context.Background(), p, mounts)
+		var pvc bool
+		for _, v := range volumes {
+			if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == "mig-pvc" {
+				pvc = true
+			}
+		}
+		require.True(t, pvc, "%s: the migration PVC is a volume of the pod", p.Name)
+		sc := agentProviderPodSecurityContext(p)
+		if sc == nil {
+			assert.False(t, devgate.Compiled && p.Name == "ch", "the agent Provider has an fsGroup in a development build")
+			continue
+		}
+		require.NotNil(t, sc.FSGroupChangePolicy, p.Name)
+		assert.NotEqual(t, corev1.FSGroupChangeAlways, *sc.FSGroupChangePolicy, "%s: never a recursive re-own on every mount", p.Name)
 	}
 }
 

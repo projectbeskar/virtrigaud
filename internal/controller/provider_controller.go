@@ -1420,12 +1420,20 @@ func agentProviderHoldsIdentityKey(provider *infravirtrigaudiov1beta1.Provider) 
 
 // agentProviderPodSecurityContext is the pod security context of a Provider
 // whose credentials volume holds its identity key (the fsGroup that may read
-// it); nil for every other Provider.
+// it); nil for every other Provider. The fsGroup is pod-wide in Kubernetes:
+// Secret volume files are owned by root unless a pod fsGroup is set, so it
+// is the only way to make a 0440 key readable by the provider user and by no
+// other (a per-item mode alone would have to grant "other" read). Its
+// change policy keeps the other volumes from being re-owned recursively.
 func agentProviderPodSecurityContext(provider *infravirtrigaudiov1beta1.Provider) *corev1.PodSecurityContext {
 	if !agentProviderHoldsIdentityKey(provider) {
 		return nil
 	}
-	return &corev1.PodSecurityContext{FSGroup: util.Int64Ptr(agentProviderFSGroup)}
+	// OnRootMismatch: the kubelet re-owns a volume only when its root does
+	// not already carry the fsGroup, never recursively on every mount, so a
+	// migration PVC this pod mounts is not walked and chowned at each start.
+	onRoot := corev1.FSGroupChangeOnRootMismatch
+	return &corev1.PodSecurityContext{FSGroup: util.Int64Ptr(agentProviderFSGroup), FSGroupChangePolicy: &onRoot}
 }
 
 // agentProviderArgs returns the extra arguments of the clustered Provider
