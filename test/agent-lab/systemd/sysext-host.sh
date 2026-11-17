@@ -18,10 +18,10 @@
 #                           extension list, users, state-directory mounts,
 #                           units (state, start time, restarts), agent
 #                           journal reasons, fake VMs, Hello
-#   kicker-residual         the documented residual: with the agent stopped
-#                           for maintenance, stopping vrtg-agent-boot-start
-#                           by hand makes Upholds= run it again, and it
-#                           starts the agent once
+#   kicker-stop             with the agent stopped for maintenance, stop
+#                           vrtg-agent-boot-start by hand: Upholds= runs it
+#                           again, and the agent must stay stopped (the
+#                           once-per-boot marker is still there)
 #   maint                   maintenance checks on the running host: the agent
 #                           stopped by an operator stays stopped through a
 #                           stop/start/try-restart of the shutdown unit, a
@@ -31,7 +31,7 @@ set -uo pipefail
 set +e
 EXT_DIR=/var/lib/kairos/extensions
 PERSIST_FILE=/oem/91_virtrigaud_agent_persistence.yaml
-CMD=${1:?usage: sysext-host.sh persist|activate|provision|report|maint ...}
+CMD=${1:?usage: sysext-host.sh persist|activate|provision|report|maint|kicker-stop ...}
 shift
 
 persist() {
@@ -126,19 +126,24 @@ maint() {
   [ "$fails" = 0 ]
 }
 
-kicker_residual() {
+kicker_stop() {
+  local fails=0
   systemctl stop vrtg-agent.service
   sleep 2
   echo "agent stopped: $(unit_state vrtg-agent.service)"
   systemctl stop vrtg-agent-boot-start.service
   sleep 3
-  echo "after stopping the kicker: kicker $(systemctl show -p ActiveState --value vrtg-agent-boot-start.service), agent $(unit_state vrtg-agent.service)"
+  echo "after stopping the boot-start unit: boot-start $(systemctl show -p ActiveState --value vrtg-agent-boot-start.service), agent $(unit_state vrtg-agent.service)"
   if [ "$(systemctl show -p ActiveState --value vrtg-agent.service)" = active ]; then
-    log "RESIDUAL CONFIRMED: stopping the kicker by hand started the agent once"
+    log "FAIL stopping the boot-start unit by hand started the maintenance-stopped agent"
+    fails=1
   else
-    log "RESIDUAL NOT SEEN: the agent stayed stopped"
+    log "PASS the maintenance-stopped agent stayed stopped"
   fi
-  wait_state vrtg-agent.service active || systemctl start vrtg-agent.service
+  systemctl start vrtg-agent.service
+  wait_state vrtg-agent.service active
+  echo "agent started again: $(unit_state vrtg-agent.service)"
+  [ "$fails" = 0 ]
 }
 
 case "$CMD" in
@@ -147,6 +152,6 @@ activate) activate "$@" ;;
 provision) provision "$@" ;;
 report) report ;;
 maint) maint ;;
-kicker-residual) kicker_residual ;;
+kicker-stop) kicker_stop ;;
 *) echo "unknown command $CMD" >&2; exit 2 ;;
 esac
