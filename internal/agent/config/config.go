@@ -94,6 +94,12 @@ const (
 	FlagDevTrustDir = "dev-trust-dir"
 	// FlagDevEnrolmentFile names the development-only enrolment file flag.
 	FlagDevEnrolmentFile = "dev-enrolment-file"
+	// FlagAuditRetainEvents names the development-only audit retention
+	// event bound flag.
+	FlagAuditRetainEvents = "audit-retain-events"
+	// FlagAuditRetainBytes names the development-only audit retention byte
+	// bound flag.
+	FlagAuditRetainBytes = "audit-retain-bytes"
 )
 
 // ExecutorNone is the no-op executor's name.
@@ -139,6 +145,14 @@ type Config struct {
 	// DevEnrolmentFile names the development enrolment file (development
 	// builds only).
 	DevEnrolmentFile string
+	// AuditRetainEvents and AuditRetainBytes bound the audit events the
+	// operation store keeps (development builds only; zero uses the store's
+	// defaults, opstore.DefaultAuditRetainEvents and
+	// DefaultAuditRetainBytes). The system journal is the durable audit
+	// record; the store keeps a bounded recent window.
+	AuditRetainEvents int
+	// AuditRetainBytes bounds the record bytes of the audit events kept.
+	AuditRetainBytes int64
 }
 
 // Register registers the agent's flags on fs with their defaults and returns
@@ -156,6 +170,8 @@ func Register(fs *flag.FlagSet) *Config {
 	fs.StringVar(&c.Executor, FlagExecutor, ExecutorNone, "the executor: none (every build) or fake (development builds only)")
 	fs.StringVar(&c.DevTrustDir, FlagDevTrustDir, "", "development builds only: read the trust configuration from this directory")
 	fs.StringVar(&c.DevEnrolmentFile, FlagDevEnrolmentFile, "", "development builds only: enrol a fresh store from this file and the host certificate")
+	fs.IntVar(&c.AuditRetainEvents, FlagAuditRetainEvents, 0, "development builds only: the newest audit events the operation store keeps (0: 100000); the system journal keeps every event")
+	fs.Int64Var(&c.AuditRetainBytes, FlagAuditRetainBytes, 0, "development builds only: the record bytes of the audit events the operation store keeps (0: 32 MiB)")
 	return c
 }
 
@@ -200,6 +216,14 @@ func (c *Config) Validate() error {
 	}
 	if c.DevEnrolmentFile != "" && !DevBuild {
 		return fmt.Errorf("--%s: %w", FlagDevEnrolmentFile, ErrDevOnly)
+	}
+	for name, v := range map[string]int64{FlagAuditRetainEvents: int64(c.AuditRetainEvents), FlagAuditRetainBytes: c.AuditRetainBytes} {
+		switch {
+		case v < 0:
+			return fmt.Errorf("--%s must not be negative", name)
+		case v > 0 && !DevBuild:
+			return fmt.Errorf("--%s: %w", name, ErrDevOnly)
+		}
 	}
 	return nil
 }

@@ -16,7 +16,11 @@ limitations under the License.
 
 package opstore
 
-import "context"
+import (
+	"context"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
+)
 
 // HoldLock takes the store lock, for a test of a caller that must not block
 // on it.
@@ -32,3 +36,42 @@ func CompactBatch(ctx context.Context, s *Store, batch int, after []byte) (dropp
 
 // CompactScanFactor is compactScanFactor (test only).
 const CompactScanFactor = compactScanFactor
+
+// BucketUsage is the number of keys and the key-plus-value bytes of one
+// bucket (test only).
+type BucketUsage struct {
+	Keys  int
+	Bytes int
+}
+
+// BucketUsages reads every bucket of the store (test only).
+func BucketUsages(ctx context.Context, s *Store) (map[string]BucketUsage, error) {
+	out := map[string]BucketUsage{}
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		for _, b := range buckets() {
+			u := BucketUsage{}
+			if err := tx.ForEach(b, nil, func(k, v []byte) error {
+				u.Keys++
+				u.Bytes += len(k) + len(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+			out[b] = u
+		}
+		return nil
+	})
+	return out, err
+}
+
+// AuditKeys returns the keys of the audit events, oldest first (test only).
+func AuditKeys(ctx context.Context, s *Store) ([][]byte, error) {
+	var out [][]byte
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		return tx.ForEach(bucketAudit, nil, func(k, _ []byte) error {
+			out = append(out, k)
+			return nil
+		})
+	})
+	return out, err
+}

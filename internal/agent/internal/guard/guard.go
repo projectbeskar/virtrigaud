@@ -37,6 +37,9 @@ const (
 	Witness Name = "witness"
 	// WitnessKept: compaction keeps witness files.
 	WitnessKept Name = "witness-kept"
+	// AuditTrimOnlyAudit: audit retention removes audit events only, never
+	// an op_id tombstone or a VM tombstone.
+	AuditTrimOnlyAudit Name = "audit-trim-only-audit"
 	// AnchorBeforeAck: a commit returns only after its anchor record is
 	// appended.
 	AnchorBeforeAck Name = "anchor-before-ack"
@@ -194,7 +197,7 @@ const (
 // All lists every guard, in a fixed order.
 func All() []Name {
 	return []Name{
-		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AnchorBeforeAck, AnchorFsync,
+		TombstoneLookup, TombstoneKept, Witness, WitnessKept, AuditTrimOnlyAudit, AnchorBeforeAck, AnchorFsync,
 		CommitAfterContinuity, VMBusy, Binding, Attempt, MintEpoch, QuarantinePersist, RefuseNoSync,
 		LockFile, MarkerCheck, QuarantineRewrite, WitnessScan, CommitErrorQuarantine, KnownBeforeMismatch,
 		CloseAfterIOError, UnknownEnrolmentNotDefinite, FreezeResumeRecover, FreezeResumeReenrol,

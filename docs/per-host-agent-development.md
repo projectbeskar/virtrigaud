@@ -481,35 +481,67 @@ VM tombstone); otherwise `CREATING`, `PRESENT`, `OTHER_BINDING` or
 ### Store size
 
 The operation store refuses new operations (`RESOURCE_EXHAUSTED`, definitely
-not performed) while its live size is above 256 MiB. What it holds per
-finished operation, measured on ext4:
+not performed) while its live size is above 256 MiB. A development build
+compacts it (`opstore.Store.Compact`) and trims its audit window
+(`opstore.Store.TrimAudit`): once the agent is ready, then every hour, and at
+once when the store reaches three quarters of the threshold (checked every
+minute).
 
-| What | Live bytes per finished operation |
-|------|-----------------------------------|
-| op_id tombstone only (a compacted operation) | about 600 B |
-| tombstone plus the operation's record and step journal (not compacted) | about 1.6 KB |
+- **Compaction** drops the record and step journal of finished operations
+  only. It never drops an op_id tombstone (a re-delivery of a finished
+  operation is answered from it and never runs again), a VM tombstone, an
+  attempt mark, a witness file, or the record of an operation that still
+  holds its VM (an unknown outcome, or a dirty failure not yet resolved).
+- **Audit retention.** Every admission decision and state change is written
+  to the store's audit bucket and emitted as a structured line to the system
+  journal. The system journal (or the host's log pipeline) is the durable
+  audit record; the store keeps a bounded window of the newest events: at
+  most 100,000 events and 32 MiB of record bytes, whichever is smaller
+  (`--audit-retain-events`, `--audit-retain-bytes`, development builds). The
+  oldest events beyond it are removed, in commit order, in later
+  transactions than the ones that wrote them; nothing else is touched. The
+  journal's chain commits to the store's state digest, which a removal
+  updates like any other change, so the store verifies after a trim and a
+  reopen (tested).
 
-So the threshold is reached after about 160,000 operations whose records were
-never compacted, or about 430,000 compacted ones. A development build
-compacts the store (`opstore.Store.Compact`): once the agent is ready, then
-every hour, and at once when the store reaches three quarters of the
-threshold (checked every minute). Compaction drops the record and step
-journal of finished operations only. It never drops an op_id tombstone (a
-re-delivery of a finished operation is answered from it and never runs
-again), a VM tombstone, a witness file, or the record of an operation that
-still holds its VM (an unknown outcome, or a dirty failure not yet resolved).
 Each batch drops at most 256 records in one transaction and reads at most
 4,096 records before it lets go of the store's lock, and the next batch
 resumes where it stopped, so operations are admitted and run between
 batches and one compaction reads the store once. Near the threshold, after
 an early compaction that dropped nothing, the wait before the next early one
 doubles (from a minute up to the hour) until the store has grown by a
-sixty-fourth of the threshold. The agent logs each compaction (`store compacted`, the
-number of records dropped, the live size before and after), and logs once,
-as an error, when a compacted store stays above three quarters of the
-threshold: tombstones are never dropped, so such a host refuses new
-operations once it reaches the threshold, and no path reclaims tombstones
-yet. A release build runs no operation and does not compact.
+sixty-fourth of the threshold. The agent logs each compaction (`store
+compacted`: the records dropped, the audit events trimmed, the live size
+before and after, and `bucketBytes`, the page bytes each bucket holds), and
+logs once, as an error, when a compacted store stays above three quarters of
+the threshold. A release build runs no operation and does not compact.
+
+What the store keeps, measured with create, power and delete cycles through
+the store's real paths (`TestGrowthBreakdown` in `internal/agent/opstore`
+prints the table), in page bytes:
+
+| Bucket | Kept for | Bytes |
+|--------|----------|-------|
+| op_id tombstones | every finished operation, for its enrolment's lifetime | about 350 B per operation |
+| attempt marks | every operation, for its enrolment's lifetime | about 180 B per operation |
+| VM tombstones | every deleted VM, for the store's lifetime | about 260 B per deleted VM |
+| audit events | the retention window only | about 290 B per event (about 2 events per operation) before trimming |
+| chain entries | the last two checkpoints' worth (bounded) | about 0.5 MiB in all |
+| operation records and step journals | until compaction | about 600 B per operation more |
+
+So once compacted and with a full audit window, the store keeps about 620 B
+per operation of that mix (about 530 B per operation plus 260 B per deleted
+VM); before audit retention it kept about 1.3 KB. That is inherent: an
+enrolment's op_id tombstones and attempt marks are kept for as long as the
+enrolment is the store's, and one VM tombstone per deleted VM for as long as
+the store exists. Under unbounded churn within one enrolment the store still
+reaches the threshold, after roughly 400,000 operations (about 130,000 VM
+lifecycles of create, power and delete) at the default threshold and audit
+window, and then refuses new operations: fail-closed, nothing is run that
+cannot be recorded. Re-keying the Host is the recovery: the new enrolment
+starts with no tombstones, and once the manager confirms the predecessor's
+freeze ([Freeze confirmation](#freeze-confirmation)), the store discards
+the predecessor's records, tombstones and attempt marks. VM tombstones stay.
 
 **Crash hook.** A development build reads `VRTG_AGENT_DEV_CRASH_AT`, a
 comma-separated sequence of crash points of the journal and the operation

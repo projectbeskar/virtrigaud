@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
@@ -137,6 +138,23 @@ func TestAgentReportsAStoreCompactionCannotRelieve(t *testing.T) {
 	r, _ := h.run()
 	waitLog(t, h, `"msg"="store compacted" "dropped"=5`)
 	waitLog(t, h, "stays near its size threshold after compaction")
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAgentTrimsTheAuditWindow: the agent's compaction also trims the audit
+// events beyond the configured retention and logs each bucket's size.
+func TestAgentTrimsTheAuditWindow(t *testing.T) {
+	h, exec := newFakeHost(t)
+	populate(t, h, exec, 10)
+	h.cfg.AuditRetainEvents = 5
+	r, _ := h.run()
+	waitLog(t, h, `"msg"="store compacted" "dropped"=10`)
+	text := h.logs.text()
+	if !strings.Contains(text, `"bucketBytes"`) || !strings.Contains(text, `"audit"`) || strings.Contains(text, `"auditEventsTrimmed"=0 `) {
+		t.Fatalf("no audit trim or bucket sizes in the compaction log:\n%s", text)
+	}
 	if err := r.stop(); err != nil {
 		t.Fatal(err)
 	}

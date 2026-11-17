@@ -69,6 +69,16 @@ func (b *nearBackoff) grew(live, maxBytes int64, every time.Duration) {
 	}
 }
 
+// bucketBytes returns the bytes of the pages each bucket of the store holds,
+// by bucket name, for the compaction log: what fills the store.
+func bucketBytes(j *journal.Store) map[string]int64 {
+	out := map[string]int64{}
+	for name, st := range j.BucketStats() {
+		out[name] = st.Allocated
+	}
+	return out
+}
+
 // compactEvery is the period of the store compaction.
 func (d *daemon) compactEvery() time.Duration {
 	if d.o.CompactEvery > 0 {
@@ -100,7 +110,9 @@ func compactDue(now, last time.Time, every, nearWait time.Duration, near bool) b
 // compactLoop compacts the operation store (opstore.Store.Compact: the step
 // journal of finished operations goes; their op_id tombstones, VM tombstones
 // and witness files are kept, so a re-delivery is still answered from the
-// tombstone and never run again) once the agent is ready, then every
+// tombstone and never run again), then trims the audit events beyond the
+// retention window (opstore.Store.TrimAudit; the system journal keeps every
+// event), once the agent is ready, then every
 // compaction period, and earlier when the store reaches three quarters of
 // its size threshold: a check period after the last one, doubling after
 // each early compaction that dropped nothing until the store has grown by a
@@ -129,19 +141,23 @@ func (d *daemon) compactLoop(ctx context.Context, st *opstore.Store) {
 		if js != journal.StateLost && st.Recovered() && !st.Freezing() && compactDue(time.Now(), last, every, backoff.wait, near) {
 			before := j.LiveSize()
 			n, err := st.Compact(ctx, opstore.DefaultCompactBatch)
+			trimmed := 0
+			if err == nil && ctx.Err() == nil {
+				trimmed, err = st.TrimAudit(ctx, opstore.DefaultCompactBatch)
+			}
 			last = time.Now()
 			after := j.LiveSize()
-			backoff.after(n, after, every)
+			backoff.after(n+trimmed, after, every)
 			switch {
 			case ctx.Err() != nil:
 				return
 			case err != nil:
-				log.Error(err, "store compaction failed; it is retried at the next period", "dropped", n)
-			case n > 0:
-				log.Info("store compacted", "dropped", n, "liveBytesBefore", before, "liveBytesAfter", after,
-					"maxStoreBytes", st.MaxStoreBytes())
+				log.Error(err, "store compaction failed; it is retried at the next period", "dropped", n, "auditEventsTrimmed", trimmed)
+			case n > 0 || trimmed > 0:
+				log.Info("store compacted", "dropped", n, "auditEventsTrimmed", trimmed, "liveBytesBefore", before,
+					"liveBytesAfter", after, "maxStoreBytes", st.MaxStoreBytes(), "bucketBytes", bucketBytes(j))
 			default:
-				log.V(1).Info("store compaction found nothing to drop", "liveBytes", after)
+				log.V(1).Info("store compaction found nothing to drop", "liveBytes", after, "bucketBytes", bucketBytes(j))
 			}
 			switch stillNear := nearCap(after, st.MaxStoreBytes()); {
 			case stillNear && !reportedFull:

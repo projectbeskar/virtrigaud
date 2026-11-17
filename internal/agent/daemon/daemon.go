@@ -512,10 +512,12 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	st, err := opstore.Open(ctx, opstore.Options{
 		Journal: journal.Options{Dir: d.o.Config.StateDir, FS: d.o.JournalFS, Events: d.journalEvent,
 			Hooks: hooks, AnchorRotateBytes: rotate},
-		Executor:      d.o.Executor,
-		Audit:         d.auditEvent,
-		StepDeadlines: d.o.StepDeadlines,
-		MaxStoreBytes: d.o.MaxStoreBytes,
+		Executor:          d.o.Executor,
+		Audit:             d.auditEvent,
+		StepDeadlines:     d.o.StepDeadlines,
+		MaxStoreBytes:     d.o.MaxStoreBytes,
+		AuditRetainEvents: d.o.Config.AuditRetainEvents,
+		AuditRetainBytes:  d.o.Config.AuditRetainBytes,
 	})
 	if err != nil {
 		if ctx.Err() != nil {

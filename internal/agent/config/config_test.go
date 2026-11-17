@@ -17,6 +17,7 @@ limitations under the License.
 package config_test
 
 import (
+	"errors"
 	"flag"
 	"testing"
 	"time"
@@ -108,5 +109,27 @@ func TestInventoryIntervalFlag(t *testing.T) {
 		if c := parse(t, "--inventory-interval="+bad); c.Validate() == nil {
 			t.Errorf("%s accepted", bad)
 		}
+	}
+}
+
+// TestAuditRetentionFlags: zero (the store's defaults) everywhere; a
+// positive bound in a development build only; never negative.
+func TestAuditRetentionFlags(t *testing.T) {
+	c := parse(t)
+	if err := c.Validate(); err != nil || c.AuditRetainEvents != 0 || c.AuditRetainBytes != 0 {
+		t.Fatalf("defaults: %+v %v", c, err)
+	}
+	for _, args := range [][]string{{"--audit-retain-events=-1"}, {"--audit-retain-bytes=-1"}} {
+		if err := parse(t, args...).Validate(); err == nil || errors.Is(err, config.ErrDevOnly) {
+			t.Errorf("%v: %v, want a refusal of the value", args, err)
+		}
+	}
+	c = parse(t, "--audit-retain-events=10", "--audit-retain-bytes=4096")
+	err := c.Validate()
+	if config.DevBuild && (err != nil || c.AuditRetainEvents != 10 || c.AuditRetainBytes != 4096) {
+		t.Fatalf("development build: %+v %v", c, err)
+	}
+	if !config.DevBuild && !errors.Is(err, config.ErrDevOnly) {
+		t.Fatalf("release build: %v", err)
 	}
 }

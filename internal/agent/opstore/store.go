@@ -66,6 +66,18 @@ const (
 // are refused (RefusalStoreFull). Terminal records are always written.
 const DefaultMaxStoreBytes = 256 << 20
 
+// Audit retention: the store keeps a bounded window of the newest audit
+// events (each is also emitted to Options.Audit, the system journal, which is
+// the durable audit record). TrimAudit removes the oldest beyond it.
+const (
+	// DefaultAuditRetainEvents is the default number of newest audit events
+	// kept.
+	DefaultAuditRetainEvents = 100_000
+	// DefaultAuditRetainBytes is the default bound on the record bytes (key
+	// and value) of the audit events kept.
+	DefaultAuditRetainBytes = 32 << 20
+)
+
 // DefaultStepDeadline is the default time a step may run before it is
 // resolved by inspection.
 const DefaultStepDeadline = 10 * time.Minute
@@ -82,6 +94,12 @@ type Options struct {
 	// MaxStoreBytes is the store size above which new operations are
 	// refused. Zero uses DefaultMaxStoreBytes.
 	MaxStoreBytes int64
+	// AuditRetainEvents and AuditRetainBytes bound the audit events the
+	// store keeps (TrimAudit): the newest events within both bounds stay.
+	// Zero uses DefaultAuditRetainEvents and DefaultAuditRetainBytes.
+	AuditRetainEvents int
+	// AuditRetainBytes bounds the record bytes of the audit events kept.
+	AuditRetainBytes int64
 	// FreezeChunk is the largest number of operations one re-enrolment
 	// freeze transaction freezes. Zero uses DefaultFreezeChunk; tests set a
 	// small value to exercise a freeze that takes several transactions.
@@ -165,6 +183,12 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	}
 	if opts.MaxStoreBytes == 0 {
 		opts.MaxStoreBytes = DefaultMaxStoreBytes
+	}
+	if opts.AuditRetainEvents <= 0 {
+		opts.AuditRetainEvents = DefaultAuditRetainEvents
+	}
+	if opts.AuditRetainBytes <= 0 {
+		opts.AuditRetainBytes = DefaultAuditRetainBytes
 	}
 	jo := opts.Journal
 	jo.Buckets = append(append([]string(nil), jo.Buckets...), buckets()...)
