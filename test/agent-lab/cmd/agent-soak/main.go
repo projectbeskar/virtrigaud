@@ -60,6 +60,7 @@ commands:
   soak          kill the agent at random points under a create/delete/power load
   growth        measure the operation store at growing numbers of tombstones
   load          keep a create/delete/power load on the agent and record its compactions
+  precursor     start the agent on a store with many audit events and no audit cursor
   verify-store  open a state directory and look up acknowledged operations
   agent         (internal) run the agent's daemon with a counting executor
 `
