@@ -667,29 +667,31 @@ func TestSysusersFixedIDs(t *testing.T) {
 	}
 }
 
-// TestStartLimits: the boot-start unit (acts once per boot) and the setup
-// unit (upheld by nothing) have an explicit start limit; the shutdown unit
-// turns it off (StartLimitIntervalSec=0, no StartLimitBurst: leaving the key
-// out would fall back to the manager's default limit). Its stops, starts, restarts and Upholds= re-arms all count
-// towards a start limit, so maintenance could put it in start-limit-hit;
-// Upholds= then waits out the window before starting it again, and a reboot
-// inside the window runs no stop action and stops no VM. A start limit
-// cannot bound Upholds= retries anyway, and the unit's start runs nothing.
+// TestStartLimits: the setup unit (upheld by nothing) has an explicit start
+// limit; the two upheld units, shutdown and boot-start, turn it off
+// (StartLimitIntervalSec=0, no StartLimitBurst: leaving the key out would
+// fall back to the manager's default limit). Their stops, starts, restarts
+// and Upholds= re-arms all count towards a start limit, so routine
+// maintenance put them in start-limit-hit: for the shutdown unit a reboot
+// inside the window then runs no stop action and stops no VM; for the
+// boot-start unit the host reports itself degraded although nothing failed.
+// A start limit cannot bound Upholds= retries anyway; the shutdown unit's
+// start runs nothing, and the boot-start unit acts at most once per boot.
 func TestStartLimits(t *testing.T) {
-	sd := parseUnit(t, shutdownUnit)
-	if got := sd.one(t, "Unit", "StartLimitIntervalSec"); got != "0" {
-		t.Errorf("%s: StartLimitIntervalSec = %q, want 0: maintenance could leave it in start-limit-hit and a reboot would stop no VM", shutdownUnit, got)
-	}
-	if _, ok := sd["Unit"]["StartLimitBurst"]; ok {
-		t.Errorf("%s: StartLimitBurst is set", shutdownUnit)
-	}
-	for _, name := range []string{bootStartUnit, setupUnit} {
+	for _, name := range []string{shutdownUnit, bootStartUnit} {
 		u := parseUnit(t, name)
-		if got := u.one(t, "Unit", "StartLimitIntervalSec"); got != "300" {
-			t.Errorf("%s: StartLimitIntervalSec = %q", name, got)
+		if got := u.one(t, "Unit", "StartLimitIntervalSec"); got != "0" {
+			t.Errorf("%s: StartLimitIntervalSec = %q, want 0: routine maintenance could leave it in start-limit-hit", name, got)
 		}
-		if got := u.one(t, "Unit", "StartLimitBurst"); got != "5" {
-			t.Errorf("%s: StartLimitBurst = %q", name, got)
+		if _, ok := u["Unit"]["StartLimitBurst"]; ok {
+			t.Errorf("%s: StartLimitBurst is set", name)
 		}
+	}
+	u := parseUnit(t, setupUnit)
+	if got := u.one(t, "Unit", "StartLimitIntervalSec"); got != "300" {
+		t.Errorf("%s: StartLimitIntervalSec = %q", setupUnit, got)
+	}
+	if got := u.one(t, "Unit", "StartLimitBurst"); got != "5" {
+		t.Errorf("%s: StartLimitBurst = %q", setupUnit, got)
 	}
 }
