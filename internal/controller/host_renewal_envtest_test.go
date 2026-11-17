@@ -1064,7 +1064,7 @@ func (s *approveFirstStatus) Update(ctx context.Context, obj client.Object, opts
 	if u, ok := obj.(*unstructured.Unstructured); ok && !s.c.done && u.GetKind() == certrequest.NewObject().GetKind() {
 		s.c.done = true
 		other := certrequest.NewObject()
-		if err := s.c.Client.Get(ctx, client.ObjectKeyFromObject(u), other); err != nil {
+		if err := s.c.Get(ctx, client.ObjectKeyFromObject(u), other); err != nil {
 			return err
 		}
 		if err := certrequest.SetCondition(other, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
