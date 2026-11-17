@@ -1237,7 +1237,14 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   started this boot, by hand or by its own `[Install]` links). Then it
   makes the marker and starts nothing, so an agent started by hand after a
   failed setup and stopped for maintenance is not started again by a
-  package's restart of the unit. It runs once per boot and stays active, so `Upholds=` does not run it
+  package's restart of the unit.
+
+  A soft reboot (`systemctl soft-reboot`) keeps `/run` and the boot id, so
+  the marker survives it (and keying the marker to the boot id would not
+  help: it does not change either). After a soft reboot the boot-start unit
+  reports that the decision was already made and the agent stays stopped
+  until it is started by hand: `systemctl start vrtg-agent.service`. That
+  is the safe direction; a full reboot re-arms the unit. It runs once per boot and stays active, so `Upholds=` does not run it
   again: an agent stopped for maintenance stays stopped through restarts of
   the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
   The agent's `Wants=` and `Requires=` bring the signer and the setup unit up with it.

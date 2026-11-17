@@ -417,6 +417,8 @@ func (r *HostReconciler) agentCertificateExpiry(ctx context.Context, host *infra
 		}
 	}
 	if a := host.Status.Agent; a != nil && a.CertificateExpiry != nil {
+		log.FromContext(ctx).V(1).Info("The agent certificate expiry is read from the Host status (the pins Secret could not be "+
+			"read, or enrolment is not configured)", "host", host.Name, "expiry", a.CertificateExpiry.UTC().Format(time.RFC3339))
 		return a.CertificateExpiry.Time, true
 	}
 	return time.Time{}, false
