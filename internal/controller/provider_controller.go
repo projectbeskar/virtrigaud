@@ -998,9 +998,17 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 	// The migration PVCs live VMMigrations reference (the pvc backend). A read
 	// error leaves the Deployment as it is: rendering it without them would
 	// unmount the storage of migrations in flight.
-	migrationMounts, err := r.discoverMigrationStorage(ctx, provider)
-	if err != nil {
-		return nil, fmt.Errorf("discover migration storage: %w", err)
+	//
+	// The clustered Provider for per-host agents mounts none: it serves no
+	// disk export or import (internal/providers/cloudhypervisor: GetCapabilities
+	// advertises none and ExportDisk/ImportDisk answer Unimplemented), so a
+	// migration PVC would only be re-grouped by its pod's fsGroup.
+	var migrationMounts []migrationStorageMount
+	if !agentProviderHoldsIdentityKey(provider) {
+		var err error
+		if migrationMounts, err = r.discoverMigrationStorage(ctx, provider); err != nil {
+			return nil, fmt.Errorf("discover migration storage: %w", err)
+		}
 	}
 
 	// Build container spec

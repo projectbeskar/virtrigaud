@@ -49,9 +49,10 @@ pod gets `fsGroup: 65532`, so the files belong to that group, which the
 provider process holds whatever user a custom security context runs it as,
 and no other user can read the key. A Secret volume's files belong to root
 unless the pod has an fsGroup, and Kubernetes has no per-volume fsGroup, so
-it is pod-wide; `fsGroupChangePolicy: OnRootMismatch` keeps the kubelet from
-re-owning the pod's other volumes (a migration PVC, say) recursively at every
-mount: only a volume whose root does not carry the group is changed. The Provider stops at start when it
+it is pod-wide. The pod mounts no migration storage (this Provider serves no
+disk export or import), so no shared volume is re-grouped; and
+`fsGroupChangePolicy: OnRootMismatch` keeps the kubelet from re-owning the
+pod's own volumes recursively at every mount. The Provider stops at start when it
 cannot load them. The Secret must be in the Provider's
 namespace and hold:
 

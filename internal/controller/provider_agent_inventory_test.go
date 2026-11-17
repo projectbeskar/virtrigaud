@@ -26,6 +26,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -378,4 +379,34 @@ func assertAgentProviderInventoryRBAC(t *testing.T, docs [][]byte, ns, name stri
 		}
 	}
 	assert.True(t, sawRole && sawBinding)
+}
+
+// TestAgentProviderMountsNoMigrationStorage: the clustered Provider for
+// per-host agents serves no disk export or import, so a live VMMigration
+// that names it mounts nothing into its pod (no migration PVC re-grouped by
+// its fsGroup); a development build only, a release build keeps the mount
+// as for any Provider.
+func TestAgentProviderMountsNoMigrationStorage(t *testing.T) {
+	m, pvc, objs := msWorld()
+	for i, o := range objs {
+		if o.GetName() == msSource {
+			objs = append(objs[:i], objs[i+1:]...)
+			break
+		}
+	}
+	ch := agentProvider(msSource)
+	ch.Namespace = msNS
+	sch := migrationTestScheme(t)
+	require.NoError(t, appsv1.AddToScheme(sch))
+	r := &ProviderReconciler{Scheme: sch, Client: fake.NewClientBuilder().WithScheme(sch).WithObjects(append(objs, m, pvc, ch)...).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.VMMigration{}, &corev1.PersistentVolumeClaim{}).Build()}
+	dep, err := r.reconcileDeployment(context.Background(), ch, r.getServiceAccountName(ch))
+	require.NoError(t, err)
+	var mounted bool
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == msPVC {
+			mounted = true
+		}
+	}
+	assert.Equal(t, !devgate.Compiled, mounted, "the migration PVC is mounted only where the Provider can use it")
 }
