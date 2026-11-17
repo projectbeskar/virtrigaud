@@ -99,6 +99,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -516,6 +517,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		Audit:             d.auditEvent,
 		StepDeadlines:     d.o.StepDeadlines,
 		MaxStoreBytes:     d.o.MaxStoreBytes,
+		ReplayAudit:       config.DevBuild,
 		AuditRetainEvents: d.o.Config.AuditRetainEvents,
 		AuditRetainBytes:  d.o.Config.AuditRetainBytes,
 	})
@@ -1282,7 +1284,11 @@ func (d *daemon) journalEvent(ev journal.Event) {
 
 // auditEvent logs an operation store event. It holds identity fields only.
 func (d *daemon) auditEvent(ev opstore.AuditEvent) {
-	d.log.Info("operation event", "event", ev.Event, "op", hex.EncodeToString(ev.Ref.OpID),
+	if ev.Event == opstore.EventReplaySkipped {
+		slog.New(logr.ToSlogHandler(d.log)).Warn("audit replay capped", "reason", ev.Reason, "seq", ev.Seq)
+		return
+	}
+	d.log.Info("operation event", "seq", ev.Seq, "event", ev.Event, "op", hex.EncodeToString(ev.Ref.OpID),
 		"enrolment", hex.EncodeToString(ev.Ref.EnrolmentID), "vm", ev.VMUID, "kind", ev.Kind.String(),
 		"actor", ev.Actor, "reason", ev.Reason, "state", ev.State.String(), "replayed", ev.Replayed)
 }

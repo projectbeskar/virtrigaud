@@ -20,6 +20,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strings"
 	"testing"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
@@ -245,5 +249,133 @@ func TestTrimAudit_NeverRemovesAboveTheCursor(t *testing.T) {
 	}
 	if left, _ := opstore.AuditKeys(ctx, h.s); len(left) != 1 {
 		t.Fatalf("after the release %d events are kept, want the window of 1", len(left))
+	}
+}
+
+// takeAudit returns the events emitted since the last call, and clears the
+// record.
+func takeAudit(h *harness) []opstore.AuditEvent {
+	h.auditMu.Lock()
+	defer h.auditMu.Unlock()
+	out := h.audit
+	h.audit = nil
+	return out
+}
+
+// TestReplayAudit_CappedWithOneSummary: with more events above the cursor
+// than the retention window's event count (here a store that never
+// persisted a cursor), the replay emits exactly the newest window, in commit
+// order, with their original sequences, and one summary of the skipped
+// older ones.
+func TestReplayAudit_CappedWithOneSummary(t *testing.T) {
+	const window = 10
+	h := newHarness(t)
+	h.opts = func(o *opstore.Options) { o.AuditRetainEvents = window }
+	h.fresh()
+	lifecycle(h, 20)
+	fresh := takeAudit(h)
+	keys, err := opstore.AuditKeys(context.Background(), h.s)
+	if err != nil || len(keys) <= window {
+		t.Fatalf("%d keys, %v", len(keys), err)
+	}
+	for _, ev := range fresh {
+		if ev.Seq == 0 && ev.Event != "known" && ev.Event != "refused" {
+			t.Fatalf("a stored event was emitted without its sequence: %+v", ev)
+		}
+	}
+	h.restart()
+	var replayed []opstore.AuditEvent
+	summaries := 0
+	for _, ev := range takeAudit(h) {
+		switch {
+		case ev.Event == opstore.EventReplaySkipped:
+			summaries++
+			if !strings.Contains(ev.Reason, fmt.Sprintf("%d audit events", len(keys)-window)) {
+				t.Fatalf("summary: %s", ev.Reason)
+			}
+		case ev.Replayed:
+			replayed = append(replayed, ev)
+		}
+	}
+	if summaries != 1 || len(replayed) != window {
+		t.Fatalf("%d summaries, %d replayed, want 1 and %d", summaries, len(replayed), window)
+	}
+	for i, ev := range replayed {
+		if want := opstore.AuditKeySeq(keys[len(keys)-window+i]); ev.Seq != want {
+			t.Fatalf("replayed %d has seq %d, want the newest window's %d", i, ev.Seq, want)
+		}
+	}
+}
+
+// TestReplayAudit_NotAgainOnceTheCursorIsPersisted: what the replay emitted
+// is not emitted again after the cursor is persisted (the agent does it once
+// it is ready), even before any trim.
+func TestReplayAudit_NotAgainOnceTheCursorIsPersisted(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	lifecycle(h, 3)
+	h.restart()
+	if n := countReplayed(takeAudit(h)); n == 0 {
+		t.Fatal("a store without a cursor replayed nothing")
+	}
+	if err := h.s.PersistAuditCursor(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h.restart()
+	if n := countReplayed(takeAudit(h)); n != 0 {
+		t.Fatalf("%d events replayed again after the cursor was persisted", n)
+	}
+}
+
+// TestReplayAudit_OffReplaysNothing: without ReplayAudit (a release build)
+// nothing is replayed.
+func TestReplayAudit_OffReplaysNothing(t *testing.T) {
+	h := newHarness(t)
+	h.opts = func(o *opstore.Options) { o.ReplayAudit = false }
+	h.fresh()
+	lifecycle(h, 3)
+	h.restart()
+	if n := countReplayed(takeAudit(h)); n != 0 {
+		t.Fatalf("%d events replayed with ReplayAudit off", n)
+	}
+}
+
+func countReplayed(evs []opstore.AuditEvent) int {
+	n := 0
+	for _, ev := range evs {
+		if ev.Replayed {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReplayAudit_HoldsNothingPerEvent: the replay streams; neither it nor
+// its count of events to skip collects events (no append, no make), so its
+// memory does not grow with the number of events above the cursor.
+func TestReplayAudit_HoldsNothingPerEvent(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "audit_trim.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || (fn.Name.Name != "replayAudit" && fn.Name.Name != "replaySkip") {
+			continue
+		}
+		found++
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && (id.Name == "append" || id.Name == "make") {
+					t.Errorf("%s calls %s at %s: the replay must not collect events", fn.Name.Name, id.Name, fset.Position(call.Pos()))
+				}
+			}
+			return true
+		})
+	}
+	if found != 2 {
+		t.Fatalf("found %d of replayAudit and replaySkip", found)
 	}
 }

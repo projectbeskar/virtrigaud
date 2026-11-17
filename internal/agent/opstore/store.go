@@ -100,6 +100,10 @@ type Options struct {
 	AuditRetainEvents int
 	// AuditRetainBytes bounds the record bytes of the audit events kept.
 	AuditRetainBytes int64
+	// ReplayAudit replays at open the audit events above the persisted
+	// audit cursor (replayAudit). Development builds set it; a release
+	// build replays nothing (it runs no operation and never trims).
+	ReplayAudit bool
 	// FreezeChunk is the largest number of operations one re-enrolment
 	// freeze transaction freezes. Zero uses DefaultFreezeChunk; tests set a
 	// small value to exercise a freeze that takes several transactions.
@@ -137,6 +141,11 @@ type AuditEvent struct {
 	// not have reached the sink before the agent stopped (it was committed
 	// after the last persisted audit cursor). The sink may have it already.
 	Replayed bool
+	// Seq is the commit sequence of the transaction that stored the event
+	// (its audit key's), the same in its first emission and in a replay;
+	// zero for an event the store does not keep (a refusal, a re-delivery).
+	// The commit time is not stored.
+	Seq uint64
 }
 
 // Errors returned by the store.
@@ -305,6 +314,7 @@ func (a *auditBuf) write(tx *journal.Tx, ev AuditEvent) error {
 		a.seq, a.registered = tx.Seq(), true
 		a.s.auditPendingAdd(a.seq)
 	}
+	ev.Seq = tx.Seq()
 	rec := &pb.AuditEvent{
 		Event:       ev.Event,
 		OpId:        ev.Ref.OpID,

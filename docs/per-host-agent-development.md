@@ -494,8 +494,14 @@ minute).
   holds its VM (an unknown outcome, or a dirty failure not yet resolved).
 - **Audit retention.** Every admission decision and state change is written
   to the store's audit bucket and emitted as a structured line to the system
-  journal. The system journal (or the host's log pipeline) is the durable
-  audit record; the store keeps a bounded window of the newest events: at
+  journal, with the event's commit sequence (`seq`; the commit time is not
+  stored). Emission hands the line to the logging pipeline. The system
+  journal is the durable audit record only when it is not rate-limited and
+  is retained or forwarded: the agent's unit sets
+  `LogRateLimitIntervalSec=0`, and in regulated environments forward the
+  journal (`systemd-journal-upload`, or the host's log shipper) to a store
+  that outlives the host. The store keeps a bounded window of the newest
+  events: at
   most 100,000 events and 32 MiB of record bytes, whichever is smaller
   (`--audit-retain-events`, `--audit-retain-bytes`, development builds). The
   oldest events beyond it are removed, in commit order, in later
@@ -511,10 +517,17 @@ minute).
   passes a transaction whose events are not logged yet). Each trim first
   writes that cursor to the store in a transaction of its own (one per
   compaction, none per operation) and removes only events at or below it.
-  At start the agent logs again every event above the persisted cursor, with
-  `"replayed"=true`: after a crash the system journal may hold an event
-  twice, never miss one. The first start of an agent with this change
-  replays the whole stored window once.
+  At start a development build logs again the events above the persisted
+  cursor, with `"replayed"=true` and their original `seq`: after a crash the
+  system journal may hold an event twice, never miss one. The replay
+  streams (it holds no events in memory) and replays at most the window's
+  event count, the newest events; for any older ones above the cursor it
+  logs one warning, `audit replay capped`, with their count and sequence
+  range. A store written before the cursor existed (no cursor) is replayed
+  the same way: the builds that wrote it logged each event at its commit,
+  so its older events reached the journal then. Once ready, the agent
+  writes the cursor (one transaction), so a crash loop does not replay the
+  same events at every start. A release build replays nothing.
 
 Each batch drops at most 256 records in one transaction and reads at most
 4,096 records before it lets go of the store's lock, and the next batch
@@ -1210,6 +1223,10 @@ uid N, not by virtrigaud-agent (uid M): its uid changed; refusing to start
 the agent`) a few times, followed by `Start request repeated too quickly`
 and `Failed with result 'start-limit-hit'` for the setup unit and the units
 that require it. Fix the cause, then `systemctl reset-failed` (or reboot).
+The shutdown unit then stays failed for the rest of that boot: its stop
+action never runs, so the VMs are not stopped gracefully at the next host
+shutdown. Alert on `systemctl --failed` (or the units' failed state in the
+host's monitoring) so that this is seen before the host is shut down.
 
 `hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
 (with the binary path replaced, since it does not exist on a build machine)

@@ -159,3 +159,29 @@ func TestAgentTrimsTheAuditWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestRestartAfterReadyDoesNotReplay: the agent replays at open the audit
+// events of a store that never persisted its audit cursor, logs them with
+// their sequence, persists the cursor once it is ready, and so replays
+// nothing when it starts again.
+func TestRestartAfterReadyDoesNotReplay(t *testing.T) {
+	h, exec := newFakeHost(t)
+	populate(t, h, exec, 3)
+	r, _ := h.run()
+	waitLog(t, h, `"msg"="store compacted"`)
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	first := h.logs.text()
+	if !hasLine(first, `"replayed"=true`, `"seq"=`) {
+		t.Fatalf("the first start replayed nothing:\n%s", first)
+	}
+	before := strings.Count(first, `"replayed"=true`)
+	r, _ = h.run()
+	if err := r.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if after := strings.Count(h.logs.text(), `"replayed"=true`); after != before {
+		t.Fatalf("%d events replayed again after a restart that followed READY", after-before)
+	}
+}

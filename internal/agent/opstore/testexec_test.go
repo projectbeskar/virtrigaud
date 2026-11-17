@@ -191,7 +191,8 @@ func (h *harness) options() opstore.Options {
 	o := opstore.Options{
 		Journal: journal.Options{Dir: h.dir, FS: h.mem, OpenTimeout: 200 * time.Millisecond,
 			Hooks: journal.Hooks{Crash: func(p journal.Point) bool { return h.crash.At(p) }}},
-		Executor: h.exec,
+		Executor:    h.exec,
+		ReplayAudit: true,
 		Audit: func(ev opstore.AuditEvent) {
 			h.auditMu.Lock()
 			h.audit = append(h.audit, ev)

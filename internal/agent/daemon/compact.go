@@ -129,6 +129,12 @@ func (d *daemon) compactLoop(ctx context.Context, st *opstore.Store) {
 	every := d.compactEvery()
 	ticker := time.NewTicker(min(every, compactCheckEvery))
 	defer ticker.Stop()
+	// Persist the audit cursor once, now that the agent is ready, so that the
+	// events replayed at open are not replayed again if it stops before the
+	// first trim.
+	if err := st.PersistAuditCursor(ctx); err != nil && ctx.Err() == nil {
+		log.Error(err, "the audit cursor could not be written; events replayed at open may be replayed again at the next start")
+	}
 	var last time.Time
 	var backoff nearBackoff
 	reportedFull := false
