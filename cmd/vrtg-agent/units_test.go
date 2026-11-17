@@ -669,17 +669,19 @@ func TestSysusersFixedIDs(t *testing.T) {
 
 // TestStartLimits: the boot-start unit (acts once per boot) and the setup
 // unit (upheld by nothing) have an explicit start limit; the shutdown unit
-// has none. Its stops, starts, restarts and Upholds= re-arms all count
+// turns it off (StartLimitIntervalSec=0, no StartLimitBurst: leaving the key
+// out would fall back to the manager's default limit). Its stops, starts, restarts and Upholds= re-arms all count
 // towards a start limit, so maintenance could put it in start-limit-hit;
 // Upholds= then waits out the window before starting it again, and a reboot
 // inside the window runs no stop action and stops no VM. A start limit
 // cannot bound Upholds= retries anyway, and the unit's start runs nothing.
 func TestStartLimits(t *testing.T) {
 	sd := parseUnit(t, shutdownUnit)
-	for _, key := range []string{"StartLimitIntervalSec", "StartLimitBurst"} {
-		if _, ok := sd["Unit"][key]; ok {
-			t.Errorf("%s: %s is set: maintenance could leave it in start-limit-hit and a reboot would stop no VM", shutdownUnit, key)
-		}
+	if got := sd.one(t, "Unit", "StartLimitIntervalSec"); got != "0" {
+		t.Errorf("%s: StartLimitIntervalSec = %q, want 0: maintenance could leave it in start-limit-hit and a reboot would stop no VM", shutdownUnit, got)
+	}
+	if _, ok := sd["Unit"]["StartLimitBurst"]; ok {
+		t.Errorf("%s: StartLimitBurst is set", shutdownUnit)
 	}
 	for _, name := range []string{bootStartUnit, setupUnit} {
 		u := parseUnit(t, name)

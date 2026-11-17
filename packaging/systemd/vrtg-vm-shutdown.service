@@ -28,15 +28,17 @@ Description=VirtRigaud: stop the per-host agent's VMs at host shutdown (developm
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
 Wants=vrtg-agent-setup.service
 After=local-fs.target dbus.service vrtg-agent-setup.service
-# No StartLimitIntervalSec=/StartLimitBurst= here, on purpose: systemd's
-# default applies. Every stop, start, restart, try-restart and Upholds=
-# re-arm of this unit counts towards a start limit, so a tight one put the
-# unit in start-limit-hit after routine maintenance; Upholds= then waited
-# out the window before starting it again, and a reboot inside that window
-# ran no stop action, so no VM was stopped. A start limit cannot bound
-# Upholds= retries anyway (it paces them at most 16 times in 10 seconds
-# whatever the unit sets), and this unit's start runs nothing, so it does
-# not fail.
+# Never start-limited: StartLimitIntervalSec=0 turns the start limit off
+# (leaving the key out would fall back to the manager's default, typically
+# 5 starts in 10 seconds). Every stop, start, restart, try-restart and
+# Upholds= re-arm of this unit counts towards a start limit, so a limit put
+# the unit in start-limit-hit after routine maintenance; Upholds= then
+# waited out the window before starting it again, and a reboot inside that
+# window ran no stop action, so no VM was stopped. A start limit cannot
+# bound Upholds= retries anyway (it paces them at most 16 times in 10
+# seconds whatever the unit sets), and this unit's start runs nothing, so
+# it does not fail.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

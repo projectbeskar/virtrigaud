@@ -1144,8 +1144,9 @@ stops nothing. When it cannot read the host's state it stops nothing either,
 and exits 1. When `vrtg-agent-setup.service` failed (the agent's user is
 missing or its uid moved), it logs a warning that it is skipping, stops
 nothing and exits 0; a setup unit that is merely inactive, or whose state
-cannot be read, does not skip. The unit sets no start limit of its own, on
-purpose: its stops, starts, restarts and `Upholds=` re-arms all count
+cannot be read, does not skip. The unit is never start-limited, on
+purpose (`StartLimitIntervalSec=0`; leaving the key out would fall back to
+the manager's default limit, typically 5 starts in 10 seconds): its stops, starts, restarts and `Upholds=` re-arms all count
 towards one, so a tight limit put it in `start-limit-hit` after routine
 maintenance, `Upholds=` then waited out the window before starting it
 again, and a reboot inside the window ran no stop action and stopped no VM. The unit never wants, requires or binds to `vrtg-agent.service`,
@@ -1287,7 +1288,7 @@ units that want or require it. The setup and boot-start units set
 `StartLimitIntervalSec=300` and `StartLimitBurst=5`, so even a repeated
 start ends in `start-limit-hit`; a boot-start unit in `start-limit-hit`
 only misses starting the agent (start it by hand), and stops nothing. The
-shutdown unit sets no start limit (see above): a start limit cannot bound
+shutdown unit turns its start limit off (see above): a start limit cannot bound
 `Upholds=` retries, and its start runs nothing.
 
 When setup fails (a moved user id, say), the journal shows, once or a few
@@ -1308,6 +1309,15 @@ the setup unit first) or `systemctl restart vrtg-agent-boot-start.service`
 (it left no marker, so it acts once), or reboot. Starting only
 `vrtg-agent-setup.service` by hand does not start the agent: nothing that
 is already active re-runs when it succeeds.
+
+The shutdown unit's stop action skips whenever the setup unit is failed,
+whatever the cause: also when setup was left failed for another reason
+than a moved uid (an operator restarted it during maintenance, say, and it
+failed on a transient error). A reboot then skips the graceful VM stop.
+Before rebooting, fix the cause and run `systemctl reset-failed
+vrtg-agent-setup.service` (or start the agent, which starts the setup unit
+again), and alert on `systemctl --failed` so that a failed setup unit is
+seen before a reboot.
 
 `hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
 (with the binary path replaced, since it does not exist on a build machine)

@@ -125,14 +125,16 @@ for name in vrtg-agent-boot-start.service vrtg-agent-setup.service; do
 		problem "${name}: no explicit start limit: a repeated start could loop"
 	fi
 done
-# The shutdown unit must have NO start limit of its own: maintenance stops,
-# starts and Upholds= re-arms count towards it, and a unit in
-# start-limit-hit is not re-armed until the window passes, so a reboot then
-# runs no stop action and stops no VM. A start limit cannot bound Upholds=
-# retries anyway, and the unit's start runs nothing.
-if [ -n "$(value "${UNIT_DIR}/vrtg-vm-shutdown.service" StartLimitIntervalSec)" ] ||
+# The shutdown unit must never be start-limited: maintenance stops, starts
+# and Upholds= re-arms count towards a limit, and a unit in start-limit-hit
+# is not re-armed until the window passes, so a reboot then runs no stop
+# action and stops no VM. StartLimitIntervalSec=0 turns the limit off;
+# leaving it out would fall back to the manager's default limit. A start
+# limit cannot bound Upholds= retries anyway, and the unit's start runs
+# nothing.
+if [ "$(value "${UNIT_DIR}/vrtg-vm-shutdown.service" StartLimitIntervalSec)" != "0" ] ||
 	[ -n "$(value "${UNIT_DIR}/vrtg-vm-shutdown.service" StartLimitBurst)" ]; then
-	problem "vrtg-vm-shutdown.service: has a start limit: maintenance could leave it in start-limit-hit and a reboot would then stop no VM"
+	problem "vrtg-vm-shutdown.service: not StartLimitIntervalSec=0 without StartLimitBurst: maintenance could leave it in start-limit-hit and a reboot would then stop no VM"
 fi
 kicker="${UNIT_DIR}/vrtg-agent-boot-start.service"
 if [ "$(value "${kicker}" ExecStart)" != "${BINARY_PATH}vrtg-agent boot-start" ] ||
