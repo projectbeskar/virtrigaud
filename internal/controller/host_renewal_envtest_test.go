@@ -490,6 +490,8 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		der := issue(e, cr, hostidentitytest.IssueOptions{})
 		reconcileCR(e, cr)
 		Expect(state(e).Renewal.Certificate).To(Equal(der), "published")
+		Expect(drainEvents(e.rec)).To(ContainElement(ContainSubstring(eventReasonAgentRenewalApproved)),
+			"the manager's approval is in the audit trail, as on the undecided path")
 
 		// The manager's rules deny it (the Host is revoked): nothing is
 		// recorded as its approval and the certificate is never published.
@@ -506,6 +508,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		cr = reconcileCR(e, cr)
 		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "a certificate the manager would deny is marked refused")
 		Expect(state(e).Renewal == nil || len(state(e).Renewal.Certificate) == 0).To(BeTrue(), "and never published")
+		Expect(drainEvents(e.rec)).To(ContainElement(ContainSubstring(eventReasonAgentRenewalDenied)), "the Host says the manager refused it")
 	})
 
 	It("keeps a renewal request it refused after another approver approved it refused, and judges none while approvals are suspended", func() {
@@ -554,6 +557,35 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(res.RequeueAfter).To(Equal(admissionSuspendedRequeue))
 		Expect(state(e).Renewal.Approved).To(BeFalse(), "nothing recorded while approvals are suspended")
 		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeFalse())
+	})
+
+	It("revisits an issued renewal request as soon as its pins Secret changes, and marks it refused once the renewal is withdrawn", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).NotTo(BeEmpty(), "issued, its key not pinned yet")
+		// A revocation withdraws the renewal: the change lands on the Host
+		// and the pins Secret, not on the request.
+		h := hostObj(e)
+		h.Spec.Revoked = true
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		reconcileHost(e)
+		sec := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.issuerNS, Name: hostEnrolmentSecretName(e.hostNS, "host-a")}, sec)).To(Succeed())
+		// The pins Secret's change maps to the request it owns (the watch the
+		// manager registers), and that reconcile marks it refused.
+		var reqs []ctrl.Request
+		Eventually(func() []ctrl.Request {
+			reqs = e.reqR.requestsOwnedBy(ctx, sec)
+			return reqs
+		}).Should(ContainElement(ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.GetNamespace(), Name: cr.GetName()}}))
+		for _, rq := range reqs {
+			_, err := e.reqR.Reconcile(ctx, rq)
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeTrue(), "marked without a restart or a resync")
 	})
 
 	It("marks an issued renewal certificate refused once its renewal is withdrawn and its key was never pinned", func() {

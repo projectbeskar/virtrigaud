@@ -1032,6 +1032,8 @@ func (r *HostEnrolmentRequestReconciler) judgeRenewal(ctx context.Context, cr *u
 	if approvedElsewhere {
 		log.FromContext(ctx).Info("A host-agent renewal request was approved by another approver first; the manager's rules hold, "+
 			"so its certificate may be published", "request", reqName, "host", ns+"/"+name, "newKeyPin", v.KeyPin)
+		r.event(host, corev1.EventTypeNormal, eventReasonAgentRenewalApproved, "certificate renewal request "+reqName+
+			" (approved by another approver first) approved for new key "+v.KeyPin)
 		return nil
 	}
 	if err := certrequest.SetCondition(cr, certrequest.ConditionApproved, certrequest.StatusTrue, reasonEnrolAuthorised,
@@ -1062,6 +1064,9 @@ func (r *HostEnrolmentRequestReconciler) refuseApprovedElsewhere(ctx context.Con
 	if err := r.Status().Update(ctx, cr); err != nil {
 		return fmt.Errorf("refuse renewal request %s: %w", reqName, err)
 	}
+	if host == nil {
+		host = r.namedHost(ctx, cr)
+	}
 	log.FromContext(ctx).Info("A host-agent renewal request was approved by another approver, but the manager's rules deny it; "+
 		"its certificate will not be published", "request", reqName, "reason", reason, "detail", message)
 	if host != nil {
@@ -1074,21 +1079,35 @@ func (r *HostEnrolmentRequestReconciler) refuseApprovedElsewhere(ctx context.Con
 // approvedElsewhereUnjudged reports whether cr, approved, is the Host's
 // renewal in progress and the manager has not recorded its own approval of
 // it: another approver decided it before the manager did.
-func (r *HostEnrolmentRequestReconciler) approvedElsewhereUnjudged(ctx context.Context, cr *unstructured.Unstructured) (bool, error) {
+func (r *HostEnrolmentRequestReconciler) approvedElsewhereUnjudged(ctx context.Context, cr *unstructured.Unstructured) (*infravirtrigaudiov1beta1.Host, bool, error) {
 	ns, name, ok := certrequest.HostOf(cr)
 	if !ok {
-		return false, nil
+		return nil, false, nil
 	}
 	host := &infravirtrigaudiov1beta1.Host{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
-		return false, client.IgnoreNotFound(err)
+		return nil, false, client.IgnoreNotFound(err)
 	}
 	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	ren := l.state.Renewal
-	return ren != nil && !ren.Approved && ren.CertificateRequest == cr.GetNamespace()+"/"+cr.GetName(), nil
+	return host, ren != nil && !ren.Approved && ren.CertificateRequest == cr.GetNamespace()+"/"+cr.GetName(), nil
+}
+
+// namedHost returns the Host a request names, nil when it names none or
+// the Host does not exist (for an event only).
+func (r *HostEnrolmentRequestReconciler) namedHost(ctx context.Context, cr *unstructured.Unstructured) *infravirtrigaudiov1beta1.Host {
+	ns, name, ok := certrequest.HostOf(cr)
+	if !ok {
+		return nil
+	}
+	host := &infravirtrigaudiov1beta1.Host{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
+		return nil
+	}
+	return host
 }
 
 // denyRenewal sets a renewal request's Denied condition, and emits a Warning

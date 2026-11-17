@@ -32,8 +32,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
@@ -181,9 +185,15 @@ func (r *HostEnrolmentRequestReconciler) reconcile(ctx context.Context, req ctrl
 			// it decides itself. One already issued before that is not
 			// judged: completeRenewal refuses it (no approval of the
 			// manager's is recorded).
-			unjudged, err := r.approvedElsewhereUnjudged(ctx, cr)
+			host, unjudged, err := r.approvedElsewhereUnjudged(ctx, cr)
 			if err != nil {
 				return ctrl.Result{}, err
+			}
+			if unjudged && renewalRequestFinished(cr) {
+				// Issued before the manager judged it: completeRenewal
+				// refuses it; the Host says so, as for a refusal.
+				r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalDenied, "certificate renewal request "+req.String()+
+					" was approved by another approver and issued before the manager judged it: its certificate is not published")
 			}
 			if unjudged && !renewalRequestFinished(cr) {
 				if r.Admission != nil && !r.Admission.OK() {
@@ -594,7 +604,7 @@ func (r *HostEnrolmentRequestReconciler) validateIssued(ctx context.Context, hos
 
 // event emits an event on the Host when a recorder is set.
 func (r *HostEnrolmentRequestReconciler) event(host *infravirtrigaudiov1beta1.Host, typ, reason, msg string) {
-	if r.Recorder != nil {
+	if r.Recorder != nil && host != nil {
 		r.Recorder.Event(host, typ, reason, msg)
 	}
 }
@@ -603,8 +613,43 @@ func (r *HostEnrolmentRequestReconciler) event(host *infravirtrigaudiov1beta1.Ho
 // manager's cache must restrict CertificateRequests to the enrolment
 // namespace (HostEnrolmentCacheOptions).
 func (r *HostEnrolmentRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	inEnrolmentNS := predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetNamespace() == r.Config.Namespace })
+	isPins := predicate.NewPredicateFuncs(func(o client.Object) bool {
+		return o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
+	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(certrequest.NewObject()).
+		// A change of a pins Secret (a renewal withdrawn by a revoke, a
+		// re-key or a new request) is seen by the requests it owns at once,
+		// not at the next resync: completeRenewal marks a withdrawn
+		// renewal's issued request refused.
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.requestsOwnedBy),
+			builder.WithPredicates(inEnrolmentNS, isPins)).
 		Named("host-enrolment-request").
 		Complete(r)
+}
+
+// requestsOwnedBy maps a pins Secret to the CertificateRequests it owns (the
+// manager's renewal requests) in the enrolment namespace.
+func (r *HostEnrolmentRequestReconciler) requestsOwnedBy(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj.GetNamespace() != r.Config.Namespace || obj.GetUID() == "" {
+		return nil
+	}
+	list := certrequest.NewList()
+	if err := r.List(ctx, list, client.InNamespace(r.Config.Namespace), client.HasLabels{certrequest.LabelAgentRenewal}); err != nil {
+		log.FromContext(ctx).V(1).Info("Could not list the renewal requests of a changed pins Secret; the next resync revisits them",
+			"secret", obj.GetName(), "error", err.Error())
+		return nil
+	}
+	var out []reconcile.Request
+	for i := range list.Items {
+		for _, o := range list.Items[i].GetOwnerReferences() {
+			if o.UID == obj.GetUID() {
+				out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: list.Items[i].GetNamespace(),
+					Name: list.Items[i].GetName()}})
+				break
+			}
+		}
+	}
+	return out
 }
