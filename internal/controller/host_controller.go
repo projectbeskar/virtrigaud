@@ -358,6 +358,18 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 			"spec.revoked is true: the host's agent identity is revoked and its Provider no longer fronts it; it is not polled")
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}
+	// 2c. Likewise a per-host agent Host whose pinned certificate has expired
+	//     (status.agent.certificateExpiry, mirrored by the enrolment
+	//     reconciler): the Provider no longer accepts its agent, so polling
+	//     would only fail every heartbeat. It is rechecked at the heartbeat
+	//     cadence without a call, and polled again as soon as a re-key pins
+	//     a new certificate.
+	if devgate.Compiled && providerRunsHostAgents(provider) && agentCertificateExpired(host, time.Now()) {
+		r.setHostUnavailable(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired,
+			"the host's pinned agent certificate expired at "+host.Status.Agent.CertificateExpiry.UTC().Format(time.RFC3339)+
+				"; it is not polled until a re-key pins a new certificate")
+		return r.persist(ctx, host, base, hostHeartbeatInterval)
+	}
 
 	// 3. Obtain the provider client the same way the VM controller does. A
 	//    not-ready runtime (no endpoint / phase != Running) surfaces here as a
@@ -384,6 +396,13 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	log.FromContext(ctx).V(1).Info("Synced Host inventory",
 		"host", host.Name, "provider", provider.Name, "health", host.Status.Health)
 	return r.persist(ctx, host, base, hostHeartbeatInterval)
+}
+
+// agentCertificateExpired reports whether the Host's pinned agent
+// certificate, as its status mirrors it, has expired at now.
+func agentCertificateExpired(host *infravirtrigaudiov1beta1.Host, now time.Time) bool {
+	a := host.Status.Agent
+	return a != nil && a.CertificateExpiry != nil && !now.Before(a.CertificateExpiry.Time)
 }
 
 // handleGetHostInfoError maps a GetHostInfo failure onto a Host status + requeue.

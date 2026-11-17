@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -372,4 +373,42 @@ func TestHostReconciler_RevokedAgentHost_NotPolled(t *testing.T) {
 	_, err := r.Reconcile(context.Background(), hostReq("host-lv"))
 	require.NoError(t, err)
 	assert.Equal(t, 1, calls, "spec.revoked does not apply to a libvirt Host")
+}
+
+// A per-host agent Host whose pinned certificate has expired is not polled:
+// Ready=False/CertificateExpired, rechecked at the heartbeat cadence without
+// a call; once a re-key pins a new certificate it is polled again.
+func TestHostReconciler_ExpiredAgentCertificate_NotPolledUntilRekeyed(t *testing.T) {
+	s := coverageTestScheme(t)
+	prov := clusterProvider("prov-a")
+	prov.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
+	host := hostCR("host-exp", "prov-a", nil)
+	past := metav1.NewTime(time.Now().Add(-time.Minute))
+	host.Status.Agent = &infravirtrigaudiov1beta1.HostAgentStatus{Mode: infravirtrigaudiov1beta1.HostAgentModeIdentity, CertificateExpiry: &past}
+	calls := 0
+	stub := &stubProvider{GetHostInfoFn: func(_ context.Context, id string) (contracts.HostInfo, error) {
+		calls++
+		return healthyHostInfo(id), nil
+	}}
+	r := newHostReconciler(s, &stubResolver{provider: stub}, prov, host)
+	res, err := r.Reconcile(context.Background(), hostReq("host-exp"))
+	require.NoError(t, err)
+	if !devgate.Compiled {
+		assert.Equal(t, 1, calls, "a release build does not run per-host agents")
+		return
+	}
+	assert.Equal(t, hostHeartbeatInterval, res.RequeueAfter)
+	assert.Zero(t, calls, "an expired agent Host is not polled")
+	got := getHost(t, r.Client, "host-exp")
+	ready := hostReadyCondition(t, got)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired, ready.Reason)
+
+	// A re-key pins a new certificate: the next reconcile polls again.
+	future := metav1.NewTime(time.Now().Add(time.Hour))
+	got.Status.Agent.CertificateExpiry = &future
+	require.NoError(t, r.Status().Update(context.Background(), got))
+	_, err = r.Reconcile(context.Background(), hostReq("host-exp"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "polled again after the re-key")
 }
