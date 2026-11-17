@@ -21,7 +21,8 @@
 #                    start of the agent, then restart and try-restart of the
 #                    shutdown unit again; reports whether the shutdown unit is
 #                    active and never reached start-limit-hit
-#   restart-burst N  N restarts each of the shutdown and setup units back to back (no pause);
+#   restart-burst N  N restarts of the shutdown unit and 3 of the setup unit back to back;
+#                    the shutdown, setup, signer and (when running) agent units stay active;
 #                    reports the time taken and any start-limit record
 #   foreign-entries DIR [pki]
 #                    plant a subdirectory and a symbolic link owned by uid
@@ -110,12 +111,21 @@ maint-burst)
 restart-burst)
   cursor=$(journalctl -n 1 --show-cursor -o cat --no-pager | sed -n 's/^-- cursor: //p')
   t0=$(date +%s.%N)
+  # The shutdown unit N times; the setup unit 3 times, about what a package
+  # upgrade does. A setup restart also restarts the agent and the signer
+  # (Requires=), which keep a start limit on purpose (it ends a crash loop),
+  # so a long burst of setup restarts would rightly trip theirs.
   for i in $(seq "${2:-8}"); do
     systemctl restart vrtg-vm-shutdown.service || log "    restart $i of the shutdown unit failed"
+  done
+  for i in 1 2 3; do
     systemctl restart vrtg-agent-setup.service || log "    restart $i of the setup unit failed"
   done
-  log "${2:-8} restarts of the shutdown and setup units in $(awk "BEGIN{printf \"%.2f\", $(date +%s.%N) - $t0}") s"
-  for u in vrtg-vm-shutdown.service vrtg-agent-setup.service; do
+  log "${2:-8} restarts of the shutdown unit and 3 of the setup unit in $(awk "BEGIN{printf \"%.2f\", $(date +%s.%N) - $t0}") s"
+  for u in vrtg-vm-shutdown.service vrtg-agent-setup.service vrtg-agent-signer.service vrtg-agent.service; do
+    if [ "$u" = vrtg-agent.service ] && [ "$(systemctl show -p ActiveState --value "$u")" != active ] && [ "$(systemctl show -p Result --value "$u")" != start-limit-hit ]; then
+      log "SKIP $u is stopped (maintenance)"; continue
+    fi
     hits=$(journalctl -o cat --no-pager --after-cursor "$cursor" -u "$u" | grep -cE 'start-limit-hit|repeated too quickly')
     if [ "$(systemctl show -p ActiveState --value "$u")" = active ] && [ "$hits" = 0 ]; then
       log "PASS $u active, 0 start-limit records"; else log "FAIL $u $(unit_state "$u"), $hits start-limit records"; fails=$((fails + 1)); fi

@@ -1303,7 +1303,10 @@ each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
 the cause is fixed, on systemd 252 only for its first burst of 16 runs (then
 start the agent by hand once the cause is fixed). The agent and the signer
 keep a start limit: they restart themselves (`Restart=always`), and the
-limit ends a crash loop.
+limit ends a crash loop. Restarting the setup unit restarts them too
+(`Requires=`), so restarting it many times in quick succession (about 10
+in 5 minutes) puts them in `start-limit-hit`; `systemctl reset-failed`
+recovers them. A package upgrade restarts it once or twice.
 
 When setup fails (a moved user id, say), the journal shows, once or a few
 times at boot, the setup unit's own error (for the owner check: `N file(s)
