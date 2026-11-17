@@ -501,3 +501,12 @@ func TestInstallAcceptsTheMinimumLifetime(t *testing.T) {
 	_, statErr := os.Lstat(f.hostCrt())
 	require.NoError(t, statErr)
 }
+
+// TestInstallRefusesAShortCertificateForItsLifetime: the refusal names the
+// lifetime, not another reason.
+func TestInstallRefusesAShortCertificateForItsLifetime(t *testing.T) {
+	f := newFixture(t)
+	_, err := f.install(f.issue(t, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}), false)
+	require.ErrorIs(t, err, enrol.ErrInstall)
+	require.ErrorIs(t, err, hostidentity.ErrLifetimeTooShort)
+}

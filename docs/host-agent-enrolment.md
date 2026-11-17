@@ -109,9 +109,12 @@ shortens lifetimes can issue a certificate valid for less than 15 minutes
 manager refuses to pin the key of such a certificate, at first enrolment and
 at renewal: nothing is pinned or published, the request is marked refused,
 and an `AgentCertificateLifetimeTooShort` warning event on the Host carries
-the reason `IssuedLifetimeTooShort` and the lifetime found. The `AgentEnrolled`
-condition says `CertificateRejected` with the same reason in its message
-(enrolment), and a renewal restarts under the backoff below. The agent applies
+the reason `IssuedLifetimeTooShort` and the lifetime found. At first
+enrolment the `AgentEnrolled` condition says `CertificateRejected` with the
+same reason in its message; on a re-key the condition stays `Enrolled`, so
+the event is the only report; a renewal restarts under the backoff below. A
+renewed certificate of that kind stored by an earlier manager is refused the
+same way (no pin, renewal restarted) instead of being pinned. The agent applies
 the same floor before it installs an enrolment certificate or stages a renewed
 one, so it never runs with a certificate it cannot renew. A certificate that
 is already pinned is not judged against the floor again: it stays in use until

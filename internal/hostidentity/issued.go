@@ -85,8 +85,8 @@ func RootPool(caBundlePEM []byte) (*x509.CertPool, error) {
 // any intermediates) against the authorisation before its key is pinned: it
 // chains to roots for server authentication at now; it meets the certificate
 // profile (CheckLeafProfile) and its lifetime is at least MinLifetime
-// (CheckLeafMinLifetime; the error then also wraps ErrLifetimeTooShort); its subject alternative names are exactly the
-// authorised host URI and record; and its key is the authorised key.
+// (CheckLeafMinLifetime; the error then also wraps ErrLifetimeTooShort); its
+// subject alternative names are exactly the authorised host URI and record; and its key is the authorised key.
 func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, now time.Time) (Issued, error) {
 	if roots == nil {
 		return Issued{}, fmt.Errorf("%w: no CA bundle", ErrIssued)

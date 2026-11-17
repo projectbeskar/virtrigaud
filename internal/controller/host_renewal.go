@@ -429,6 +429,12 @@ type renewalOutcome struct {
 	early bool
 	// heldBack names a new key whose renewal is in its backoff or given up.
 	heldBack string
+	// tooShort is the message of a stored issued certificate that lives
+	// less than hostidentity.MinLifetime: its renewal failed (failedAttempt,
+	// gaveUp) and nothing was pinned.
+	tooShort      string
+	failedAttempt renewalAttempt
+	gaveUp        bool
 }
 
 // renewalTrust is the pins-Secret side of renewal (PinsHostTrust).
@@ -476,6 +482,17 @@ func (p *PinsHostTrust) RenewalStep(ctx context.Context, provider *infravirtriga
 	staged := hex.EncodeToString(v.Host.GetStagedCertificateSha256())
 	changed := false
 	r := st.Renewal
+	if r != nil && r.PinnedAt == nil && len(r.Certificate) > 0 {
+		// A certificate stored before the minimum lifetime was enforced is
+		// never pinned by an answer either.
+		if leaf, perr := x509.ParseCertificate(r.Certificate); perr == nil {
+			if lerr := hostidentity.CheckLeafMinLifetime(leaf); lerr != nil {
+				out.tooShort = hostidentity.ReasonIssuedLifetimeTooShort + ": " + lerr.Error()
+				out.failedAttempt, out.gaveUp = st.failRenewal(now, out.tooShort)
+				changed, r = true, nil
+			}
+		}
+	}
 	switch {
 	case r != nil && r.PinnedAt != nil && v.SignerPin == r.KeyPin && staged == "":
 		// The new key is in use: it signed this answer.
@@ -569,6 +586,13 @@ func (h *HostAnswers) checkRenewal(ctx context.Context, provider *infravirtrigau
 			"host", hostID, "newKeyPin", out.pinned, "answerSHA256", hex.EncodeToString(v.BlobSHA256[:]))
 		evs = append(evs, hostEvent{corev1.EventTypeNormal, eventReasonAgentRenewalPinned,
 			"the host staged its renewed certificate (signed answer); new key " + out.pinned + " is pinned beside the current one"})
+	}
+	if out.tooShort != "" {
+		logger.Info("Refused a stored renewed certificate: its lifetime is below the minimum; nothing is pinned", "host", hostID,
+			"newKeyPin", out.failedAttempt.KeyPin, "reason", out.tooShort)
+		evs = append(evs, hostEvent{corev1.EventTypeWarning, eventReasonAgentCertLifetimeTooShort,
+			"the issued renewal certificate for key " + out.failedAttempt.KeyPin + " was refused and not pinned: " + out.tooShort})
+		evs = append(evs, restartedEvents(out.failedAttempt, out.gaveUp, out.tooShort)...)
 	}
 	if out.heldBack != "" {
 		logger.V(1).Info("A host's renewal request for this key is held back after failures", "host", hostID, "keyPin", out.heldBack)
@@ -713,6 +737,22 @@ func (r *HostEnrolmentReconciler) pinRenewalAtExpiry(ctx context.Context, host *
 	roots, err := hostidentity.RootPool(r.Config.CABundle)
 	if err != nil {
 		return false, err
+	}
+	// A certificate stored before the minimum lifetime was enforced is
+	// refused for that reason, which is judged before its validity (it may
+	// have expired meanwhile): the renewal fails (backoff, new key) and the
+	// Host says why.
+	if leaf, perr := x509.ParseCertificate(ren.Certificate); perr == nil {
+		if lerr := hostidentity.CheckLeafMinLifetime(leaf); lerr != nil {
+			why := hostidentity.ReasonIssuedLifetimeTooShort + ": " + lerr.Error()
+			a, gaveUp := st.failRenewal(r.now(), why)
+			r.event(host, corev1.EventTypeWarning, eventReasonAgentCertLifetimeTooShort, "the issued renewal certificate for key "+
+				a.KeyPin+" was refused and not pinned at the old certificate's expiry: "+why)
+			for _, ev := range restartedEvents(a, gaveUp, why) {
+				r.event(host, ev.typ, ev.reason, ev.message)
+			}
+			return true, nil
+		}
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ren.Certificate})
 	if _, err := hostidentity.ValidateIssued(hostidentity.Authorisation{HostName: live.Name, HostURI: hostURI, Record: rec,
@@ -1187,6 +1227,16 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 		for _, ev := range restartedEvents(a, gaveUp, "the issued certificate was refused") {
 			r.event(host, ev.typ, ev.reason, ev.message)
 		}
+		// The refusal is reported as soon as it is saved, before the request's
+		// status is written: a retry of a failed write finds the renewal
+		// failed and marks the request withdrawn, so the event is only here.
+		if errors.Is(verr, hostidentity.ErrLifetimeTooShort) {
+			r.event(host, corev1.EventTypeWarning, eventReasonAgentCertLifetimeTooShort, "the certificate issued for renewal request "+
+				reqName+" was refused and not published: "+verr.Error())
+		} else {
+			r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalRefused, "the certificate issued for renewal request "+reqName+
+				" was refused")
+		}
 		if _, err := iss.Complete(cr, verr, r.now()); err != nil {
 			return err
 		}
@@ -1194,13 +1244,6 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 			return fmt.Errorf("record the outcome on renewal request %s: %w", reqName, err)
 		}
 		log.FromContext(ctx).Info("Refused the certificate issued for a renewal request", "request", reqName, "host", ns+"/"+name)
-		if errors.Is(verr, hostidentity.ErrLifetimeTooShort) {
-			r.event(host, corev1.EventTypeWarning, eventReasonAgentCertLifetimeTooShort, "the certificate issued for renewal request "+
-				reqName+" was refused and not published: "+verr.Error())
-			return nil
-		}
-		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalRefused, "the certificate issued for renewal request "+reqName+
-			" was refused")
 		return nil
 	}
 	na := metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second))

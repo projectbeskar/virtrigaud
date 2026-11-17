@@ -140,8 +140,8 @@ type Result struct {
 //   - the signer's key is ECDSA P-256 and is the request's key;
 //   - the certificate chains directly to a pinned host identity issuer for
 //     server authentication at Now, is not a CA, has server authentication as
-//     its only usage, lives at least hostidentity.MinLifetime and at most hostidentity.MaxLifetime, has an empty
-//     subject or the Host's name, carries no DNS, address or e-mail name,
+//     its only usage, lives at least hostidentity.MinLifetime and at most
+//     hostidentity.MaxLifetime, has an empty subject or the Host's name, carries no DNS, address or e-mail name,
 //     carries exactly the request's URIs (so the enrolment record the manager
 //     drew), and certifies the signer's key (hostidentity.ValidateIssued);
 //   - when a certificate is installed already, or the daemon recorded its
@@ -206,7 +206,7 @@ func Install(o InstallOptions) (Result, error) {
 		HostName: name, HostURI: hostURI, Record: rec, KeyPin: signerPin,
 	}, leafPEM, o.Trust.HostCAPool, o.Now)
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: %v", ErrInstall, err)
+		return Result{}, fmt.Errorf("%w: %w", ErrInstall, err)
 	}
 	return install(o, leafPEM, issued, hostURI)
 }

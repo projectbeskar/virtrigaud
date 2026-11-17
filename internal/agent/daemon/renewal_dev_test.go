@@ -342,7 +342,6 @@ func TestRenewalStageRefusals(t *testing.T) {
 		"another key":          h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{PublicKey: &otherKey.PublicKey}),
 		"the current key":      h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{PublicKey: &h.pki.HostKey.PublicKey}),
 		"client auth usage":    h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}}),
-		"lifetime too short":   h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}),
 		"lifetime too long":    h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{Lifetime: 60 * 24 * time.Hour}),
 		"expired by the clock": h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{Lifetime: 24 * time.Hour}),
 	}
@@ -351,6 +350,14 @@ func TestRenewalStageRefusals(t *testing.T) {
 		if _, err := r.install(b.Bytes, false); status.Code(err) != codes.InvalidArgument {
 			t.Errorf("%s: stage = %v, want InvalidArgument", name, err)
 		}
+	}
+	// Valid at the agent's clock, so that only the minimum lifetime refuses it.
+	short := h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{
+		Lifetime: hostidentity.MinLifetime - time.Second, NotBefore: time.Now().Add(renewalAge - time.Minute)})
+	sb, _ := pem.Decode(short)
+	_, serr := r.install(sb.Bytes, false)
+	if status.Code(serr) != codes.InvalidArgument || !strings.Contains(status.Convert(serr).Message(), hostidentity.ErrLifetimeTooShort.Error()) {
+		t.Errorf("too short: stage = %v, want InvalidArgument naming the lifetime", serr)
 	}
 	if exists(t, h.pkiPath(enrol.FileRenewalCert)) {
 		t.Fatal("a refused certificate was staged")
