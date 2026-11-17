@@ -22,6 +22,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestNonStoredGate_FloodThatStopsIsSummarised: the last window of a flood
@@ -87,5 +88,38 @@ func TestNonStoredGate_ForcedFlushAndActorBound(t *testing.T) {
 	}
 	if s := g.flush(true); s == nil || !strings.Contains(s.Reason, "known=") {
 		t.Fatalf("forced flush: %+v", s)
+	}
+}
+
+// TestTruncateUTF8: an actor is cut on a rune boundary, so the summary stays
+// valid UTF-8 whatever the actor holds.
+func TestTruncateUTF8(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"short", 64, "short"},
+		{"abcdef", 3, "abc"},
+		{"ab\u00e9", 3, "ab"},  // e-acute is 2 bytes: not split
+		{"a\u20ac", 2, "a"},    // euro sign is 3 bytes
+		{"\U0001F600x", 3, ""}, // a 4-byte rune at the start
+		{"\U0001F600x", 4, "\U0001F600"},
+	} {
+		got := truncateUTF8(tc.in, tc.n)
+		if got != tc.want || !utf8.ValidString(got) || len(got) > tc.n {
+			t.Errorf("truncateUTF8(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+		}
+	}
+	now := time.Unix(1_700_000_000, 0)
+	g := &nonStoredGate{now: func() time.Time { return now }}
+	actor := strings.Repeat("a", maxSummaryActorLen-1) + "\u00e9\u00e9"
+	for i := 0; i < nonStoredBurst+1; i++ {
+		g.admit(AuditEvent{Event: "known", Actor: actor})
+	}
+	for a := range g.byActor {
+		if !utf8.ValidString(a) || len(a) > maxSummaryActorLen {
+			t.Fatalf("actor %q kept", a)
+		}
 	}
 }

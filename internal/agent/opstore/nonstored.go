@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Bound on the audit events the store emits without storing them (a
@@ -112,14 +113,23 @@ func (g *nonStoredGate) suppressLocked(ev AuditEvent) {
 		kind += ":" + ev.Reason
 	}
 	g.byKind[kind]++
-	actor := ev.Actor
-	if len(actor) > maxSummaryActorLen {
-		actor = actor[:maxSummaryActorLen]
-	}
+	actor := truncateUTF8(ev.Actor, maxSummaryActorLen)
 	if _, ok := g.byActor[actor]; !ok && len(g.byActor) >= maxSummaryActors {
 		actor = otherActors
 	}
 	g.byActor[actor]++
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a UTF-8
+// sequence: the cut moves back to the start of the rune it would split.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // summaryLocked returns the summary of the suppressed events and resets
