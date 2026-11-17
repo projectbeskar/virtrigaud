@@ -612,6 +612,18 @@ starts with no tombstones, and once the manager confirms the predecessor's
 freeze ([Freeze confirmation](#freeze-confirmation)), the store discards
 the predecessor's records, tombstones and attempt marks. VM tombstones stay.
 
+**VM tombstones bound the store per host, not per enrolment.** A deleted VM
+stays deleted across re-keys, so its tombstone is kept for as long as the
+store exists. At about 260 B each, the default threshold holds roughly 0.9 to
+1 million deleted VMs, fewer while the current enrolment's own tombstones
+share it. A store filled by VM tombstones stays full after a re-key. It is
+recovered with a fresh store, as for a host whose disk was reinstalled:
+once no VM is left on the host, reinstall the agent's state and re-key the
+Host with a new key
+([Re-keying an enrolled Host](host-agent-enrolment.md#re-keying-an-enrolled-host)).
+A fresh store has no record of the VMs a host runs, so it must not be used on
+a host that still runs VMs.
+
 **Crash hook.** A development build reads `VRTG_AGENT_DEV_CRASH_AT`, a
 comma-separated sequence of crash points of the journal and the operation
 store (for example `before-accept,after-store-commit`), and kills its own
