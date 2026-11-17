@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -411,4 +412,45 @@ func TestHostReconciler_ExpiredAgentCertificate_NotPolledUntilRekeyed(t *testing
 	_, err = r.Reconcile(context.Background(), hostReq("host-exp"))
 	require.NoError(t, err)
 	assert.Equal(t, 1, calls, "polled again after the re-key")
+}
+
+// The expiry comes from the pins Secret when the manager runs enrolment: a
+// certificate that expired there is not polled even before the status
+// mirror shows it, and a re-key pinned there is polled at once.
+func TestHostReconciler_ExpiryFromThePinsSecret(t *testing.T) {
+	if !devgate.Compiled {
+		t.Skip("per-host agents run in development builds only")
+	}
+	s := coverageTestScheme(t)
+	prov := clusterProvider("prov-a")
+	prov.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
+	host := hostCR("host-pins", "prov-a", nil)
+	host.UID = "host-pins-uid"
+	calls := 0
+	stub := &stubProvider{GetHostInfoFn: func(_ context.Context, id string) (contracts.HostInfo, error) {
+		calls++
+		return healthyHostInfo(id), nil
+	}}
+	r := newHostReconciler(s, &stubResolver{provider: stub}, prov, host)
+	cfg := &HostEnrolmentConfig{Namespace: "host-agent-pki", TrustDomain: "cluster.test"}
+	r.HostAnswers = NewHostAnswers(r.Client, r.Client, cfg, bytes16(0x42))
+	require.NotNil(t, r.HostAnswers)
+	setExpiry := func(at time.Time) {
+		t.Helper()
+		h := getHost(t, r.Client, "host-pins")
+		l, err := loadHostEnrolment(context.Background(), r.Client, cfg, h)
+		require.NoError(t, err)
+		l.state.Current = enrolmentFor(strings.Repeat("c3", 16), "uid-prov-a", 2, strings.Repeat("aa", 32))
+		l.state.Current.NotAfter = metav1.NewTime(at)
+		require.NoError(t, saveHostEnrolment(context.Background(), r.Client, cfg, h, &l))
+	}
+	setExpiry(time.Now().Add(-time.Minute))
+	_, err := r.Reconcile(context.Background(), hostReq("host-pins"))
+	require.NoError(t, err)
+	assert.Zero(t, calls, "expired in the pins Secret: not polled, whatever the status says")
+	assert.Equal(t, infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired, hostReadyCondition(t, getHost(t, r.Client, "host-pins")).Reason)
+	setExpiry(time.Now().Add(time.Hour))
+	_, err = r.Reconcile(context.Background(), hostReq("host-pins"))
+	require.NoError(t, err)
+	assert.Equal(t, 1, calls, "a re-key pinned in the Secret is polled at once")
 }

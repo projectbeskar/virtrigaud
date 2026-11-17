@@ -711,8 +711,8 @@ credentials Secret
 
 A revoked Host (`spec.revoked`) is no longer polled by the heartbeat: its
 `Ready` condition is `False` with reason `Revoked`. Nor is a Host whose
-pinned agent certificate has expired (`status.agent.certificateExpiry` in
-the past): `Ready=False` with reason `CertificateExpired`, rechecked every
+pinned agent certificate has expired (read from its pins Secret, which
+`status.agent.certificateExpiry` mirrors): `Ready=False` with reason `CertificateExpired`, rechecked every
 minute without a call, and polled again once a re-key pins a new
 certificate.
 

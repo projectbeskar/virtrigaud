@@ -359,14 +359,15 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}
 	// 2c. Likewise a per-host agent Host whose pinned certificate has expired
-	//     (status.agent.certificateExpiry, mirrored by the enrolment
-	//     reconciler): the Provider no longer accepts its agent, so polling
+	//     (read from its pins Secret, the source the enrolment reconciler
+	//     mirrors into status.agent.certificateExpiry): the Provider no
+	//     longer accepts its agent, so polling
 	//     would only fail every heartbeat. It is rechecked at the heartbeat
 	//     cadence without a call, and polled again as soon as a re-key pins
 	//     a new certificate.
-	if devgate.Compiled && providerRunsHostAgents(provider) && agentCertificateExpired(host, time.Now()) {
+	if expiry, ok := r.agentCertificateExpiry(ctx, host); devgate.Compiled && providerRunsHostAgents(provider) && ok && !time.Now().Before(expiry) {
 		r.setHostUnavailable(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired,
-			"the host's pinned agent certificate expired at "+host.Status.Agent.CertificateExpiry.UTC().Format(time.RFC3339)+
+			"the host's pinned agent certificate expired at "+expiry.UTC().Format(time.RFC3339)+
 				"; it is not polled until a re-key pins a new certificate")
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}
@@ -398,11 +399,27 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	return r.persist(ctx, host, base, hostHeartbeatInterval)
 }
 
-// agentCertificateExpired reports whether the Host's pinned agent
-// certificate, as its status mirrors it, has expired at now.
-func agentCertificateExpired(host *infravirtrigaudiov1beta1.Host, now time.Time) bool {
-	a := host.Status.Agent
-	return a != nil && a.CertificateExpiry != nil && !now.Before(a.CertificateExpiry.Time)
+// agentCertificateExpiry returns when the Host's pinned agent certificate
+// expires: from its pins Secret, read through the enrolment loader, when the
+// manager runs enrolment (so a re-key is seen as soon as it is pinned, not
+// when the status mirror catches up), else from status.agent. ok is false
+// when no certificate is pinned.
+func (r *HostReconciler) agentCertificateExpiry(ctx context.Context, host *infravirtrigaudiov1beta1.Host) (time.Time, bool) {
+	if r.HostAnswers != nil {
+		if p, isPins := r.HostAnswers.Trust.(*PinsHostTrust); isPins && p.Config != nil {
+			// The cached client: a polling decision, not a read-modify-write.
+			if l, err := loadHostEnrolment(ctx, p.Client, p.Config, host); err == nil {
+				if l.reset || l.state.Current == nil {
+					return time.Time{}, false
+				}
+				return l.state.Current.NotAfter.Time, true
+			}
+		}
+	}
+	if a := host.Status.Agent; a != nil && a.CertificateExpiry != nil {
+		return a.CertificateExpiry.Time, true
+	}
+	return time.Time{}, false
 }
 
 // handleGetHostInfoError maps a GetHostInfo failure onto a Host status + requeue.
