@@ -58,6 +58,9 @@ RestartPreventExitStatus=2
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStartSec=5min
+# Every operation event is a journal line, and the system journal is the
+# durable audit record: never let journald's rate limit drop one.
+LogRateLimitIntervalSec=0
 TimeoutStopSec=60
 User=virtrigaud-agent
 Group=virtrigaud-agent

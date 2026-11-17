@@ -98,6 +98,9 @@ for name in vrtg-agent.service vrtg-agent-signer.service vrtg-vm-shutdown.servic
 		problem "${name}: does not require vrtg-agent-setup.service: it would start when its users' ids moved"
 	fi
 done
+if [ "$(value "${UNIT_DIR}/vrtg-agent.service" LogRateLimitIntervalSec)" != "0" ]; then
+	problem "vrtg-agent.service: LogRateLimitIntervalSec=0 missing: journald could drop audit lines"
+fi
 signer="${UNIT_DIR}/vrtg-agent-signer.service"
 rw="$(value "${signer}" ReadWritePaths | tr ' ' '\n' | sed '/^$/d' | sort | paste -sd' ' -)"
 if [ "${rw}" != "/run/virtrigaud-signer /var/lib/virtrigaud-signer" ]; then

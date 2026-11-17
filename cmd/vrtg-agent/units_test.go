@@ -107,6 +107,8 @@ func TestAgentUnitProperties(t *testing.T) {
 		"CapabilityBoundingSet": "", "AmbientCapabilities": "", "User": "virtrigaud-agent", "StateDirectoryMode": "0700",
 		"ProtectSystem": "strict", "RestartPreventExitStatus": "2", "ProtectProc": "invisible", "PrivateIPC": "yes",
 		"SystemCallErrorNumber": "EPERM", "TimeoutStartSec": "5min",
+		// The audit lines are the durable record: journald must not drop them.
+		"LogRateLimitIntervalSec": "0",
 	} {
 		if got := u.one(t, "Service", key); got != want {
 			t.Errorf("[Service] %s = %q, want %q", key, got, want)
