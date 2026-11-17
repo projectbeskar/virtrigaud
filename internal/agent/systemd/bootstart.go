@@ -86,6 +86,29 @@ func (s Systemctl) Active(ctx context.Context, unit string) (bool, error) {
 
 var _ UnitStarter = Systemctl{}
 
+// UnitFailures reports whether a unit is in the failed state.
+type UnitFailures interface {
+	// Failed reports whether unit failed (systemctl is-failed succeeds).
+	Failed(ctx context.Context, unit string) (bool, error)
+}
+
+// Failed implements UnitFailures: systemctl is-failed --quiet exits 0 for a
+// failed unit and non-zero otherwise; a systemctl that cannot be run is an
+// error.
+func (s Systemctl) Failed(ctx context.Context, unit string) (bool, error) {
+	err := exec.CommandContext(ctx, s.bin(), "is-failed", "--quiet", unit).Run() // #nosec G204 -- fixed binary, a unit name of ours
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.As(err, &exit):
+		return false, nil
+	}
+	return false, fmt.Errorf("systemctl is-failed %s: %w", unit, err)
+}
+
+var _ UnitFailures = Systemctl{}
+
 // Enabled implements UnitStarter: systemctl is-enabled --quiet exits 0 for an
 // enabled unit and non-zero otherwise (disabled, masked, not found, ...); a
 // systemctl that cannot be run is an error.

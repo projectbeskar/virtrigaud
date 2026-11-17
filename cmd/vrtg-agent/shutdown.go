@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -49,18 +50,36 @@ func shutdownCommand(args []string, log logr.Logger, stderr io.Writer) int {
 		log.Error(err, "invalid configuration")
 		return 2
 	}
-	exec, err := cfg.NewExecutor()
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	return shutdownVMs(ctx, systemd.Systemctl{}, systemd.Systemctl{}, func() (executor.Stopper, error) {
+		return cfg.NewExecutor()
+	}, log)
+}
+
+// shutdownVMs is the guarded action of shutdown-vms. When the setup unit
+// failed (the agent's user is missing or its uid moved), it does nothing and
+// exits 0: the agent's state cannot be trusted, nothing is stopped, and the
+// failure is the setup unit's to report. This check is in the action, not a
+// unit condition: the shutdown unit is upheld, and a skipped upheld unit is
+// started again and again. A setup unit that is merely inactive, or whose
+// state cannot be read, does not skip: the shutdown guard and the executor
+// then decide, fail-closed, as before.
+func shutdownVMs(ctx context.Context, m systemd.Manager, units systemd.UnitFailures, newStopper func() (executor.Stopper, error), log logr.Logger) int {
+	failed, err := units.Failed(ctx, systemd.SetupUnit)
+	switch {
+	case err != nil:
+		log.Info("cannot tell whether the setup unit failed; going on", "unit", systemd.SetupUnit, "error", err.Error())
+	case failed:
+		slog.New(logr.ToSlogHandler(log)).Warn("skipping: the agent's users and directories could not be set up ("+systemd.SetupUnit+
+			" failed), so the agent's state cannot be used; no VM is stopped", "unit", systemd.SetupUnit)
+		return 0
+	}
+	s, err := newStopper()
 	if err != nil {
 		log.Error(err, "executor")
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-	defer cancel()
-	return shutdownVMs(ctx, systemd.Systemctl{}, exec, log)
-}
-
-// shutdownVMs is the guarded action of shutdown-vms.
-func shutdownVMs(ctx context.Context, m systemd.Manager, s executor.Stopper, log logr.Logger) int {
 	down, err := systemd.ShutdownInProgress(ctx, m)
 	if err != nil {
 		log.Error(err, "cannot tell whether the host is shutting down; no VM is stopped")

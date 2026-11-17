@@ -1141,7 +1141,14 @@ when `/usr/bin/systemctl is-system-running` reports `stopping` or a start job
 of `shutdown.target`, `reboot.target`, `soft-reboot.target`, `halt.target`,
 `poweroff.target` or `kexec.target` is queued; a maintenance stop of the unit
 stops nothing. When it cannot read the host's state it stops nothing either,
-and exits 1. The unit never wants, requires or binds to `vrtg-agent.service`,
+and exits 1. When `vrtg-agent-setup.service` failed (the agent's user is
+missing or its uid moved), it logs a warning that it is skipping, stops
+nothing and exits 0; a setup unit that is merely inactive, or whose state
+cannot be read, does not skip. The unit sets no start limit of its own, on
+purpose: its stops, starts, restarts and `Upholds=` re-arms all count
+towards one, so a tight limit put it in `start-limit-hit` after routine
+maintenance, `Upholds=` then waited out the window before starting it
+again, and a reboot inside the window ran no stop action and stopped no VM. The unit never wants, requires or binds to `vrtg-agent.service`,
 so starting it never starts an agent stopped for maintenance; it is not
 ordered against the agent's unit either (`After=` would only order the two,
 never pull the agent in). That ordering is decided when the agent runs real
@@ -1276,9 +1283,12 @@ fail because setup failed: the shutdown and boot-start units only want the
 setup unit (and start after it); the shutdown unit's start runs nothing, and
 the boot-start unit's action succeeds and makes no marker when setup is not
 active. Nothing upholds the setup unit: it runs when the boot pulls in the
-units that want or require it, and the setup, shutdown and boot-start units
-also set `StartLimitIntervalSec=300` and `StartLimitBurst=5`, so even a
-repeated start ends in `start-limit-hit`.
+units that want or require it. The setup and boot-start units set
+`StartLimitIntervalSec=300` and `StartLimitBurst=5`, so even a repeated
+start ends in `start-limit-hit`; a boot-start unit in `start-limit-hit`
+only misses starting the agent (start it by hand), and stops nothing. The
+shutdown unit sets no start limit (see above): a start limit cannot bound
+`Upholds=` retries, and its start runs nothing.
 
 When setup fails (a moved user id, say), the journal shows, once or a few
 times at boot, the setup unit's own error (for the owner check: `N file(s)
@@ -1288,12 +1298,16 @@ unit `failed`, the agent and the signer `Dependency failed` (only when
 something starts them), and one warning of the boot-start unit; it does not
 repeat. The shutdown unit is active, and its stop action stays fail-closed:
 without the user it does not run (`217/USER`), and with a moved uid it
-cannot read the agent's state and stops nothing. Either way the VMs are not
-stopped gracefully at the next host shutdown. Alert on `systemctl --failed`
-(the setup unit is failed) or the host monitoring's equivalent, so that
-this is seen before the host is shut down. Fix the cause, then `systemctl
-reset-failed vrtg-agent-setup.service` and `systemctl start
-vrtg-agent.service` (or reboot).
+sees the setup unit failed, logs a warning that it is skipping and stops
+nothing. Either way the VMs are not stopped gracefully at the next host
+shutdown. Alert on `systemctl --failed` (the setup unit is failed) or the
+host monitoring's equivalent, so that this is seen before the host is shut
+down. Fix the cause, then `systemctl reset-failed vrtg-agent-setup.service`
+and start the agent: `systemctl start vrtg-agent.service` (which starts
+the setup unit first) or `systemctl restart vrtg-agent-boot-start.service`
+(it left no marker, so it acts once), or reboot. Starting only
+`vrtg-agent-setup.service` by hand does not start the agent: nothing that
+is already active re-runs when it succeeds.
 
 `hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
 (with the binary path replaced, since it does not exist on a build machine)
