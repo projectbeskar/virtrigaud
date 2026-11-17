@@ -152,9 +152,13 @@ func prepareLab(d labDirs, agent, signer account) (*lab, error) {
 	if err := mk(d.effects(), 0o700, agent.UID, agent.GID); err != nil {
 		return nil, err
 	}
-	// The trust configuration: root-owned, not writable by the agent.
+	// The trust configuration: root-owned, readable by the agent's group
+	// only, not writable by the agent.
 	pki.WriteTrust(labT{}, d.Trust)
-	if err := os.Chmod(d.Trust, 0o755); err != nil {
+	if err := os.Chown(d.Trust, 0, int(agent.GID)); err != nil {
+		return nil, fmt.Errorf("chown trust directory: %w", err)
+	}
+	if err := os.Chmod(d.Trust, 0o750); err != nil {
 		return nil, fmt.Errorf("chmod trust directory: %w", err)
 	}
 	// The agent's key material directory: only the host certificate.
@@ -198,7 +202,7 @@ func prepareLab(d labDirs, agent, signer account) (*lab, error) {
 
 // startSigner starts the signer process and waits for its socket.
 func (l *lab) startSigner(bin string) (*exec.Cmd, error) {
-	logf, err := os.OpenFile(filepath.Join(l.Dirs.Work, "logs", "signer.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644) // #nosec G304 -- a path under the lab directory
+	logf, err := os.OpenFile(filepath.Join(l.Dirs.Work, "logs", "signer.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- a path under the lab directory
 	if err != nil {
 		return nil, fmt.Errorf("open signer log: %w", err)
 	}
@@ -228,17 +232,15 @@ func (l *lab) tlsConfig() *tls.Config {
 	cert := l.PKI.ProviderCert(labT{}, nil, trusttest.ProviderURI(trusttest.ProviderUID))
 	roots := l.PKI.HostCAPool()
 	return &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true, // #nosec G402 -- verified below against the host identity issuer
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		// VerifyConnection runs on every handshake, resumed sessions included.
+		InsecureSkipVerify: true, // #nosec G402 -- verified in VerifyConnection against the host identity issuer
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
 				return errors.New("no server certificate")
 			}
-			leaf, err := x509.ParseCertificate(raw[0])
-			if err != nil {
-				return fmt.Errorf("parse server certificate: %w", err)
-			}
+			leaf := cs.PeerCertificates[0]
 			if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
 				return fmt.Errorf("verify server certificate: %w", err)
 			}

@@ -296,15 +296,13 @@ func dial(dir, addr string) (*grpc.ClientConn, error) {
 		Certificates: []tls.Certificate{cert},
 		// The agent's certificate carries URI names only, so the default
 		// host name check cannot apply; the chain is verified below.
-		InsecureSkipVerify: true, // #nosec G402 -- verified in VerifyPeerCertificate
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
+		// VerifyConnection runs on every handshake, resumed sessions included.
+		InsecureSkipVerify: true, // #nosec G402 -- verified in VerifyConnection
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
 				return errors.New("the agent sent no certificate")
 			}
-			leaf, err := x509.ParseCertificate(raw[0])
-			if err != nil {
-				return fmt.Errorf("parse the agent's certificate: %w", err)
-			}
+			leaf := cs.PeerCertificates[0]
 			if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
 				return fmt.Errorf("verify the agent's certificate: %w", err)
 			}

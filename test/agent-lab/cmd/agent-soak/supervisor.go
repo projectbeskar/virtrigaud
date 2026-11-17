@@ -130,7 +130,7 @@ func (s *supervisor) start(ctx context.Context, maxWait time.Duration) (int, err
 	s.gen++
 	gen := s.gen
 	s.mu.Unlock()
-	logf, err := os.OpenFile(s.lab.Dirs.agentLog(gen), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644) // #nosec G304 -- a path under the lab directory
+	logf, err := os.OpenFile(s.lab.Dirs.agentLog(gen), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- a path under the lab directory
 	if err != nil {
 		return gen, fmt.Errorf("open agent log: %w", err)
 	}
