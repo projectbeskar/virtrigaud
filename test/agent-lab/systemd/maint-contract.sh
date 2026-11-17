@@ -110,6 +110,9 @@ maint-burst)
   ;;
 restart-burst)
   cursor=$(journalctl -n 1 --show-cursor -o cat --no-pager | sed -n 's/^-- cursor: //p')
+  # Whether the agent runs is decided before the burst: during it, a
+  # running agent is restarted and may look stopped for a moment.
+  agent_was=$(systemctl show -p ActiveState --value vrtg-agent.service)
   t0=$(date +%s.%N)
   # The shutdown unit N times; the setup unit 3 times, about what a package
   # upgrade does. A setup restart also restarts the agent and the signer
@@ -122,9 +125,25 @@ restart-burst)
     systemctl restart vrtg-agent-setup.service || log "    restart $i of the setup unit failed"
   done
   log "${2:-8} restarts of the shutdown unit and 3 of the setup unit in $(awk "BEGIN{printf \"%.2f\", $(date +%s.%N) - $t0}") s"
+  # A setup restart returns before the signer and agent restarts it queued
+  # have finished: wait for them (at most 60 s).
+  for _ in $(seq 60); do
+    systemctl list-jobs --no-legend 2>/dev/null | grep -q 'vrtg-' || break
+    sleep 1
+  done
+  for u in vrtg-agent-signer.service vrtg-agent.service; do
+    for _ in $(seq 30); do
+      case "$(systemctl show -p ActiveState --value "$u")" in activating|deactivating|reloading) sleep 1 ;; *) break ;; esac
+    done
+  done
   for u in vrtg-vm-shutdown.service vrtg-agent-setup.service vrtg-agent-signer.service vrtg-agent.service; do
-    if [ "$u" = vrtg-agent.service ] && [ "$(systemctl show -p ActiveState --value "$u")" != active ] && [ "$(systemctl show -p Result --value "$u")" != start-limit-hit ]; then
-      log "SKIP $u is stopped (maintenance)"; continue
+    if [ "$u" = vrtg-agent.service ] && [ "$agent_was" != active ]; then
+      if [ "$(systemctl show -p ActiveState --value "$u")" = active ]; then
+        log "FAIL $u was stopped (maintenance) and is running now"; fails=$((fails + 1))
+      else
+        log "SKIP $u was stopped (maintenance) and stays stopped"
+      fi
+      continue
     fi
     hits=$(journalctl -o cat --no-pager --after-cursor "$cursor" -u "$u" | grep -cE 'start-limit-hit|repeated too quickly')
     if [ "$(systemctl show -p ActiveState --value "$u")" = active ] && [ "$hits" = 0 ]; then
