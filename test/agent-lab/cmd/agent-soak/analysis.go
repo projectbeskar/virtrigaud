@@ -62,13 +62,20 @@ type storeCheckResult struct {
 // opened to be read.
 type nullExec struct{}
 
+// Plan implements executor.Executor.
 func (nullExec) Plan(providerv1.OperationKind) ([]executor.Step, error) {
 	return nil, executor.ErrUnsupportedKind
 }
+
+// Run implements executor.Executor; it performs nothing.
 func (nullExec) Run(context.Context, executor.Operation, executor.Step) error { return nil }
+
+// Inspect implements executor.Executor.
 func (nullExec) Inspect(context.Context, executor.Operation, executor.Step) (executor.Evidence, error) {
 	return executor.EvidenceUnknown, nil
 }
+
+// Goal implements executor.Executor.
 func (nullExec) Goal(context.Context, executor.Operation, executor.Step) (bool, error) {
 	return false, nil
 }

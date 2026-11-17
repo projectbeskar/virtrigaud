@@ -61,6 +61,7 @@ type growthParams struct {
 // executor's.
 type fastExec struct{}
 
+// Plan implements executor.Executor.
 func (fastExec) Plan(k providerv1.OperationKind) ([]executor.Step, error) {
 	switch k {
 	case providerv1.OperationKind_OPERATION_KIND_CREATE:
@@ -73,10 +74,16 @@ func (fastExec) Plan(k providerv1.OperationKind) ([]executor.Step, error) {
 	}
 	return nil, executor.ErrUnsupportedKind
 }
+
+// Run implements executor.Executor; it performs nothing.
 func (fastExec) Run(context.Context, executor.Operation, executor.Step) error { return nil }
+
+// Inspect implements executor.Executor.
 func (fastExec) Inspect(context.Context, executor.Operation, executor.Step) (executor.Evidence, error) {
 	return executor.EvidencePresent, nil
 }
+
+// Goal implements executor.Executor.
 func (fastExec) Goal(context.Context, executor.Operation, executor.Step) (bool, error) {
 	return true, nil
 }
@@ -384,6 +391,7 @@ type stderrTee struct {
 	b *strings.Builder
 }
 
+// Write implements io.Writer, copying p to both writers.
 func (t *stderrTee) Write(p []byte) (int, error) { _, _ = t.w.Write(p); return t.b.Write(p) }
 
 func tail(s string, n int) string {
