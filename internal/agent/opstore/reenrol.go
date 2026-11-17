@@ -357,6 +357,8 @@ func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]
 		switch err := s.ConfirmFreeze(ctx, id); {
 		case err == nil:
 			done = append(done, append([]byte(nil), id...))
+		case errors.Is(err, ErrTooManyDiscards):
+			return done, err
 		case errors.Is(err, ErrEnrolment):
 			// Not a frozen predecessor (unknown, already discarded, or a
 			// freeze still in progress): nothing to do.
@@ -436,8 +438,11 @@ func writeDiscard(tx *journal.Tx, ids [][]byte) error {
 }
 
 // MaxPendingDiscards bounds the confirmed discards whose records are still
-// being removed. A confirmation beyond it is refused (ErrEnrolment) until
-// compaction has finished one; the manager confirms it again.
+// being removed. A confirmation beyond it is refused (ErrTooManyDiscards,
+// logged) until compaction has finished one; the predecessor then stays
+// frozen until the confirmation is relayed again (the next connection or
+// change of the confirmed set). Reaching it needs that many re-keys of one
+// Host within one sweep, a few minutes.
 const MaxPendingDiscards = 2 * MaxFreezeConfirmations
 
 func containsID(ids [][]byte, id []byte) bool {
@@ -468,7 +473,8 @@ func containsID(ids [][]byte, id []byte) bool {
 // reports it, and the agent then compacts at its next check). It never
 // sweeps in the caller's call, which may be a relayed operation with its own
 // deadline. A confirmation of an enrolment already being removed returns nil.
-// It waits for another discard transaction only as long as ctx allows.
+// It waits for another discard transaction (one chunk) only as long as ctx
+// allows.
 func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 	if err := s.lockDiscard(ctx); err != nil {
 		return fmt.Errorf("confirm freeze: %w", err)
@@ -490,6 +496,11 @@ func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 	return nil
 }
 
+// ErrTooManyDiscards: MaxPendingDiscards confirmed discards are still being
+// removed; a further confirmation is refused (wrapped in ErrEnrolment) until
+// compaction has finished one.
+var ErrTooManyDiscards = errors.New("too many discards in progress")
+
 // errAlreadyDiscarding: the enrolment a confirmation names is being removed.
 var errAlreadyDiscarding = errors.New("already being discarded")
 
@@ -508,48 +519,67 @@ func (s *Store) unlockDiscard() { <-s.discardSem }
 // resumeDiscard removes, chunk by chunk, the records of every enrolment the
 // discard-in-progress marker names (and their witness directories, again),
 // until none remain or ctx ends, and returns the records it removed.
-// Compact calls it.
+// Compact calls it. It takes the discard semaphore for one chunk at a time,
+// so a confirmation relayed meanwhile waits for at most one transaction.
 func (s *Store) resumeDiscard(ctx context.Context) (int, error) {
 	if guard.Off(guard.DiscardResume) {
 		return 0, nil
 	}
-	if err := s.lockDiscard(ctx); err != nil {
-		return 0, err
-	}
-	defer s.unlockDiscard()
 	total := 0
+	var witnessed []byte
 	for ctx.Err() == nil {
-		var pending [][]byte
-		if err := s.j.View(ctx, func(tx *journal.Tx) error {
-			var err error
-			pending, err = readDiscard(tx)
-			return err
-		}); err != nil {
+		n, done, prev, err := s.resumeStep(ctx, witnessed)
+		total += n
+		if err != nil || done {
 			return total, err
 		}
-		if len(pending) == 0 {
-			return total, nil
-		}
-		prev := pending[0]
-		// A removal that failed in ConfirmFreeze is retried here.
-		if err := s.fsys.RemoveAll(s.witnessDir(prev)); err != nil {
-			return total, fmt.Errorf("remove witnesses: %w", err)
-		}
-		for ctx.Err() == nil {
-			done, n, err := s.discardStep(ctx, prev, false)
-			total += n
-			if err != nil {
-				return total, err
-			}
-			if done {
-				break
-			}
-			if err := s.j.CrashPoint(PointMidDiscard); err != nil {
-				return total, err
-			}
+		witnessed = prev
+		if err := s.j.CrashPoint(PointMidDiscard); err != nil {
+			return total, err
 		}
 	}
 	return total, ctx.Err()
+}
+
+// resumeStep commits one discard transaction for the oldest pending
+// enrolment, holding the discard semaphore only for it, and returns the
+// records removed, whether no discard is pending any more, and the
+// enrolment it worked on. It removes that enrolment's witness directory
+// first, unless witnessed names it (done earlier in this resume). An id
+// the marker names that is not retired is never touched: the store fails
+// closed.
+func (s *Store) resumeStep(ctx context.Context, witnessed []byte) (int, bool, []byte, error) {
+	if err := s.lockDiscard(ctx); err != nil {
+		return 0, false, nil, err
+	}
+	defer s.unlockDiscard()
+	var pending [][]byte
+	var retired bool
+	if err := s.j.View(ctx, func(tx *journal.Tx) error {
+		var err error
+		if pending, err = readDiscard(tx); err != nil || len(pending) == 0 {
+			return err
+		}
+		retired, err = isRetired(tx, pending[0])
+		return err
+	}); err != nil {
+		return 0, false, nil, err
+	}
+	if len(pending) == 0 {
+		return 0, true, nil, nil
+	}
+	prev := pending[0]
+	if !retired && !guard.Off(guard.DiscardOnlyRetired) {
+		return 0, false, nil, fmt.Errorf("%w: the discard marker names an enrolment that is not retired", errCorruptRecord)
+	}
+	if !sameBytes(prev, witnessed) {
+		// A removal that failed in ConfirmFreeze is retried here.
+		if err := s.fsys.RemoveAll(s.witnessDir(prev)); err != nil {
+			return 0, false, nil, fmt.Errorf("remove witnesses: %w", err)
+		}
+	}
+	_, n, err := s.discardStep(ctx, prev, false)
+	return n, false, prev, err
 }
 
 // discardStep commits one discard transaction for prev and reports whether
@@ -575,7 +605,7 @@ func (s *Store) discardStep(ctx context.Context, prev []byte, first bool) (bool,
 		case first && containsID(pending, prev):
 			return errAlreadyDiscarding
 		case first && len(pending) >= MaxPendingDiscards:
-			return fmt.Errorf("%w: too many discards in progress", ErrEnrolment)
+			return fmt.Errorf("%w: %w", ErrEnrolment, ErrTooManyDiscards)
 		case first:
 			if err := startDiscard(tx, prev); err != nil {
 				return err

@@ -303,3 +303,51 @@ func TestConfirmFreeze_WaitIsBoundedByContext(t *testing.T) {
 	_, _, pending := rawRecords(t, h, prev)
 	assert.False(t, pending, "nothing was started")
 }
+
+// A discard marker naming an enrolment that is not retired (damage: only a
+// confirmation writes the marker, and it retires the enrolment first) never
+// makes compaction remove that enrolment's records: it fails closed.
+func TestCompact_MarkerOfANonRetiredEnrolmentRemovesNothing(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	ops := finishOps(t, h, "vm")
+	before, _, _ := rawRecords(t, h, h.enrol)
+	_, err := h.s.Journal().Update(context.Background(), func(tx *journal.Tx) error {
+		return tx.Put("meta", []byte("discard"), append([]byte(nil), h.enrol...))
+	})
+	require.NoError(t, err)
+	_, err = h.s.Compact(context.Background(), opstore.DefaultCompactBatch)
+	require.Error(t, err, "compaction refuses the marker")
+	after, enrolment, _ := rawRecords(t, h, h.enrol)
+	assert.Equal(t, before, after, "nothing of the active enrolment was removed")
+	assert.True(t, enrolment)
+	for _, r := range ops {
+		assert.True(t, h.tombstoned(r))
+	}
+}
+
+// At most MaxPendingDiscards discards are pending; a further confirmation
+// is refused with ErrTooManyDiscards (reported by ConfirmFrozen, not
+// dropped) until compaction finishes them, and then succeeds.
+func TestConfirmFreeze_TooManyPending(t *testing.T) {
+	h := newHarness(t)
+	h.opts = func(o *opstore.Options) { o.DiscardChunk = testDiscardChunk }
+	h.fresh()
+	ctx := context.Background()
+	var last []byte
+	for i := 0; i <= opstore.MaxPendingDiscards; i++ {
+		finishOps(t, h, fmt.Sprintf("vm%d", i))
+		last = reenrolNext(t, h)
+		if i < opstore.MaxPendingDiscards {
+			require.NoError(t, h.s.ConfirmFreeze(ctx, last))
+		}
+	}
+	err := h.s.ConfirmFreeze(ctx, last)
+	require.ErrorIs(t, err, opstore.ErrTooManyDiscards)
+	_, err = h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{last})
+	require.ErrorIs(t, err, opstore.ErrTooManyDiscards, "the relay reports the refusal")
+	_, err = h.s.Compact(ctx, opstore.DefaultCompactBatch)
+	require.NoError(t, err)
+	assert.False(t, h.s.Discarding())
+	require.NoError(t, h.s.ConfirmFreeze(ctx, last))
+}

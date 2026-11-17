@@ -272,7 +272,13 @@ crash or a restart; a repeated confirmation of the same enrolment changes
 nothing. The store shrinks chunk by chunk; a full store refuses new
 operations until it is below its threshold. The first transaction also
 reads every VM record of the host once, so its cost grows with the host's
-VMs, not with the predecessor's records.
+VMs, not with the predecessor's records. Compaction holds the discard lock
+for one transaction at a time, so a confirmation relayed meanwhile waits for
+one chunk at most. At most 32 discards can be pending at once; a further
+confirmation is refused, with an error in the agent's log, until compaction
+has finished one, and the predecessor stays frozen until the confirmation is
+relayed again. Compaction removes records only of an enrolment the store
+has retired; a discard marker naming any other fails the compaction.
 
 ### Host checks
 
