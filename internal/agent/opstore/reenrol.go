@@ -498,9 +498,9 @@ func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
 	return nil
 }
 
-// ErrTooManyDiscards: MaxPendingDiscards confirmed discards are still being
-// removed; a further confirmation is refused (wrapped in ErrEnrolment) until
-// compaction has finished one.
+// ErrTooManyDiscards is returned when MaxPendingDiscards confirmed
+// discards are still being removed: a further confirmation is refused
+// (wrapped in ErrEnrolment) until compaction has finished one.
 var ErrTooManyDiscards = errors.New("too many discards in progress")
 
 // errAlreadyDiscarding: the enrolment a confirmation names is being removed.
