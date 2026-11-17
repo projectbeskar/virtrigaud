@@ -891,6 +891,29 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		reconcileCR(e, cr)
 	}
 
+	It("refuses an issued renewal certificate shorter than the minimum lifetime, publishes nothing and reports why", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		csr, err := certrequest.CSR(cr)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(certrequest.SetCertificate(cr, e.ca.Issue(GinkgoT(), csr, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}),
+			e.ca.PEM)).To(Succeed())
+		Expect(certrequest.SetCondition(cr, certrequest.ConditionReady, certrequest.StatusTrue, certrequest.ReasonIssued, "issued", time.Now())).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+		drainRenewalEvents(e.rec)
+		reconcileCR(e, cr)
+		st := state(e)
+		Expect(st.Renewal).To(BeNil(), "nothing is published or pinned")
+		Expect(st.RenewalAttempts).To(HaveLen(1))
+		Expect(st.RenewalAttempts[0].Failures).To(Equal(1))
+		Expect(st.RenewalAttempts[0].Reason).To(ContainSubstring(hostidentity.ReasonIssuedLifetimeTooShort))
+		events := drainRenewalEvents(e.rec)
+		Expect(events).To(ContainSubstring(eventReasonAgentCertLifetimeTooShort))
+		Expect(events).NotTo(ContainSubstring(eventReasonAgentRenewalIssued))
+		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeTrue())
+	})
+
 	It("backs off a renewal whose issued certificate is refused, gives the key up after five failures, and deletes the requests", func() {
 		e := newRenewalEnv()
 		cr := reconcileCR(e, requested(e))

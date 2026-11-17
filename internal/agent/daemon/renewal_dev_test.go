@@ -342,6 +342,7 @@ func TestRenewalStageRefusals(t *testing.T) {
 		"another key":          h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{PublicKey: &otherKey.PublicKey}),
 		"the current key":      h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{PublicKey: &h.pki.HostKey.PublicKey}),
 		"client auth usage":    h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}}),
+		"lifetime too short":   h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{Lifetime: hostidentity.MinLifetime - time.Second}),
 		"lifetime too long":    h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{Lifetime: 60 * 24 * time.Hour}),
 		"expired by the clock": h.pki.HostCA.Issue(t, csrPEM, hostidentitytest.IssueOptions{Lifetime: 24 * time.Hour}),
 	}
