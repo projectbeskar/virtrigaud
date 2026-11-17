@@ -215,8 +215,12 @@ func TestRunRefusesNonPersistentKeyDir(t *testing.T) {
 			l := &logs{}
 			o := RunOptions{SocketPath: filepath.Join(dir, "signer.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(),
 				Log: l.logger(), Probe: probe}
-			err := Run(context.Background(), o, make(chan os.Signal))
-			require.Error(t, err)
+			// A bounded context: were the check missing, the signer would
+			// serve, and the test must fail at once, not hang.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := Run(ctx, o, make(chan os.Signal))
+			require.Error(t, err, "the signer must refuse to start")
 			f, ok := hostcheck.AsFailure(err)
 			require.True(t, ok, "the refusal is a host check failure")
 			assert.Equal(t, hostcheck.ReasonSignerKeyNotPersistent, f.Reason)
@@ -227,4 +231,26 @@ func TestRunRefusesNonPersistentKeyDir(t *testing.T) {
 			assert.True(t, os.IsNotExist(statErr), "nothing is served")
 		})
 	}
+}
+
+// TestRunRefusesKeyFileOnItsOwnMount: a key file bind-mounted from memory
+// refuses the start although its directory is persistent.
+func TestRunRefusesKeyFileOnItsOwnMount(t *testing.T) {
+	dir := shortTempDir(t)
+	require.NoError(t, os.Chmod(dir, 0o750))
+	keyFile := writeKeyFile(t, shortTempDir(t), newKey(t), 0o600)
+	probe := persistentProbe()
+	probe.Edit(func(f *hostchecktest.Fake) {
+		f.Files[keyFile] = hostcheck.FileInfo{Mode: 0o600}
+		f.Mounts = append(f.Mounts, hostcheck.Mount{MountPoint: keyFile, FSType: "tmpfs", Source: "tmpfs"})
+	})
+	o := RunOptions{SocketPath: filepath.Join(dir, "signer.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(),
+		Log: (&logs{}).logger(), Probe: probe}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := Run(ctx, o, make(chan os.Signal))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), keyFile)
+	_, statErr := os.Lstat(o.SocketPath)
+	assert.True(t, os.IsNotExist(statErr), "nothing is served")
 }

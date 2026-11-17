@@ -103,6 +103,8 @@ func Run(p Probe, cfg Config) error {
 		func() error { return CheckCgroupV2(p) },
 		func() error { return CheckStateDir(p, cfg.StateDir, cfg.UID) },
 		func() error { return CheckPersistent(p, cfg.StateDir) },
+		// pki/ may be a mount of its own: the certificate lands there.
+		func() error { return CheckPersistent(p, cfg.PKIDir) },
 		func() error { return CheckPKI(p, cfg.PKIDir, cfg.UID) },
 		func() error { return CheckHostKeyUnreadable(p, cfg.PKIDir, cfg.SignerKeyFile) },
 		func() error { return CheckSignerSocketDir(p, cfg.SignerSocketDir, cfg.SignerUID) },
@@ -209,33 +211,51 @@ func CheckPersistent(p Probe, dir string) error {
 	return checkPersistent(p, ReasonStateNotPersistent, "persistent-state", dir)
 }
 
-// CheckEnrolStatePersistent is the check every host enrolment step makes
-// before it writes anything: the agent's state directory is on persistent
-// storage (CheckPersistent), so that an identity installed now is still
-// there after a reboot. The refusal names the directory and what is wrong
-// with it. A development build's enrolment steps are the only callers.
-func CheckEnrolStatePersistent(p Probe, stateDir string) error {
+// CheckEnrolStatePersistent is the check the enrolment step that installs the
+// certificate makes before it writes anything: the agent's state directory
+// and its key material directory (pkiDir, where the certificate lands, and
+// which may be a mount of its own) are on persistent storage
+// (CheckPersistent's rule), so that an identity installed now is still there
+// after a reboot. The refusal names the directory and what is wrong with it.
+// A development build's enrolment is the only caller.
+func CheckEnrolStatePersistent(p Probe, stateDir, pkiDir string) error {
 	if guard.Off(guard.EnrolStatePersistent) {
 		return nil
 	}
-	return checkPersistent(p, ReasonStateNotPersistent, "enrol-persistent-state", stateDir)
+	for _, dir := range []string{stateDir, pkiDir} {
+		if err := checkPersistent(p, ReasonStateNotPersistent, "enrol-persistent-state", dir); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CheckSignerKeyDirPersistent refuses a signer whose host key file would not
 // survive a reboot: the directory that holds keyFile must be on persistent
-// storage (the same rule as CheckPersistent). It is checked before the host
-// key is created and when the signer starts, so that the key a certificate
-// certifies is never one that a reboot loses.
+// storage (the same rule as CheckPersistent), and so must keyFile's own mount
+// when the file exists (a key file bind-mounted on its own). It is checked
+// before the host key is created and when the signer starts, so that the key
+// a certificate certifies is never one that a reboot loses.
 func CheckSignerKeyDirPersistent(p Probe, keyFile string) error {
 	if guard.Off(guard.SignerKeyDirPersistent) {
 		return nil
 	}
-	return checkPersistent(p, ReasonSignerKeyNotPersistent, "signer-key-persistent", filepath.Dir(keyFile))
+	const check = "signer-key-persistent"
+	if err := checkPersistent(p, ReasonSignerKeyNotPersistent, check, filepath.Dir(keyFile)); err != nil {
+		return err
+	}
+	if _, err := p.Lstat(keyFile); err != nil {
+		return nil // no key yet (enroll csr makes it): nothing else to look at
+	}
+	return checkPersistent(p, ReasonSignerKeyNotPersistent, check, keyFile)
 }
 
 // checkPersistent is CheckPersistent for dir, refusing with reason and check.
 func checkPersistent(p Probe, reason, check, dir string) error {
 	m, err := p.MountOf(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return refuse(reason, check, "%s does not exist, so it cannot be shown to be on persistent storage", dir)
+	}
 	if err != nil {
 		return refuse(reason, check, "cannot read the mount of %s: %v", dir, err)
 	}

@@ -50,10 +50,10 @@ steps:
   install  run as the agent's user: install the certificate that was issued
            for the request, after checking it
 
-Both steps refuse, before they write anything, when the agent's state
-directory (--state-dir) is not on persistent storage; enroll csr also refuses
-when the directory of the host key file (--key-file) is not. An identity or a
-key kept in memory would be lost at the next reboot.
+Each step refuses, before it writes anything, when what it writes would not
+survive a reboot: enroll csr when the directory of the host key file
+(--key-file) is not on persistent storage; enroll install when the agent's
+state directory (--state-dir) or its pki directory is not.
 `
 
 // signerConnectTimeout bounds how long enroll install waits for the signer.
@@ -143,15 +143,14 @@ func readLines(path string, read func(string) ([]byte, error)) ([]string, error)
 // enrollCSR creates the host key when there is none and writes the
 // certificate signing request. It must run as the signer's own user, the only
 // user that owns the key file; it refuses to run as root or as the agent's
-// user. Before anything is written it checks that the agent's state directory
-// and the directory of the key file are on persistent storage.
+// user. Before anything is written it checks that the directory of the key
+// file, the one directory this step writes, is on persistent storage.
 func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer, deps enrollDeps) int {
 	fs := flag.NewFlagSet("enroll csr", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	keyFile := fs.String("key-file", config.DefaultSignerKeyFile, "the host private key file: created when absent (mode 0600, in a directory private to the signer's user), never replaced")
 	signerUser := fs.String("signer-user", config.DefaultSignerUser, "the signer's user (name or uid); this command must run as it")
 	agentUser := fs.String("agent-user", defaultSignerAgentUser, "the agent's user (name or uid); never the signer's user")
-	stateDir := fs.String("state-dir", config.DefaultStateDir, "the agent's state directory: must be on persistent storage (only its mount is looked at)")
 	out := fs.String("out", "", "where to write the request (a new file; - for standard output)")
 	urisFile := fs.String("uris-file", "", "a file with the URIs, one per line (the Host's status.agent.requestURIs)")
 	var uris uriList
@@ -159,9 +158,8 @@ func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer, deps en
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *out == "" || !filepath.IsAbs(*keyFile) || filepath.Clean(*keyFile) != *keyFile ||
-		!filepath.IsAbs(*stateDir) || filepath.Clean(*stateDir) != *stateDir {
-		log.Error(errors.New("--out is required; --key-file and --state-dir must be clean absolute paths"), "invalid configuration")
+	if *out == "" || !filepath.IsAbs(*keyFile) || filepath.Clean(*keyFile) != *keyFile {
+		log.Error(errors.New("--out is required and --key-file must be a clean absolute path"), "invalid configuration")
 		return 2
 	}
 	if *urisFile != "" {
@@ -196,10 +194,10 @@ func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer, deps en
 		log.Error(err, "the request URIs")
 		return 2
 	}
-	// Nothing is written before the host is shown to keep what it is given
-	// across a reboot: neither a key nor a request.
-	if err := checkEnrolPersistence(deps.probe, *stateDir, *keyFile); err != nil {
-		log.Error(err, "refused; enrolment needs persistent storage")
+	// Nothing is written before the key's directory is shown to keep what it
+	// is given across a reboot: neither a key nor a request.
+	if err := hostcheck.CheckSignerKeyDirPersistent(deps.probe, *keyFile); err != nil {
+		log.Error(fmt.Errorf("signer key directory: %w", err), "refused; the host key needs persistent storage")
 		return 1
 	}
 	key, created, err := signer.CreateKey(*keyFile, own)
@@ -223,23 +221,6 @@ func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer, deps en
 	}
 	log.Info("request written", "createdKey", created, "keyPin", pin)
 	return 0
-}
-
-// checkEnrolPersistence refuses an enrolment step on a host whose agent state
-// directory (stateDir) is not on persistent storage, and, when keyFile is
-// not empty, one whose host key directory is not either (the csr step, which
-// creates the key). It runs before the step writes anything.
-func checkEnrolPersistence(probe hostcheck.Probe, stateDir, keyFile string) error {
-	if err := hostcheck.CheckEnrolStatePersistent(probe, stateDir); err != nil {
-		return fmt.Errorf("agent state directory: %w", err)
-	}
-	if keyFile == "" {
-		return nil
-	}
-	if err := hostcheck.CheckSignerKeyDirPersistent(probe, keyFile); err != nil {
-		return fmt.Errorf("signer key directory: %w", err)
-	}
-	return nil
 }
 
 // writeCSR writes the request to a new file (mode 0644: it is public), or to
@@ -321,8 +302,8 @@ func installCertificate(cfg *config.Config, csrFile, certFile string, uris []str
 	}
 	// Before anything is written: an identity installed on state that a
 	// reboot loses is lost with it.
-	if err := checkEnrolPersistence(probe, cfg.StateDir, ""); err != nil {
-		return enrol.Result{}, err
+	if err := hostcheck.CheckEnrolStatePersistent(probe, cfg.StateDir, cfg.PKIDir()); err != nil {
+		return enrol.Result{}, fmt.Errorf("agent state: %w", err)
 	}
 	signerUID, err := signer.ResolveUID(cfg.SignerUser)
 	if err != nil {

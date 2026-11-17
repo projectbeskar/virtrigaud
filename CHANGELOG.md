@@ -5,15 +5,20 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-11-17 21:00] - Per-host agent: enrolment and the signer refuse non-persistent storage (development builds only)
+## [2026-11-17 22:00] - Per-host agent: enrolment and the signer refuse non-persistent storage (development builds only)
 **Author:** @wrkode (William Rizzo)
 
-### Fixed
-- `cmd/vrtg-agent/enroll.go`: `enroll csr` and `enroll install` did not check that the agent's state directory is on persistent storage, so on a host whose state is in memory (an immutable host with no persistent volume, where `/var` falls back to tmpfs) enrolment succeeded and the identity was lost at the next reboot. Both steps now refuse, before anything is written, with an error naming the directory and its file system (`hostcheck.CheckPersistent`'s rule). `enroll csr` has a new `--state-dir` flag (default `/var/lib/virtrigaud-agent`; only its mount is looked at) and also refuses when the directory of `--key-file` is not persistent, before it creates the host key.
-- `internal/agent/signer/run.go`: the signer refuses to start (logging `start refused` with reason `SignerKeyNotPersistent`) when the directory of its key file is not on persistent storage. `RunOptions.Probe` is new (nil is the real host).
-- `internal/agent/hostcheck/checks.go`, `doc.go`: `CheckEnrolStatePersistent`, `CheckSignerKeyDirPersistent` and the `SignerKeyNotPersistent` reason, sharing `CheckPersistent`'s rule; `CheckPersistent` is unchanged.
+### Security
+- `cmd/vrtg-agent/enroll.go`: `enroll install` did not check that the agent's state directory is on persistent storage, and `enroll csr` did not check the key's, so on a host whose storage is in memory (an immutable host with no persistent volume, where `/var` falls back to tmpfs) enrolment succeeded and the identity or key was lost at the next reboot. Before anything is written, `enroll install` now refuses when the state directory or its `pki/` directory (which may be a mount of its own) is not persistent, and `enroll csr` refuses when the directory of `--key-file` is not (it writes nothing to the state directory, so it has no `--state-dir`). The refusals name the directory and its file system, using `CheckPersistent`'s rule.
+- `internal/agent/signer/run.go`: the signer refuses to start (`start refused`, reason `SignerKeyNotPersistent`, exit 1; systemd retries within the unit's start limit) when the directory of its key file, or the key file's own mount when it exists, is not on persistent storage.
+- `internal/agent/hostcheck/checks.go`: the agent's start-up check also covers `pki/`; a directory that does not exist is refused with a message that says so.
+
+### Added
+- `internal/agent/hostcheck/`: `CheckEnrolStatePersistent`, `CheckSignerKeyDirPersistent` and the `SignerKeyNotPersistent` reason; `CheckPersistent` is unchanged. `signer.RunOptions.Probe` (nil is the real host).
 - `internal/agent/internal/guard/guard.go`: mutation guards `enrol-state-persistent` and `signer-key-dir-persistent`, each killed by a test.
-- `internal/agent/hostcheck/checks_test.go`, `internal/agent/signer/run_test.go`, `cmd/vrtg-agent/enroll_test.go`: a refusal test per step and directory, and the persistent case still passes.
+- Tests in `internal/agent/hostcheck/checks_test.go`, `internal/agent/signer/run_test.go` and `cmd/vrtg-agent/enroll_test.go` for each refusal and the persistent case.
+
+### Changed
 - `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`: the host checks table, the enrolment steps and the enrolment page describe the checks.
 
 ### Why
