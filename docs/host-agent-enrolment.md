@@ -102,6 +102,21 @@ discarded before it is answered and end pinned to a key the host no longer
 holds. `vrtg host enroll --duration` refuses a shorter lifetime locally, and
 the approver-policy sample sets the same `minDuration`.
 
+The floor also applies to the certificate the issuer returns, not only to the
+lifetime requested: a sub-CA near its own expiry or an external PKI that
+shortens lifetimes can issue a certificate valid for less than 15 minutes
+(`notAfter` minus `notBefore`; the check is exact, with no tolerance). The
+manager refuses to pin the key of such a certificate, at first enrolment and
+at renewal: nothing is pinned or published, the request is marked refused,
+and an `AgentCertificateLifetimeTooShort` warning event on the Host carries
+the reason `IssuedLifetimeTooShort` and the lifetime found. The `AgentEnrolled`
+condition says `CertificateRejected` with the same reason in its message
+(enrolment), and a renewal restarts under the backoff below. The agent applies
+the same floor before it installs an enrolment certificate or stages a renewed
+one, so it never runs with a certificate it cannot renew. A certificate that
+is already pinned is not judged against the floor again: it stays in use until
+it expires.
+
 Before approving, the manager records the authorisation (request UID, record,
 key pin) in the pins Secret. A denial never changes the pins.
 

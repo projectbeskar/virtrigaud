@@ -1012,7 +1012,9 @@ serves no renewal operation.
 - **Stage** (`InstallRenewedCertificate`, `activate` false). The agent stages
   only a certificate that is one DER certificate of at most 8 KiB, chains
   directly to its pinned host identity issuer for server authentication and
-  is valid now, meets the certificate profile, carries exactly the URI names
+  is valid now, meets the certificate profile, lives at least 15 minutes
+  (`notAfter` minus `notBefore`; a shorter one could not finish its own
+  renewal), carries exactly the URI names
   of the current certificate (same host, same enrolment record, same start
   epoch), and certifies its pending key (not the current one). Anything else
   is `InvalidArgument` and nothing is written; no pending renewal is
@@ -1491,7 +1493,10 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
 loads the host certificate with the same certificate profile the manager
 enforces before it pins the key (no CA bit, no certificate or CRL signing
 usage, digital signature, server authentication only, at most 30 days, empty
-subject or the Host's name, no DNS, address or e-mail name). The agent keeps no
+subject or the Host's name, no DNS, address or e-mail name). The 15-minute
+minimum lifetime is not part of that load-time profile: `vrtg host enroll`'s
+install and a renewal's staging refuse a shorter certificate, but one that is
+already installed keeps loading until it expires. The agent keeps no
 separate enrolment file. At start (step 6) and on reload it
 derives its enrolment record from the host certificate: the enrolment id, the
 Provider UID, the install id, the mode and the start epoch (from 2; a record
