@@ -69,8 +69,9 @@ const (
 	// wiped. The store cannot say whether the op_id ran. Not definite.
 	RefusalUnknownToAgent
 	// RefusalStoreFull: the store is above its size threshold. Definite (the
-	// op_id is not known, as known op_ids are answered first); a server
-	// answers RESOURCE_EXHAUSTED, with no reason string.
+	// op_id is not known, as known op_ids are answered first); the agent's
+	// server answers RESOURCE_EXHAUSTED with its own reason STORE_FULL
+	// (Reason here stays empty: it is not a provider contract reason).
 	RefusalStoreFull
 )
 

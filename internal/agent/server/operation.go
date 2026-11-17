@@ -384,7 +384,9 @@ func admissionRefusal(r opstore.Refusal) error {
 	case opstore.RefusalUnknownToAgent:
 		return refusal(codes.NotFound, opstore.ReasonUnknownToAgent, "this host holds no record of the grant's enrolment")
 	case opstore.RefusalStoreFull:
-		return status.Error(codes.ResourceExhausted, "the host's operation store is full")
+		return refusal(codes.ResourceExhausted, ReasonStoreFull, "the host's operation store is full: the operation was not "+
+			"performed and new operations are refused; re-keying the Host (a new enrolment) reclaims the space once its "+
+			"predecessor's freeze is confirmed")
 	}
 	return status.Error(codes.Internal, "the operation was not admitted")
 }

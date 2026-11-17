@@ -480,8 +480,12 @@ VM tombstone); otherwise `CREATING`, `PRESENT`, `OTHER_BINDING` or
 
 ### Store size
 
-The operation store refuses new operations (`RESOURCE_EXHAUSTED`, definitely
-not performed) while its live size is above 256 MiB. A development build
+The operation store refuses new operations (`RESOURCE_EXHAUSTED` with the
+ErrorInfo reason `STORE_FULL` in the agent's `provider.virtrigaud.io` domain,
+definitely not performed; the message names a re-key as the remedy) while
+its live size is above 256 MiB. The clustered Provider relays that answer
+unchanged, and the manager keeps a `RESOURCE_EXHAUSTED` answer out of its
+circuit breaker (a refused call, not a failing Provider). A development build
 compacts it (`opstore.Store.Compact`) and trims its audit window
 (`opstore.Store.TrimAudit`): once the agent is ready, then every hour, and at
 once when the store reaches three quarters of the threshold (checked every

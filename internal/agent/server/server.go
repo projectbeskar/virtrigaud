@@ -229,6 +229,12 @@ const (
 	CauseEnrolmentMismatch = "enrolment_mismatch"
 )
 
+// ReasonStoreFull is the ErrorInfo reason (in ErrorInfoDomain) of an
+// operation refused because the host's operation store is above its size
+// threshold: RESOURCE_EXHAUSTED, definitely not performed. A re-key of the
+// Host reclaims the space (development builds only serve operations).
+const ReasonStoreFull = "STORE_FULL"
+
 // Options configures New.
 type Options struct {
 	// Agent is the agent the server answers for. Required.
