@@ -584,6 +584,7 @@ func (r *HostReconciler) persist(ctx context.Context, host, base *infravirtrigau
 			// Another writer (the enrolment reconciler mirrors its status
 			// too) updated the Host since it was read: re-read and sync
 			// again, without an error log.
+			ctrl.LoggerFrom(ctx).V(1).Info("The Host changed since it was read; syncing it again", "host", host.Name)
 			return ctrl.Result{Requeue: true}, nil
 		}
 		metrics.RecordError(errReasonHostStatusUpdate, metrics.ComponentManager)
@@ -632,14 +633,15 @@ func (r *HostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// A pins Secret change (a re-key pinned, a renewal completed, an expiry
 	// moved) re-evaluates its Host at once: the expired-certificate check
 	// reads it, and the Host must not keep CertificateExpired until the next
-	// heartbeat.
+	// heartbeat. The heartbeat's own writes of the store positions do not
+	// enqueue (pinsTrustChanged): they would add a poll per Host per heartbeat.
 	if r.HostAnswers != nil {
 		if p, ok := r.HostAnswers.Trust.(*PinsHostTrust); ok && p.Config != nil {
 			ns := p.Config.Namespace
 			b = b.Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(hostOfPinsSecret(ns)),
 				builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
 					return o.GetNamespace() == ns && o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
-				})))
+				}), pinsTrustChanged()))
 		}
 	}
 	return b.Named("host").Complete(r)

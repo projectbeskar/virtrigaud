@@ -719,13 +719,15 @@ passed, and no later than a second after it: while the certificate is
 valid, the next check is brought forward to its expiry when that comes
 before the next heartbeat. A change to the Host's pins Secret (a re-key
 pinning a new certificate) re-evaluates the Host at once rather than at the
-next minute. While a revoked or expired Host is not polled,
+next minute; the heartbeat's own writes of the verified store position to
+that Secret do not, so they add no extra poll. While a revoked or expired Host is not polled,
 `AgentInventoryVerified` is `False` with reason `NoSignedAnswer` and
 `AgentAnswerVerified` (when the Host has it) is `False` with reason
 `NoVerifiedAnswer`; their messages say that the host is not polled and why
 (`Revoked` or `CertificateExpired`), rather than keeping a verdict from
 before. A status update that loses an optimistic-lock race with another
-writer is retried at once without an error log.
+writer is retried at once without an error log (a verbosity 1 log line
+records it).
 
 With approver-policy bound to the manager, a renewal request is often
 approved by approver-policy before the manager decides it. The manager then

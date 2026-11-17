@@ -622,9 +622,10 @@ func (r *HostEnrolmentRequestReconciler) SetupWithManager(mgr ctrl.Manager) erro
 		// A change of a pins Secret (a renewal withdrawn by a revoke, a
 		// re-key or a new request) is seen by the requests it owns at once,
 		// not at the next resync: completeRenewal marks a withdrawn
-		// renewal's issued request refused.
+		// renewal's issued request refused. A heartbeat write of the store
+		// positions alone does not enqueue (pinsTrustChanged).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.requestsOwnedBy),
-			builder.WithPredicates(inEnrolmentNS, isPins)).
+			builder.WithPredicates(inEnrolmentNS, isPins, pinsTrustChanged())).
 		Named("host-enrolment-request").
 		Complete(r)
 }

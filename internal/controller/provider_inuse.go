@@ -553,6 +553,7 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 		if apierrors.IsConflict(err) {
 			// The Provider changed since it was read: re-read and decide
 			// again, without an error log.
+			logger.V(1).Info("The Provider changed since it was read; deciding its release again", "provider", key.String())
 			return ctrl.Result{Requeue: true}, nil
 		}
 		metrics.RecordError(errReasonProviderFinalizer, metrics.ComponentManager)
