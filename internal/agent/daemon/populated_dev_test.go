@@ -23,7 +23,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/fake"
@@ -93,7 +95,14 @@ func TestRecoverPopulatedStore(t *testing.T) {
 		t.Fatalf("state = %v\n%s", state, h.logs.text())
 	}
 	waitLog(t, h, "operations remain runnable after recovery")
-	waitLog(t, h, `"event"="terminal"`)
+	// A terminal event of this run, not one the store replays at open.
+	deadline := time.Now().Add(5 * time.Second)
+	for !hasLine(h.logs.text(), `"event"="terminal"`, `"replayed"=false`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no terminal event of this run:\n%s", h.logs.text())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := r.stop(); err != nil {
 		t.Fatal(err)
 	}
@@ -125,4 +134,18 @@ func TestRecoverPopulatedStore(t *testing.T) {
 	if v, ok, err := st.Lookup(ctx, opstore.OpRef{EnrolmentID: off.EnrolmentID, OpID: off.OpID}); err != nil || !ok || v.State != opstore.StateCompleted {
 		t.Fatalf("power off after restart: %+v %v %v", v, ok, err)
 	}
+}
+
+// hasLine reports whether one line of text holds every one of subs.
+func hasLine(text string, subs ...string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		all := true
+		for _, sub := range subs {
+			all = all && strings.Contains(line, sub)
+		}
+		if all {
+			return true
+		}
+	}
+	return false
 }

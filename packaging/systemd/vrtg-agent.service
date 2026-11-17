@@ -4,7 +4,9 @@
 # The agent holds no capability and creates no scope, cgroup or process: it
 # serves the Provider that routes to this host and keeps its operation store
 # in its state directory. It is not upheld by any other unit, so an operator
-# can stop it for maintenance.
+# can stop it for maintenance. At boot it is started by its [Install]
+# section on a host where the unit is enabled, or, from a system extension
+# merged late in the boot, by vrtg-agent-boot-start.service once per boot.
 #
 # It holds no host private key: the host key is in the separate signer
 # process (vrtg-agent-signer.service), which the agent reaches over a Unix
@@ -22,18 +24,32 @@
 # fails closed on its own when the signer is away, answering without a
 # signature and refusing TLS handshakes, and signs again when the signer
 # returns.
+#
+# A filtered system call fails with EPERM instead of killing the process
+# (SystemCallErrorNumber=): the host inventory probes calls the filter
+# denies on some kernels (open_by_handle_at, in @privileged) and treats a
+# refusal as "not supported".
+#
+# It requires vrtg-agent-setup.service, which creates its user and
+# directories and refuses to let it start when its user's id no longer owns
+# its state directory; restarting that unit restarts this one too.
+#
+# Start-up opens and recovers the operation store before READY=1. A large
+# store on slow storage can take longer than systemd's default start
+# timeout, so the unit sets its own (TimeoutStartSec=).
 [Unit]
 Description=VirtRigaud per-host agent (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
 Wants=network-online.target vrtg-agent-signer.service
-After=network-online.target local-fs.target vrtg-agent-signer.service
+Requires=vrtg-agent-setup.service
+After=network-online.target local-fs.target vrtg-agent-setup.service vrtg-agent-signer.service
 StartLimitIntervalSec=300
 StartLimitBurst=10
 
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/libexec/virtrigaud/vrtg-agent run
+ExecStart=/usr/lib/virtrigaud/vrtg-agent run
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=2
@@ -41,6 +57,10 @@ RestartSec=2
 RestartPreventExitStatus=2
 KillMode=process
 KillSignal=SIGTERM
+TimeoutStartSec=5min
+# Every operation event is a journal line, and the system journal is the
+# durable audit record: never let journald's rate limit drop one.
+LogRateLimitIntervalSec=0
 TimeoutStopSec=60
 User=virtrigaud-agent
 Group=virtrigaud-agent
@@ -78,6 +98,7 @@ RemoveIPC=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]

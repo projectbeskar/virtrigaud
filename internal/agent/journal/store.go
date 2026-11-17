@@ -1619,6 +1619,43 @@ func (s *Store) LiveSize() (n int64) {
 	return n - free
 }
 
+// BucketStat is the space one bucket uses: its keys, the bytes its pages
+// hold (keys, values, record trailers and page headers) and the bytes of
+// the pages allocated to it.
+type BucketStat struct {
+	Keys      int
+	InUse     int64
+	Allocated int64
+}
+
+// BucketStats returns the space of every top-level bucket, the journal's own
+// included, by name. It reads one consistent view; an empty map when the
+// store is closed or lost.
+func (s *Store) BucketStats() (out map[string]BucketStat) {
+	out = map[string]BucketStat{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return out
+	}
+	defer panicOnFault()()
+	defer func() {
+		if r := recover(); r != nil {
+			s.abandonIfTaintedLocked()
+			out = map[string]BucketStat{}
+		}
+	}()
+	_ = s.dbView(s.db, func(btx *bolt.Tx) error {
+		return btx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			st := b.Stats()
+			out[string(name)] = BucketStat{Keys: st.KeyN, InUse: int64(st.BranchInuse + st.LeafInuse + st.InlineBucketInuse),
+				Allocated: int64(st.BranchAlloc + st.LeafAlloc)}
+			return nil
+		})
+	})
+	return out
+}
+
 // Size returns the size of the bbolt store in bytes.
 func (s *Store) Size() (n int64) {
 	s.mu.Lock()

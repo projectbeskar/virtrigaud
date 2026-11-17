@@ -1,0 +1,382 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package opstore
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
+	pb "github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+)
+
+// errTrimBatchFull ends an audit trim scan that collected a full batch.
+var errTrimBatchFull = errors.New("audit trim batch full")
+
+// TrimAudit removes the oldest audit events beyond the retention bounds
+// (Options.AuditRetainEvents and AuditRetainBytes): the newest events within
+// both bounds stay. Audit keys are ordered by commit sequence, so the oldest
+// go first. It touches the audit bucket only: op_id tombstones, VM
+// tombstones, attempt marks and witness files stay, and so does every
+// record compaction keeps. Each event is removed in a later transaction than
+// the one that wrote it, batch events per transaction, each under the
+// store's lock, so operations are admitted and run between batches. The
+// journal's chain commits to the state digest, which a removal updates like
+// any other change; nothing verifies against a removed event.
+//
+// Only events handed to the sink are removed. The sink (Options.Audit) hands
+// each event to the logging pipeline, a system journal line in the agent;
+// the system journal is the durable audit record only when it does not
+// rate-limit the agent (the reference unit sets LogRateLimitIntervalSec=0)
+// and is retained or forwarded. The sink is told only after a commit, so an
+// event can be in the store and nowhere else: committed, and the agent
+// stopped before the sink got it. The store therefore keeps an
+// audit cursor, the highest commit sequence through which every event was
+// emitted (it never passes a transaction whose events are not emitted yet),
+// writes it to its meta bucket in a transaction of its own first, and then
+// removes only events at or below the cursor it wrote. At open, every event
+// above the persisted cursor is emitted again, marked Replayed (see
+// replayAudit), so a crash between a commit and its emission duplicates
+// journal lines and never loses one. It returns the number of events
+// removed.
+func (s *Store) TrimAudit(ctx context.Context, batch int) (int, error) {
+	if batch <= 0 {
+		batch = DefaultCompactBatch
+	}
+	cursor, err := s.persistAuditCursor(ctx)
+	if errors.Is(err, errAuditFrozen) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("trim audit: %w", err)
+	}
+	count, size, err := s.auditUsage(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("trim audit: %w", err)
+	}
+	removed := 0
+	var after []byte
+	for count > s.opts.AuditRetainEvents || size > s.opts.AuditRetainBytes {
+		n, bytes, next, err := s.trimAuditBatch(ctx, batch, after, count, size, cursor)
+		removed += n
+		if err != nil {
+			return removed, fmt.Errorf("trim audit: %w", err)
+		}
+		if n == 0 {
+			return removed, nil
+		}
+		count -= n
+		size -= bytes
+		after = next
+	}
+	return removed, nil
+}
+
+// auditUsage returns the number and the record bytes of the audit events.
+func (s *Store) auditUsage(ctx context.Context) (count int, size int64, err error) {
+	err = s.j.View(ctx, func(tx *journal.Tx) error {
+		return tx.ForEach(bucketAudit, nil, func(k, v []byte) error {
+			count++
+			size += int64(len(k) + len(v))
+			return nil
+		})
+	})
+	return count, size, err
+}
+
+// persistAuditCursor writes the current audit cursor (auditEmittedThrough)
+// to the meta bucket in its own transaction when it moved, and returns the
+// cursor that is persisted.
+func (s *Store) persistAuditCursor(ctx context.Context) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	through := s.auditEmittedThrough()
+	s.auditMu.Lock()
+	persisted, frozen := s.auditPersisted, s.auditFrozen && !guard.Off(guard.AuditReplayCeiling)
+	s.auditMu.Unlock()
+	if frozen {
+		return 0, errAuditFrozen
+	}
+	if through <= persisted {
+		return persisted, nil
+	}
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], through)
+	if _, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+		return tx.Put(bucketMeta, keyAuditEmitted, b[:])
+	}); err != nil {
+		return persisted, err
+	}
+	s.auditMu.Lock()
+	s.auditPersisted = through
+	s.auditMu.Unlock()
+	return through, nil
+}
+
+// auditKeySeq returns the commit sequence of an audit key.
+func auditKeySeq(k []byte) uint64 {
+	if len(k) < 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(k[:8])
+}
+
+// errAuditFrozen is returned by persistAuditCursor when the replay at open
+// could not read the cursor: nothing is persisted or trimmed for the life of
+// the process.
+var errAuditFrozen = errors.New("the audit cursor could not be read at open; it is not written and nothing is trimmed until the next start")
+
+// EventAuditReplayFailed is the audit event the replay emits, once, when it
+// could not finish: Reason says how far the cursor may move (or that it is
+// frozen) for the life of the process.
+const EventAuditReplayFailed = "audit_replay_failed"
+
+// replayChunk is the number of audit events one read transaction of the
+// replay visits.
+const replayChunk = 1024
+
+// EventReplaySkipped is the audit event the replay emits, once, for the
+// events above the audit cursor it did not replay because they exceed its
+// cap (Reason names how many and their sequence range).
+const EventReplaySkipped = "replay_skipped"
+
+// replayAudit emits again, marked Replayed, the audit events above the
+// persisted audit cursor: events that may not have reached the sink before
+// the agent stopped (Options.ReplayAudit; development builds). It runs at
+// open and writes nothing (nothing may be committed before continuity is
+// established); the cursor moves past them in memory, and PersistAuditCursor
+// (the agent calls it once it is ready) or TrimAudit writes it.
+//
+// It is bounded in time and memory: it streams, emitting each event as it
+// reads it, replayChunk events per read transaction, and holds nothing in
+// proportion to the number of events. It replays at most the retention
+// window's event count (Options.AuditRetainEvents), which is all the store
+// keeps after a trim anyway: when more events lie above the cursor, it
+// emits only the newest within that count and one EventReplaySkipped event
+// naming how many older ones it skipped and their sequence range. A store
+// written before the cursor existed (no cursor) is replayed the same way,
+// newest first within the cap: the builds that wrote it emitted every event
+// at its commit, so the older ones reached the sink then.
+//
+// A store whose audit events cannot be read replays nothing and keeps its
+// cursor where it was, so nothing above it is ever removed.
+func (s *Store) replayAudit(ctx context.Context) {
+	var cursor uint64
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		b, err := tx.Get(bucketMeta, keyAuditEmitted)
+		switch {
+		case err != nil:
+			return err
+		case len(b) == 8:
+			cursor = binary.BigEndian.Uint64(b)
+		case len(b) != 0:
+			return fmt.Errorf("%w: audit cursor of %d bytes", errCorruptRecord, len(b))
+		}
+		return nil
+	})
+	s.auditMu.Lock()
+	s.auditPersisted, s.auditHigh = cursor, cursor
+	s.auditMu.Unlock()
+	if err != nil {
+		// Without the cursor nothing is known to have been emitted: no
+		// persisting and no trimming in this process.
+		s.auditMu.Lock()
+		s.auditFrozen = true
+		s.auditMu.Unlock()
+		s.emit(AuditEvent{Event: EventAuditReplayFailed, Reason: "the audit cursor could not be read (" + err.Error() +
+			"): audit events are neither replayed, nor trimmed, nor the cursor written until the next start"})
+		return
+	}
+	if !s.opts.ReplayAudit {
+		return
+	}
+	failed := func(through uint64, err error) {
+		s.auditMu.Lock()
+		s.auditCeiling, s.auditCeilingSet = through, true
+		s.auditMu.Unlock()
+		s.emit(AuditEvent{Event: EventAuditReplayFailed, Seq: through, Reason: fmt.Sprintf("the audit replay stopped (%v): "+
+			"events after seq %d are not known to have been emitted, so the audit cursor stays at or below it and "+
+			"nothing above it is trimmed until the next start", err, through)})
+	}
+	start := auditKey(cursor, math.MaxUint32)
+	skip, err := replaySkipFault(s.replaySkip(ctx, start))
+	if err != nil {
+		failed(cursor, err)
+		return
+	}
+	var (
+		after               = start
+		skipped             int
+		firstSkip, lastSkip uint64
+		high                uint64
+		cur, completed      = cursor, cursor
+		done                bool
+	)
+	for !done {
+		visited := 0
+		err := s.j.View(ctx, func(tx *journal.Tx) error {
+			return tx.ForEachAfter(bucketAudit, nil, after, func(k, v []byte) error {
+				if visited == replayChunk {
+					return errTrimBatchFull
+				}
+				seq := auditKeySeq(k)
+				if seq != cur {
+					// Every event of the previous transaction was handled.
+					completed, cur = cur, seq
+				}
+				if skipped < skip {
+					visited++
+					after = k
+					high = max(high, seq)
+					if skipped == 0 {
+						firstSkip = seq
+					}
+					skipped++
+					lastSkip = seq
+					if skipped == skip {
+						s.emit(AuditEvent{Event: EventReplaySkipped, Replayed: true, Seq: lastSkip, FirstSeq: firstSkip,
+							Reason: fmt.Sprintf("%d audit events above the audit cursor (seq %d to %d) were not replayed: a replay "+
+								"is capped at the %d newest events", skipped, firstSkip, lastSkip, s.opts.AuditRetainEvents)})
+					}
+					return nil
+				}
+				rec := &pb.AuditEvent{}
+				if err := unmarshalRecord(v, rec); err != nil {
+					return err
+				}
+				visited++
+				after = k
+				high = max(high, seq)
+				s.emit(AuditEvent{Event: rec.GetEvent(),
+					Ref:   OpRef{EnrolmentID: rec.GetEnrolmentId(), OpID: rec.GetOpId()},
+					VMUID: rec.GetVmUid(), Kind: providerv1.OperationKind(rec.GetKind()), Actor: rec.GetActor(),
+					Reason: rec.GetReason(), State: rec.GetState(), Replayed: true, Seq: seq})
+				return nil
+			})
+		})
+		switch {
+		case errors.Is(err, errTrimBatchFull):
+		case err != nil:
+			// What was replayed stays replayed; the cursor never passes
+			// the last transaction whose events were all emitted.
+			failed(completed, err)
+			return
+		default:
+			done = true
+		}
+	}
+	if high == 0 {
+		return
+	}
+	s.auditMu.Lock()
+	s.auditHigh = max(s.auditHigh, high)
+	s.auditMu.Unlock()
+}
+
+// replaySkipFault lets a test make the replay's count fail (test only: nil
+// in every build).
+var replaySkipFault = func(n int, err error) (int, error) { return n, err }
+
+// replaySkip returns how many of the oldest audit events after start the
+// replay skips: those beyond the retention window's event count. It counts
+// only when the bucket holds more events than that.
+func (s *Store) replaySkip(ctx context.Context, start []byte) (int, error) {
+	if st, ok := s.j.BucketStats()[bucketAudit]; ok && st.Keys <= s.opts.AuditRetainEvents {
+		return 0, nil
+	}
+	above := 0
+	if err := s.j.View(ctx, func(tx *journal.Tx) error {
+		return tx.ForEachAfter(bucketAudit, nil, start, func(_, _ []byte) error {
+			above++
+			return nil
+		})
+	}); err != nil {
+		return 0, err
+	}
+	return max(0, above-s.opts.AuditRetainEvents), nil
+}
+
+// PersistAuditCursor writes the audit cursor to the store, in a transaction
+// of its own, when it moved. The agent calls it once it is ready, so that
+// the events replayed at open are not replayed again after a crash, before
+// the first trim persists the cursor.
+func (s *Store) PersistAuditCursor(ctx context.Context) error {
+	_, err := s.persistAuditCursor(ctx)
+	return err
+}
+
+// trimAuditBatch removes at most batch of the oldest audit events after the
+// key after, and none above the audit cursor, while count events of size
+// bytes exceed a bound, and returns how many it removed, their bytes and the
+// last key removed.
+func (s *Store) trimAuditBatch(ctx context.Context, batch int, after []byte, count int, size int64, cursor uint64) (int, int64, []byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var keys [][]byte
+	var bytes int64
+	if err := s.j.View(ctx, func(tx *journal.Tx) error {
+		return tx.ForEachAfter(bucketAudit, nil, after, func(k, v []byte) error {
+			if len(keys) == batch || (count-len(keys) <= s.opts.AuditRetainEvents && size-bytes <= s.opts.AuditRetainBytes) {
+				return errTrimBatchFull
+			}
+			if auditKeySeq(k) > cursor && !guard.Off(guard.AuditTrimEmittedOnly) {
+				// Not known to have reached the sink: kept, and so is
+				// everything after it.
+				return errTrimBatchFull
+			}
+			keys = append(keys, k)
+			bytes += int64(len(k) + len(v))
+			return nil
+		})
+	}); err != nil && !errors.Is(err, errTrimBatchFull) {
+		return 0, 0, nil, err
+	}
+	if len(keys) == 0 {
+		return 0, 0, nil, nil
+	}
+	if _, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+		for _, k := range keys {
+			if err := tx.Delete(bucketAudit, k); err != nil {
+				return err
+			}
+		}
+		if guard.Off(guard.AuditTrimOnlyAudit) {
+			// The mutation: retention also takes the oldest tombstones.
+			for _, b := range []string{bucketTombstones, bucketVMTombstones} {
+				var drop [][]byte
+				_ = tx.ForEach(b, nil, func(k, _ []byte) error {
+					if len(drop) < len(keys) {
+						drop = append(drop, k)
+					}
+					return nil
+				})
+				for _, k := range drop {
+					_ = tx.Delete(b, k)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, 0, nil, err
+	}
+	return len(keys), bytes, keys[len(keys)-1], nil
+}

@@ -359,6 +359,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Entry("a missing proof of possession", func(c *hostidentitytest.CSROptions) { c.BreakSignature = true }, nil,
 			hostidentity.ReasonProofOfPossession),
 		Entry("a lifetime over thirty days", nil, func(o *crOpts) { o.duration = 31 * 24 * time.Hour }, hostidentity.ReasonLifetime),
+		Entry("a lifetime under fifteen minutes (it could not be renewed in time)", nil, func(o *crOpts) { o.duration = 6 * time.Minute }, hostidentity.ReasonLifetime),
 		Entry("no lifetime (cert-manager would default to ninety days)", nil, func(o *crOpts) { o.duration = 0 }, hostidentity.ReasonLifetime),
 		Entry("the CA bit in the request spec", nil, func(o *crOpts) { o.isCA = true }, hostidentity.ReasonCARequested),
 		Entry("the CA bit in the CSR", func(c *hostidentitytest.CSROptions) { c.RequestCA = true }, nil, hostidentity.ReasonCARequested),

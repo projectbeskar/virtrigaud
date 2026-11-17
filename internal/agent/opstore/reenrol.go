@@ -188,16 +188,17 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 func (s *Store) freezeLocked(ctx context.Context, prev []byte) error {
 	s.freezing.Store(true)
 	for {
-		buf := &auditBuf{}
+		buf := s.newAuditBuf()
 		var more bool
-		if _, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+		_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
 			var err error
 			more, err = freezeChunk(tx, prev, s.freezeChunk(), s.freezeScanCap(), buf)
 			return err
-		}); err != nil {
+		})
+		s.settle(buf, err)
+		if err != nil {
 			return err
 		}
-		s.flush(buf)
 		if !more {
 			s.freezing.Store(false)
 			return nil

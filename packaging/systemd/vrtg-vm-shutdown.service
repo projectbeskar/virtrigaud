@@ -10,15 +10,40 @@
 # would only order the two units, never pull the agent in). Whether it must be
 # ordered against the agent's unit is decided when the agent runs real VMs; it
 # is not ordered against it today.
+#
+# Its stop action runs as the agent's user: vrtg-agent-setup.service, which
+# it wants and starts after, creates that user first (on a host where the
+# units come from a system extension merged after systemd-sysusers ran). It
+# wants the setup unit and does not require it: this unit is upheld, and
+# Upholds= starts a failed upheld unit again, without end (at most 16 times
+# in 10 seconds), so a Requires= on a setup unit that keeps failing would
+# retry both forever. It starts even when setup failed (its start runs
+# nothing), and its stop action stays fail-closed: without the user it is
+# not run at all (217/USER), and with a moved uid "vrtg-agent shutdown-vms"
+# sees vrtg-agent-setup.service failed, logs a warning that it is skipping,
+# stops nothing and exits 0. That check is in the action, not a Condition*=
+# or ExecCondition=: a skipped upheld unit is started again and again.
 [Unit]
 Description=VirtRigaud: stop the per-host agent's VMs at host shutdown (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
-After=local-fs.target dbus.service
+Wants=vrtg-agent-setup.service
+After=local-fs.target dbus.service vrtg-agent-setup.service
+# Never start-limited: StartLimitIntervalSec=0 turns the start limit off
+# (leaving the key out would fall back to the manager's default, typically
+# 5 starts in 10 seconds). Every stop, start, restart, try-restart and
+# Upholds= re-arm of this unit counts towards a start limit, so a limit put
+# the unit in start-limit-hit after routine maintenance; Upholds= then
+# waited out the window before starting it again, and a reboot inside that
+# window ran no stop action, so no VM was stopped. A start limit cannot
+# bound Upholds= retries anyway (it paces them at most 16 times in 10
+# seconds whatever the unit sets), and this unit's start runs nothing, so
+# it does not fail.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStop=/usr/libexec/virtrigaud/vrtg-agent shutdown-vms
+ExecStop=/usr/lib/virtrigaud/vrtg-agent shutdown-vms
 TimeoutStopSec=330
 User=virtrigaud-agent
 Group=virtrigaud-agent
@@ -52,6 +77,7 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX
 
 [Install]

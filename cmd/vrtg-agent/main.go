@@ -26,6 +26,9 @@ limitations under the License.
 //	              holds the host private key (vrtg-agent-signer.service)
 //	shutdown-vms  stop every VM, only while the host is shutting down
 //	              (systemd unit vrtg-vm-shutdown.service)
+//	boot-start    development builds only: start the agent at most once per
+//	              boot, while its unit is enabled
+//	              (systemd unit vrtg-agent-boot-start.service)
 //	enroll        development builds only: enrol the host in two steps: csr (as
 //	              the signer's user: make the host key and the certificate
 //	              request) and install (as the agent's user: check and install
@@ -51,6 +54,7 @@ commands:
   run           run the per-host agent
   signer        run the host key signer (holds the host private key)
   shutdown-vms  stop every VM, only while the host is shutting down
+  boot-start    start the agent once per boot if enabled (development builds only)
   enroll        enrol the host (development builds only): enroll csr, enroll install
   version       print the version
 `
@@ -73,6 +77,8 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 		return signerCommand(args[1:], log, stderr)
 	case "shutdown-vms":
 		return shutdownCommand(args[1:], log, stderr)
+	case "boot-start":
+		return bootStartCommand(args[1:], log, stderr)
 	case "enroll":
 		return enrollCommand(args[1:], log, stdout, stderr)
 	case "version":

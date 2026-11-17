@@ -97,6 +97,18 @@ const (
 // promise. See ADR-0003 / umbrella #156.
 const tlsBlockMissingMessage = "TLS is on-by-default in v0.3.7. To proceed: (a) provision a Secret with tls.crt/tls.key/ca.crt and set spec.runtime.service.tls.enabled=true with secretRef pointing at it, OR (b) explicitly set spec.runtime.service.tls.enabled=false to keep plaintext (lab / migration scenarios). See umbrella #156 for the runbook."
 
+// providerCredentialsMountPath is the in-pod path where the manager mounts
+// the Provider's credentials Secret (spec.credentialSecretRef).
+const providerCredentialsMountPath = "/etc/virtrigaud/credentials" // #nosec G101 -- a mount path, not a credential
+
+// The keys of the credentials Secret of a clustered Provider for per-host
+// agents that hold its Provider identity certificate and key (a
+// kubernetes.io/tls Secret's keys; development builds only).
+const (
+	agentClientCertKey = "tls.crt"
+	agentClientKeyKey  = "tls.key"
+)
+
 // providerTLSMountPath is the in-pod path where the manager mounts the
 // provider's TLS Secret (matches the path documented in ADR-0003 and
 // consumed by PR-2 in the provider-side `main.go` files).
@@ -986,9 +998,17 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 	// The migration PVCs live VMMigrations reference (the pvc backend). A read
 	// error leaves the Deployment as it is: rendering it without them would
 	// unmount the storage of migrations in flight.
-	migrationMounts, err := r.discoverMigrationStorage(ctx, provider)
-	if err != nil {
-		return nil, fmt.Errorf("discover migration storage: %w", err)
+	//
+	// The clustered Provider for per-host agents mounts none: it serves no
+	// disk export or import (internal/providers/cloudhypervisor: GetCapabilities
+	// advertises none and ExportDisk/ImportDisk answer Unimplemented), so a
+	// migration PVC would only be re-grouped by its pod's fsGroup.
+	var migrationMounts []migrationStorageMount
+	if !agentProviderHoldsIdentityKey(provider) {
+		var err error
+		if migrationMounts, err = r.discoverMigrationStorage(ctx, provider); err != nil {
+			return nil, fmt.Errorf("discover migration storage: %w", err)
+		}
 	}
 
 	// Build container spec
@@ -1050,6 +1070,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					Affinity:                      provider.Spec.Runtime.Affinity,
 					RestartPolicy:                 corev1.RestartPolicyAlways,
 					TerminationGracePeriodSeconds: util.Int64Ptr(30), // Allow time for graceful shutdown
+					SecurityContext:               agentProviderPodSecurityContext(provider),
 				},
 			},
 		},
@@ -1248,7 +1269,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	// Mount credentials secret
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      "provider-credentials",
-		MountPath: "/etc/virtrigaud/credentials",
+		MountPath: providerCredentialsMountPath,
 		ReadOnly:  true,
 	})
 
@@ -1389,19 +1410,68 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 	return container, nil
 }
 
-// agentProviderArgs returns the extra arguments of the clustered Provider
-// for per-host agents when it follows its host inventory Secret through the
-// API (providerReadsInventorySecret): --hosts-secret, so that a revoked host
-// is refused within seconds, and --provider-uid, so that agents enrolled
-// with another Provider are refused. Nil otherwise.
-func (r *ProviderReconciler) agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
-	if !r.providerReadsInventorySecret(provider) {
+// The credentials volume of the clustered Provider for per-host agents
+// holds its identity key: mode 0440 and the pod's fsGroup, so that the
+// provider process reads it (as the fsGroup is one of its groups, whatever
+// user a custom security context runs it as) and no other user does.
+const (
+	agentCredentialsMode int32 = 0o440
+	agentProviderFSGroup int64 = 65532
+)
+
+// agentProviderHoldsIdentityKey reports whether the Provider's credentials
+// Secret holds its Provider identity key (development builds, the
+// clustered Provider for per-host agents).
+func agentProviderHoldsIdentityKey(provider *infravirtrigaudiov1beta1.Provider) bool {
+	return devgate.Compiled && providerRunsHostAgents(provider)
+}
+
+// agentProviderPodSecurityContext is the pod security context of a Provider
+// whose credentials volume holds its identity key (the fsGroup that may read
+// it); nil for every other Provider. The fsGroup is pod-wide in Kubernetes:
+// Secret volume files are owned by root unless a pod fsGroup is set, so it
+// is the only way to make a 0440 key readable by the provider user and by no
+// other (a per-item mode alone would have to grant "other" read). Its
+// change policy keeps the other volumes from being re-owned recursively.
+func agentProviderPodSecurityContext(provider *infravirtrigaudiov1beta1.Provider) *corev1.PodSecurityContext {
+	if !agentProviderHoldsIdentityKey(provider) {
 		return nil
 	}
-	return []string{
-		"--hosts-secret=" + hostInventorySecretName(provider),
-		"--provider-uid=" + string(provider.UID),
+	// OnRootMismatch: the kubelet re-owns a volume only when its root does
+	// not already carry the fsGroup, never recursively on every mount, so a
+	// migration PVC this pod mounts is not walked and chowned at each start.
+	onRoot := corev1.FSGroupChangeOnRootMismatch
+	return &corev1.PodSecurityContext{FSGroup: util.Int64Ptr(agentProviderFSGroup), FSGroupChangePolicy: &onRoot}
+}
+
+// agentProviderArgs returns the extra arguments of the clustered Provider
+// for per-host agents, in a development build only:
+//
+//   - always --agent-client-cert and --agent-client-key, which the Provider
+//     requires: its Provider identity certificate and key, read from the
+//     tls.crt and tls.key keys of its credentials Secret
+//     (spec.credentialSecretRef, mounted at providerCredentialsMountPath);
+//   - when it follows its host inventory Secret through the API
+//     (providerReadsInventorySecret), --hosts-secret, so that a revoked host
+//     is refused within seconds, and --provider-uid, so that agents enrolled
+//     with another Provider are refused.
+//
+// Nil for every other Provider.
+func (r *ProviderReconciler) agentProviderArgs(provider *infravirtrigaudiov1beta1.Provider) []string {
+	if !agentProviderHoldsIdentityKey(provider) {
+		return nil
 	}
+	args := []string{
+		"--agent-client-cert=" + providerCredentialsMountPath + "/" + agentClientCertKey,
+		"--agent-client-key=" + providerCredentialsMountPath + "/" + agentClientKeyKey,
+	}
+	if !r.providerReadsInventorySecret(provider) {
+		return args
+	}
+	return append(args,
+		"--hosts-secret="+hostInventorySecretName(provider),
+		"--provider-uid="+string(provider.UID),
+	)
 }
 
 // providerReadsInventorySecret reports whether the Provider's pod reads its
@@ -1474,14 +1544,16 @@ func addTmpSizeLimitEnv(provider *infravirtrigaudiov1beta1.Provider, container *
 func (r *ProviderReconciler) buildPodVolumes(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, migrationMounts []migrationStorageMount) []corev1.Volume {
 	var volumes []corev1.Volume
 
-	// Add credentials volume
+	// Add credentials volume. For the clustered Provider for per-host agents
+	// it holds the Provider identity key: group-readable only, by the pod's
+	// fsGroup (agentProviderPodSecurityContext), never world-readable.
+	credentials := &corev1.SecretVolumeSource{SecretName: provider.Spec.CredentialSecretRef.Name}
+	if agentProviderHoldsIdentityKey(provider) {
+		credentials.DefaultMode = util.Int32Ptr(agentCredentialsMode)
+	}
 	volumes = append(volumes, corev1.Volume{
-		Name: "provider-credentials",
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: provider.Spec.CredentialSecretRef.Name,
-			},
-		},
+		Name:         "provider-credentials",
+		VolumeSource: corev1.VolumeSource{Secret: credentials},
 	})
 
 	// Add the clustered host-inventory volume (ADR-0007 D3) for a

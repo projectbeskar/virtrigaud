@@ -550,6 +550,12 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 		return ctrl.Result{}, fmt.Errorf("clean up the runtime of Provider %s: %w", key, err)
 	}
 	if err := k8s.RemoveFinalizer(ctx, r.Client, provider, infravirtrigaudiov1beta1.ProviderInUseFinalizer); err != nil {
+		if apierrors.IsConflict(err) {
+			// The Provider changed since it was read: re-read and decide
+			// again, without an error log.
+			logger.V(1).Info("The Provider changed since it was read; deciding its release again", "provider", key.String())
+			return ctrl.Result{Requeue: true}, nil
+		}
 		metrics.RecordError(errReasonProviderFinalizer, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("remove in-use finalizer from Provider %s: %w", key, err)
 	}

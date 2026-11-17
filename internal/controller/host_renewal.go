@@ -148,6 +148,7 @@ const (
 	eventReasonAgentRenewalEarly         = "AgentRenewalActivatedEarly"
 	eventReasonAgentRenewalNoIdentity    = "AgentRenewalNoManagerIdentity"
 	eventReasonAgentRenewalPinnedExpiry  = "AgentRenewalPinnedAtExpiry"
+	eventReasonAgentRenewalOverdue       = "AgentRenewalOverdue"
 )
 
 // Denial reasons of renewal requests.
@@ -196,8 +197,10 @@ type renewalState struct {
 	// staged before the new key is pinned.
 	Certificate       []byte `json:"certificate,omitempty"`
 	CertificateSHA256 string `json:"certificateSHA256,omitempty"`
-	// NotAfter is when the renewed certificate expires.
-	NotAfter *metav1.Time `json:"notAfter,omitempty"`
+	// NotAfter is when the renewed certificate expires, and NotBefore when
+	// its validity begins.
+	NotAfter  *metav1.Time `json:"notAfter,omitempty"`
+	NotBefore *metav1.Time `json:"notBefore,omitempty"`
 	// PinnedAt is when the new key was pinned beside the old one, and
 	// OverlapUntil when the overlap is expected to end.
 	PinnedAt     *metav1.Time `json:"pinnedAt,omitempty"`
@@ -339,6 +342,17 @@ func newRenewalRequestName(src io.Reader) (string, error) {
 	return renewalRequestPrefix + hex.EncodeToString(b), nil
 }
 
+// reasonAgentRenewalOverdue is the AgentEnrolled reason (status True) of a
+// Host whose pinned certificate is past currentEnrolment.renewalOverdueAt
+// with no renewal in progress.
+const reasonAgentRenewalOverdue = "RenewalOverdue"
+
+// ptrTime returns t, truncated to the second in UTC, as a *metav1.Time.
+func ptrTime(t time.Time) *metav1.Time {
+	m := metav1.NewTime(t.UTC().Truncate(time.Second))
+	return &m
+}
+
 // hostHashLabel returns the value of certrequest.LabelHostHash for a Host.
 func hostHashLabel(namespace, name string) string {
 	sum := sha256.Sum256([]byte(namespace + "/" + name))
@@ -368,7 +382,7 @@ func (st *hostEnrolmentState) completeRenewalPins() []string {
 	}
 	cur.KeyPins = []string{r.KeyPin}
 	if r.NotAfter != nil {
-		cur.NotAfter = *r.NotAfter
+		cur.NotAfter, cur.NotBefore = *r.NotAfter, r.NotBefore
 	}
 	st.Renewal, st.RenewalAttempts = nil, nil
 	return removed
@@ -913,43 +927,62 @@ func renewalRequestFinished(cr *unstructured.Unstructured) bool {
 // exactly that request's CSR with agent usages and a bounded lifetime; and
 // the new key was never pinned.
 func (r *HostEnrolmentRequestReconciler) decideRenewal(ctx context.Context, cr *unstructured.Unstructured, iss HostCertificateIssuer) error {
+	return r.judgeRenewal(ctx, cr, iss, false)
+}
+
+// judgeRenewal applies the renewal approval rules (decideRenewal). With
+// approvedElsewhere, the request was already approved by another approver
+// (approver-policy, say) before the manager decided it: the manager writes
+// no condition (a request cannot be both approved and denied), and only
+// records its own approval when every rule holds. A request it would deny
+// is recorded as not approved by the manager, so its issued certificate is
+// never published (completeRenewal marks it refused): "approved by someone
+// else" is never taken as the manager's approval.
+func (r *HostEnrolmentRequestReconciler) judgeRenewal(ctx context.Context, cr *unstructured.Unstructured, iss HostCertificateIssuer,
+	approvedElsewhere bool) error {
 	reqName := cr.GetNamespace() + "/" + cr.GetName()
+	deny := func(host *infravirtrigaudiov1beta1.Host, reason, message string) error {
+		if approvedElsewhere {
+			return r.refuseApprovedElsewhere(ctx, cr, host, reason, message)
+		}
+		return r.denyRenewal(ctx, cr, host, reason, message)
+	}
 	in, err := certrequest.RequestOf(cr)
 	if err != nil {
-		return r.denyRenewal(ctx, cr, nil, hostidentity.ReasonRequestInvalid, err.Error())
+		return deny(nil, hostidentity.ReasonRequestInvalid, err.Error())
 	}
 	if id, ok := r.Config.managerIdentity(); !ok || in.Username != id.Username {
-		return r.denyRenewal(ctx, cr, nil, reasonRenewalRequester,
+		return deny(nil, reasonRenewalRequester,
 			"a renewal request is approved only when the manager created it; this one was created by another principal")
 	}
 	if iss.Name() != (certManagerIssuer{}).Name() {
-		return r.denyRenewal(ctx, cr, nil, reasonRenewalIssuer, "renewal requests are issued only by the cert-manager issuer")
+		return deny(nil, reasonRenewalIssuer, "renewal requests are issued only by the cert-manager issuer")
 	}
 	ns, name, ok := certrequest.HostOf(cr)
 	if !ok {
-		return r.denyRenewal(ctx, cr, nil, reasonEnrolHostUnnamed, "the request does not name a Host in annotation "+certrequest.AnnotationHost)
+		return deny(nil, reasonEnrolHostUnnamed, "the request does not name a Host in annotation "+certrequest.AnnotationHost)
 	}
 	host := &infravirtrigaudiov1beta1.Host{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.denyRenewal(ctx, cr, nil, reasonEnrolHostNotFound, fmt.Sprintf("Host %s/%s does not exist", ns, name))
+			return deny(nil, reasonEnrolHostNotFound, fmt.Sprintf("Host %s/%s does not exist", ns, name))
 		}
 		return fmt.Errorf("get Host of renewal request %s: %w", reqName, err)
 	}
 	switch {
 	case !host.DeletionTimestamp.IsZero():
-		return r.denyRenewal(ctx, cr, host, reasonEnrolHostNotFound, "the Host is being deleted")
+		return deny(host, reasonEnrolHostNotFound, "the Host is being deleted")
 	case host.Spec.Identity == "":
-		return r.denyRenewal(ctx, cr, host, reasonEnrolIdentityMissing, "the Host has no spec.identity")
+		return deny(host, reasonEnrolIdentityMissing, "the Host has no spec.identity")
 	case host.Spec.Revoked:
-		return r.denyRenewal(ctx, cr, host, reasonEnrolHostRevoked, "the Host is revoked")
+		return deny(host, reasonEnrolHostRevoked, "the Host is revoked")
 	}
 	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
 	if err != nil {
 		return err
 	}
 	if !agent {
-		return r.denyRenewal(ctx, cr, host, reasonEnrolHostNotAgent, "the Host's Provider does not run a per-host agent")
+		return deny(host, reasonEnrolHostNotAgent, "the Host's Provider does not run a per-host agent")
 	}
 	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
 	if err != nil {
@@ -958,11 +991,11 @@ func (r *HostEnrolmentRequestReconciler) decideRenewal(ctx context.Context, cr *
 	cur, ren := l.state.Current, l.state.Renewal
 	switch {
 	case l.reset || cur == nil:
-		return r.denyRenewal(ctx, cr, host, reasonRenewalNotEnrolled, "the Host is not enrolled")
+		return deny(host, reasonRenewalNotEnrolled, "the Host is not enrolled")
 	case ren == nil || ren.CertificateRequest != reqName || (ren.CertificateRequestUID != "" && ren.CertificateRequestUID != string(cr.GetUID())):
-		return r.denyRenewal(ctx, cr, host, reasonRenewalNotPending, "the Host has no renewal in progress for this request")
+		return deny(host, reasonRenewalNotPending, "the Host has no renewal in progress for this request")
 	case cur.Record.ProviderUID != string(provider.UID):
-		return r.denyRenewal(ctx, cr, host, reasonEnrolProviderChanged, "the Host is enrolled with another Provider than its own")
+		return deny(host, reasonEnrolProviderChanged, "the Host is enrolled with another Provider than its own")
 	}
 	exp, err := renewalExpectation(r.Config, host, cur, string(provider.UID), r.now())
 	if err != nil {
@@ -970,7 +1003,7 @@ func (r *HostEnrolmentRequestReconciler) decideRenewal(ctx context.Context, cr *
 	}
 	blob, err := ren.blob()
 	if err != nil {
-		return r.denyRenewal(ctx, cr, host, reasonRenewalNotVerified, "the stored renewal request does not decode")
+		return deny(host, reasonRenewalNotVerified, "the stored renewal request does not decode")
 	}
 	v, err := hostidentity.VerifyRenewal(blob, exp)
 	if err != nil || v.KeyPin != ren.KeyPin {
@@ -978,23 +1011,42 @@ func (r *HostEnrolmentRequestReconciler) decideRenewal(ctx context.Context, cr *
 		if err != nil {
 			why = err.Error()
 		}
-		return r.denyRenewal(ctx, cr, host, reasonRenewalNotVerified, why)
+		return deny(host, reasonRenewalNotVerified, why)
 	}
 	if err := hostidentity.CheckRenewalRequestSpec(hostidentity.RenewalRequestSpec{CSRPEM: in.CSRPEM, Usages: in.Usages,
 		Duration: in.Duration, IsCA: in.IsCA}, v); err != nil {
 		if d, ok := hostidentity.AsDenial(err); ok {
-			return r.denyRenewal(ctx, cr, host, d.Reason, d.Message)
+			return deny(host, d.Reason, d.Message)
 		}
 		return err
 	}
 	if slices.Contains(l.state.PreviousKeyPins, v.KeyPin) || slices.Contains(cur.KeyPins, v.KeyPin) {
-		return r.denyRenewal(ctx, cr, host, reasonEnrolKeyPreviouslyPinned, "the renewal's key is, or was, pinned for this Host")
+		return deny(host, reasonEnrolKeyPreviouslyPinned, "the renewal's key is, or was, pinned for this Host")
 	}
 	// Record the approval first, then approve: a crash in between leaves an
 	// undecided request this reconcile approves again (its UID matches).
+	// The approval is reported (log line, event) once, when it is first
+	// saved to the pins Secret: the condition write below may lose to
+	// another approver, and the retry then finds the approval recorded.
+	recorded := ren.Approved && ren.CertificateRequestUID == string(cr.GetUID())
 	ren.Approved, ren.CertificateRequestUID = true, string(cr.GetUID())
 	if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 		return err
+	}
+	if !recorded {
+		if approvedElsewhere {
+			log.FromContext(ctx).Info("A host-agent renewal request was approved by another approver first; the manager's rules hold, "+
+				"so its certificate may be published", "request", reqName, "host", ns+"/"+name, "newKeyPin", v.KeyPin)
+			r.event(host, corev1.EventTypeNormal, eventReasonAgentRenewalApproved, "certificate renewal request "+reqName+
+				" (approved by another approver first) approved for new key "+v.KeyPin)
+		} else {
+			log.FromContext(ctx).Info("Approved a host-agent certificate renewal request", "request", reqName, "host", ns+"/"+name,
+				"newKeyPin", v.KeyPin, "signerKeyPin", v.SignerPin)
+			r.event(host, corev1.EventTypeNormal, eventReasonAgentRenewalApproved, "certificate renewal request "+reqName+" approved for new key "+v.KeyPin)
+		}
+	}
+	if approvedElsewhere {
+		return nil
 	}
 	if err := certrequest.SetCondition(cr, certrequest.ConditionApproved, certrequest.StatusTrue, reasonEnrolAuthorised,
 		"certificate renewal authorised by VirtRigaud for Host "+ns+"/"+name, r.now()); err != nil {
@@ -1003,10 +1055,68 @@ func (r *HostEnrolmentRequestReconciler) decideRenewal(ctx context.Context, cr *
 	if err := r.Status().Update(ctx, cr); err != nil {
 		return fmt.Errorf("approve renewal request %s: %w", reqName, err)
 	}
-	log.FromContext(ctx).Info("Approved a host-agent certificate renewal request", "request", reqName, "host", ns+"/"+name,
-		"newKeyPin", v.KeyPin, "signerKeyPin", v.SignerPin)
-	r.event(host, corev1.EventTypeNormal, eventReasonAgentRenewalApproved, "certificate renewal request "+reqName+" approved for new key "+v.KeyPin)
 	return nil
+}
+
+// refuseApprovedElsewhere refuses a renewal request that another approver
+// approved although the manager's rules deny it: nothing is recorded as the
+// manager's approval, and the request is marked refused at once (it cannot
+// also be denied), which is final: its certificate is never published, even
+// if the rule that failed later passes (the renewal starts again with a new
+// request).
+func (r *HostEnrolmentRequestReconciler) refuseApprovedElsewhere(ctx context.Context, cr *unstructured.Unstructured,
+	host *infravirtrigaudiov1beta1.Host, reason, message string) error {
+	reqName := cr.GetNamespace() + "/" + cr.GetName()
+	if err := markRefused(cr, fmt.Errorf("approved by another approver, but the manager denies it (%s): %s", reason, message), r.now()); err != nil {
+		return err
+	}
+	if err := r.Status().Update(ctx, cr); err != nil {
+		return fmt.Errorf("refuse renewal request %s: %w", reqName, err)
+	}
+	if host == nil {
+		host = r.namedHost(ctx, cr)
+	}
+	log.FromContext(ctx).Info("A host-agent renewal request was approved by another approver, but the manager's rules deny it; "+
+		"its certificate will not be published", "request", reqName, "reason", reason, "detail", message)
+	if host != nil {
+		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalDenied, "certificate renewal request "+reqName+
+			" was approved by another approver, but the manager denies it ("+reason+"): its certificate is not published")
+	}
+	return nil
+}
+
+// approvedElsewhereUnjudged reports whether cr, approved, is the Host's
+// renewal in progress and the manager has not recorded its own approval of
+// it: another approver decided it before the manager did.
+func (r *HostEnrolmentRequestReconciler) approvedElsewhereUnjudged(ctx context.Context, cr *unstructured.Unstructured) (*infravirtrigaudiov1beta1.Host, bool, error) {
+	ns, name, ok := certrequest.HostOf(cr)
+	if !ok {
+		return nil, false, nil
+	}
+	host := &infravirtrigaudiov1beta1.Host{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
+		return nil, false, client.IgnoreNotFound(err)
+	}
+	l, err := loadHostEnrolment(ctx, r.liveReader(), r.Config, host)
+	if err != nil {
+		return nil, false, err
+	}
+	ren := l.state.Renewal
+	return host, ren != nil && !ren.Approved && ren.CertificateRequest == cr.GetNamespace()+"/"+cr.GetName(), nil
+}
+
+// namedHost returns the Host a request names, nil when it names none or
+// the Host does not exist (for an event only).
+func (r *HostEnrolmentRequestReconciler) namedHost(ctx context.Context, cr *unstructured.Unstructured) *infravirtrigaudiov1beta1.Host {
+	ns, name, ok := certrequest.HostOf(cr)
+	if !ok {
+		return nil
+	}
+	host := &infravirtrigaudiov1beta1.Host{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, host); err != nil {
+		return nil
+	}
+	return host
 }
 
 // denyRenewal sets a renewal request's Denied condition, and emits a Warning
@@ -1054,7 +1164,13 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 		return err
 	}
 	if l.reset || cur == nil || ren == nil || !ren.Approved || ren.CertificateRequestUID != string(cr.GetUID()) {
-		return r.markRenewalWithdrawn(ctx, cr)
+		if issuedKeyWasPinned(chain, &l.state) {
+			// A finished renewal (its certificate is, or was, the host's
+			// pinned one; every manager restart reconciles its request again)
+			// is never marked "never install".
+			return nil
+		}
+		return r.markRenewalWithdrawn(ctx, cr, host, !wasHostRenewal(cr, &l))
 	}
 	if len(ren.Certificate) > 0 {
 		return nil
@@ -1081,6 +1197,7 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 	}
 	na := metav1.NewTime(issued.Leaf.NotAfter.UTC().Truncate(time.Second))
 	ren.Certificate, ren.CertificateSHA256, ren.NotAfter = bytes.Clone(issued.Leaf.Raw), hostidentity.CertificateSHA256(issued.Leaf.Raw), &na
+	ren.NotBefore = ptrTime(issued.Leaf.NotBefore)
 	if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
 		return err
 	}
@@ -1118,18 +1235,68 @@ func (r *HostEnrolmentRequestReconciler) validateRenewed(ctx context.Context, ho
 		chain, roots, r.now())
 }
 
+// issuedKeyWasPinned reports whether the leaf of an issued chain certifies a
+// key that is pinned for the Host now (st.Current) or was pinned before
+// (st.PreviousKeyPins): the certificate of a renewal that completed. A chain
+// that does not parse is not one.
+func issuedKeyWasPinned(chain []byte, st *hostEnrolmentState) bool {
+	certs, err := hostidentity.ParseCertificates(chain)
+	if err != nil || len(certs) == 0 {
+		return false
+	}
+	pin, err := hostidentity.SPKIPin(certs[0].PublicKey)
+	if err != nil {
+		return false
+	}
+	if st.Current != nil && slices.Contains(st.Current.KeyPins, pin) {
+		return true
+	}
+	return slices.Contains(st.PreviousKeyPins, pin)
+}
+
+// wasHostRenewal reports whether a request is, or was, a renewal the manager
+// created for the Host: owned by its pins Secret (the manager creates every
+// renewal request with that owner), or named by its renewal in progress.
+func wasHostRenewal(cr *unstructured.Unstructured, l *loadedEnrolment) bool {
+	if ren := l.state.Renewal; ren != nil && ren.CertificateRequest == cr.GetNamespace()+"/"+cr.GetName() {
+		return true
+	}
+	if l.secret == nil || l.secret.UID == "" {
+		return false
+	}
+	for _, o := range cr.GetOwnerReferences() {
+		if o.UID == l.secret.UID {
+			return true
+		}
+	}
+	return false
+}
+
 // markRenewalWithdrawn marks as refused a renewal request that holds a
 // certificate the manager will never publish (its renewal was dropped or
 // replaced).
-func (r *HostEnrolmentRequestReconciler) markRenewalWithdrawn(ctx context.Context, cr *unstructured.Unstructured) error {
+//
+// When the request never was a renewal of the Host it names (neverRenewal:
+// not created for it by the manager, a forged or copied request), a Warning
+// AgentRenewalDenied on that Host says so, once: only the reconcile whose
+// write marks the request emits it.
+func (r *HostEnrolmentRequestReconciler) markRenewalWithdrawn(ctx context.Context, cr *unstructured.Unstructured,
+	host *infravirtrigaudiov1beta1.Host, neverRenewal bool) error {
 	if certrequest.IsTrue(cr, certrequest.ConditionRefused) {
 		return nil
 	}
 	if err := markRefused(cr, errors.New("its renewal is no longer in progress"), r.now()); err != nil {
 		return err
 	}
+	reqName := cr.GetNamespace() + "/" + cr.GetName()
 	if err := r.Status().Update(ctx, cr); err != nil {
-		return fmt.Errorf("mark renewal request %s/%s refused: %w", cr.GetNamespace(), cr.GetName(), err)
+		return fmt.Errorf("mark renewal request %s refused: %w", reqName, err)
+	}
+	if neverRenewal && host != nil {
+		log.FromContext(ctx).Info("Refused a renewal-shaped certificate request that was not the named Host's renewal",
+			"request", reqName, "host", host.Namespace+"/"+host.Name)
+		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalDenied, "certificate request "+reqName+
+			" names this Host as a renewal but was not the Host's renewal: it is marked refused and its certificate is not published")
 	}
 	return nil
 }

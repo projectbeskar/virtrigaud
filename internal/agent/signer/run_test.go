@@ -112,6 +112,46 @@ func TestRun(t *testing.T) {
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
 
+// TestRunRemovesStrayKeyTemps: at start, the signer removes the temporary
+// files an interrupted write of the host key or of a renewal's pending key
+// left in its key directory, and nothing else; without the option it leaves
+// them.
+func TestRunRemovesStrayKeyTemps(t *testing.T) {
+	for _, sweep := range []bool{true, false} {
+		dir := shortTempDir(t)
+		require.NoError(t, os.Chmod(dir, 0o750))
+		keyDir := shortTempDir(t)
+		keyFile := writeKeyFile(t, keyDir, newKey(t), 0o600)
+		strays := []string{".host.key.0123456789abcdef", ".host.key.pending.fedcba9876543210"}
+		keep := []string{"host.key.pending", ".host.key.short", "notes"}
+		for _, n := range append(append([]string(nil), strays...), keep...) {
+			require.NoError(t, os.WriteFile(filepath.Join(keyDir, n), []byte("x"), 0o600))
+		}
+		l := &logs{}
+		signals := make(chan os.Signal, 1)
+		o := RunOptions{SocketPath: filepath.Join(dir, "signer.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(),
+			Notifier: &notes{}, Log: l.logger(), RemoveStrayTemps: sweep}
+		done := make(chan error, 1)
+		go func() { done <- Run(context.Background(), o, signals) }()
+		require.Eventually(t, func() bool { return contains(l.text(), "signer serving") }, 5*time.Second, 10*time.Millisecond)
+		for _, n := range strays {
+			_, err := os.Lstat(filepath.Join(keyDir, n))
+			assert.Equal(t, sweep, os.IsNotExist(err), "%s (sweep %v)", n, sweep)
+		}
+		for _, n := range keep {
+			_, err := os.Lstat(filepath.Join(keyDir, n))
+			assert.NoError(t, err, n)
+		}
+		signals <- syscall.SIGTERM
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("the signer did not stop")
+		}
+	}
+}
+
 // TestRunRefusals: nothing is served when the directory or the key is wrong.
 func TestRunRefusals(t *testing.T) {
 	signals := make(chan os.Signal)

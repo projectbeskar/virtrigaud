@@ -27,6 +27,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -213,7 +215,9 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		}
 	})
 
-	newRenewalEnv := func() *renewalEnv {
+	// newRenewalEnvLiving builds the environment with a current certificate
+	// that lives life.
+	newRenewalEnvLiving := func(life time.Duration) *renewalEnv {
 		e := &renewalEnv{now: time.Now(), rec: record.NewFakeRecorder(64)}
 		for _, p := range []string{"renew-hosts-", "renew-issuer-"} {
 			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: p}}
@@ -261,7 +265,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		csr := hostidentitytest.NewCSR(GinkgoT(), key, hostidentitytest.CSROptions{CommonName: "host-a", URIs: hostidentity.RequestURIs(uri, rec)})
 		// The current certificate lives 20 days, the renewed ones 30, so the
 		// renewed expiry is distinguishable.
-		cb, _ := pem.Decode(e.ca.Issue(GinkgoT(), csr, hostidentitytest.IssueOptions{Lifetime: 20 * 24 * time.Hour}))
+		cb, _ := pem.Decode(e.ca.Issue(GinkgoT(), csr, hostidentitytest.IssueOptions{Lifetime: life}))
 		leaf, err := x509.ParseCertificate(cb.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 		e.oldPin, err = hostidentity.SPKIPin(&key.PublicKey)
@@ -278,6 +282,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		e.reader = &renewalReader{host: e.host}
 		return e
 	}
+	newRenewalEnv := func() *renewalEnv { return newRenewalEnvLiving(20 * 24 * time.Hour) }
 
 	state := func(e *renewalEnv) hostEnrolmentState {
 		sec := &corev1.Secret{}
@@ -449,6 +454,14 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(resolveHostRenewal(ctx, k8sClient, e.cfg, h)).To(BeNil())
 		Expect(renewalRequests(e)).To(HaveLen(1), "the finished renewal request is retained for audit")
 
+		// A manager restart reconciles the finished request again, with no
+		// renewal in progress: its certificate is the host's pinned one and
+		// is never marked "never install it".
+		e.reqR = &HostEnrolmentRequestReconciler{Client: e.reqR.Client, APIReader: e.reqR.APIReader, Config: e.reqR.Config,
+			Recorder: e.reqR.Recorder, Now: e.reqR.Now}
+		finished := reconcileCR(e, getCR(e, renewalRequests(e)[0]))
+		Expect(certrequest.IsTrue(finished, certrequest.ConditionRefused)).To(BeFalse(), "the current certificate's request is not refused")
+
 		// Answers by the old key are no answers now.
 		e.host.mu.Lock()
 		e.host.key, e.host.cert = oldKey, oldCert
@@ -462,6 +475,257 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		}
 		Expect(strings.Join(reasons, "\n")).To(And(ContainSubstring(eventReasonAgentRenewalRequested), ContainSubstring(eventReasonAgentRenewalApproved),
 			ContainSubstring(eventReasonAgentRenewalIssued), ContainSubstring(eventReasonAgentRenewalPinned), ContainSubstring(eventReasonAgentRenewed)))
+	})
+
+	It("renews a short-lived certificate with every step after the request driven by the pins Secret watch, not the heartbeat", func() {
+		life := hostidentity.MinLifetime
+		e := newRenewalEnvLiving(life)
+		pinsSecret := func() *corev1.Secret {
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.issuerNS, Name: hostEnrolmentSecretName(e.hostNS, "host-a")}, sec)).To(Succeed())
+			return sec
+		}
+		watch := pinsAdvanceHost(func() time.Time { return e.now })
+		// pollIfWatched runs the Host controller's poll only when the pins
+		// Secret change since before is one its watch enqueues, and fails
+		// otherwise (the step would wait for the next heartbeat). It returns
+		// the Secret the poll was enqueued for, so the next step's change
+		// includes what the poll wrote.
+		pollIfWatched := func(before *corev1.Secret, step string) *corev1.Secret {
+			after := pinsSecret()
+			Expect(watch.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after})).To(BeTrue(),
+				"%s: the Host's poll follows the pins Secret change at once", step)
+			Expect(heartbeat(e)).To(Equal(answerVerified))
+			return after
+		}
+		Expect(heartbeat(e)).To(Equal(answerVerified), "the first heartbeat learns the agent's API version")
+		// The one heartbeat the renewal waits for: the one that collects the
+		// host's request.
+		e.host.startRenewal(e.hostURI, "host-a")
+		start := e.now
+		s0 := pinsSecret()
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		Expect(state(e).Renewal).NotTo(BeNil())
+		s1 := pollIfWatched(s0, "renewal recorded")
+		reconcileHost(e)
+		reconcileHost(e)
+		s2 := pollIfWatched(s1, "request created")
+		_, name, _ := strings.Cut(state(e).Renewal.CertificateRequest, "/")
+		cr := reconcileCR(e, getCR(e, name))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		s3 := pollIfWatched(s2, "approved")
+		der := issue(e, cr, hostidentitytest.IssueOptions{Lifetime: time.Hour})
+		reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).To(Equal(der))
+		// The poll that follows the issuance stages it on the host (the
+		// Provider's call), and the next answer pins the new key.
+		e.host.stage(der)
+		s4 := pollIfWatched(s3, "issued")
+		newPin, err := hostidentity.SPKIPin(&e.host.newKey.PublicKey)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(state(e).Current.KeyPins).To(ContainElement(newPin), "pinned on the poll that followed the issuance")
+		e.host.activate()
+		pollIfWatched(s4, "pinned")
+		st := state(e)
+		Expect(st.Current.KeyPins).To(Equal([]string{newPin}), "renewed: the old pin is removed")
+		Expect(st.Renewal).To(BeNil())
+		Expect(e.now).To(Equal(start), "no heartbeat interval passed: every step followed the watch")
+		Expect(e.now.Sub(start)).To(BeNumerically("<", life/6), "well within the agent's discard deadline")
+	})
+
+	It("applies its own rules to a renewal request another approver approved first, and publishes only what it would approve", func() {
+		approveElsewhere := func(cr *unstructured.Unstructured) {
+			Expect(certrequest.SetCondition(cr, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+				"Approved by CertificateRequestPolicy", time.Now())).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+		}
+
+		// The manager's rules hold: it records its approval and publishes.
+		e := newRenewalEnv()
+		cr := requested(e)
+		approveElsewhere(cr)
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionDenied)).To(BeFalse(), "an approved request is never also denied")
+		Expect(state(e).Renewal.Approved).To(BeTrue(), "the manager's own rules hold: its approval is recorded")
+		der := issue(e, cr, hostidentitytest.IssueOptions{})
+		reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).To(Equal(der), "published")
+		Expect(drainEvents(e.rec)).To(ContainElement(ContainSubstring(eventReasonAgentRenewalApproved)),
+			"the manager's approval is in the audit trail, as on the undecided path")
+
+		// The manager's rules deny it (the Host is revoked): nothing is
+		// recorded as its approval and the certificate is never published.
+		e = newRenewalEnv()
+		cr = requested(e)
+		h := hostObj(e)
+		h.Spec.Revoked = true
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		approveElsewhere(cr)
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionDenied)).To(BeFalse())
+		Expect(state(e).Renewal.Approved).To(BeFalse(), "approved by someone else is never the manager's approval")
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "a certificate the manager would deny is marked refused")
+		Expect(state(e).Renewal == nil || len(state(e).Renewal.Certificate) == 0).To(BeTrue(), "and never published")
+		Expect(drainEvents(e.rec)).To(ContainElement(ContainSubstring(eventReasonAgentRenewalDenied)), "the Host says the manager refused it")
+	})
+
+	It("keeps a renewal request it refused after another approver approved it refused, and judges none while approvals are suspended", func() {
+		approveElsewhere := func(cr *unstructured.Unstructured) {
+			Expect(certrequest.SetCondition(cr, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+				"Approved by CertificateRequestPolicy", time.Now())).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+		}
+
+		// Refused while a rule fails (the renewal's key is recorded as
+		// previously pinned); once the rule passes again, still refused.
+		e := newRenewalEnv()
+		cr := requested(e)
+		setPreviouslyPinned := func(on bool) {
+			h := hostObj(e)
+			l, err := loadHostEnrolment(ctx, k8sClient, e.cfg, h)
+			Expect(err).NotTo(HaveOccurred())
+			pin := l.state.Renewal.KeyPin
+			l.state.PreviousKeyPins = slices.DeleteFunc(l.state.PreviousKeyPins, func(p string) bool { return p == pin })
+			if on {
+				l.state.PreviousKeyPins = append(l.state.PreviousKeyPins, pin)
+			}
+			Expect(saveHostEnrolment(ctx, k8sClient, e.cfg, h, &l)).To(Succeed())
+		}
+		setPreviouslyPinned(true)
+		approveElsewhere(cr)
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "refused at once")
+		setPreviouslyPinned(false) // the rule passes again
+		cr = reconcileCR(e, cr)
+		Expect(state(e).Renewal.Approved).To(BeFalse(), "a refused request is not judged again")
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "still refused")
+		st := state(e)
+		Expect(st.Renewal == nil || (!st.Renewal.Approved && len(st.Renewal.Certificate) == 0)).To(BeTrue(), "never approved, never published")
+
+		// While approvals are suspended, a request another approver approved
+		// is not judged: no approval of the manager's is recorded.
+		e = newRenewalEnv()
+		cr = requested(e)
+		approveElsewhere(cr)
+		e.reqR.Admission = &AdmissionGate{} // never checked: suspended
+		res, err := e.reqR.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.GetNamespace(), Name: cr.GetName()}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(admissionSuspendedRequeue))
+		Expect(state(e).Renewal.Approved).To(BeFalse(), "nothing recorded while approvals are suspended")
+		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeFalse())
+	})
+
+	It("revisits an issued renewal request as soon as its pins Secret changes, and marks it refused once the renewal is withdrawn", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).NotTo(BeEmpty(), "issued, its key not pinned yet")
+		// A revocation withdraws the renewal: the change lands on the Host
+		// and the pins Secret, not on the request.
+		h := hostObj(e)
+		h.Spec.Revoked = true
+		Expect(k8sClient.Update(ctx, h)).To(Succeed())
+		reconcileHost(e)
+		sec := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.issuerNS, Name: hostEnrolmentSecretName(e.hostNS, "host-a")}, sec)).To(Succeed())
+		// The pins Secret's change maps to the request it owns (the watch the
+		// manager registers), and that reconcile marks it refused.
+		var reqs []ctrl.Request
+		Eventually(func() []ctrl.Request {
+			reqs = e.reqR.requestsOwnedBy(ctx, sec)
+			return reqs
+		}).Should(ContainElement(ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.GetNamespace(), Name: cr.GetName()}}))
+		for _, rq := range reqs {
+			_, err := e.reqR.Reconcile(ctx, rq)
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeTrue(), "marked without a restart or a resync")
+	})
+
+	It("reports its approval once, when it is saved, even when another approver wins the condition write", func() {
+		e := newRenewalEnv()
+		cr := requested(e)
+		// Another approver approves the request between the manager's
+		// judgement and its condition write, which then conflicts.
+		e.reqR.Client = &approveFirstClient{Client: k8sClient}
+		res, err := e.reqR.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.GetNamespace(), Name: cr.GetName()}})
+		Expect(err).NotTo(HaveOccurred(), "a lost condition write is retried quietly")
+		Expect(res.Requeue).To(BeTrue(), "the condition write lost to the other approver") //nolint:staticcheck // Requeue is what the reconciler returns
+		Expect(state(e).Renewal.Approved).To(BeTrue(), "the manager's approval was saved before the lost write")
+		approved := func(evs []string) int {
+			n := 0
+			for _, ev := range evs {
+				if strings.Contains(ev, eventReasonAgentRenewalApproved) {
+					n++
+				}
+			}
+			return n
+		}
+		evs := drainEvents(e.rec)
+		Expect(approved(evs)).To(Equal(1), "reported when the approval was saved: %v", evs)
+		// The retry finds the request approved elsewhere and the approval
+		// recorded: it reports nothing again, and publishes.
+		e.reqR.Client = k8sClient
+		cr = reconcileCR(e, getCR(e, cr.GetName()))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		der := issue(e, cr, hostidentitytest.IssueOptions{})
+		reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).To(Equal(der), "published")
+		reconcileCR(e, cr)
+		Expect(approved(drainEvents(e.rec))).To(BeZero(), "the approval is reported exactly once")
+	})
+
+	It("tells the named Host when a request that was never its renewal is refused, once", func() {
+		e := newRenewalEnv()
+		cr := requested(e)
+		csr, err := certrequest.CSR(cr)
+		Expect(err).NotTo(HaveOccurred())
+		forged := certrequest.NewRenewal(certrequest.RenewalSpec{Namespace: e.issuerNS, Name: "forged-approved", HostNamespace: e.hostNS,
+			HostName: "host-a", HostHash: hostHashLabel(e.hostNS, "host-a"), IssuerRef: enrolTestCMIssuer, CSRPEM: csr,
+			Duration: 24 * time.Hour, Username: "mallory", Groups: []string{"system:authenticated"}})
+		Expect(k8sClient.Create(ctx, forged)).To(Succeed())
+		forged = getCR(e, "forged-approved")
+		Expect(certrequest.SetCondition(forged, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+			"Approved by CertificateRequestPolicy", time.Now())).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, forged)).To(Succeed())
+		drainEvents(e.rec)
+		issue(e, forged, hostidentitytest.IssueOptions{})
+		forged = reconcileCR(e, forged)
+		Expect(certrequest.IsTrue(forged, certrequest.ConditionRefused)).To(BeTrue())
+		evs := drainEvents(e.rec)
+		Expect(evs).To(ContainElement(SatisfyAll(ContainSubstring("Warning "+eventReasonAgentRenewalDenied),
+			ContainSubstring("forged-approved"), ContainSubstring("was not the Host's renewal"))))
+		for _, ev := range evs {
+			Expect(ev).NotTo(ContainSubstring("BEGIN"), "no certificate or request material in the event")
+		}
+		reconcileCR(e, forged)
+		Expect(drainEvents(e.rec)).NotTo(ContainElement(ContainSubstring(eventReasonAgentRenewalDenied)), "only the marking reconcile reports it")
+		Expect(state(e).Renewal.CertificateRequest).To(Equal(cr.GetNamespace()+"/"+cr.GetName()), "the Host's own renewal is untouched")
+	})
+
+	It("marks an issued renewal certificate refused once its renewal is withdrawn and its key was never pinned", func() {
+		e := newRenewalEnv()
+		cr := reconcileCR(e, requested(e))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		// The renewal is withdrawn (a re-key or a restart dropped it) before
+		// the issuance is seen; the issued key was never pinned.
+		h := hostObj(e)
+		l, err := loadHostEnrolment(ctx, k8sClient, e.cfg, h)
+		Expect(err).NotTo(HaveOccurred())
+		l.state.Renewal = nil
+		Expect(saveHostEnrolment(ctx, k8sClient, e.cfg, h, &l)).To(Succeed())
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		drainEvents(e.rec)
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "a certificate never published is marked refused")
+		Expect(drainEvents(e.rec)).NotTo(ContainElement(ContainSubstring("was not the Host's renewal")),
+			"a withdrawn renewal of the Host is not reported as a request that never was one")
 	})
 
 	It("never records a renewal co-signed by another key, or one that changes the identities", func() {
@@ -838,4 +1102,38 @@ func drainRenewalEvents(rec *record.FakeRecorder) string {
 			return strings.Join(out, "\n")
 		}
 	}
+}
+
+// approveFirstClient lets another approver approve a CertificateRequest just
+// before the reconciler's own status write, once, so that write conflicts.
+type approveFirstClient struct {
+	client.Client
+	done bool
+}
+
+func (c *approveFirstClient) Status() client.SubResourceWriter {
+	return &approveFirstStatus{SubResourceWriter: c.Client.Status(), c: c}
+}
+
+type approveFirstStatus struct {
+	client.SubResourceWriter
+	c *approveFirstClient
+}
+
+func (s *approveFirstStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if u, ok := obj.(*unstructured.Unstructured); ok && !s.c.done && u.GetKind() == certrequest.NewObject().GetKind() {
+		s.c.done = true
+		other := certrequest.NewObject()
+		if err := s.c.Get(ctx, client.ObjectKeyFromObject(u), other); err != nil {
+			return err
+		}
+		if err := certrequest.SetCondition(other, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+			"Approved by CertificateRequestPolicy", time.Now()); err != nil {
+			return err
+		}
+		if err := s.c.Client.Status().Update(ctx, other); err != nil {
+			return err
+		}
+	}
+	return s.SubResourceWriter.Update(ctx, obj, opts...)
 }

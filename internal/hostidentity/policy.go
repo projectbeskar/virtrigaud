@@ -35,6 +35,18 @@ import (
 // authorises.
 const MaxLifetime = 30 * 24 * time.Hour
 
+// MinLifetime is the shortest agent certificate lifetime the manager
+// authorises. An agent asks to renew at two thirds of its certificate's
+// lifetime and draws a new key when its request is not answered within half
+// the lifetime then left, a sixth of the lifetime. The manager collects the
+// request on its next heartbeat poll (up to a minute) and the issued
+// certificate is staged on a poll seconds later, so a sixth of the lifetime
+// must cover more than a heartbeat with room for one missed poll and a slow
+// issuer: at fifteen minutes it is 150 seconds, two and a half heartbeats.
+// A shorter certificate could have its request discarded before it is
+// answered, and end pinned to a key the host no longer holds.
+const MinLifetime = 15 * time.Minute
+
 // Certificate usages, spelled as cert-manager's CertificateRequest
 // spec.usages spells them.
 const (
@@ -80,7 +92,8 @@ const (
 	ReasonCARequested = "CARequested"
 	// ReasonUsages: the usages are not client and server authentication.
 	ReasonUsages = "UsagesRefused"
-	// ReasonLifetime: no lifetime, or one longer than MaxLifetime.
+	// ReasonLifetime: no lifetime, or one shorter than MinLifetime or longer
+	// than MaxLifetime.
 	ReasonLifetime = "LifetimeRefused"
 )
 
@@ -189,8 +202,8 @@ func Authorise(p Policy, req Request) (Authorisation, error) {
 	if err := checkUsages(req.Usages); err != nil {
 		return Authorisation{}, err
 	}
-	if req.Duration <= 0 || req.Duration > MaxLifetime {
-		return Authorisation{}, deny(ReasonLifetime, "the requested lifetime must be set and at most %s", MaxLifetime)
+	if err := checkLifetime(req.Duration); err != nil {
+		return Authorisation{}, err
 	}
 	csr, err := ParseCSR(req.CSRPEM)
 	if err != nil {
@@ -343,4 +356,19 @@ func subjectAllowed(names []pkix.AttributeTypeAndValue, hostName string) bool {
 		}
 	}
 	return true
+}
+
+// checkLifetime refuses a requested lifetime that is not set, shorter than
+// MinLifetime or longer than MaxLifetime.
+func checkLifetime(d time.Duration) error {
+	switch {
+	case d <= 0:
+		return deny(ReasonLifetime, "the requested lifetime must be set, at least %s and at most %s", MinLifetime, MaxLifetime)
+	case d < MinLifetime:
+		return deny(ReasonLifetime, "the requested lifetime %s is shorter than %s: the agent could not renew it in time "+
+			"(it draws a new key when its renewal request is not answered within a sixth of the lifetime)", d, MinLifetime)
+	case d > MaxLifetime:
+		return deny(ReasonLifetime, "the requested lifetime %s is longer than %s", d, MaxLifetime)
+	}
+	return nil
 }

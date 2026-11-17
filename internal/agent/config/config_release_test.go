@@ -33,6 +33,7 @@ func TestReleaseBuildRefusesDevelopmentSettings(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"--executor=fake"}, {"--dev-trust-dir=/srv/trust"}, {"--dev-enrolment-file=/srv/enrolment.json"},
+		{"--audit-retain-events=10"}, {"--audit-retain-bytes=4096"},
 	} {
 		if err := parse(t, args...).Validate(); !errors.Is(err, config.ErrDevOnly) {
 			t.Errorf("%v: %v, want ErrDevOnly", args, err)

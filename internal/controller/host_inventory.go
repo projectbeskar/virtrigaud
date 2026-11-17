@@ -805,6 +805,7 @@ func (r *HostReconciler) auditInventory(ctx context.Context, host *infravirtriga
 // probes' backoff, when the Host is
 // gone or deleted.
 func (r *HostReconciler) forgetHostInventory(key types.NamespacedName) {
+	r.notFronted.Delete(key)
 	r.inventoryEvents.forget(key.Namespace + "/" + key.Name)
 	metrics.DeleteHostInventoryConditions(key.Namespace, key.Name)
 	if r.HostAnswers != nil {

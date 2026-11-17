@@ -57,6 +57,10 @@ type RunOptions struct {
 	// Renewal serves the certificate renewal operations, keeping the pending
 	// key beside KeyFile (development builds only).
 	Renewal bool
+	// RemoveStrayTemps removes, at start, the temporary files an interrupted
+	// write of the host key or of a renewal's pending key left beside
+	// KeyFile (development builds only).
+	RemoveStrayTemps bool
 	// Notifier receives READY when the signer serves (nil sends nothing).
 	Notifier systemd.Notifier
 	// Log receives structured events.
@@ -75,6 +79,13 @@ func Run(ctx context.Context, o RunOptions, signals <-chan os.Signal) error {
 	key, err := LoadKey(o.KeyFile, o.OwnerUID)
 	if err != nil {
 		return fmt.Errorf("run signer: %w", err)
+	}
+	// A write of the host key or of a renewal's pending key that was killed
+	// leaves a temporary file; nothing else ever removes it.
+	if o.RemoveStrayTemps {
+		if removed := removeStrayTemps(filepath.Dir(o.KeyFile), filepath.Base(o.KeyFile)); len(removed) > 0 {
+			o.Log.Info("removed temporary key files left by an interrupted write", "files", removed)
+		}
 	}
 	srv, err := NewServer(ServerOptions{Key: key, AllowedUID: o.AgentUID, Log: o.Log,
 		SignsPerSecond: o.SignsPerSecond, SignBurst: o.SignBurst, LogInterval: o.LogInterval,

@@ -1,0 +1,79 @@
+# Deny-only admission control for the CertificateRequests the manager creates
+# itself (certificate renewals). Development builds only; not referenced by
+# any kustomization: apply it on purpose after editing the placeholders (see
+# ../README.md). Needs Kubernetes 1.30 or later (ValidatingAdmissionPolicy).
+#
+# It only ever denies: it approves nothing and leaves the manager's approval
+# rules in charge. A CertificateRequest created by the manager's
+# ServiceAccount is refused at admission unless it is a renewal request of
+# the shape the manager builds: in the enrolment namespace, labelled as an
+# agent renewal and naming a Host, for the host-agent issuer, not a CA, with
+# exactly the usages "digital signature" and "server auth" and a lifetime of
+# at most 30 days. Requests from anyone else are not matched.
+#
+# What it cannot check: the names inside the request's PKCS #10 request
+# (spec.request is DER, which admission expressions cannot parse). The
+# manager checks those itself, and an issued certificate is pinned for no
+# Host unless it carries the Host's names and a key the host co-signed; but
+# whoever controls the manager's ServiceAccount can still have the issuer
+# sign other names. A name constraint on the host-agent sub-CA (permitted
+# URI domain: the trust domain) narrows that at the CA.
+#
+# Placeholders: virtrigaud-system / virtrigaud-controller-manager (the
+# manager's ServiceAccount), host-agent-pki (the enrolment namespace),
+# host-agent-ca (the host-agent ClusterIssuer).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: virtrigaud-host-agent-manager-requests
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["cert-manager.io"]
+      apiVersions: ["*"]
+      operations: ["CREATE"]
+      resources: ["certificaterequests"]
+  matchConditions:
+  - name: created-by-the-manager
+    expression: >-
+      request.userInfo.username == 'system:serviceaccount:virtrigaud-system:virtrigaud-controller-manager'
+  validations:
+  - expression: >-
+      request.namespace == 'host-agent-pki'
+    message: the manager creates certificate requests only in the enrolment namespace
+  - expression: >-
+      has(object.metadata.labels) &&
+      'enrolment.virtrigaud.io/agent' in object.metadata.labels &&
+      object.metadata.labels['enrolment.virtrigaud.io/agent'] == 'true' &&
+      'enrolment.virtrigaud.io/renewal' in object.metadata.labels &&
+      object.metadata.labels['enrolment.virtrigaud.io/renewal'] == 'true' &&
+      has(object.metadata.annotations) &&
+      'enrolment.virtrigaud.io/host' in object.metadata.annotations
+    message: the manager creates only agent renewal requests that name a Host
+  - expression: >-
+      has(object.spec.issuerRef) &&
+      has(object.spec.issuerRef.group) && object.spec.issuerRef.group == 'cert-manager.io' &&
+      has(object.spec.issuerRef.kind) && object.spec.issuerRef.kind == 'ClusterIssuer' &&
+      has(object.spec.issuerRef.name) && object.spec.issuerRef.name == 'host-agent-ca'
+    message: the manager's requests must name the host-agent issuer
+  - expression: >-
+      !has(object.spec.isCA) || object.spec.isCA == false
+    message: the manager's requests must not ask for a CA
+  - expression: >-
+      has(object.spec.usages) && size(object.spec.usages) == 2 &&
+      'digital signature' in object.spec.usages && 'server auth' in object.spec.usages
+    message: the manager's requests must ask for exactly the usages "digital signature" and "server auth"
+  - expression: >-
+      has(object.spec.duration) &&
+      duration(object.spec.duration) > duration('0s') &&
+      duration(object.spec.duration) <= duration('720h')
+    message: the manager's requests must ask for a lifetime of at most 30 days
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: virtrigaud-host-agent-manager-requests
+spec:
+  policyName: virtrigaud-host-agent-manager-requests
+  validationActions: ["Deny"]

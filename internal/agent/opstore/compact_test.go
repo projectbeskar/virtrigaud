@@ -108,3 +108,65 @@ func TestCompact_ManyOperations(t *testing.T) {
 		}
 	}
 }
+
+// TestCompact_BatchScanIsBoundedAndResumes: a batch reads at most
+// CompactScanFactor times its size before it lets go of the store's lock,
+// and the next batch resumes after the last key read, so a store whose
+// records cannot be dropped is scanned once per Compact in short steps, and
+// the records that can be dropped behind them are still found.
+func TestCompact_BatchScanIsBoundedAndResumes(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	const open = 2*opstore.CompactScanFactor + 3
+	for i := 0; i < open; i++ {
+		b := rid()
+		h.do(h.req(fmt.Sprintf("vm-open-%d", i), b, kCreate, 1))
+		h.mustAccept(h.req(fmt.Sprintf("vm-open-%d", i), b, kPowerOn, 1))
+	}
+	// Every Create above is finished and droppable; the accepted power ops
+	// are not. With batch 1 a batch stops at its scan bound or its first
+	// droppable record, and each returns where to resume.
+	ctx := context.Background()
+	var after []byte
+	batches, dropped := 0, 0
+	for {
+		n, more, next, err := opstore.CompactBatch(ctx, h.s, 1, after)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batches++
+		dropped += n
+		if n > 1 {
+			t.Fatalf("batch of 1 dropped %d", n)
+		}
+		if !more {
+			break
+		}
+		if next == nil {
+			t.Fatal("a batch that stopped early names no key to resume after")
+		}
+		after = next
+		if batches > 4*open {
+			t.Fatal("the scan does not advance")
+		}
+	}
+	if dropped != open {
+		t.Fatalf("dropped %d, want the %d finished Creates", dropped, open)
+	}
+	// A store with nothing left to drop: each batch reads at most its bound.
+	after, batches = nil, 0
+	for {
+		n, more, next, err := opstore.CompactBatch(ctx, h.s, 1, after)
+		if err != nil || n != 0 {
+			t.Fatalf("dropped %d, err %v", n, err)
+		}
+		batches++
+		if !more {
+			break
+		}
+		after = next
+	}
+	if want := open/opstore.CompactScanFactor + 1; batches != want {
+		t.Fatalf("a scan of %d records took %d batches of at most %d reads, want %d", open, batches, opstore.CompactScanFactor, want)
+	}
+}

@@ -27,6 +27,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -144,17 +145,100 @@ const (
 	keepaliveTimeout = 10 * time.Second
 )
 
+// alertCreds wraps the client TLS credentials of an agent connection: the
+// connection a handshake returns reports, through onAlert, a fatal TLS alert
+// the agent sends instead of its first frame. A TLS 1.3 server verifies the
+// client certificate after the client finished its handshake, so that alert
+// is how an agent refuses the Provider's certificate; gRPC keeps only the
+// error of the connection's last attempt, which a refused redial replaces.
+// An alert after the agent sent anything (its first frame shows it accepted
+// the connection) is not reported: calls on such a connection may have run.
+type alertCreds struct {
+	credentials.TransportCredentials
+	onAlert func()
+}
+
+// ClientHandshake implements credentials.TransportCredentials. A failed
+// handshake is never reported as a refusal: a TLS 1.3 server's refusal of
+// the client certificate arrives after the client's handshake, on the first
+// read, and an alert during the handshake (an agent whose signer is away, a
+// handshake over its cap) says nothing about the certificate; gRPC then
+// redials the same connection.
+func (c *alertCreds) ClientHandshake(ctx context.Context, authority string, raw net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	conn, info, err := c.TransportCredentials.ClientHandshake(ctx, authority, raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &alertConn{Conn: conn, onAlert: c.onAlert}, info, nil
+}
+
+// Clone implements credentials.TransportCredentials.
+func (c *alertCreds) Clone() credentials.TransportCredentials {
+	return &alertCreds{TransportCredentials: c.TransportCredentials.Clone(), onAlert: c.onAlert}
+}
+
+// alertConn is an agent connection that reports a fatal TLS alert it reads
+// before any data.
+type alertConn struct {
+	net.Conn
+	onAlert func()
+	// read is set once the agent sent any data (its first frame).
+	read atomic.Bool
+}
+
+// Read implements net.Conn.
+func (c *alertConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.read.Store(true)
+	}
+	if err != nil && n == 0 && !c.read.Load() && isCertificateAlert(err) {
+		c.onAlert()
+	}
+	return n, err
+}
+
+// certificateAlerts are the fatal TLS alerts a TLS server sends when it
+// refuses the client certificate (crypto/tls's texts). Any other alert, an
+// internal error above all, is not a refusal of the certificate.
+var certificateAlerts = []string{
+	"bad certificate", "certificate required", "unknown certificate authority", "certificate unknown", "access denied",
+}
+
+// isCertificateAlert reports whether err is a fatal TLS alert the peer sent
+// to refuse the client certificate.
+func isCertificateAlert(err error) bool {
+	msg := err.Error()
+	i := strings.Index(msg, remoteTLSAlert)
+	if i < 0 {
+		return false
+	}
+	rest := msg[i+len(remoteTLSAlert):]
+	for _, a := range certificateAlerts {
+		if strings.HasPrefix(rest, a) {
+			return true
+		}
+	}
+	return false
+}
+
 // dialAgent returns a lazy client connection to an agent at endpoint: nothing
 // is dialed until the first call. The connection carries the stats handler
-// sh (route.go), keepalive pings and, when dial is set, dials through it.
+// sh (route.go), keepalive pings and, when dial is set, dials through it;
+// onAlert, when set, runs when the agent ends a connection with a fatal TLS
+// alert (it refused the Provider's certificate).
 func dialAgent(endpoint string, trust *agentTrust, client tls.Certificate,
-	dial func(ctx context.Context, addr string) (net.Conn, error), sh stats.Handler) (*grpc.ClientConn, error) {
+	dial func(ctx context.Context, addr string) (net.Conn, error), sh stats.Handler, onAlert func()) (*grpc.ClientConn, error) {
 	addr, err := agentAddress(endpoint)
 	if err != nil {
 		return nil, err
 	}
+	creds := credentials.NewTLS(trust.tlsConfig(client))
+	if onAlert != nil {
+		creds = &alertCreds{TransportCredentials: creds, onAlert: onAlert}
+	}
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(credentials.NewTLS(trust.tlsConfig(client))),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithStatsHandler(sh),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: keepaliveTime, Timeout: keepaliveTimeout, PermitWithoutStream: true}),
 	}

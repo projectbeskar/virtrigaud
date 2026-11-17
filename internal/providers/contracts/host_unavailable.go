@@ -17,6 +17,8 @@ limitations under the License.
 package contracts
 
 import (
+	"errors"
+
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/status"
 )
@@ -44,6 +46,33 @@ func UnreachableHost(err error) string {
 		if info, ok := d.(*errdetails.ErrorInfo); ok &&
 			info.GetReason() == HostUnavailableReason && info.GetDomain() == HostUnavailableErrorDomain {
 			return info.GetMetadata()[HostUnavailableHostKey]
+		}
+	}
+	return ""
+}
+
+// HostUnavailableCauseKey is the google.rpc.ErrorInfo metadata key a
+// clustered provider sets on a HostUnavailableReason status to name why the
+// host is unavailable (development builds' Cloud Hypervisor Provider).
+const HostUnavailableCauseKey = "cause"
+
+// HostUnavailableCauseNotFronted is the HostUnavailableCauseKey value of a
+// host the Provider does not front (not, or no longer, in its inventory).
+const HostUnavailableCauseNotFronted = "HostNotFronted"
+
+// HostUnavailableCause returns the HostUnavailableCauseKey value of a
+// HostUnavailableReason answer in err's chain, or "" when err carries no such
+// answer or it names no cause. The status may be wrapped (a ProviderError's
+// cause).
+func HostUnavailableCause(err error) string {
+	var se interface{ GRPCStatus() *status.Status }
+	if !errors.As(err, &se) || se.GRPCStatus() == nil {
+		return ""
+	}
+	for _, d := range se.GRPCStatus().Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == HostUnavailableReason && info.GetDomain() == HostUnavailableErrorDomain {
+			return info.GetMetadata()[HostUnavailableCauseKey]
 		}
 	}
 	return ""

@@ -30,8 +30,12 @@ The `none` executor implements no operation kind and performs nothing. The
 `fake` executor (`internal/agent/executor/fake`) keeps small JSON files under
 `<state dir>/fake-executor/` that stand in for VMs; it is compiled only with
 the `virtrigaud_dev` tag, so a release binary does not contain it (a test
-checks the release build's dependency list). Neither build links Kubernetes or
-the VirtRigaud API packages.
+checks the release build's dependency list). It appends a line naming each
+effect to `intents.log` before performing it and to `effects.log` after, so a
+crash never leaves an effect that neither log names; a Create's define writes
+the VM file before its effect marker, so a crash between the two leaves a VM
+that inspection recognises as the define's effect, never a marker without its
+VM. Neither build links Kubernetes or the VirtRigaud API packages.
 
 ## Subcommands and flags
 
@@ -40,6 +44,7 @@ the VirtRigaud API packages.
 | `vrtg-agent run` | Runs the agent until SIGTERM or SIGINT. |
 | `vrtg-agent signer` | Runs the host key signer until SIGTERM or SIGINT: a separate process and user that holds the host private key and signs for the agent over a Unix socket (see [Host key signer](#host-key-signer)). The same in a release and a development build; it has no development-only setting. |
 | `vrtg-agent shutdown-vms` | Stops every VM of the executor, only while the host is shutting down (see [Units](#systemd-units)). |
+| `vrtg-agent boot-start` | Development builds only (a release build prints that it is not available and exits 1). Starts the agent at most once per boot, while `vrtg-agent.service` is enabled: the action of `vrtg-agent-boot-start.service` (see [Units](#systemd-units)). `--runtime-dir` (default `$RUNTIME_DIRECTORY`, then `/run/vrtg-agent-boot-start`) holds the once-per-boot marker. |
 | `vrtg-agent enroll csr` / `enroll install` | Development builds only (a release build prints that it is not available and exits 1). The two steps of host enrolment: `csr`, run as the signer's user, creates the host key and writes the certificate signing request; `install`, run as the agent's user, checks and installs the issued certificate (see [Enrolment](#enrolment)). |
 | `vrtg-agent version` | Prints the version. |
 
@@ -472,6 +477,115 @@ state. With `answer_nonce` and `binding_id`, the signed `VMAnswer` says
 `DELETED`, naming the Delete, only when that placement's Delete completed (its
 VM tombstone); otherwise `CREATING`, `PRESENT`, `OTHER_BINDING` or
 `NO_RECORD`. The absence of a record never says deleted.
+
+### Store size
+
+The operation store refuses new operations (`RESOURCE_EXHAUSTED` with the
+ErrorInfo reason `STORE_FULL` in the agent's `provider.virtrigaud.io` domain,
+definitely not performed; the message names a re-key as the remedy) while
+its live size is above 256 MiB. The clustered Provider relays that answer
+unchanged, and the manager keeps a `RESOURCE_EXHAUSTED` answer out of its
+circuit breaker (a refused call, not a failing Provider). A development build
+compacts it (`opstore.Store.Compact`) and trims its audit window
+(`opstore.Store.TrimAudit`): once the agent is ready, then every hour, and at
+once when the store reaches three quarters of the threshold (checked every
+minute).
+
+- **Compaction** drops the record and step journal of finished operations
+  only. It never drops an op_id tombstone (a re-delivery of a finished
+  operation is answered from it and never runs again), a VM tombstone, an
+  attempt mark, a witness file, or the record of an operation that still
+  holds its VM (an unknown outcome, or a dirty failure not yet resolved).
+- **Audit retention.** Every admission decision and state change is written
+  to the store's audit bucket and emitted as a structured line to the system
+  journal, with the event's commit sequence (`seq`; the commit time is not
+  stored). Emission hands the line to the logging pipeline. The system
+  journal is the durable audit record only when it is not rate-limited and
+  is retained or forwarded: the agent's unit sets
+  `LogRateLimitIntervalSec=0`, and in regulated environments forward the
+  journal (`systemd-journal-upload`, or the host's log shipper) to a store
+  that outlives the host, or size the journal (`SystemMaxUse=`) to hold at
+  least the audit window. The events the store does not keep, a
+  re-delivery answered `known` and an admission `refused`, which a caller
+  with a valid operation signature can repeat at will, are limited inside
+  the agent instead: at most 20 per second, and one warning, `operation
+  events not logged`, for the rest of each window: their count, the counts
+  by kind (`known`, `refused:<reason>`) and the actor named most often
+  (`topActor`). It is logged at the next such event, or within five seconds
+  of the window closing if the flood stopped, and at the agent's drain.
+  Stored events are never limited. The store keeps a bounded window of the newest
+  events: at
+  most 100,000 events and 32 MiB of record bytes, whichever is smaller
+  (`--audit-retain-events`, `--audit-retain-bytes`, development builds). The
+  oldest events beyond it are removed, in commit order, in later
+  transactions than the ones that wrote them; nothing else is touched. The
+  journal's chain commits to the store's state digest, which a removal
+  updates like any other change, so the store verifies after a trim and a
+  reopen (tested).
+
+  Only events known to have reached the system journal are removed. The
+  journal line is written after the commit, so an event can be committed
+  and the agent stop before it is logged. The store keeps an audit cursor:
+  the highest commit sequence through which every event was logged (it never
+  passes a transaction whose events are not logged yet). Each trim first
+  writes that cursor to the store in a transaction of its own (one per
+  compaction, none per operation) and removes only events at or below it.
+  At start a development build logs again the events above the persisted
+  cursor, with `"replayed"=true` and their original `seq`: after a crash the
+  system journal may hold an event twice, never miss one. The replay
+  streams (it holds no events in memory) and replays at most the window's
+  event count, the newest events; for any older ones above the cursor it
+  logs one warning, `audit replay capped`, with their count and sequence
+  range (`firstSeq`, `lastSeq`). Such a backlog loses detail: that warning
+  is then the only record of the skipped events. A store written before the cursor existed (no cursor) is replayed
+  the same way: the builds that wrote it logged each event at its commit,
+  so its older events reached the journal then. Once ready, the agent
+  writes the cursor (one transaction), so a crash loop does not replay the
+  same events at every start. A release build replays nothing. A replay
+  that fails (an event that cannot be decoded, say) is logged once as an
+  error, `audit replay failed`, and for the rest of that process the cursor
+  never passes the last transaction whose events were all emitted, so
+  nothing above it is trimmed; when the cursor itself cannot be read, it is
+  neither written nor anything trimmed until the next start.
+
+Each batch drops at most 256 records in one transaction and reads at most
+4,096 records before it lets go of the store's lock, and the next batch
+resumes where it stopped, so operations are admitted and run between
+batches and one compaction reads the store once. Near the threshold, after
+an early compaction that dropped nothing, the wait before the next early one
+doubles (from a minute up to the hour) until the store has grown by a
+sixty-fourth of the threshold. The agent logs each compaction (`store
+compacted`: the records dropped, the audit events trimmed, the live size
+before and after, and `bucketBytes`, the page bytes each bucket holds), and
+logs once, as an error, when a compacted store stays above three quarters of
+the threshold. A release build runs no operation and does not compact.
+
+What the store keeps, measured with create, power and delete cycles through
+the store's real paths (`TestGrowthBreakdown` in `internal/agent/opstore`
+prints the table), in page bytes:
+
+| Bucket | Kept for | Bytes |
+|--------|----------|-------|
+| op_id tombstones | every finished operation, for its enrolment's lifetime | about 350 B per operation |
+| attempt marks | every operation, for its enrolment's lifetime | about 180 B per operation |
+| VM tombstones | every deleted VM, for the store's lifetime | about 260 B per deleted VM |
+| audit events | the retention window only | about 290 B per event (about 2 events per operation) before trimming |
+| chain entries | the last two checkpoints' worth (bounded) | about 0.5 MiB in all |
+| operation records and step journals | until compaction | about 600 B per operation more |
+
+So once compacted and with a full audit window, the store keeps about 620 B
+per operation of that mix (about 530 B per operation plus 260 B per deleted
+VM); before audit retention it kept about 1.3 KB. That is inherent: an
+enrolment's op_id tombstones and attempt marks are kept for as long as the
+enrolment is the store's, and one VM tombstone per deleted VM for as long as
+the store exists. Under unbounded churn within one enrolment the store still
+reaches the threshold, after roughly 400,000 operations (about 130,000 VM
+lifecycles of create, power and delete) at the default threshold and audit
+window, and then refuses new operations: fail-closed, nothing is run that
+cannot be recorded. Re-keying the Host is the recovery: the new enrolment
+starts with no tombstones, and once the manager confirms the predecessor's
+freeze ([Freeze confirmation](#freeze-confirmation)), the store discards
+the predecessor's records, tombstones and attempt marks. VM tombstones stay.
 
 **Crash hook.** A development build reads `VRTG_AGENT_DEV_CRASH_AT`, a
 comma-separated sequence of crash points of the journal and the operation
@@ -925,31 +1039,88 @@ delivers it ([details](clustered-agent-provider-development.md#renewed-certifica
 
 ## systemd units
 
-`packaging/systemd/` holds reference units and `sysusers.d` / `tmpfiles.d`
-fragments; they are not installed by anything.
+`packaging/systemd/` holds reference units, a `multi-user.target` drop-in and
+`sysusers.d` / `tmpfiles.d` fragments; they are not installed by anything.
+They expect the binary at `/usr/lib/virtrigaud/vrtg-agent` (not under
+`/usr/libexec`, which some immutable hosts do not merge from a system
+extension) and install as:
+
+| File | Installed as |
+|------|--------------|
+| `vrtg-agent.service`, `vrtg-agent-signer.service`, `vrtg-vm-shutdown.service`, `vrtg-agent-setup.service`, `vrtg-agent-boot-start.service` | `/usr/lib/systemd/system/` |
+| `multi-user.target.d/virtrigaud-agent.conf` | `/usr/lib/systemd/system/multi-user.target.d/virtrigaud-agent.conf` |
+| `virtrigaud-agent.sysusers.conf` | `/usr/lib/sysusers.d/virtrigaud-agent.conf` |
+| `virtrigaud-agent.tmpfiles.conf` | `/usr/lib/tmpfiles.d/virtrigaud-agent.conf` |
+
+Every unit that filters system calls sets `SystemCallErrorNumber=EPERM`: a
+filtered call fails with `EPERM` instead of killing the process (systemd's
+default). The host inventory's persistent process handle probe calls
+`open_by_handle_at`, which `~@privileged` filters; on kernels where taking a
+file handle of a process file descriptor succeeds (RHEL 9's 5.14, kernels
+with pidfs), the default would kill the agent after it became ready. The
+probe reads the refusal as "not supported" (`pidfs_handle` reported absent).
+A test in `internal/agent/inventory` classifies every system call the
+collector makes against the agent unit's filter, and a test in
+`cmd/vrtg-agent` asserts the `EPERM` setting on every unit. As a
+consequence `pidfs_handle` reads absent even on kernels that support
+persistent process handles: the agent's filter refuses `open_by_handle_at`.
+That is fail-safe while the agent supervises no VM process; when it does and
+needs pidfs handles, the agent unit's filter must allow that one call
+(`SystemCallFilter=open_by_handle_at` after the `~@privileged` line, which
+systemd applies in order). A filtered call returns `EPERM` and leaves no
+audit record: seccomp applies the action of highest precedence, so
+`SystemCallLog=` would never log a call the filter refuses (the units set
+none; a test asserts it). Making refused calls auditable would mean killing
+the process or allowing the call, which costs availability or enforcement;
+the agent cannot tell a filtered `EPERM` from any other, so it does not log
+them either.
 
 `vrtg-agent.service`: `Type=notify`, `Restart=always`, `RestartSec=2`,
 `StartLimitIntervalSec=300`, `StartLimitBurst=10`, `KillMode=process`,
 `User=virtrigaud-agent`, `StateDirectory=virtrigaud-agent` (`0700`),
 `RestartPreventExitStatus=2` (a configuration error is not retried),
-`NoNewPrivileges=yes`, an empty capability bounding set, `ProtectSystem=strict`,
-`ProtectProc=invisible`, `PrivateIPC=yes`, `LimitNOFILE=4096`, `TasksMax=128`,
-`MemoryMax=256M` and further sandboxing. It sets no `Delegate=` and creates no
-scope. No other unit upholds it, so it can be stopped for maintenance.
+`TimeoutStartSec=5min`, `NoNewPrivileges=yes`, an empty capability bounding
+set, `ProtectSystem=strict`, `ProtectProc=invisible`, `PrivateIPC=yes`,
+`LimitNOFILE=4096`, `TasksMax=128`, `MemoryMax=256M` and further sandboxing.
+It sets no `Delegate=` and creates no scope. No other unit upholds it, so it
+can be stopped for maintenance.
+
+Start-up opens and recovers the operation store before `READY=1` (steps 1
+to 8). The open reads and verifies every record, so its time grows with the
+store: about 0.7 s for 10,000 finished operations and 6 s for 100,000
+(uncompacted), and 18 s for a store of a million tombstones, cold, on a
+virtio disk; slower storage takes longer. The unit's `TimeoutStartSec=5min`
+replaces systemd's default of 90 seconds, which a store near the size
+threshold on slow storage could exceed (the start would then be killed and
+retried until the start limit fails the unit). While it opens and recovers,
+the agent's service status says so (`STATUS=opening the operation store`,
+then `STATUS=establishing continuity and recovering interrupted
+operations`).
+
+Memory: the store is a memory-mapped file, so the agent's resident size
+includes the pages of the store it has read, besides its heap: about 30 MB
+idle at 10,000 tombstones, 80 MB at 100,000, and about the store's size for a
+store opened cold (it reads every page). Mapped file pages count toward the
+unit's `MemoryMax=256M` but are reclaimable page cache: under the limit the
+kernel drops them before it would kill the process, at the cost of reading
+them again. The store refuses new operations above 256 MiB (see
+[Store size](#store-size)), which bounds the mapping; the agent has not been
+measured running under the unit's memory limit at that size.
 
 `vrtg-agent-signer.service`: the host key signer. `Type=notify` (`READY=1`
 once it serves), `Restart=always`, the same start-rate limit and sandboxing as
 the agent, and its own user and group (`virtrigaud-signer`) and, beyond the
 agent's, a private network namespace with `RestrictAddressFamilies=AF_UNIX`,
-a `MemoryMax` of `64M`, `MemorySwapMax=0` and `LimitCORE=0` (the key is never
-never dumped, and swapped out neither, hibernation aside), its state directory (`/var/lib/virtrigaud-signer`,
-`0700`, made by `tmpfiles.d`) read-only (`ReadOnlyPaths=`; the signer never
-writes there, so the unit has no `StateDirectory=`) and read-write access to
-`/run/virtrigaud-signer` only. It sets no
-`PrivateUsers=`, which would hide the agent's uid from `SO_PEERCRED`.
-`ExecReload` sends SIGHUP (reload the key file). The `sysusers.d` fragment
-declares both users, and the `tmpfiles.d` fragment the signer's state
-directory and the socket directory.
+a `MemoryMax` of `64M`, `MemorySwapMax=0` and `LimitCORE=0` (the key is
+never dumped, and not swapped out either, hibernation aside). It can write
+only two directories (`ReadWritePaths=`; `ProtectSystem=strict` keeps
+everything else read-only): its state directory
+(`/var/lib/virtrigaud-signer`, `0700`, made by `tmpfiles.d`, so the unit has
+no `StateDirectory=`), where a [certificate renewal](#certificate-renewal)
+writes the pending key and renames it over the host key, and the socket
+directory `/run/virtrigaud-signer`. It sets no `PrivateUsers=`, which would
+hide the agent's uid from `SO_PEERCRED`. `ExecReload` sends SIGHUP (reload
+the key file).
 
 The agent's unit has `Wants=` and `After=vrtg-agent-signer.service`: starting
 the agent starts the signer first, and as the signer is `Type=notify`,
@@ -970,15 +1141,193 @@ when `/usr/bin/systemctl is-system-running` reports `stopping` or a start job
 of `shutdown.target`, `reboot.target`, `soft-reboot.target`, `halt.target`,
 `poweroff.target` or `kexec.target` is queued; a maintenance stop of the unit
 stops nothing. When it cannot read the host's state it stops nothing either,
-and exits 1. The unit never wants, requires or binds to `vrtg-agent.service`,
+and exits 1. When `vrtg-agent-setup.service` failed (the agent's user is
+missing or its uid moved), it logs a warning that it is skipping, stops
+nothing and exits 0; a setup unit that is merely inactive, or whose state
+cannot be read, does not skip. The unit is never start-limited, on
+purpose (`StartLimitIntervalSec=0`; leaving the key out would fall back to
+the manager's default limit, typically 5 starts in 10 seconds): its stops, starts, restarts and `Upholds=` re-arms all count
+towards one, so a tight limit put it in `start-limit-hit` after routine
+maintenance, `Upholds=` then waited out the window before starting it
+again, and a reboot inside the window ran no stop action and stopped no VM. The unit never wants, requires or binds to `vrtg-agent.service`,
 so starting it never starts an agent stopped for maintenance; it is not
 ordered against the agent's unit either (`After=` would only order the two,
 never pull the agent in). That ordering is decided when the agent runs real
 VMs.
 
+`vrtg-agent-setup.service`: a `oneshot` unit (`RemainAfterExit=yes`, no
+default dependencies) that runs `systemd-sysusers virtrigaud-agent.conf`, an
+owner check, and `systemd-tmpfiles --create virtrigaud-agent.conf`, ordered
+after `systemd-sysext.service`, `systemd-sysusers.service` and
+`local-fs.target` and before the agent, the signer and the shutdown unit.
+The agent and the signer require it (neither starts when it failed;
+restarting it restarts them); the upheld units, the shutdown unit and the
+boot-start unit, only want it and start after it (see the start limits
+below for why). A package install creates the users and directories when
+it is installed, and this unit then changes nothing (both tools are
+idempotent). It exists for hosts where the agent arrives as a system
+extension merged during the boot: the boot's own `systemd-sysusers.service`
+runs before the merge and never sees the extension's fragment, and on hosts
+whose `/etc` is rebuilt at every boot the users would be missing at every
+boot. The units would then fail with `217/USER`, and the shutdown unit would
+look active while its stop action could not run. The fragments are named by
+file name, so a fragment of the same name in `/etc/sysusers.d` or
+`/etc/tmpfiles.d` takes precedence. It runs as root with only what the two
+tools need: `ProtectSystem=strict` with `/etc` (sysusers rewrites `passwd`,
+`group`, `shadow`, `gshadow` through temporary, backup and lock files there),
+`/var/lib` and `/run` (tmpfiles creates the state and socket directories)
+writable, the capability set `CAP_CHOWN CAP_FOWNER CAP_FSETID
+CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH`, `ProtectProc=invisible`,
+`PrivateIPC=yes`, no network and a system call filter.
+
+Users: the `sysusers.d` fragment gives `virtrigaud-agent` the fixed id 564
+and `virtrigaud-signer` 565 (user and group), in the system range and away
+from both ends of it (`systemd-sysusers` draws dynamic system ids downwards
+from 999, some distributions' `adduser` upwards from 100). Fixed ids keep the
+owners of the persistent state directories stable where `/etc/passwd` is
+rebuilt at every boot. If an id is already taken, `systemd-sysusers`
+allocates another one; on such a host it can differ between boots. The setup
+unit's owner check decides by content: every regular file, directory and
+symbolic link under `/var/lib/virtrigaud-agent` and
+`/var/lib/virtrigaud-signer` (`host-id`, `pki/host.crt`, the operation
+store, `host.key`, ...) must be owned by its user's current uid (`find -xdev
+-mindepth 1 ... ! -uid`; links are not followed, a link's own owner counts).
+Only the directories `systemd-tmpfiles` manages are left out: the state
+directories themselves and the agent's `pki/`. A file system mounted below a
+state directory is not checked (`-xdev`). The directories tmpfiles manages
+are not checked: the boot's
+`systemd-tmpfiles-setup.service` may already have applied the agent's
+`tmpfiles.d` fragment to them (re-owning them, but not the files inside),
+and an immutable host's bind mount root, or a dedicated state file system,
+starts out owned by root; the setup unit's own `systemd-tmpfiles` run then
+sets them. A state directory with no files, or only files of the right uid,
+passes. A file of another uid fails the unit, which names the files (the
+first ten), so the agent and the signer do not start (and the agent's own
+host checks would refuse too). That is fail-closed, not confidential: the files stay
+owned by the old uid, and whichever account holds that uid now (another
+service, or a user created later) can read the host key and the agent's
+state. Reserve the ids: check that both are free (`getent passwd 564 565`,
+`getent group 564 565`) before the first start and keep them out of other
+allocations in the host image, or choose other free ids in a fragment named
+`virtrigaud-agent.conf` in `/etc/sysusers.d` before the first start.
+
+Start at boot: on a host where the units are installed as files, the
+`[Install]` sections apply (`systemctl enable`). On a host where they arrive
+in a system extension merged during the boot, the extension's `.wants` links
+start nothing (the boot transaction was computed before the merge), but a
+unit that `multi-user.target` upholds is started even so. The drop-in
+`multi-user.target.d/virtrigaud-agent.conf` sets
+`Upholds=vrtg-vm-shutdown.service vrtg-agent-boot-start.service`:
+
+- the shutdown unit is upheld, so it is active, and its stop action armed,
+  whenever the host is up; `Upholds=` starts it again after a maintenance
+  stop, which stops no VM;
+- the agent is not upheld (`Upholds=` would start it again at once after a
+  maintenance stop). `vrtg-agent-boot-start.service` is upheld instead: a
+  `oneshot` with `RemainAfterExit=yes` whose only action is `vrtg-agent
+  boot-start` (development builds), with no dependency on the agent's unit.
+  That command acts at most once per boot: it first creates the marker
+  `/run/vrtg-agent-boot-start/started` exclusively and does nothing when it
+  already exists; the unit's runtime directory is kept when the unit stops
+  (`RuntimeDirectoryPreserve=yes`) and goes with the reboot. Only then, and
+  only while `systemctl is-enabled vrtg-agent.service` succeeds (enabled,
+  enabled-runtime, static, ...), it runs `systemctl --no-block start
+  vrtg-agent.service`. The marker is made before the start, so an
+  interruption can only miss a start (start the agent by hand), never start
+  it twice. It runs after the setup unit (it wants it and is ordered after
+  it) and makes its marker only once that unit is active: when setup failed
+  it logs a warning that says to fix the cause and start the agent by hand,
+  makes no marker and succeeds, so a later start of the unit, after the fix,
+  still acts once in that boot. Any start of the agent during the boot is
+  that boot's decision: before anything else the command reads the agent
+  unit's `InactiveExitTimestampMonotonic` (`systemctl show`; the monotonic
+  clock restarts at each boot, so a non-zero value means the agent was
+  started this boot, by hand or by its own `[Install]` links). Then it
+  makes the marker and starts nothing, so an agent started by hand after a
+  failed setup and stopped for maintenance is not started again by a
+  package's restart of the unit.
+
+  A soft reboot (`systemctl soft-reboot`) keeps `/run` and the boot id, so
+  the marker survives it (and keying the marker to the boot id would not
+  help: it does not change either). After a soft reboot the boot-start unit
+  reports that the decision was already made and the agent stays stopped
+  until it is started by hand: `systemctl start vrtg-agent.service`. That
+  is the safe direction; a full reboot re-arms the unit. It runs once per boot and stays active, so `Upholds=` does not run it
+  again: an agent stopped for maintenance stays stopped through restarts of
+  the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
+  The agent's `Wants=` and `Requires=` bring the signer and the setup unit up with it.
+  Stopping, restarting or try-restarting `vrtg-agent-boot-start.service`
+  (by hand, or by a package's upgrade scripts, which restart every unit the
+  package ships) starts nothing either: the marker of this boot is still
+  there. A reboot is what re-arms it.
+
+Enablement: the agent starts at boot only while `vrtg-agent.service` is
+enabled, on both kinds of host. On a host with a system extension, enable it
+once the extension is merged (`systemctl enable vrtg-agent.service`; the
+link it writes under `/etc/systemd/system` must persist across boots, as it
+does on hosts that keep `/etc/systemd/system` on persistent storage, or be
+provisioned by the host's configuration at each boot); `.wants` links shipped
+inside the extension do not count as enabled. `systemctl disable
+vrtg-agent.service` keeps the agent off at the next boot; `systemctl mask
+vrtg-agent.service` keeps it off entirely, including a manual start. The
+check is made in the boot-start unit's action, not as an `ExecCondition=`:
+a skipped unit is inactive, and `Upholds=` would start it again and again
+until its start limit failed it.
+
+`Upholds=` needs systemd 249 or later. It starts an upheld unit again
+whenever it is found inactive or failed, without end: systemd only paces it
+(at most 16 starts in 10 seconds, its auto-start rate limit) and does not
+apply the unit's own start limit to a start job that fails on a dependency.
+An upheld unit that required a failing setup unit would therefore be retried
+forever, with a "Dependency failed" line each time. So no upheld unit can
+fail because setup failed: the shutdown and boot-start units only want the
+setup unit (and start after it); the shutdown unit's start runs nothing, and
+the boot-start unit's action succeeds and makes no marker when setup is not
+active. Nothing upholds the setup unit: it runs when the boot pulls in the
+units that want or require it. The setup and boot-start units set
+`StartLimitIntervalSec=300` and `StartLimitBurst=5`, so even a repeated
+start ends in `start-limit-hit`; a boot-start unit in `start-limit-hit`
+only misses starting the agent (start it by hand), and stops nothing. The
+shutdown unit turns its start limit off (see above): a start limit cannot bound
+`Upholds=` retries, and its start runs nothing.
+
+When setup fails (a moved user id, say), the journal shows, once or a few
+times at boot, the setup unit's own error (for the owner check: `N file(s)
+under /var/lib/... are not owned by virtrigaud-agent (uid M): its uid
+changed; refusing to start the agent. The first:` and the files), the setup
+unit `failed`, the agent and the signer `Dependency failed` (only when
+something starts them), and one warning of the boot-start unit; it does not
+repeat. The shutdown unit is active, and its stop action stays fail-closed:
+without the user it does not run (`217/USER`), and with a moved uid it
+sees the setup unit failed, logs a warning that it is skipping and stops
+nothing. Either way the VMs are not stopped gracefully at the next host
+shutdown. Alert on `systemctl --failed` (the setup unit is failed) or the
+host monitoring's equivalent, so that this is seen before the host is shut
+down. Fix the cause, then `systemctl reset-failed vrtg-agent-setup.service`
+and start the agent: `systemctl start vrtg-agent.service` (which starts
+the setup unit first) or `systemctl restart vrtg-agent-boot-start.service`
+(it left no marker, so it acts once), or reboot. Starting only
+`vrtg-agent-setup.service` by hand does not start the agent: nothing that
+is already active re-runs when it succeeds.
+
+The shutdown unit's stop action skips whenever the setup unit is failed,
+whatever the cause: also when setup was left failed for another reason
+than a moved uid (an operator restarted it during maintenance, say, and it
+failed on a transient error). A reboot then skips the graceful VM stop.
+Before rebooting, fix the cause and run `systemctl reset-failed
+vrtg-agent-setup.service` (or start the agent, which starts the setup unit
+again), and alert on `systemctl --failed` so that a failed setup unit is
+seen before a reboot.
+
 `hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
-(with the binary path replaced, since it does not exist on a build machine);
-the CI lint job runs it.
+(with the binary path replaced, since it does not exist on a build machine)
+and checks what the analyzer cannot see: `SystemCallErrorNumber=` wherever a
+system call filter is set, no binary under `/usr/libexec`, a signer that can
+write exactly its key and socket directories, a `multi-user.target`
+drop-in that upholds the shutdown and boot-start units and never the agent
+or the signer, no `SystemCallLog=`, `Requires=` on the setup unit for the
+agent and the signer and none for the upheld units, and a boot-start unit
+that runs `vrtg-agent boot-start` with a preserved runtime directory. The CI lint job runs it.
 
 ## Enrolment
 
@@ -1177,8 +1526,9 @@ that is already enrolled is never changed by this file.
   effect in doubt, and never perform an effect it cannot reconstruct
   (documented on `executor.Operation.Payload`). How a real executor parks a
   step and how the manager re-delivers the request for it is a follow-up.
-- The re-enrolment freeze and compaction are not reachable from the agent
-  process yet, so their crash points are tested in the store library only.
+- The re-enrolment freeze's crash points are tested in the store library
+  only. Compaction runs in the agent process (see [Store size](#store-size));
+  its crash point between batches is tested in the store library.
   The renewal's crash points (between stage and activation, and between the
   signer's switch to the new key and the promotion of the certificate) are
   tested on the agent process, with the activation stopped by a test hook.

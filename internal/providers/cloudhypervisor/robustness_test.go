@@ -20,6 +20,8 @@ package cloudhypervisor
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -34,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
@@ -439,4 +442,159 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// TestAgentRefusingTheProviderCertificateHasItsOwnCause: an agent that
+// refuses the Provider's identity certificate after the TLS 1.3 handshake
+// (a URI without the Provider UID, a Provider it does not allow) is reported
+// as ProviderCertificateRefused, not as unreachable, for reads and mutating
+// calls alike, and receives no call.
+func TestAgentRefusingTheProviderCertificateHasItsOwnCause(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{refuseClient: true})
+	prov := newProvider(t, p, Options{}, a)
+	client := providerv1.NewProviderClient(served(t, prov))
+	// The agent's alert usually reaches the Provider; when the agent closes
+	// the connection before the Provider's first write lands, the Provider
+	// reads a reset instead and reports AgentUnreachable (the safe side:
+	// never "refused" without the alert). Every answer is host-scoped, and
+	// the alert is seen within a few calls, reads and mutations alike.
+	causes := map[string]int{}
+	for i := 0; i < 8 && causes[CauseProviderCertificateRefused] < 2; i++ {
+		var err error
+		if i%2 == 0 {
+			_, err = client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		} else {
+			_, err = client.Power(ctx(t), signedPower(t, "host-a"))
+		}
+		info, ok := errorInfo(err, contracts.HostUnavailableReason)
+		require.True(t, ok, "host-scoped: %v", err)
+		c := info.GetMetadata()[MetadataCause]
+		require.Contains(t, []string{CauseProviderCertificateRefused, CauseAgentUnreachable, CauseBreakerOpen}, c, "%v", err)
+		causes[c]++
+	}
+	assert.GreaterOrEqual(t, causes[CauseProviderCertificateRefused], 2, "the refusal has its own cause: %v", causes)
+	assert.Empty(t, a.received(), "the agent received no call")
+}
+
+// scriptedConn returns its reads in order, then their errors.
+type scriptedConn struct {
+	net.Conn
+	reads []struct {
+		data string
+		err  error
+	}
+}
+
+func (c *scriptedConn) Read(b []byte) (int, error) {
+	r := c.reads[0]
+	c.reads = c.reads[1:]
+	return copy(b, r.data), r.err
+}
+
+// TestAlertConnReportsOnlyARefusalBeforeAnyData: a fatal TLS alert read
+// before the agent sent anything is a refusal of the Provider's certificate
+// (nothing ran); one read after the agent's first data is not, because a
+// call on that connection may have run.
+func TestAlertConnReportsOnlyARefusalBeforeAnyData(t *testing.T) {
+	alert := errors.New("remote error: tls: bad certificate")
+	var n int
+	c := &alertConn{Conn: &scriptedConn{reads: []struct {
+		data string
+		err  error
+	}{{"", alert}}}, onAlert: func() { n++ }}
+	_, _ = c.Read(make([]byte, 8))
+	assert.Equal(t, 1, n, "an alert before any data is a refusal")
+
+	n = 0
+	c = &alertConn{Conn: &scriptedConn{reads: []struct {
+		data string
+		err  error
+	}{{"settings", nil}, {"", errors.New("remote error: tls: bad record MAC")}}}, onAlert: func() { n++ }}
+	_, _ = c.Read(make([]byte, 8))
+	_, _ = c.Read(make([]byte, 8))
+	assert.Zero(t, n, "an alert after the agent's first data is not a refusal")
+
+	n = 0
+	c = &alertConn{Conn: &scriptedConn{reads: []struct {
+		data string
+		err  error
+	}{{"", io.EOF}}}, onAlert: func() { n++ }}
+	_, _ = c.Read(make([]byte, 8))
+	assert.Zero(t, n, "a close is not a refusal")
+}
+
+// TestHandshakeAlertIsNotARefusal: an agent that ends a handshake with an
+// internal error alert (its signer is away, or it is over its handshake cap)
+// has not refused the Provider's certificate. gRPC redials the same
+// connection; once that succeeds, a mutating call that was sent and never
+// answered has an unknown outcome, never "definitely not performed".
+func TestHandshakeAlertIsNotARefusal(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{failHandshakes: 1})
+	prov := newProvider(t, p, Options{}, a)
+	client := providerv1.NewProviderClient(served(t, prov))
+	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+	if err != nil {
+		requireHostUnavailable(t, err, CauseAgentUnreachable)
+	}
+	require.Eventually(t, func() bool {
+		_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "the redial succeeds")
+	require.EqualValues(t, 1, a.handshakesFailed.Load(), "the first handshake ended with an alert")
+	e, _ := prov.pool.get("host-a")
+	_, gen, err := e.connection()
+	require.NoError(t, err)
+	assert.False(t, e.refusedOn(gen), "a handshake alert does not mark the connection refused")
+
+	// The agent receives the mutating call and drops every connection
+	// without answering.
+	a.setRespond(func(method string, raw []byte) (proto.Message, error) {
+		if strings.HasSuffix(method, "/Power") {
+			a.lis.dropAll()
+			return nil, errors.New("dropped")
+		}
+		return defaultRespond(method, raw)
+	})
+	_, err = client.Power(ctx(t), signedPower(t, "host-a"))
+	_, ok := errorInfo(err, contracts.OutcomeUnknownRetryReason)
+	assert.True(t, ok, "a sent, unanswered mutation has an unknown outcome: %v", err)
+	_, refused := errorInfo(err, contracts.HostUnavailableReason)
+	assert.False(t, refused, "never a host-scoped refusal: %v", err)
+}
+
+// TestOnlyCertificateAlertsAreRefusals: of the fatal alerts an agent can
+// send before its first frame, only the certificate alerts mark a refusal;
+// an internal error (the signer away, the handshake cap) never does.
+func TestOnlyCertificateAlertsAreRefusals(t *testing.T) {
+	for alert, want := range map[string]bool{
+		"bad certificate": true, "certificate required": true, "unknown certificate authority": true,
+		"certificate unknown": true, "access denied": true,
+		"internal error": false, "handshake failure": false, "protocol version not supported": false, "decrypt error": false,
+	} {
+		err := errors.New("read tcp 127.0.0.1:1->127.0.0.1:2: remote error: tls: " + alert)
+		assert.Equal(t, want, isCertificateAlert(err), alert)
+		n := 0
+		c := &alertConn{Conn: &scriptedConn{reads: []struct {
+			data string
+			err  error
+		}{{"", err}}}, onAlert: func() { n++ }}
+		_, _ = c.Read(make([]byte, 8))
+		assert.Equal(t, want, n == 1, alert)
+	}
+	assert.False(t, isCertificateAlert(errors.New("bad certificate")), "only an alert the peer sent")
+}
+
+// TestTransportBeganClearsARefusal: a refusal marks one transport; a new
+// transport of the same connection starts unrefused.
+func TestTransportBeganClearsARefusal(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	prov := newProvider(t, p, Options{}, a)
+	e, _ := prov.pool.get("host-a")
+	e.certificateRefused(e.gen)
+	require.True(t, e.refusedOn(e.gen))
+	e.transportBegan(e.gen)
+	assert.False(t, e.refusedOn(e.gen))
 }

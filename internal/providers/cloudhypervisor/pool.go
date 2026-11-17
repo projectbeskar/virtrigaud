@@ -129,6 +129,9 @@ type hostEntry struct {
 	// the earliest time of the next one (a backoff).
 	renewalFailures int
 	renewalNextTry  time.Time
+	// refusedGen is the connection the agent ended with a fatal TLS alert
+	// (it refused the Provider's certificate); 0 for none.
+	refusedGen uint64
 }
 
 // transportInfo is one established transport of an entry's connection.
@@ -187,7 +190,24 @@ func (p *pool) newEntry(h hostsecret.Host) (*hostEntry, error) {
 
 // dial returns a new lazy client connection of generation gen.
 func (e *hostEntry) dial(gen uint64) (*grpc.ClientConn, error) {
-	return dialAgent(e.spec.Endpoint, e.trust, e.opts.ClientCertificate, e.dialer(gen), connStats{e: e, gen: gen})
+	return dialAgent(e.spec.Endpoint, e.trust, e.opts.ClientCertificate, e.dialer(gen), connStats{e: e, gen: gen},
+		func() { e.certificateRefused(gen) })
+}
+
+// certificateRefused records that the agent ended connection gen with a
+// fatal TLS alert: it refused the Provider's certificate.
+func (e *hostEntry) certificateRefused(gen uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.refusedGen = gen
+}
+
+// refusedOn reports whether the agent refused the Provider's certificate on
+// connection gen.
+func (e *hostEntry) refusedOn(gen uint64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return gen != 0 && e.refusedGen == gen
 }
 
 // errConnectionRetired is returned by the dialer of a client connection that
@@ -228,6 +248,11 @@ func (e *hostEntry) transportBegan(gen uint64) {
 	}
 	e.genUsed = true
 	e.transport = transportInfo{gen: gen, live: true, began: e.opts.Now(), notAfter: e.leafNotAfter}
+	// A refusal is a property of one transport: an established transport
+	// starts without one (the alert, if any, is read after this).
+	if e.refusedGen == gen {
+		e.refusedGen = 0
+	}
 }
 
 // transportEnded records that the transport of connection gen ended, and

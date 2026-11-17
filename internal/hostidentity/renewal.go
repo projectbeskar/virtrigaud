@@ -280,8 +280,8 @@ func CheckRenewalRequestSpec(s RenewalRequestSpec, verified VerifiedRenewal) err
 	if err := checkUsages(s.Usages); err != nil {
 		return err
 	}
-	if s.Duration <= 0 || s.Duration > MaxLifetime {
-		return deny(ReasonLifetime, "the requested lifetime must be set and at most %s", MaxLifetime)
+	if err := checkLifetime(s.Duration); err != nil {
+		return err
 	}
 	csr, err := ParseCSR(s.CSRPEM)
 	if err != nil {

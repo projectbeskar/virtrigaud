@@ -1,0 +1,81 @@
+# Optional cert-manager approver-policy for the Provider identity certificate
+# of a clustered Provider for per-host agents (development builds only); see
+# docs/clustered-agent-provider-development.md (Provider identity
+# certificate). Not referenced by any kustomization: apply it on purpose
+# after editing the placeholders. Needs approver-policy installed.
+#
+# With cert-manager's default approver disabled (as per-host agent
+# enrolment requires), a Certificate's CertificateRequest needs an approver.
+# This policy approves, for requests created by cert-manager's own
+# ServiceAccount (that is, from Certificate resources) in the Provider's
+# namespace and for the Provider identity issuer only, exactly one shape:
+# the Provider's own URI identity (any UID suffix), the usages "digital
+# signature" and "client auth", ECDSA P-256, at most 30 days, no other name.
+#
+# Whoever can create or edit Certificates in that namespace can then obtain
+# this Provider's identity, which every agent of its hosts accepts: grant
+# that to no one but the Provider's administrators, and keep the namespace
+# to the Provider.
+#
+# Placeholders: example.test (the trust domain), infra / ch (the Provider's
+# namespace and name), provider-identity-ca (the ClusterIssuer of the
+# agents' provider-ca.pem), cert-manager / cert-manager (cert-manager's
+# controller ServiceAccount).
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  name: virtrigaud-provider-identity-infra-ch
+spec:
+  allowed:
+    uris:
+      # The wildcard allows any Provider UID: the UID exists only once the
+      # Provider is created. Once it is known, replace "*" with the exact UID
+      # (kubectl get provider ch -n infra -o jsonpath='{.metadata.uid}'), so
+      # that a Provider re-created under the same name (a new UID) needs this
+      # policy edited before it can get an identity.
+      values:
+      - "spiffe://example.test/virtrigaud/provider/infra/ch/*"
+      required: true
+    usages:
+    - "digital signature"
+    - "client auth"
+    isCA: false
+  constraints:
+    maxDuration: 720h
+    privateKey:
+      algorithm: ECDSA
+      minSize: 256
+      maxSize: 256
+  selector:
+    issuerRef:
+      group: cert-manager.io
+      kind: ClusterIssuer
+      name: provider-identity-ca
+    namespace:
+      matchNames:
+      - infra
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: virtrigaud-provider-identity-policy
+  namespace: infra
+rules:
+- apiGroups: ["policy.cert-manager.io"]
+  resources: ["certificaterequestpolicies"]
+  verbs: ["use"]
+  resourceNames: ["virtrigaud-provider-identity-infra-ch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: virtrigaud-provider-identity-policy
+  namespace: infra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: virtrigaud-provider-identity-policy
+subjects:
+- kind: ServiceAccount
+  name: cert-manager
+  namespace: cert-manager

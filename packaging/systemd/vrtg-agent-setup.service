@@ -1,0 +1,89 @@
+# Reference unit that creates the per-host agent's users and directories
+# before any of its units starts. Development builds only: no release
+# artefact ships the agent or this unit.
+#
+# A package install creates them when it is installed (systemd-sysusers and
+# systemd-tmpfiles run on the package's fragments). On a host where the agent
+# arrives as a system extension merged during the boot, the boot's own
+# systemd-sysusers.service ran before the merge and never saw the
+# extension's sysusers.d fragment, and /etc may be rebuilt at every boot, so
+# the users would be missing and every unit that runs as them would fail
+# (217/USER), the shutdown unit's stop action included. This unit runs both
+# tools for the agent's fragments only, after the merge and before the agent,
+# the signer and the shutdown unit, which each want it. Both tools are
+# idempotent: on a package install it changes nothing. The agent and the
+# signer require it; the shutdown unit and the boot-start unit want it.
+#
+# The fragments are named by file name, so that a fragment of the same name
+# in /etc (for example one that assigns other fixed ids) takes precedence.
+#
+# Between the two tools it checks ownership by content: every regular file,
+# directory and symbolic link under the agent's and the signer's state
+# directories (host-id, pki/host.crt, the operation store, host.key, ...)
+# must be owned by its user's current uid; only the directories
+# systemd-tmpfiles manages (the state directories themselves and the
+# agent's pki/) are left out. find runs with -xdev, so a file system mounted
+# below a state directory is not checked, and it does not follow symbolic
+# links (a link's own owner is checked). The directories tmpfiles manages
+# are not checked: the boot's
+# systemd-tmpfiles-setup.service may already have applied the agent's
+# tmpfiles.d fragment to them, and an immutable host's bind mount root, or a
+# dedicated state file system, starts out owned by root; this unit's
+# systemd-tmpfiles run then sets them. If a fixed id was taken and
+# systemd-sysusers allocated another one (on a host whose /etc is rebuilt at
+# boot, possibly a different one at each boot), the files are not owned by
+# the current uid: the unit fails, the files are listed, and the agent and
+# the signer, which require it, do not start. The files stay owned by the old
+# uid, which another account may now hold: reserve the ids (see the
+# sysusers.d fragment).
+[Unit]
+Description=VirtRigaud: create the per-host agent's users and directories (development builds only)
+Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
+DefaultDependencies=no
+After=systemd-sysext.service systemd-sysusers.service local-fs.target
+Before=vrtg-agent.service vrtg-agent-signer.service vrtg-vm-shutdown.service shutdown.target
+Conflicts=shutdown.target
+# Nothing upholds this unit, and the upheld units only want it, so a failure
+# is not retried by Upholds=. It is started when a unit that requires or
+# wants it starts; a unit that keeps failing is started at most 5 times in
+# 5 minutes, then stays failed ("Start request repeated too quickly", result
+# start-limit-hit) until "systemctl reset-failed" or a reboot.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/systemd-sysusers virtrigaud-agent.conf
+ExecStart=/bin/sh -c 'check() { [ -d "$$1" ] || return 0; w=$$(id -u "$$2") || return 1; bad=$$(find "$$1" -xdev -mindepth 1 ! -path "$$1/pki" ! -type b ! -type c ! -type p ! -type s ! -uid "$$w" -print) || return 1; [ -z "$$bad" ] && return 0; n=$$(printf "%%s\n" "$$bad" | wc -l); echo "$$n entries under $$1 are not owned by $$2 (uid $$w): its uid changed; refusing to start the agent. The first:" >&2; printf "%%s\n" "$$bad" | head -n 10 >&2; return 1; }; check /var/lib/virtrigaud-agent virtrigaud-agent && check /var/lib/virtrigaud-signer virtrigaud-signer'
+ExecStart=/usr/bin/systemd-tmpfiles --create virtrigaud-agent.conf
+UMask=0022
+# systemd-sysusers rewrites /etc/passwd, group, shadow and gshadow (through
+# temporary files, backups and a lock file in /etc); systemd-tmpfiles
+# creates the state directories in /var/lib and the socket directory in /run
+# and sets their owners and modes. Nothing else is writable.
+ProtectSystem=strict
+ReadWritePaths=/etc /var/lib /run
+CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_FSETID CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectProc=invisible
+PrivateIPC=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX

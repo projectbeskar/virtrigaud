@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,11 +34,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/devgate"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -58,6 +64,10 @@ const (
 	// (provider missing/not-ready/unreachable, or a GetHostInfo error), so a Host
 	// recovers promptly once its provider comes back without a full heartbeat wait.
 	hostSyncBackoffInterval = 15 * time.Second
+
+	// renewalStagePoll is the next poll of a per-host agent Host whose
+	// renewed certificate is issued and not pinned yet (development builds).
+	renewalStagePoll = 5 * time.Second
 	// hostInUseRetryInterval re-checks a Host whose deletion is blocked by the
 	// in-use finalizer. VirtualMachine changes do not trigger a Host reconcile,
 	// so this is how the Host notices its last VM went away.
@@ -133,6 +143,13 @@ type HostReconciler struct {
 	// inventoryEvents is the audit state of the host inventory conditions
 	// (Events and signed-answer log lines). The zero value is ready to use.
 	inventoryEvents inventoryAudit
+
+	// notFronted is the not-fronted streak of each Host (namespace/name to
+	// *notFrontedStreak): a per-host agent Host its Provider does not front
+	// yet is polled with a backoff, and logged at ERROR only on its first
+	// miss and then at most once per heartbeat interval. The zero value is
+	// ready to use.
+	notFronted sync.Map
 
 	// publishedProvider maps a Host (namespace/name) to the Provider label its
 	// committed-capacity gauges were last published under, so a changed
@@ -348,6 +365,46 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}
 
+	// 2b. A revoked per-host agent Host is left out of its Provider's
+	//     inventory: polling it would only fail every heartbeat. It is not
+	//     polled, and Ready says why (development builds: spec.revoked is
+	//     used only there).
+	if devgate.Compiled && host.Spec.Revoked && providerRunsHostAgents(provider) {
+		r.setHostNotPolled(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentRevoked,
+			"spec.revoked is true: the host's agent identity is revoked and its Provider no longer fronts it; it is not polled")
+		return r.persist(ctx, host, base, hostHeartbeatInterval)
+	}
+	// 2c. Likewise a per-host agent Host whose pinned certificate has expired
+	//     (read from its pins Secret, the source the enrolment reconciler
+	//     mirrors into status.agent.certificateExpiry): the Provider no
+	//     longer accepts its agent, so polling
+	//     would only fail every heartbeat. It is rechecked at the heartbeat
+	//     cadence without a call, and polled again as soon as a re-key pins
+	//     a new certificate.
+	var expiry time.Time
+	hasExpiry, stagePending := false, false
+	agentHost := devgate.Compiled && providerRunsHostAgents(provider)
+	if agentHost {
+		expiry, hasExpiry, stagePending = r.agentCertificateExpiry(ctx, host)
+	}
+	if hasExpiry && !time.Now().Before(expiry) {
+		r.setHostNotPolled(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired,
+			"the host's pinned agent certificate expired at "+expiry.UTC().Format(time.RFC3339)+
+				"; it is not polled until a re-key pins a new certificate")
+		return r.persist(ctx, host, base, hostHeartbeatInterval)
+	}
+	// While the certificate is valid, the next check comes no later than its
+	// expiry, so Ready turns CertificateExpired when it passes, not up to a
+	// heartbeat later.
+	untilExpiry := func(d time.Duration) time.Duration {
+		if hasExpiry {
+			if u := time.Until(expiry) + time.Second; u > 0 && u < d {
+				return u
+			}
+		}
+		return d
+	}
+
 	// 3. Obtain the provider client the same way the VM controller does. A
 	//    not-ready runtime (no endpoint / phase != Running) surfaces here as a
 	//    resolve error → keep last-known facts, mark health Unknown, requeue.
@@ -356,15 +413,19 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 		metrics.RecordError(errReasonHostProviderResolve, metrics.ComponentManager)
 		r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
 			fmt.Sprintf("Provider %s runtime is not ready: %v", provider.Name, err))
-		return r.persist(ctx, host, base, hostSyncBackoffInterval)
+		return r.persist(ctx, host, base, untilExpiry(hostSyncBackoffInterval))
 	}
 
 	// 4. Cheap single-host refresh (NOT a full ListHosts). The host id is the Host
 	//    CR name (#315 render / #318 HostInfo.id).
 	info, inventory, err := r.getHostInfo(ctx, host, provider, providerInstance)
 	if err != nil {
+		if agentHost && contracts.HostUnavailableCause(err) == contracts.HostUnavailableCauseNotFronted {
+			return r.handleNotFronted(ctx, host, base, provider, err, hasExpiry)
+		}
 		return r.handleGetHostInfoError(ctx, host, base, provider, err)
 	}
+	r.notFronted.Delete(client.ObjectKeyFromObject(host))
 
 	// 5. Map the live facts into status and stamp the heartbeat; for a host
 	//    with a per-host agent, fold its verified inventory in (same write).
@@ -372,7 +433,114 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	r.applyHostInventory(ctx, host, inventory)
 	log.FromContext(ctx).V(1).Info("Synced Host inventory",
 		"host", host.Name, "provider", provider.Name, "health", host.Status.Health)
-	return r.persist(ctx, host, base, hostHeartbeatInterval)
+	next := untilExpiry(hostHeartbeatInterval)
+	if stagePending {
+		// A renewed certificate is issued and not pinned yet: the Provider
+		// stages it on its next call to the host, and the manager pins it
+		// on the host's next answer, so the next poll comes soon rather
+		// than a heartbeat later.
+		next = min(next, renewalStagePoll)
+	}
+	return r.persist(ctx, host, base, next)
+}
+
+// setHostNotPolled marks a Host the heartbeat deliberately does not poll (a
+// revoked agent identity, an expired agent certificate): Ready=False with
+// reason, and the signed-answer and inventory conditions say that the host
+// is not polled, not that the heartbeat failed to reach it (existing
+// reasons, accurate messages).
+func (r *HostReconciler) setHostNotPolled(ctx context.Context, host *infravirtrigaudiov1beta1.Host, reason, msg string) {
+	host.Status.Health = infravirtrigaudiov1beta1.HostHealthUnknown
+	setHostReady(host, metav1.ConditionFalse, reason, msg)
+	why := "the host is not polled (" + reason + "), so no signed host answer is asked for: " + msg
+	r.withdrawHostInventory(ctx, host, true, why)
+	if meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentAnswer) != nil {
+		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing, why)
+	}
+}
+
+// agentCertificateExpiry returns when the Host's pinned agent certificate
+// expires: from its pins Secret, read through the enrolment loader, when the
+// manager runs enrolment (so a re-key is seen as soon as it is pinned, not
+// when the status mirror catches up), else from status.agent. ok is false
+// when no certificate is pinned.
+func (r *HostReconciler) agentCertificateExpiry(ctx context.Context, host *infravirtrigaudiov1beta1.Host) (expiry time.Time, ok, stagePending bool) {
+	if r.HostAnswers != nil {
+		if p, isPins := r.HostAnswers.Trust.(*PinsHostTrust); isPins && p.Config != nil {
+			// The cached client: a polling decision, not a read-modify-write.
+			if l, err := loadHostEnrolment(ctx, p.Client, p.Config, host); err == nil {
+				if l.reset || l.state.Current == nil {
+					return time.Time{}, false, false
+				}
+				ren := l.state.Renewal
+				stagePending = ren != nil && len(ren.Certificate) > 0 && ren.PinnedAt == nil
+				return l.state.Current.NotAfter.Time, true, stagePending
+			}
+		}
+	}
+	if a := host.Status.Agent; a != nil && a.CertificateExpiry != nil {
+		log.FromContext(ctx).V(1).Info("The agent certificate expiry is read from the Host status (the pins Secret could not be "+
+			"read, or enrolment is not configured)", "host", host.Name, "expiry", a.CertificateExpiry.UTC().Format(time.RFC3339))
+		return a.CertificateExpiry.Time, true, false
+	}
+	return time.Time{}, false, false
+}
+
+// notFrontedStreak is a Host's run of polls its Provider answered "not
+// fronted".
+type notFrontedStreak struct {
+	// misses counts the polls of the streak.
+	misses int
+	// lastError is when the streak was last logged at ERROR.
+	lastError time.Time
+}
+
+// handleNotFronted records a poll of a per-host agent Host its Provider does
+// not front (no pinned certificate yet, or a pin the Provider has not applied
+// yet). The Host is Ready=False as for any failed poll. A Host with no pinned
+// certificate is polled again with an exponential backoff from
+// hostSyncBackoffInterval up to the heartbeat (its first pin enqueues it at
+// once); one with a pin, at hostSyncBackoffInterval. The miss is logged at
+// ERROR on the first poll of a streak and then at most once per heartbeat
+// interval, otherwise at verbosity 1.
+func (r *HostReconciler) handleNotFronted(ctx context.Context, host, base *infravirtrigaudiov1beta1.Host,
+	provider *infravirtrigaudiov1beta1.Provider, err error, pinned bool) (ctrl.Result, error) {
+	key := client.ObjectKeyFromObject(host)
+	v, _ := r.notFronted.LoadOrStore(key, &notFrontedStreak{})
+	s, _ := v.(*notFrontedStreak)
+	if s == nil {
+		s = &notFrontedStreak{}
+		r.notFronted.Store(key, s)
+	}
+	s.misses++
+	now := time.Now()
+	if s.misses == 1 || now.Sub(s.lastError) >= hostHeartbeatInterval {
+		s.lastError = now
+		metrics.RecordError(errReasonHostGetInfo, metrics.ComponentManager)
+		log.FromContext(ctx).Error(err, "GetHostInfo failed: the host is not fronted by its Provider yet; polling it with a backoff",
+			"host", host.Name, "provider", provider.Name, "misses", s.misses)
+	} else {
+		log.FromContext(ctx).V(1).Info("GetHostInfo: the host is still not fronted by its Provider", "host", host.Name,
+			"provider", provider.Name, "misses", s.misses)
+	}
+	if hostInventoryInScope(provider) {
+		r.withdrawHostInventory(ctx, host, true, "the heartbeat's GetHostInfo failed, so there is no signed host answer")
+	} else {
+		r.clearHostInventory(host)
+	}
+	r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
+		fmt.Sprintf("GetHostInfo failed on Provider %s: %v", provider.Name, err))
+	return r.persist(ctx, host, base, notFrontedBackoff(s.misses, pinned))
+}
+
+// notFrontedBackoff is the wait after the n-th not-fronted poll (n from 1):
+// hostSyncBackoffInterval doubled per miss up to the heartbeat for a Host with
+// no pinned certificate, hostSyncBackoffInterval for one with a pin.
+func notFrontedBackoff(n int, pinned bool) time.Duration {
+	if pinned || n < 1 {
+		return hostSyncBackoffInterval
+	}
+	return min(hostSyncBackoffInterval<<min(n-1, 8), hostHeartbeatInterval)
 }
 
 // handleGetHostInfoError maps a GetHostInfo failure onto a Host status + requeue.
@@ -472,6 +640,22 @@ func (r *HostReconciler) setHostUnavailable(ctx context.Context, host *infravirt
 	r.withdrawHostInventory(ctx, host, false, "the heartbeat did not reach the host, so there is no signed host answer")
 }
 
+// keepTransitionTimes gives every condition whose status is the same as when
+// the reconcile read the Host its transition time from then. One sync may
+// set a condition more than once (a healthy host's Ready is set True from
+// the Provider's answer, then False when its inventory is not ready), and
+// meta.SetStatusCondition stamps a new transition time at each flip, so
+// without this a condition that stays False would show a new transition
+// time at every heartbeat.
+func keepTransitionTimes(host, base *infravirtrigaudiov1beta1.Host) {
+	for i := range host.Status.Conditions {
+		c := &host.Status.Conditions[i]
+		if was := meta.FindStatusCondition(base.Status.Conditions, c.Type); was != nil && was.Status == c.Status {
+			c.LastTransitionTime = was.LastTransitionTime
+		}
+	}
+}
+
 // setHostReady upserts the Host's Ready condition, stamping ObservedGeneration =
 // host.Generation so a client can tell which spec generation the condition
 // reflects (status-condition best practice). meta.SetStatusCondition only bumps
@@ -491,10 +675,18 @@ func setHostReady(host *infravirtrigaudiov1beta1.Host, status metav1.ConditionSt
 // idempotent re-reconcile issues no write (a successful sync always changes
 // status because LastHeartbeatTime advances).
 func (r *HostReconciler) persist(ctx context.Context, host, base *infravirtrigaudiov1beta1.Host, requeueAfter time.Duration) (ctrl.Result, error) {
+	keepTransitionTimes(host, base)
 	if equality.Semantic.DeepEqual(host.Status, base.Status) {
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	if err := r.Status().Update(ctx, host); err != nil {
+		if apierrors.IsConflict(err) {
+			// Another writer (the enrolment reconciler mirrors its status
+			// too) updated the Host since it was read: re-read and sync
+			// again, without an error log.
+			ctrl.LoggerFrom(ctx).V(1).Info("The Host changed since it was read; syncing it again", "host", host.Name)
+			return ctrl.Result{Requeue: true}, nil
+		}
 		metrics.RecordError(errReasonHostStatusUpdate, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("update Host %s status: %w", host.Name, err)
 	}
@@ -536,9 +728,35 @@ func (r *HostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexPlacementHost(mgr); err != nil {
 		return err
 	}
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&infravirtrigaudiov1beta1.Host{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
-		Named("host").
-		Complete(r)
+	b := ctrl.NewControllerManagedBy(mgr).
+		For(&infravirtrigaudiov1beta1.Host{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
+	// A pins Secret change the poll must follow at once (a re-key that lifts
+	// an expired certificate, the first pin, a renewal step) re-evaluates
+	// its Host at once; no other pins Secret change enqueues it
+	// (pinsAdvanceHost).
+	if r.HostAnswers != nil {
+		if p, ok := r.HostAnswers.Trust.(*PinsHostTrust); ok && p.Config != nil {
+			ns := p.Config.Namespace
+			b = b.Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(hostOfPinsSecret(ns)),
+				builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
+					return o.GetNamespace() == ns && o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
+				}), pinsAdvanceHost(nil)))
+		}
+	}
+	return b.Named("host").Complete(r)
+}
+
+// hostOfPinsSecret maps a pins Secret of the enrolment namespace ns to the
+// Host its annotation names.
+func hostOfPinsSecret(ns string) handler.MapFunc {
+	return func(_ context.Context, obj client.Object) []reconcile.Request {
+		if obj.GetNamespace() != ns {
+			return nil
+		}
+		hostNS, name, ok := strings.Cut(obj.GetAnnotations()[certrequest.AnnotationHost], "/")
+		if !ok || hostNS == "" || name == "" || strings.Contains(name, "/") {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: hostNS, Name: name}}}
+	}
 }

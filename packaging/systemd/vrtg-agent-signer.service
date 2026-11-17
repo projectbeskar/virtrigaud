@@ -10,21 +10,24 @@
 # asking for signatures while it runs (see docs/per-host-agent-development.md).
 #
 # It holds no capability, opens no network socket (it has no network
-# namespace to open one in) and reads one file, the key, from its own state
-# directory. The socket directory /run/virtrigaud-signer is made by tmpfiles.d
+# namespace to open one in) and reaches one directory, its own state
+# directory, which holds the key; a certificate renewal writes the next key
+# there (host.key.pending, renamed over host.key when the renewed certificate
+# is activated). The socket directory /run/virtrigaud-signer is made by tmpfiles.d
 # (owned by the signer's user, group the agent's, mode 2750, so that the agent
 # can reach the socket and cannot replace it).
 [Unit]
 Description=VirtRigaud per-host agent host key signer (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
-After=local-fs.target
+Requires=vrtg-agent-setup.service
+After=local-fs.target vrtg-agent-setup.service
 StartLimitIntervalSec=300
 StartLimitBurst=10
 
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/libexec/virtrigaud/vrtg-agent signer
+ExecStart=/usr/lib/virtrigaud/vrtg-agent signer
 # SIGHUP loads a replaced key file; a key that does not load keeps the old one.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
@@ -36,11 +39,12 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 User=virtrigaud-signer
 Group=virtrigaud-signer
-# The key is read from /var/lib/virtrigaud-signer, made by tmpfiles.d (0700,
-# owned by the signer's user); the signer never writes there, so it is
-# read-only to it (ProtectSystem=strict also makes it so).
-ReadOnlyPaths=/var/lib/virtrigaud-signer
-ReadWritePaths=/run/virtrigaud-signer
+# The key is in /var/lib/virtrigaud-signer, made by tmpfiles.d (0700, owned
+# by the signer's user). The signer writes there only for a certificate
+# renewal: the pending key and its rename over host.key. It is the only
+# writable path besides the socket directory; ProtectSystem=strict keeps the
+# rest of the file system read-only to it.
+ReadWritePaths=/var/lib/virtrigaud-signer /run/virtrigaud-signer
 # No core dump (it would hold the key) and no swap. (Hibernation still
 # writes all memory to disk; that is not covered.)
 LimitCORE=0
@@ -77,6 +81,7 @@ RemoveIPC=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
 RestrictAddressFamilies=AF_UNIX
 
 [Install]
