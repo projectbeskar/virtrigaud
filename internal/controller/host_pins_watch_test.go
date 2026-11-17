@@ -136,3 +136,43 @@ func TestPinsTrustChanged(t *testing.T) {
 	assert.True(t, p.Delete(event.DeleteEvent{Object: old}))
 	assert.True(t, p.Generic(event.GenericEvent{Object: old}))
 }
+
+// The Host controller's pins Secret watch enqueues only an update that lifts
+// an expired certificate (a re-key); an enrolment, a revocation, a renewal of
+// a valid certificate and store position writes wait for the Host's own
+// schedule, so a host its Provider does not front is not polled for them.
+func TestPinsLiftExpiry(t *testing.T) {
+	now := time.Now()
+	p := pinsLiftExpiry(func() time.Time { return now })
+	withExpiry := func(id string, at time.Time) hostEnrolmentState {
+		c := enrolmentFor(strings.Repeat(id, 16), "uid-prov-a", 2, strings.Repeat("aa", 32))
+		c.NotAfter = metav1.NewTime(at)
+		return hostEnrolmentState{Current: c}
+	}
+	sec := func(st hostEnrolmentState) *corev1.Secret { return pinsSecretWith(t, st, HostStoreState{}) }
+	expired, valid := withExpiry("c3", now.Add(-time.Minute)), withExpiry("d4", now.Add(time.Hour))
+	pending := hostEnrolmentState{Pending: &enrolmentRecord{EnrolmentID: strings.Repeat("e5", 16)}}
+	for name, tc := range map[string]struct {
+		old, new hostEnrolmentState
+		want     bool
+	}{
+		"re-key of an expired certificate":   {expired, valid, true},
+		"first enrolment pins a certificate": {pending, valid, false},
+		"enrolment steps before the pin":     {hostEnrolmentState{}, pending, false},
+		"revocation of an expired host":      {expired, hostEnrolmentState{}, false},
+		"revocation of a valid host":         {valid, hostEnrolmentState{}, false},
+		"renewal of a valid certificate":     {valid, withExpiry("f6", now.Add(2*time.Hour)), false},
+		"still expired":                      {expired, withExpiry("f6", now.Add(-time.Second)), false},
+		"nothing changed":                    {valid, valid, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, p.Update(event.UpdateEvent{ObjectOld: sec(tc.old), ObjectNew: sec(tc.new)}))
+		})
+	}
+	undecodable := sec(valid)
+	undecodable.Data[hostEnrolmentStateKey] = []byte("{")
+	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: sec(expired), ObjectNew: undecodable}))
+	assert.False(t, p.Create(event.CreateEvent{Object: sec(valid)}))
+	assert.False(t, p.Delete(event.DeleteEvent{Object: sec(valid)}))
+	assert.False(t, p.Generic(event.GenericEvent{Object: sec(valid)}))
+}

@@ -18,8 +18,10 @@ package controller
 
 import (
 	"bytes"
+	"encoding/json"
 	"maps"
 	"slices"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -45,6 +47,48 @@ func pinsTrustChanged() predicate.Funcs {
 			return !onlyStorePositionsChanged(oldS, newS)
 		},
 	}
+}
+
+// pinsLiftExpiry passes a pins Secret update only when it lifts an expired
+// agent certificate: the current enrolment's certificate had expired before
+// the update and a current certificate that is still valid is pinned after
+// it (a re-key). Only then must the Host be re-evaluated at once, so it does
+// not keep CertificateExpired until the next heartbeat. Every other change
+// waits for the Host's own schedule: an enrolment pins a host its Provider
+// does not front yet, and a revocation or a renewal changes nothing the
+// heartbeat would poll sooner for, so polling on them would only log
+// GetHostInfo failures. Creates, deletes and generic events do not pass (a
+// Host is reconciled at start-up through its own watch). now nil: time.Now.
+func pinsLiftExpiry(now func() time.Time) predicate.Funcs {
+	if now == nil {
+		now = time.Now
+	}
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return false },
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldS, ok1 := e.ObjectOld.(*corev1.Secret)
+			newS, ok2 := e.ObjectNew.(*corev1.Secret)
+			if !ok1 || !ok2 {
+				return false
+			}
+			at := now()
+			before, okOld := currentNotAfter(oldS)
+			after, okNew := currentNotAfter(newS)
+			return okOld && okNew && !at.Before(before) && at.Before(after)
+		},
+	}
+}
+
+// currentNotAfter returns the expiry of the current enrolment's certificate
+// a pins Secret records; false when it records none or cannot be decoded.
+func currentNotAfter(s *corev1.Secret) (time.Time, bool) {
+	var st hostEnrolmentState
+	if err := json.Unmarshal(s.Data[hostEnrolmentStateKey], &st); err != nil || st.Current == nil {
+		return time.Time{}, false
+	}
+	return st.Current.NotAfter.Time, true
 }
 
 // onlyStorePositionsChanged reports whether two versions of a pins Secret

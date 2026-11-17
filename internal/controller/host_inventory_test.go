@@ -1040,3 +1040,49 @@ func TestHostInventory_OneSeriesPerCondition(t *testing.T) {
 	assert.True(t, ok)
 	metrics.DeleteHostInventoryConditions(ns, host)
 }
+
+// A condition whose status does not change keeps its transition time across
+// heartbeats, although one sync sets Ready True from the Provider's answer
+// and then False for the inventory.
+func TestHostInventory_ReadyTransitionTimeStaysWhileFalse(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	f.reconcile(t)
+	f.signed.unsigned = true
+	first := requireCond(t, f.reconcile(t), k8s.ConditionReady, metav1.ConditionFalse, reasonAgentInventoryNotReady).LastTransitionTime
+	inv := requireCond(t, f.reconcile(t), infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, metav1.ConditionFalse,
+		infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer).LastTransitionTime
+	time.Sleep(1100 * time.Millisecond) // transition times have second precision
+	h := f.reconcile(t)
+	ready := requireCond(t, h, k8s.ConditionReady, metav1.ConditionFalse, reasonAgentInventoryNotReady)
+	assert.True(t, ready.LastTransitionTime.Equal(&first), "Ready stayed False: transition time %v, want %v", ready.LastTransitionTime, first)
+	again := requireCond(t, h, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, metav1.ConditionFalse,
+		infravirtrigaudiov1beta1.HostReasonInventoryNoSignedAnswer).LastTransitionTime
+	assert.True(t, again.Equal(&inv))
+	// A real change still moves it.
+	f.signed.unsigned = false
+	time.Sleep(1100 * time.Millisecond)
+	back := meta.FindStatusCondition(f.reconcile(t).Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, back)
+	assert.Equal(t, metav1.ConditionTrue, back.Status)
+	assert.True(t, back.LastTransitionTime.After(first.Time))
+}
+
+// keepTransitionTimes restores the read transition time only for a
+// condition whose status is unchanged.
+func TestKeepTransitionTimes(t *testing.T) {
+	old := metav1.NewTime(time.Unix(1_700_000_000, 0))
+	now := metav1.NewTime(time.Unix(1_700_000_100, 0))
+	base := &infravirtrigaudiov1beta1.Host{Status: infravirtrigaudiov1beta1.HostStatus{Conditions: []metav1.Condition{
+		{Type: "A", Status: metav1.ConditionFalse, LastTransitionTime: old},
+		{Type: "B", Status: metav1.ConditionFalse, LastTransitionTime: old},
+	}}}
+	host := &infravirtrigaudiov1beta1.Host{Status: infravirtrigaudiov1beta1.HostStatus{Conditions: []metav1.Condition{
+		{Type: "A", Status: metav1.ConditionFalse, Reason: "Other", LastTransitionTime: now},
+		{Type: "B", Status: metav1.ConditionTrue, LastTransitionTime: now},
+		{Type: "C", Status: metav1.ConditionTrue, LastTransitionTime: now},
+	}}}
+	keepTransitionTimes(host, base)
+	assert.Equal(t, old, host.Status.Conditions[0].LastTransitionTime, "same status: kept")
+	assert.Equal(t, now, host.Status.Conditions[1].LastTransitionTime, "status changed: new time")
+	assert.Equal(t, now, host.Status.Conditions[2].LastTransitionTime, "new condition: new time")
+}

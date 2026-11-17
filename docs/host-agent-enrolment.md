@@ -717,10 +717,14 @@ minute without a call, and polled again once a re-key pins a new
 certificate. `Ready` turns `CertificateExpired` only once the expiry has
 passed, and no later than a second after it: while the certificate is
 valid, the next check is brought forward to its expiry when that comes
-before the next heartbeat. A change to the Host's pins Secret (a re-key
-pinning a new certificate) re-evaluates the Host at once rather than at the
-next minute; the heartbeat's own writes of the verified store position to
-that Secret do not, so they add no extra poll. While a revoked or expired Host is not polled,
+before the next heartbeat. A re-key that pins a valid certificate in place
+of an expired one re-evaluates the Host at once rather than at the next
+minute. No other change of the Host's pins Secret does: the writes of an
+enrolment or a revocation would only poll a host its Provider does not
+front (each a `GetHostInfo failed` error), and the heartbeat's own writes
+of the verified store position would add a poll per heartbeat. A
+condition's `lastTransitionTime` moves only when its status changes, not
+when only its reason or message does. While a revoked or expired Host is not polled,
 `AgentInventoryVerified` is `False` with reason `NoSignedAnswer` and
 `AgentAnswerVerified` (when the Host has it) is `False` with reason
 `NoVerifiedAnswer`; their messages say that the host is not polled and why
@@ -732,13 +736,20 @@ records it).
 With approver-policy bound to the manager, a renewal request is often
 approved by approver-policy before the manager decides it. The manager then
 applies its own rules to the approved request (it writes no condition): if
-they hold, it records its approval and publishes the issued certificate; if
+they hold, it records its approval and publishes the issued certificate (an
+`AgentRenewalApproved` event and a log line report the approval once, when
+it is recorded, also when another approver's approval lands while the
+manager is writing its own); if
 they do not, it marks the request refused at once (`VirtRigaudCertificateRefused`;
 an approved request cannot also be denied) and an `AgentRenewalDenied`
 Warning says so. The refusal is final: the request is not judged again even
 if the rule that failed passes later, its certificate is never published,
 and the renewal starts again with a new request. A request already issued
-before the manager judged it is refused the same way. While approvals are
+before the manager judged it is refused the same way. A renewal-shaped
+request that names an existing Host but never was its renewal (not one the
+manager created for it) is refused once it is issued, and an
+`AgentRenewalDenied` Warning on that Host says that it was not the Host's
+renewal (it names the request, never its contents). While approvals are
 suspended (the admission check fails), such requests are not judged. An
 optimistic-lock conflict (the request or the pins Secret written by someone
 else since it was read) is retried at once without an error log; every

@@ -557,6 +557,22 @@ func (r *HostReconciler) setHostUnavailable(ctx context.Context, host *infravirt
 	r.withdrawHostInventory(ctx, host, false, "the heartbeat did not reach the host, so there is no signed host answer")
 }
 
+// keepTransitionTimes gives every condition whose status is the same as when
+// the reconcile read the Host its transition time from then. One sync may
+// set a condition more than once (a healthy host's Ready is set True from
+// the Provider's answer, then False when its inventory is not ready), and
+// meta.SetStatusCondition stamps a new transition time at each flip, so
+// without this a condition that stays False would show a new transition
+// time at every heartbeat.
+func keepTransitionTimes(host, base *infravirtrigaudiov1beta1.Host) {
+	for i := range host.Status.Conditions {
+		c := &host.Status.Conditions[i]
+		if was := meta.FindStatusCondition(base.Status.Conditions, c.Type); was != nil && was.Status == c.Status {
+			c.LastTransitionTime = was.LastTransitionTime
+		}
+	}
+}
+
 // setHostReady upserts the Host's Ready condition, stamping ObservedGeneration =
 // host.Generation so a client can tell which spec generation the condition
 // reflects (status-condition best practice). meta.SetStatusCondition only bumps
@@ -576,6 +592,7 @@ func setHostReady(host *infravirtrigaudiov1beta1.Host, status metav1.ConditionSt
 // idempotent re-reconcile issues no write (a successful sync always changes
 // status because LastHeartbeatTime advances).
 func (r *HostReconciler) persist(ctx context.Context, host, base *infravirtrigaudiov1beta1.Host, requeueAfter time.Duration) (ctrl.Result, error) {
+	keepTransitionTimes(host, base)
 	if equality.Semantic.DeepEqual(host.Status, base.Status) {
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
@@ -630,18 +647,20 @@ func (r *HostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Host{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
-	// A pins Secret change (a re-key pinned, a renewal completed, an expiry
-	// moved) re-evaluates its Host at once: the expired-certificate check
-	// reads it, and the Host must not keep CertificateExpired until the next
-	// heartbeat. The heartbeat's own writes of the store positions do not
-	// enqueue (pinsTrustChanged): they would add a poll per Host per heartbeat.
+	// A pins Secret change that lifts an expired certificate (a re-key)
+	// re-evaluates its Host at once: the expired-certificate check reads it,
+	// and the Host must not keep CertificateExpired until the next
+	// heartbeat. No other pins Secret change enqueues it (pinsLiftExpiry):
+	// the heartbeat's store position writes would add a poll per Host per
+	// heartbeat, and the writes of an enrolment or a revocation would poll a
+	// host its Provider does not front, each logging a GetHostInfo failure.
 	if r.HostAnswers != nil {
 		if p, ok := r.HostAnswers.Trust.(*PinsHostTrust); ok && p.Config != nil {
 			ns := p.Config.Namespace
 			b = b.Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(hostOfPinsSecret(ns)),
 				builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
 					return o.GetNamespace() == ns && o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
-				}), pinsTrustChanged()))
+				}), pinsLiftExpiry(nil)))
 		}
 	}
 	return b.Named("host").Complete(r)
