@@ -714,7 +714,18 @@ A revoked Host (`spec.revoked`) is no longer polled by the heartbeat: its
 pinned agent certificate has expired (read from its pins Secret, which
 `status.agent.certificateExpiry` mirrors): `Ready=False` with reason `CertificateExpired`, rechecked every
 minute without a call, and polled again once a re-key pins a new
-certificate.
+certificate. `Ready` turns `CertificateExpired` only once the expiry has
+passed, and no later than a second after it: while the certificate is
+valid, the next check is brought forward to its expiry when that comes
+before the next heartbeat. A change to the Host's pins Secret (a re-key
+pinning a new certificate) re-evaluates the Host at once rather than at the
+next minute. While a revoked or expired Host is not polled,
+`AgentInventoryVerified` is `False` with reason `NoSignedAnswer` and
+`AgentAnswerVerified` (when the Host has it) is `False` with reason
+`NoVerifiedAnswer`; their messages say that the host is not polled and why
+(`Revoked` or `CertificateExpired`), rather than keeping a verdict from
+before. A status update that loses an optimistic-lock race with another
+writer is retried at once without an error log.
 
 With approver-policy bound to the manager, a renewal request is often
 approved by approver-policy before the manager decides it. The manager then

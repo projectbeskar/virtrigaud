@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,12 +34,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/devgate"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -354,7 +359,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	//     polled, and Ready says why (development builds: spec.revoked is
 	//     used only there).
 	if devgate.Compiled && host.Spec.Revoked && providerRunsHostAgents(provider) {
-		r.setHostUnavailable(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentRevoked,
+		r.setHostNotPolled(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentRevoked,
 			"spec.revoked is true: the host's agent identity is revoked and its Provider no longer fronts it; it is not polled")
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
 	}
@@ -365,11 +370,27 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	//     would only fail every heartbeat. It is rechecked at the heartbeat
 	//     cadence without a call, and polled again as soon as a re-key pins
 	//     a new certificate.
-	if expiry, ok := r.agentCertificateExpiry(ctx, host); devgate.Compiled && providerRunsHostAgents(provider) && ok && !time.Now().Before(expiry) {
-		r.setHostUnavailable(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired,
+	var expiry time.Time
+	hasExpiry := false
+	if devgate.Compiled && providerRunsHostAgents(provider) {
+		expiry, hasExpiry = r.agentCertificateExpiry(ctx, host)
+	}
+	if hasExpiry && !time.Now().Before(expiry) {
+		r.setHostNotPolled(ctx, host, infravirtrigaudiov1beta1.HostReasonAgentCertificateExpired,
 			"the host's pinned agent certificate expired at "+expiry.UTC().Format(time.RFC3339)+
 				"; it is not polled until a re-key pins a new certificate")
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
+	}
+	// While the certificate is valid, the next check comes no later than its
+	// expiry, so Ready turns CertificateExpired when it passes, not up to a
+	// heartbeat later.
+	untilExpiry := func(d time.Duration) time.Duration {
+		if hasExpiry {
+			if u := time.Until(expiry) + time.Second; u > 0 && u < d {
+				return u
+			}
+		}
+		return d
 	}
 
 	// 3. Obtain the provider client the same way the VM controller does. A
@@ -380,7 +401,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 		metrics.RecordError(errReasonHostProviderResolve, metrics.ComponentManager)
 		r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
 			fmt.Sprintf("Provider %s runtime is not ready: %v", provider.Name, err))
-		return r.persist(ctx, host, base, hostSyncBackoffInterval)
+		return r.persist(ctx, host, base, untilExpiry(hostSyncBackoffInterval))
 	}
 
 	// 4. Cheap single-host refresh (NOT a full ListHosts). The host id is the Host
@@ -396,7 +417,22 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	r.applyHostInventory(ctx, host, inventory)
 	log.FromContext(ctx).V(1).Info("Synced Host inventory",
 		"host", host.Name, "provider", provider.Name, "health", host.Status.Health)
-	return r.persist(ctx, host, base, hostHeartbeatInterval)
+	return r.persist(ctx, host, base, untilExpiry(hostHeartbeatInterval))
+}
+
+// setHostNotPolled marks a Host the heartbeat deliberately does not poll (a
+// revoked agent identity, an expired agent certificate): Ready=False with
+// reason, and the signed-answer and inventory conditions say that the host
+// is not polled, not that the heartbeat failed to reach it (existing
+// reasons, accurate messages).
+func (r *HostReconciler) setHostNotPolled(ctx context.Context, host *infravirtrigaudiov1beta1.Host, reason, msg string) {
+	host.Status.Health = infravirtrigaudiov1beta1.HostHealthUnknown
+	setHostReady(host, metav1.ConditionFalse, reason, msg)
+	why := "the host is not polled (" + reason + "), so no signed host answer is asked for: " + msg
+	r.withdrawHostInventory(ctx, host, true, why)
+	if meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentAnswer) != nil {
+		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing, why)
+	}
 }
 
 // agentCertificateExpiry returns when the Host's pinned agent certificate
@@ -544,6 +580,12 @@ func (r *HostReconciler) persist(ctx context.Context, host, base *infravirtrigau
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	if err := r.Status().Update(ctx, host); err != nil {
+		if apierrors.IsConflict(err) {
+			// Another writer (the enrolment reconciler mirrors its status
+			// too) updated the Host since it was read: re-read and sync
+			// again, without an error log.
+			return ctrl.Result{Requeue: true}, nil
+		}
 		metrics.RecordError(errReasonHostStatusUpdate, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("update Host %s status: %w", host.Name, err)
 	}
@@ -585,9 +627,35 @@ func (r *HostReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexPlacementHost(mgr); err != nil {
 		return err
 	}
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&infravirtrigaudiov1beta1.Host{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
-		Named("host").
-		Complete(r)
+	b := ctrl.NewControllerManagedBy(mgr).
+		For(&infravirtrigaudiov1beta1.Host{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
+	// A pins Secret change (a re-key pinned, a renewal completed, an expiry
+	// moved) re-evaluates its Host at once: the expired-certificate check
+	// reads it, and the Host must not keep CertificateExpired until the next
+	// heartbeat.
+	if r.HostAnswers != nil {
+		if p, ok := r.HostAnswers.Trust.(*PinsHostTrust); ok && p.Config != nil {
+			ns := p.Config.Namespace
+			b = b.Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(hostOfPinsSecret(ns)),
+				builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
+					return o.GetNamespace() == ns && o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
+				})))
+		}
+	}
+	return b.Named("host").Complete(r)
+}
+
+// hostOfPinsSecret maps a pins Secret of the enrolment namespace ns to the
+// Host its annotation names.
+func hostOfPinsSecret(ns string) handler.MapFunc {
+	return func(_ context.Context, obj client.Object) []reconcile.Request {
+		if obj.GetNamespace() != ns {
+			return nil
+		}
+		hostNS, name, ok := strings.Cut(obj.GetAnnotations()[certrequest.AnnotationHost], "/")
+		if !ok || hostNS == "" || name == "" || strings.Contains(name, "/") {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: hostNS, Name: name}}}
+	}
 }
