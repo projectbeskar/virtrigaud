@@ -54,6 +54,12 @@ var keyAgentMeta = []byte("agent")
 // operations has more chunks to commit.
 var keyFreeze = []byte("freeze")
 
+// keyDiscard is the key of the discard-in-progress marker in bucketMeta: the
+// id of the retired predecessor enrolment whose records are still being
+// removed. It exists exactly while a confirmed discard has more chunks to
+// commit (ConfirmFreeze, resumed by Compact).
+var keyDiscard = []byte("discard")
+
 // keyClockFloor is the key of the clock floor record in bucketMeta.
 var keyClockFloor = []byte("clock_floor")
 

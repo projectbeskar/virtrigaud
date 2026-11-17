@@ -121,7 +121,7 @@ func (s *Server) applyFreezeConfirmation(ctx context.Context, forEnrolment []byt
 	}
 	done, err := s.opts.Freezes.ConfirmFrozen(ctx, forEnrolment, ids)
 	for _, id := range done {
-		s.opts.Log.Info("freeze confirmed: the records of a frozen predecessor enrolment are discarded",
+		s.opts.Log.Info("freeze confirmed: a frozen predecessor enrolment is discarded (its records are removed in chunks; compaction finishes an interrupted removal)",
 			"enrolment", hex.EncodeToString(id), "for", hex.EncodeToString(forEnrolment))
 	}
 	if err != nil {

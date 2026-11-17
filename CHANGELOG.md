@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-17 19:00] - Per-host agent: discard a re-keyed Host's predecessor in bounded chunks (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/agent/opstore/reenrol.go`, `compact.go`, `admit.go`, `answers.go`, `store.go`, `records.go`: a confirmed freeze discarded the predecessor enrolment's records (op records, op_id tombstones, attempt marks, panic counts) in one transaction. After a re-key of a Host whose store was full (`STORE_FULL`, about 440,000 tombstones), that transaction made the agent exceed its unit's `MemoryMax=256M` and the kernel killed it; a larger predecessor could fail at every retry and leave the Host refusing new operations. `ConfirmFreeze` now commits one transaction and returns: it retires the predecessor, releases the VMs its operations held, adds it to a discard-in-progress marker (at most 32 pending) and removes its first 2,048 records (`DefaultDiscardChunk`); a small predecessor is removed completely. Compaction (`Store.Compact`, which resumes pending discards first) removes the rest in transactions of at most 2,048 records with the store lock released between them, and retries the witness directory removal; `Store.Discarding` reports a pending discard, and the agent then compacts at its next check whatever the compaction backoff (`internal/agent/daemon/compact.go`). The call that relayed the confirmation is never held up by the sweep, and waits for another discard transaction only as long as its context allows. From the first transaction on, a retired enrolment's operations are answered as discarded (`UNKNOWN_TO_AGENT` at admission, not found by lookups and answers), whatever records remain, so a removed tombstone never makes a re-sent op_id read as never accepted. A repeated confirmation of an enrolment being removed changes nothing. Compaction holds the discard lock one transaction at a time, removes records only of a retired enrolment (a marker naming any other quarantines the store), and at most 32 discards are pending; a further confirmation is refused with `ErrTooManyDiscards`, which the agent logs.
+- `internal/agent/internal/guard/guard.go`: new mutation guards `retired-not-held`, `discard-chunked`, `discard-resume`, `discard-prompt` and `discard-only-retired`, each killed by `internal/agent/opstore/discard_chunk_test.go` or `internal/agent/daemon/compact_internal_test.go` (one transaction per confirmation, chunked removal by compaction with a crash between chunks and a restart, a second predecessor while one is pending, VMs released by the first transaction, a bounded wait, a crash before the witness removal, one transaction for a small predecessor).
+- `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`, `internal/agent/server/services.go`: the discard is described as above; the agent's log line says the records are removed in chunks.
+
+### Why
+A lab run of re-key recovery from a full store found the agent killed for memory while applying the freeze confirmation. It recovered on a retry with little margin: a second run peaked 11 MiB under the limit.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-17 16:00] - Per-host agent: the setup unit is no longer start-limited (development builds only)
 **Author:** @wrkode (William Rizzo)
 

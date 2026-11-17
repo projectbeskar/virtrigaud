@@ -226,8 +226,8 @@ three steps:
 3. **Removal.** The manager's heartbeat asks the host, with a signed request,
    about an operation id it never used under each confirmed predecessor. Only
    a verified signed answer from a ready agent, answering under another
-   enrolment, that the predecessor is `UNKNOWN_TO_AGENT` (its records are
-   gone) removes it from the pins Secret (written with its resourceVersion
+   enrolment, that the predecessor is `UNKNOWN_TO_AGENT` (it is discarded:
+   its records are gone, or the agent is still removing them) removes it from the pins Secret (written with its resourceVersion
    as precondition), with an `AgentPredecessorDiscarded` event and an audit
    log line carrying the signed answer. A `NO_RECORD` (still held), an
    unsigned answer, an answer from an agent that is not ready or that

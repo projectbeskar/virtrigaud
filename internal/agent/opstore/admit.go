@@ -287,6 +287,14 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 	if err != nil {
 		return Decision{}, false, err
 	}
+	// A retired enrolment is discarded, also while a confirmed discard is
+	// still removing its records: none of them is consulted, and a
+	// removed tombstone must never let its op_id read as never accepted.
+	if retired, err := isRetired(tx, r.EnrolmentID); err != nil {
+		return Decision{}, false, err
+	} else if retired && !guard.Off(guard.RetiredNotHeld) {
+		return refused(RefusalUnknownToAgent), false, nil
+	}
 	enrolmentCheck := func() (Decision, bool, error) {
 		if enr == nil || !sameBytes(enr.GetEnrolmentId(), r.EnrolmentID) {
 			// Definite only for an enrolment whose records this store holds
