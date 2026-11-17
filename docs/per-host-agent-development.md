@@ -44,6 +44,7 @@ VM. Neither build links Kubernetes or the VirtRigaud API packages.
 | `vrtg-agent run` | Runs the agent until SIGTERM or SIGINT. |
 | `vrtg-agent signer` | Runs the host key signer until SIGTERM or SIGINT: a separate process and user that holds the host private key and signs for the agent over a Unix socket (see [Host key signer](#host-key-signer)). The same in a release and a development build; it has no development-only setting. |
 | `vrtg-agent shutdown-vms` | Stops every VM of the executor, only while the host is shutting down (see [Units](#systemd-units)). |
+| `vrtg-agent boot-start` | Development builds only (a release build prints that it is not available and exits 1). Starts the agent at most once per boot, while `vrtg-agent.service` is enabled: the action of `vrtg-agent-boot-start.service` (see [Units](#systemd-units)). `--runtime-dir` (default `$RUNTIME_DIRECTORY`, then `/run/vrtg-agent-boot-start`) holds the once-per-boot marker. |
 | `vrtg-agent enroll csr` / `enroll install` | Development builds only (a release build prints that it is not available and exits 1). The two steps of host enrolment: `csr`, run as the signer's user, creates the host key and writes the certificate signing request; `install`, run as the agent's user, checks and installs the issued certificate (see [Enrolment](#enrolment)). |
 | `vrtg-agent version` | Prints the version. |
 
@@ -984,7 +985,13 @@ with pidfs), the default would kill the agent after it became ready. The
 probe reads the refusal as "not supported" (`pidfs_handle` reported absent).
 A test in `internal/agent/inventory` classifies every system call the
 collector makes against the agent unit's filter, and a test in
-`cmd/vrtg-agent` asserts the `EPERM` setting on every unit. The agent, the
+`cmd/vrtg-agent` asserts the `EPERM` setting on every unit. As a
+consequence `pidfs_handle` reads absent even on kernels that support
+persistent process handles: the agent's filter refuses `open_by_handle_at`.
+That is fail-safe while the agent supervises no VM process; when it does and
+needs pidfs handles, the agent unit's filter must allow that one call
+(`SystemCallFilter=open_by_handle_at` after the `~@privileged` line, which
+systemd applies in order). The agent, the
 signer and the shutdown unit also set `SystemCallLog=@privileged` (systemd
 247 or later), so a filtered privileged call, which now fails quietly, is
 still recorded by the audit subsystem.
@@ -1116,16 +1123,24 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   stop, which stops no VM;
 - the agent is not upheld (`Upholds=` would start it again at once after a
   maintenance stop). `vrtg-agent-boot-start.service` is upheld instead: a
-  `oneshot` with `RemainAfterExit=yes` whose only action is `systemctl
-  --no-block start vrtg-agent.service` while `systemctl is-enabled
-  vrtg-agent.service` succeeds (enabled, enabled-runtime, static, ...), with
-  no dependency on the agent's unit. It runs once per boot and stays active, so `Upholds=` does not run it
+  `oneshot` with `RemainAfterExit=yes` whose only action is `vrtg-agent
+  boot-start` (development builds), with no dependency on the agent's unit.
+  That command acts at most once per boot: it first creates the marker
+  `/run/vrtg-agent-boot-start/started` exclusively and does nothing when it
+  already exists; the unit's runtime directory is kept when the unit stops
+  (`RuntimeDirectoryPreserve=yes`) and goes with the reboot. Only then, and
+  only while `systemctl is-enabled vrtg-agent.service` succeeds (enabled,
+  enabled-runtime, static, ...), it runs `systemctl --no-block start
+  vrtg-agent.service`. The marker is made before the start, so an
+  interruption can only miss a start (start the agent by hand), never start
+  it twice. It runs once per boot and stays active, so `Upholds=` does not run it
   again: an agent stopped for maintenance stays stopped through restarts of
   the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
   The agent's `Wants=` and `Requires=` bring the signer and the setup unit up with it.
-  Stopping `vrtg-agent-boot-start.service` by hand is the exception:
-  `Upholds=` starts it again and it starts the agent once more (if enabled).
-  Stop the agent, not that unit.
+  Stopping, restarting or try-restarting `vrtg-agent-boot-start.service`
+  (by hand, or by a package's upgrade scripts, which restart every unit the
+  package ships) starts nothing either: the marker of this boot is still
+  there. A reboot is what re-arms it.
 
 Enablement: the agent starts at boot only while `vrtg-agent.service` is
 enabled, on both kinds of host. On a host with a system extension, enable it
@@ -1148,8 +1163,9 @@ and checks what the analyzer cannot see: `SystemCallErrorNumber=` wherever a
 system call filter is set, no binary under `/usr/libexec`, a signer that can
 write exactly its key and socket directories, a `multi-user.target`
 drop-in that upholds the shutdown and boot-start units and never the agent
-or the signer, and `SystemCallLog=@privileged` and `Requires=` on the setup
-unit for the agent, the signer and the shutdown unit. The CI lint job runs it.
+or the signer, `SystemCallLog=@privileged` and `Requires=` on the setup
+unit for the agent, the signer and the shutdown unit, and a boot-start unit
+that runs `vrtg-agent boot-start` with a preserved runtime directory. The CI lint job runs it.
 
 ## Enrolment
 

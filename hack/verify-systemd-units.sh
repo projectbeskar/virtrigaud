@@ -13,7 +13,9 @@
 #  - the multi-user.target drop-in upholds the shutdown unit and the
 #    once-per-boot start unit, and never the agent itself;
 #  - the agent, the signer and the shutdown unit audit filtered privileged
-#    calls and require the setup unit (which refuses moved user ids).
+#    calls and require the setup unit (which refuses moved user ids);
+#  - the boot-start unit acts once per boot ("vrtg-agent boot-start" with a
+#    runtime directory kept across restarts of the unit).
 #
 # The units start a binary under /usr/lib/virtrigaud that does not exist on a
 # build machine, so each unit is copied to a temporary directory with that
@@ -101,6 +103,12 @@ if [ "${rw}" != "/run/virtrigaud-signer /var/lib/virtrigaud-signer" ]; then
 fi
 if value "${signer}" ReadOnlyPaths | grep -q virtrigaud-signer; then
 	problem "vrtg-agent-signer.service: its key directory is read-only: a renewal cannot write the pending key"
+fi
+kicker="${UNIT_DIR}/vrtg-agent-boot-start.service"
+if [ "$(value "${kicker}" ExecStart)" != "${BINARY_PATH}vrtg-agent boot-start" ] ||
+	[ "$(value "${kicker}" RuntimeDirectory)" != "vrtg-agent-boot-start" ] ||
+	[ "$(value "${kicker}" RuntimeDirectoryPreserve)" != "yes" ]; then
+	problem "vrtg-agent-boot-start.service: not the once-per-boot guard (vrtg-agent boot-start with a preserved RuntimeDirectory): a restart could start an agent stopped for maintenance"
 fi
 if [ ! -f "${UPHOLDS_DROPIN}" ]; then
 	problem "missing ${UPHOLDS_DROPIN#"${REPO_ROOT}/"}"

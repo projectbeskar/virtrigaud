@@ -531,8 +531,10 @@ func TestBootStartUnitProperties(t *testing.T) {
 	u := parseUnit(t, bootStartUnit)
 	for key, want := range map[string]string{
 		"Type": "oneshot", "RemainAfterExit": "yes", "NoNewPrivileges": "yes", "CapabilityBoundingSet": "",
-		"ExecStart": "/bin/sh -c 'if /usr/bin/systemctl is-enabled --quiet " + agentUnit + "; then exec /usr/bin/systemctl --no-block start " +
-			agentUnit + "; fi'", "ProtectSystem": "strict",
+		"ExecStart": binaryPath + " boot-start", "ProtectSystem": "strict",
+		// The once-per-boot marker's directory survives restarts of the unit
+		// (a package's try-restart included) and goes with the reboot.
+		"RuntimeDirectory": "vrtg-agent-boot-start", "RuntimeDirectoryPreserve": "yes", "RuntimeDirectoryMode": "0700",
 		"RestrictAddressFamilies": "AF_UNIX",
 	} {
 		if got := u.one(t, "Service", key); got != want {

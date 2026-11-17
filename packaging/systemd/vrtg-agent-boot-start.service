@@ -14,16 +14,23 @@
 # It has no dependency on the agent's unit: stopping or restarting the agent
 # never involves it.
 #
-# It starts the agent only while vrtg-agent.service is enabled
+# Its action is "vrtg-agent boot-start", which acts at most once per boot:
+# it first creates the marker /run/vrtg-agent-boot-start/started
+# (exclusively), and does nothing when the marker already exists. The
+# runtime directory is kept when the unit stops (RuntimeDirectoryPreserve=)
+# and goes with the reboot, so a restart or try-restart of this unit, by
+# hand or by a package's upgrade scripts, never starts an agent stopped for
+# maintenance; a reboot re-arms it. The marker is made before the start, so
+# an interruption can only miss a start (start the agent by hand), never
+# start it twice.
+#
+# Then it starts the agent only while vrtg-agent.service is enabled
 # (systemctl is-enabled: enabled, enabled-runtime, static, ...), so that
 # "systemctl disable vrtg-agent.service" keeps the agent off at boot, and
 # "systemctl mask" keeps it off entirely. The check is in the action, not an
 # ExecCondition=: a skipped unit is inactive, and Upholds= would start it
 # again at once, over and over, until its start limit failed it. Here the
-# unit always succeeds and stays active.
-#
-# Stopping this unit by hand is the exception: Upholds= starts it again, and
-# it starts the agent once more (if enabled). Stop the agent, not this unit.
+# unit succeeds and stays active.
 [Unit]
 Description=VirtRigaud: start the per-host agent once per boot (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
@@ -33,7 +40,10 @@ After=vrtg-agent-setup.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'if /usr/bin/systemctl is-enabled --quiet vrtg-agent.service; then exec /usr/bin/systemctl --no-block start vrtg-agent.service; fi'
+ExecStart=/usr/lib/virtrigaud/vrtg-agent boot-start
+RuntimeDirectory=vrtg-agent-boot-start
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
