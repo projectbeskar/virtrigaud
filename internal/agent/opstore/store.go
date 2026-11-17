@@ -193,9 +193,10 @@ type Store struct {
 	// discarding is set while a confirmed discard has records left to
 	// remove (the discard-in-progress marker exists).
 	discarding atomic.Bool
-	// discardMu serialises confirmed discards (ConfirmFreeze and the resume
-	// in Compact). It is taken before mu, never while holding it.
-	discardMu sync.Mutex
+	// discardSem serialises confirmed discards (ConfirmFreeze and the
+	// resume in Compact), and is waited for only as long as the caller's
+	// context allows. It is taken before mu, never while holding it.
+	discardSem chan struct{}
 	// recovered mirrors ready for readers that must not wait for s.mu
 	// (Ready), which Recover holds while it runs.
 	recovered atomic.Bool
@@ -246,7 +247,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("open operation store: %w", err)
 	}
 	s := &Store{j: j, exec: opts.Executor, opts: opts, fsys: j.FS(), audit: opts.Audit,
-		running: map[string]bool{}, dirs: map[string]bool{}}
+		running: map[string]bool{}, dirs: map[string]bool{}, discardSem: make(chan struct{}, 1)}
 	if err := s.checkMarker(ctx); err != nil {
 		_ = j.Close()
 		return nil, fmt.Errorf("open operation store: %w", err)
@@ -259,7 +260,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 			return err
 		}
 		dm, err := readDiscard(tx)
-		s.discarding.Store(dm != nil)
+		s.discarding.Store(len(dm) > 0)
 		return err
 	}); err != nil {
 		var lostErr *journal.LostError
