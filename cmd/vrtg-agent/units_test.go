@@ -667,18 +667,20 @@ func TestSysusersFixedIDs(t *testing.T) {
 	}
 }
 
-// TestStartLimits: the setup unit (upheld by nothing) has an explicit start
-// limit; the two upheld units, shutdown and boot-start, turn it off
-// (StartLimitIntervalSec=0, no StartLimitBurst: leaving the key out would
-// fall back to the manager's default limit). Their stops, starts, restarts
-// and Upholds= re-arms all count towards a start limit, so routine
-// maintenance put them in start-limit-hit: for the shutdown unit a reboot
-// inside the window then runs no stop action and stops no VM; for the
-// boot-start unit the host reports itself degraded although nothing failed.
-// A start limit cannot bound Upholds= retries anyway; the shutdown unit's
-// start runs nothing, and the boot-start unit acts at most once per boot.
+// TestStartLimits: the shutdown, boot-start and setup units are never
+// start-limited (StartLimitIntervalSec=0, no StartLimitBurst: leaving the key
+// out would fall back to the manager's default limit). Their stops, starts,
+// restarts and Upholds= re-arms all count towards a start limit, so routine
+// maintenance put them in start-limit-hit. For the shutdown unit a reboot
+// inside the window then runs no stop action. For the setup unit the agent
+// cannot start and the shutdown unit skips its graceful stop, so a reboot
+// stops no VM. For the boot-start unit the host reports itself degraded
+// although nothing failed. A start limit cannot bound Upholds= retries
+// anyway, and nothing retries the setup unit by itself. The agent and the
+// signer keep theirs: they restart themselves, and the limit ends a crash
+// loop.
 func TestStartLimits(t *testing.T) {
-	for _, name := range []string{shutdownUnit, bootStartUnit} {
+	for _, name := range []string{shutdownUnit, bootStartUnit, setupUnit} {
 		u := parseUnit(t, name)
 		if got := u.one(t, "Unit", "StartLimitIntervalSec"); got != "0" {
 			t.Errorf("%s: StartLimitIntervalSec = %q, want 0: routine maintenance could leave it in start-limit-hit", name, got)
@@ -687,11 +689,13 @@ func TestStartLimits(t *testing.T) {
 			t.Errorf("%s: StartLimitBurst is set", name)
 		}
 	}
-	u := parseUnit(t, setupUnit)
-	if got := u.one(t, "Unit", "StartLimitIntervalSec"); got != "300" {
-		t.Errorf("%s: StartLimitIntervalSec = %q", setupUnit, got)
-	}
-	if got := u.one(t, "Unit", "StartLimitBurst"); got != "5" {
-		t.Errorf("%s: StartLimitBurst = %q", setupUnit, got)
+	for _, name := range []string{agentUnit, signerUnit} {
+		u := parseUnit(t, name)
+		if got := u.one(t, "Service", "Restart"); got != "always" {
+			t.Errorf("%s: Restart = %q", name, got)
+		}
+		if got := u.one(t, "Unit", "StartLimitIntervalSec"); got == "0" {
+			t.Errorf("%s: StartLimitIntervalSec = 0: a crash loop would never end", name)
+		}
 	}
 }

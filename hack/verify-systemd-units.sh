@@ -17,8 +17,8 @@
 #    user ids); the upheld units only want it and start after it;
 #  - the boot-start unit acts once per boot ("vrtg-agent boot-start" with a
 #    runtime directory kept across restarts of the unit);
-#  - the setup unit has an explicit start limit; the units Upholds= reaches
-#    (the shutdown and boot-start units) are never start-limited.
+#  - the shutdown, boot-start and setup units are never start-limited; the
+#    agent and the signer (Restart=always) keep a start limit.
 #
 # The units start a binary under /usr/lib/virtrigaud that does not exist on a
 # build machine, so each unit is copied to a temporary directory with that
@@ -120,9 +120,12 @@ fi
 if value "${signer}" ReadOnlyPaths | grep -q virtrigaud-signer; then
 	problem "vrtg-agent-signer.service: its key directory is read-only: a renewal cannot write the pending key"
 fi
-if [ -z "$(value "${UNIT_DIR}/vrtg-agent-setup.service" StartLimitIntervalSec)" ] || [ -z "$(value "${UNIT_DIR}/vrtg-agent-setup.service" StartLimitBurst)" ]; then
-	problem "vrtg-agent-setup.service: no explicit start limit: a repeated start could loop"
-fi
+for name in vrtg-agent.service vrtg-agent-signer.service; do
+	limit="$(value "${UNIT_DIR}/${name}" StartLimitIntervalSec)"
+	if [ -z "${limit}" ] || [ "${limit}" = "0" ]; then
+		problem "${name}: no explicit start limit: it restarts itself, and a crash loop would never end"
+	fi
+done
 # The shutdown unit must never be start-limited: maintenance stops, starts
 # and Upholds= re-arms count towards a limit, and a unit in start-limit-hit
 # is not re-armed until the window passes, so a reboot then runs no stop
@@ -141,6 +144,13 @@ fi
 if [ "$(value "${UNIT_DIR}/vrtg-agent-boot-start.service" StartLimitIntervalSec)" != "0" ] ||
 	[ -n "$(value "${UNIT_DIR}/vrtg-agent-boot-start.service" StartLimitBurst)" ]; then
 	problem "vrtg-agent-boot-start.service: not StartLimitIntervalSec=0 without StartLimitBurst: a package upgrade could leave it in start-limit-hit and the host degraded"
+fi
+# And for the setup unit: in start-limit-hit the agent cannot start and the
+# shutdown unit skips its graceful stop (setup failed), so a reboot inside
+# the window stops no VM. Nothing retries it by itself.
+if [ "$(value "${UNIT_DIR}/vrtg-agent-setup.service" StartLimitIntervalSec)" != "0" ] ||
+	[ -n "$(value "${UNIT_DIR}/vrtg-agent-setup.service" StartLimitBurst)" ]; then
+	problem "vrtg-agent-setup.service: not StartLimitIntervalSec=0 without StartLimitBurst: a package upgrade could leave it in start-limit-hit and a reboot would then stop no VM"
 fi
 kicker="${UNIT_DIR}/vrtg-agent-boot-start.service"
 if [ "$(value "${kicker}" ExecStart)" != "${BINARY_PATH}vrtg-agent boot-start" ] ||

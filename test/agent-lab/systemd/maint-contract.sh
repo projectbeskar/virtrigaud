@@ -21,7 +21,7 @@
 #                    start of the agent, then restart and try-restart of the
 #                    shutdown unit again; reports whether the shutdown unit is
 #                    active and never reached start-limit-hit
-#   restart-burst N  N restarts of the shutdown unit back to back (no pause);
+#   restart-burst N  N restarts each of the shutdown and setup units back to back (no pause);
 #                    reports the time taken and any start-limit record
 #   foreign-entries DIR [pki]
 #                    plant a subdirectory and a symbolic link owned by uid
@@ -110,11 +110,16 @@ maint-burst)
 restart-burst)
   cursor=$(journalctl -n 1 --show-cursor -o cat --no-pager | sed -n 's/^-- cursor: //p')
   t0=$(date +%s.%N)
-  for i in $(seq "${2:-8}"); do systemctl restart vrtg-vm-shutdown.service || log "    restart $i failed"; done
-  log "${2:-8} restarts in $(awk "BEGIN{printf \"%.2f\", $(date +%s.%N) - $t0}") s"
-  hits=$(journalctl -o cat --no-pager --after-cursor "$cursor" -u vrtg-vm-shutdown.service | grep -cE 'start-limit-hit|repeated too quickly')
-  if [ "$(systemctl show -p ActiveState --value vrtg-vm-shutdown.service)" = active ] && [ "$hits" = 0 ]; then
-    log "PASS shutdown unit active, 0 start-limit records"; else log "FAIL shutdown unit $(unit_state vrtg-vm-shutdown.service), $hits start-limit records"; fails=$((fails + 1)); fi
+  for i in $(seq "${2:-8}"); do
+    systemctl restart vrtg-vm-shutdown.service || log "    restart $i of the shutdown unit failed"
+    systemctl restart vrtg-agent-setup.service || log "    restart $i of the setup unit failed"
+  done
+  log "${2:-8} restarts of the shutdown and setup units in $(awk "BEGIN{printf \"%.2f\", $(date +%s.%N) - $t0}") s"
+  for u in vrtg-vm-shutdown.service vrtg-agent-setup.service; do
+    hits=$(journalctl -o cat --no-pager --after-cursor "$cursor" -u "$u" | grep -cE 'start-limit-hit|repeated too quickly')
+    if [ "$(systemctl show -p ActiveState --value "$u")" = active ] && [ "$hits" = 0 ]; then
+      log "PASS $u active, 0 start-limit records"; else log "FAIL $u $(unit_state "$u"), $hits start-limit records"; fails=$((fails + 1)); fi
+  done
   ;;
 foreign-entries)
   d=${2:?missing DIR}

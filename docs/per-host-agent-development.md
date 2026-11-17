@@ -1284,17 +1284,26 @@ fail because setup failed: the shutdown and boot-start units only want the
 setup unit (and start after it); the shutdown unit's start runs nothing, and
 the boot-start unit's action succeeds and makes no marker when setup is not
 active. Nothing upholds the setup unit: it runs when the boot pulls in the
-units that want or require it. The setup unit sets
-`StartLimitIntervalSec=300` and `StartLimitBurst=5`, so even a repeated
-start ends in `start-limit-hit`. The two upheld units turn their start
-limit off (`StartLimitIntervalSec=0`): a start limit cannot bound
-`Upholds=` retries, and every start counts towards it, successful ones
-included. For the shutdown unit see above. The boot-start unit acts at most
-once per boot, so its restarts by a package upgrade do nothing; with a
-limit, they put it in `start-limit-hit` and the host reported itself
-degraded although nothing had failed. When its action does fail before this
-boot's decision is made (`systemctl` unusable, say), `Upholds=` runs it
-again at systemd's pace, with a warning each time, until the cause is fixed.
+units that want or require it, and nothing retries it by itself (it has no
+`Restart=`, and a unit whose start fails on it is not restarted
+automatically).
+
+None of the three units is start-limited (`StartLimitIntervalSec=0`):
+every start counts towards a start limit, successful ones included, and a
+package upgrade restarts every unit it ships. With limits, routine
+maintenance put them in `start-limit-hit`. For the shutdown unit see above.
+For the setup unit, inside that window the host reported itself degraded,
+the agent could not be started, and a reboot skipped the graceful VM stop,
+leaving every VM running. For the boot-start unit, the host reported itself
+degraded although nothing had failed. A start limit cannot bound `Upholds=`
+retries anyway. The boot-start unit acts at most once per boot, so its
+restarts do nothing. When its action does fail before this boot's decision
+is made (`systemctl` unusable, say), `Upholds=` runs it again with a warning
+each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
+the cause is fixed, on systemd 252 only for its first burst of 16 runs (then
+start the agent by hand once the cause is fixed). The agent and the signer
+keep a start limit: they restart themselves (`Restart=always`), and the
+limit ends a crash loop.
 
 When setup fails (a moved user id, say), the journal shows, once or a few
 times at boot, the setup unit's own error (for the owner check: `N file(s)
