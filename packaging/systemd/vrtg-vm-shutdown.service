@@ -19,20 +19,24 @@
 # in 10 seconds), so a Requires= on a setup unit that keeps failing would
 # retry both forever. It starts even when setup failed (its start runs
 # nothing), and its stop action stays fail-closed: without the user it is
-# not run at all (217/USER), and with a moved uid it cannot read the agent's
-# state and stops nothing.
+# not run at all (217/USER), and with a moved uid "vrtg-agent shutdown-vms"
+# sees vrtg-agent-setup.service failed, logs a warning that it is skipping,
+# stops nothing and exits 0. That check is in the action, not a Condition*=
+# or ExecCondition=: a skipped upheld unit is started again and again.
 [Unit]
 Description=VirtRigaud: stop the per-host agent's VMs at host shutdown (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
 Wants=vrtg-agent-setup.service
 After=local-fs.target dbus.service vrtg-agent-setup.service
-# Bounded restarts: Upholds= starts this unit again whenever it is found
-# inactive or failed; its start runs nothing and does not depend on the
-# setup unit's success, so it does not fail. Should it fail anyway, it is
-# started at most 5 times in 5 minutes, then stays failed (result
-# start-limit-hit) until "systemctl reset-failed" or a reboot.
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# No StartLimitIntervalSec=/StartLimitBurst= here, on purpose: systemd's
+# default applies. Every stop, start, restart, try-restart and Upholds=
+# re-arm of this unit counts towards a start limit, so a tight one put the
+# unit in start-limit-hit after routine maintenance; Upholds= then waited
+# out the window before starting it again, and a reboot inside that window
+# ran no stop action, so no VM was stopped. A start limit cannot bound
+# Upholds= retries anyway (it paces them at most 16 times in 10 seconds
+# whatever the unit sets), and this unit's start runs nothing, so it does
+# not fail.
 
 [Service]
 Type=oneshot

@@ -667,12 +667,21 @@ func TestSysusersFixedIDs(t *testing.T) {
 	}
 }
 
-// TestUpheldChainHasBoundedRestarts: every unit Upholds= reaches, directly or
-// through a Requires=, has an explicit start limit, so a unit that keeps
-// failing is not restarted in a loop: the shutdown and boot-start units
-// (upheld) and the setup unit (required by the shutdown unit).
-func TestUpheldChainHasBoundedRestarts(t *testing.T) {
-	for _, name := range []string{shutdownUnit, bootStartUnit, setupUnit} {
+// TestStartLimits: the boot-start unit (acts once per boot) and the setup
+// unit (upheld by nothing) have an explicit start limit; the shutdown unit
+// has none. Its stops, starts, restarts and Upholds= re-arms all count
+// towards a start limit, so maintenance could put it in start-limit-hit;
+// Upholds= then waits out the window before starting it again, and a reboot
+// inside the window runs no stop action and stops no VM. A start limit
+// cannot bound Upholds= retries anyway, and the unit's start runs nothing.
+func TestStartLimits(t *testing.T) {
+	sd := parseUnit(t, shutdownUnit)
+	for _, key := range []string{"StartLimitIntervalSec", "StartLimitBurst"} {
+		if _, ok := sd["Unit"][key]; ok {
+			t.Errorf("%s: %s is set: maintenance could leave it in start-limit-hit and a reboot would stop no VM", shutdownUnit, key)
+		}
+	}
+	for _, name := range []string{bootStartUnit, setupUnit} {
 		u := parseUnit(t, name)
 		if got := u.one(t, "Unit", "StartLimitIntervalSec"); got != "300" {
 			t.Errorf("%s: StartLimitIntervalSec = %q", name, got)
