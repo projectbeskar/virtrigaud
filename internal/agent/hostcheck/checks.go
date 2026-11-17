@@ -206,19 +206,47 @@ func CheckStateDir(p Probe, dir string, uid uint32) error {
 // which also catches a persistent partition that failed to mount and left
 // an in-memory directory in its place.
 func CheckPersistent(p Probe, dir string) error {
-	const check = "persistent-state"
+	return checkPersistent(p, ReasonStateNotPersistent, "persistent-state", dir)
+}
+
+// CheckEnrolStatePersistent is the check every host enrolment step makes
+// before it writes anything: the agent's state directory is on persistent
+// storage (CheckPersistent), so that an identity installed now is still
+// there after a reboot. The refusal names the directory and what is wrong
+// with it. A development build's enrolment steps are the only callers.
+func CheckEnrolStatePersistent(p Probe, stateDir string) error {
+	if guard.Off(guard.EnrolStatePersistent) {
+		return nil
+	}
+	return checkPersistent(p, ReasonStateNotPersistent, "enrol-persistent-state", stateDir)
+}
+
+// CheckSignerKeyDirPersistent refuses a signer whose host key file would not
+// survive a reboot: the directory that holds keyFile must be on persistent
+// storage (the same rule as CheckPersistent). It is checked before the host
+// key is created and when the signer starts, so that the key a certificate
+// certifies is never one that a reboot loses.
+func CheckSignerKeyDirPersistent(p Probe, keyFile string) error {
+	if guard.Off(guard.SignerKeyDirPersistent) {
+		return nil
+	}
+	return checkPersistent(p, ReasonSignerKeyNotPersistent, "signer-key-persistent", filepath.Dir(keyFile))
+}
+
+// checkPersistent is CheckPersistent for dir, refusing with reason and check.
+func checkPersistent(p Probe, reason, check, dir string) error {
 	m, err := p.MountOf(dir)
 	if err != nil {
-		return refuse(ReasonStateNotPersistent, check, "cannot read the mount of %s: %v", dir, err)
+		return refuse(reason, check, "cannot read the mount of %s: %v", dir, err)
 	}
 	if !persistentFSTypes[m.FSType] {
-		return refuse(ReasonStateNotPersistent, check, "%s is on a %q file system mounted at %s, not a persistent disk-backed one", dir, m.FSType, m.MountPoint)
+		return refuse(reason, check, "%s is on a %q file system mounted at %s, not a persistent disk-backed one", dir, m.FSType, m.MountPoint)
 	}
 	if !datasetFSTypes[m.FSType] && !strings.HasPrefix(m.Source, "/dev/") {
-		return refuse(ReasonStateNotPersistent, check, "%s is on a %q mount at %s that is not backed by a block device", dir, m.FSType, m.MountPoint)
+		return refuse(reason, check, "%s is on a %q mount at %s that is not backed by a block device", dir, m.FSType, m.MountPoint)
 	}
 	if strings.HasPrefix(m.Source, loopDevicePrefix) {
-		return refuse(ReasonStateNotPersistent, check, "%s is on a loop device (%s), whose backing file may itself be in memory", dir, m.Source)
+		return refuse(reason, check, "%s is on a loop device (%s), whose backing file may itself be in memory", dir, m.Source)
 	}
 	return nil
 }

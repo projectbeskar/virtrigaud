@@ -100,7 +100,7 @@ func bytes16(b byte) []byte {
 }
 
 func (e *enrollEnv) csrArgs(out string, extra ...string) []string {
-	args := []string{"csr", "--key-file=" + e.keyFile, "--out=" + out,
+	args := []string{"csr", "--key-file=" + e.keyFile, "--state-dir=" + e.stateDir, "--out=" + out,
 		"--signer-user=" + strconv.Itoa(os.Getuid()), "--agent-user=" + strconv.Itoa(os.Getuid()+1)}
 	for _, u := range e.uris {
 		args = append(args, "--uri="+u)
@@ -204,7 +204,7 @@ func TestEnrollCSRRefusals(t *testing.T) {
 		{"no output", []string{"csr", "--key-file=" + e.keyFile}, 2},
 		{"relative key file", []string{"csr", "--key-file=host.key", "--out=" + out}, 2},
 		{"no uris", []string{"csr", "--key-file=" + e.keyFile, "--out=" + out, "--signer-user=" + uid, "--agent-user=" + strconv.Itoa(os.Getuid()+1)}, 2},
-		{"uris without the record", append(e.csrArgs(out)[:5:5], "--uri="+e.pki.HostURI), 2},
+		{"uris without the record", append(e.csrArgs(out)[:6:6], "--uri="+e.pki.HostURI), 2},
 		{"the agent is the signer's user", e.csrArgs(out, "--agent-user="+uid), 1},
 		{"not the signer's user", e.csrArgs(out, "--signer-user="+strconv.Itoa(os.Getuid()+1)), 1},
 		{"unknown flag", []string{"csr", "--bogus"}, 2},
@@ -376,4 +376,89 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// notPersistent mounts a file system that does not survive a reboot (or is
+// not a disk) over dir on the fake host.
+func (e *enrollEnv) notPersistent(dir string, m hostcheck.Mount) {
+	e.probe.Edit(func(f *hostchecktest.Fake) {
+		m.MountPoint = dir
+		f.Mounts = append(f.Mounts, m)
+	})
+}
+
+var nonPersistentMounts = []struct {
+	name  string
+	mount hostcheck.Mount
+}{
+	{"tmpfs", hostcheck.Mount{FSType: "tmpfs", Source: "tmpfs"}},
+	{"overlay", hostcheck.Mount{FSType: "overlay", Source: "overlay"}},
+	{"loop device", hostcheck.Mount{FSType: "ext4", Source: "/dev/loop0"}},
+	{"network file system", hostcheck.Mount{FSType: "nfs4", Source: "server:/export"}},
+}
+
+// TestEnrollCSRRefusesNonPersistentDirectories: the csr step writes neither a
+// key nor a request when the agent's state directory, or the key file's
+// directory, is not on persistent storage, and the refusal names the
+// directory.
+func TestEnrollCSRRefusesNonPersistentDirectories(t *testing.T) {
+	for _, mt := range nonPersistentMounts {
+		for _, which := range []string{"state", "key"} {
+			t.Run(mt.name+"/"+which, func(t *testing.T) {
+				e := newEnrollEnv(t)
+				dir := e.stateDir
+				if which == "key" {
+					dir = e.keyDir
+				}
+				e.notPersistent(dir, mt.mount)
+				out := filepath.Join(e.workDir, "host.csr")
+				code, msg := e.run(e.csrArgs(out))
+				assert.Equal(t, 1, code, msg)
+				_, err := os.Lstat(e.keyFile)
+				assert.True(t, os.IsNotExist(err), "a refused step makes no key")
+				_, err = os.Lstat(out)
+				assert.True(t, os.IsNotExist(err), "a refused step writes no request")
+			})
+		}
+	}
+}
+
+// TestEnrollCSRPersistenceErrorNamesTheDirectory checks the refusal text.
+func TestEnrollCSRPersistenceErrorNamesTheDirectory(t *testing.T) {
+	for which, reason := range map[string]string{"state": hostcheck.ReasonStateNotPersistent, "key": hostcheck.ReasonSignerKeyNotPersistent} {
+		e := newEnrollEnv(t)
+		dir := e.stateDir
+		if which == "key" {
+			dir = e.keyDir
+		}
+		e.notPersistent(dir, hostcheck.Mount{FSType: "tmpfs", Source: "tmpfs"})
+		err := checkEnrolPersistence(e.probe, e.stateDir, e.keyFile)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), dir)
+		assert.Contains(t, err.Error(), "tmpfs")
+		f, ok := hostcheck.AsFailure(err)
+		require.True(t, ok)
+		assert.Equal(t, reason, f.Reason)
+	}
+}
+
+// TestEnrollInstallRefusesNonPersistentState: the install step writes nothing
+// when the agent's state directory is not on persistent storage, even for a
+// certificate that would otherwise be installed.
+func TestEnrollInstallRefusesNonPersistentState(t *testing.T) {
+	for _, mt := range nonPersistentMounts {
+		t.Run(mt.name, func(t *testing.T) {
+			e := newEnrollEnv(t)
+			csr := filepath.Join(e.workDir, "host.csr")
+			code, msg := e.run(e.csrArgs(csr))
+			require.Equal(t, 0, code, msg)
+			e.serveSigner(t)
+			cert := e.issue(t, csr, hostidentitytest.IssueOptions{})
+			e.notPersistent(e.stateDir, mt.mount)
+			code, msg = e.run(e.installArgs(csr, cert))
+			assert.Equal(t, 1, code, msg)
+			_, err := os.Lstat(filepath.Join(e.stateDir, config.PKIDirName, "host.crt"))
+			assert.True(t, os.IsNotExist(err), "nothing is installed")
+		})
+	}
 }

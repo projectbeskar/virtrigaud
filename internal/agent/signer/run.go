@@ -27,6 +27,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
 	"github.com/projectbeskar/virtrigaud/internal/agent/systemd"
 )
 
@@ -65,14 +66,32 @@ type RunOptions struct {
 	Notifier systemd.Notifier
 	// Log receives structured events.
 	Log logr.Logger
+	// Probe looks at the host for the start-up check that KeyFile's directory
+	// is on persistent storage (nil: hostcheck.System, the real host). Tests
+	// give a fake.
+	Probe hostcheck.Probe
 }
 
 // Run loads the host key, serves the socket and runs until ctx ends or a
 // stop signal arrives on signals. SIGHUP reloads the key file (a failed
 // reload keeps the key in use). It returns nil after a graceful stop. It
-// refuses to start, serving nothing, when the socket directory or the key
-// file is not private as required.
+// refuses to start, serving nothing, when the key file's directory is not on
+// persistent storage (hostcheck.CheckSignerKeyDirPersistent: a key that a
+// reboot loses would leave the host's certificate certifying nothing), or
+// when the socket directory or the key file is not private as required.
 func Run(ctx context.Context, o RunOptions, signals <-chan os.Signal) error {
+	probe := o.Probe
+	if probe == nil {
+		probe = hostcheck.System{}
+	}
+	if err := hostcheck.CheckSignerKeyDirPersistent(probe, o.KeyFile); err != nil {
+		reason := hostcheck.ReasonSignerKeyNotPersistent
+		if f, ok := hostcheck.AsFailure(err); ok {
+			reason = f.Reason
+		}
+		o.Log.Error(err, "start refused", "reason", reason)
+		return fmt.Errorf("run signer: %w", err)
+	}
 	if err := CheckSocketDir(filepath.Dir(o.SocketPath), o.OwnerUID); err != nil {
 		return fmt.Errorf("run signer: %w", err)
 	}
