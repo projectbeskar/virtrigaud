@@ -58,11 +58,14 @@ log.
 Checks (every violation fails the run; the result is JSON, default
 `WORK/result.json`):
 
-- effect log: each (operation, step) of a once or irreversible step at most once;
-  every effect belongs to an issued operation and its VM; every completed
-  operation has its effect (an effect without its log line, from a kill
-  between the two, is counted separately and checked against the effect
-  itself); idempotent steps re-run after a crash are counted, not failed;
+- effect and intents logs: the fake executor names each effect in its
+  intents log before performing it and in its effects log after. Each
+  (operation, step) of a once or irreversible step appears at most once in
+  either log; every effect and intent belongs to an issued operation and its
+  VM; every effect line has an intent line; every completed operation has an
+  effect line, or an intent line (a kill between the effect and its effects
+  log line, counted separately); idempotent steps re-run after a crash are
+  counted, not failed; effect lines without an intents log fail the run;
 - step invocations (wrapped mode): a once or irreversible step is called at
   most once;
 - acknowledged operations: after restarts (sampled every 25 kills, in full at
@@ -99,7 +102,7 @@ set, the store's `Admit` latency over the last 1,000 operations, and
 the acknowledgement and TaskStatus latency over the agent's gRPC path
 (`--probe` Create operations). Results: `WORK/growth.json`.
 
-## Sustained load, intents log, temporary files
+## Sustained load, temporary files
 
 ```sh
 agent-soak load --duration 75m --workers 1 [--prefill N] [--memory-max 256M]
@@ -107,4 +110,4 @@ agent-soak soak --kills 1000 --plant-temps
 agent-soak growth --bulk --memory-max 256M --steps 0,100000,445000,1000000
 ```
 
-`load` keeps a create/delete/power load on a running agent without kills (optionally on a store prefilled with tombstones) and records the agent's compaction log lines, the database file size and the agent's memory. When the fake executor writes an `intents.log` (a line before each effect), the soak checks it too: a once or irreversible step with more than one intent is a duplicate, and a completed operation with an intent and no effect line (a kill between the effect and its line) is accounted for by the intent. With `--plant-temps` the soak leaves stray temporary key files as an interrupted atomic write would, before random kills and before ten signer kill/start cycles, and fails if any remains at the end. `--memory-max` runs the agent in a transient systemd scope with that `MemoryMax` and reads the scope's `memory.peak` and `memory.events`.
+`load` keeps a create/delete/power load on a running agent without kills (optionally on a store prefilled with tombstones) and records the agent's compaction log lines, the database file size and the agent's memory. With `--plant-temps` the soak leaves stray temporary key files as an interrupted atomic write would, before random kills and before ten signer kill/start cycles, and fails if any remains at the end. `--memory-max` runs the agent in a transient systemd scope with that `MemoryMax` and reads the scope's `memory.peak` and `memory.events`.

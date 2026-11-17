@@ -221,10 +221,9 @@ type effectReport struct {
 	StepInvocations    int            `json:"step_invocation_lines,omitempty"`
 	IdempotentReruns   int            `json:"idempotent_step_reruns"`
 	IdempotentRerunOps int            `json:"idempotent_step_rerun_ops"`
-	LogGaps            int            `json:"completed_ops_without_effect_line_but_effect_present"`
-	Intents            int            `json:"intent_lines,omitempty"`
-	IntentOnly         int            `json:"completed_ops_with_intent_line_but_no_effect_line,omitempty"`
-	IntentWithoutDone  int            `json:"intents_without_effect_line,omitempty"`
+	Intents            int            `json:"intent_lines"`
+	IntentOnly         int            `json:"completed_ops_with_intent_line_but_no_effect_line"`
+	IntentWithoutDone  int            `json:"intents_without_effect_line"`
 	OrphanVMFiles      int            `json:"vm_files_of_unknown_vms"`
 	VMChecked          int            `json:"vms_compared_with_outcomes"`
 	VMSkipped          int            `json:"vms_skipped_unresolved_operations"`
@@ -260,10 +259,15 @@ func (s *soak) analyzeEffects(stepLog string) (effectReport, error) {
 			s.led.violate(vOrphanEffect, "effect %s %s names VM %s, the operation is for %s", e.op, e.step, e.vm, r.VM)
 		}
 	}
-	// The intents log (fix branch): one line before each effect is performed.
-	ints, err := readLines(filepath.Join(s.lab.Dirs.effects(), "intents.log"))
+	// The intents log: the fake executor appends one line before each effect
+	// is performed, so every effect line has an intent line before it.
+	intentsPath := filepath.Join(s.lab.Dirs.effects(), "intents.log")
+	ints, err := readLines(intentsPath)
 	if err != nil {
 		return rep, err
+	}
+	if len(eff) > 0 && len(ints) == 0 {
+		return rep, fmt.Errorf("the fake executor wrote %d effect lines and no intents log at %s", len(eff), intentsPath)
 	}
 	rep.Intents = len(ints)
 	icounts := map[key]int{}
@@ -326,32 +330,7 @@ func (s *soak) analyzeEffects(stepLog string) (effectReport, error) {
 			rep.IntentOnly++
 			continue
 		}
-		if len(ints) > 0 {
-			s.led.violate(vMissingEffect, "op %s (%s) completed with neither an effect line nor an intent line", r.ID, r.Kind)
-			continue
-		}
-		// The fake appends its log line after the effect: a kill between the
-		// two leaves the effect without its line. Look for the effect itself.
-		switch need {
-		case stepDefine:
-			if _, err := os.Stat(filepath.Join(s.lab.Dirs.effects(), "effects", r.ID+"."+stepDefine)); err == nil {
-				rep.LogGaps++
-				continue
-			}
-		case stepDestroy:
-			// The VM is gone, or was created again afterwards with another
-			// placement.
-			b, err := os.ReadFile(filepath.Join(s.lab.Dirs.effects(), "vms", r.VM+".json")) // #nosec G304 -- the lab's directory
-			var v vmFile
-			if errors.Is(err, os.ErrNotExist) || (err == nil && json.Unmarshal(b, &v) == nil && v.Binding != hexStr(r.Spec.id.BindingID)) {
-				rep.LogGaps++
-				continue
-			}
-		default:
-			rep.LogGaps++ // a power write leaves no per-operation marker
-			continue
-		}
-		s.led.violate(vMissingEffect, "op %s (%s) completed and no effect of it exists", r.ID, r.Kind)
+		s.led.violate(vMissingEffect, "op %s (%s) completed with neither an effect line nor an intent line", r.ID, r.Kind)
 	}
 	// Step invocations (wrapped mode): a once or irreversible step is called
 	// at most once.
