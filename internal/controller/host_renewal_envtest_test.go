@@ -588,6 +588,67 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeTrue(), "marked without a restart or a resync")
 	})
 
+	It("reports its approval once, when it is saved, even when another approver wins the condition write", func() {
+		e := newRenewalEnv()
+		cr := requested(e)
+		// Another approver approves the request between the manager's
+		// judgement and its condition write, which then conflicts.
+		e.reqR.Client = &approveFirstClient{Client: k8sClient}
+		res, err := e.reqR.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.GetNamespace(), Name: cr.GetName()}})
+		Expect(err).NotTo(HaveOccurred(), "a lost condition write is retried quietly")
+		Expect(res.Requeue).To(BeTrue(), "the condition write lost to the other approver") //nolint:staticcheck // Requeue is what the reconciler returns
+		Expect(state(e).Renewal.Approved).To(BeTrue(), "the manager's approval was saved before the lost write")
+		approved := func(evs []string) int {
+			n := 0
+			for _, ev := range evs {
+				if strings.Contains(ev, eventReasonAgentRenewalApproved) {
+					n++
+				}
+			}
+			return n
+		}
+		evs := drainEvents(e.rec)
+		Expect(approved(evs)).To(Equal(1), "reported when the approval was saved: %v", evs)
+		// The retry finds the request approved elsewhere and the approval
+		// recorded: it reports nothing again, and publishes.
+		e.reqR.Client = k8sClient
+		cr = reconcileCR(e, getCR(e, cr.GetName()))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		der := issue(e, cr, hostidentitytest.IssueOptions{})
+		reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).To(Equal(der), "published")
+		reconcileCR(e, cr)
+		Expect(approved(drainEvents(e.rec))).To(BeZero(), "the approval is reported exactly once")
+	})
+
+	It("tells the named Host when a request that was never its renewal is refused, once", func() {
+		e := newRenewalEnv()
+		cr := requested(e)
+		csr, err := certrequest.CSR(cr)
+		Expect(err).NotTo(HaveOccurred())
+		forged := certrequest.NewRenewal(certrequest.RenewalSpec{Namespace: e.issuerNS, Name: "forged-approved", HostNamespace: e.hostNS,
+			HostName: "host-a", HostHash: hostHashLabel(e.hostNS, "host-a"), IssuerRef: enrolTestCMIssuer, CSRPEM: csr,
+			Duration: 24 * time.Hour, Username: "mallory", Groups: []string{"system:authenticated"}})
+		Expect(k8sClient.Create(ctx, forged)).To(Succeed())
+		forged = getCR(e, "forged-approved")
+		Expect(certrequest.SetCondition(forged, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+			"Approved by CertificateRequestPolicy", time.Now())).To(Succeed())
+		Expect(k8sClient.Status().Update(ctx, forged)).To(Succeed())
+		drainEvents(e.rec)
+		issue(e, forged, hostidentitytest.IssueOptions{})
+		forged = reconcileCR(e, forged)
+		Expect(certrequest.IsTrue(forged, certrequest.ConditionRefused)).To(BeTrue())
+		evs := drainEvents(e.rec)
+		Expect(evs).To(ContainElement(SatisfyAll(ContainSubstring("Warning "+eventReasonAgentRenewalDenied),
+			ContainSubstring("forged-approved"), ContainSubstring("was not the Host's renewal"))))
+		for _, ev := range evs {
+			Expect(ev).NotTo(ContainSubstring("BEGIN"), "no certificate or request material in the event")
+		}
+		reconcileCR(e, forged)
+		Expect(drainEvents(e.rec)).NotTo(ContainElement(ContainSubstring(eventReasonAgentRenewalDenied)), "only the marking reconcile reports it")
+		Expect(state(e).Renewal.CertificateRequest).To(Equal(cr.GetNamespace()+"/"+cr.GetName()), "the Host's own renewal is untouched")
+	})
+
 	It("marks an issued renewal certificate refused once its renewal is withdrawn and its key was never pinned", func() {
 		e := newRenewalEnv()
 		cr := reconcileCR(e, requested(e))
@@ -600,8 +661,11 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		l.state.Renewal = nil
 		Expect(saveHostEnrolment(ctx, k8sClient, e.cfg, h, &l)).To(Succeed())
 		issue(e, cr, hostidentitytest.IssueOptions{})
+		drainEvents(e.rec)
 		cr = reconcileCR(e, cr)
 		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "a certificate never published is marked refused")
+		Expect(drainEvents(e.rec)).NotTo(ContainElement(ContainSubstring("was not the Host's renewal")),
+			"a withdrawn renewal of the Host is not reported as a request that never was one")
 	})
 
 	It("never records a renewal co-signed by another key, or one that changes the identities", func() {
@@ -978,4 +1042,38 @@ func drainRenewalEvents(rec *record.FakeRecorder) string {
 			return strings.Join(out, "\n")
 		}
 	}
+}
+
+// approveFirstClient lets another approver approve a CertificateRequest just
+// before the reconciler's own status write, once, so that write conflicts.
+type approveFirstClient struct {
+	client.Client
+	done bool
+}
+
+func (c *approveFirstClient) Status() client.SubResourceWriter {
+	return &approveFirstStatus{SubResourceWriter: c.Client.Status(), c: c}
+}
+
+type approveFirstStatus struct {
+	client.SubResourceWriter
+	c *approveFirstClient
+}
+
+func (s *approveFirstStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if u, ok := obj.(*unstructured.Unstructured); ok && !s.c.done && u.GetKind() == certrequest.NewObject().GetKind() {
+		s.c.done = true
+		other := certrequest.NewObject()
+		if err := s.c.Client.Get(ctx, client.ObjectKeyFromObject(u), other); err != nil {
+			return err
+		}
+		if err := certrequest.SetCondition(other, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+			"Approved by CertificateRequestPolicy", time.Now()); err != nil {
+			return err
+		}
+		if err := s.c.Client.Status().Update(ctx, other); err != nil {
+			return err
+		}
+	}
+	return s.SubResourceWriter.Update(ctx, obj, opts...)
 }
