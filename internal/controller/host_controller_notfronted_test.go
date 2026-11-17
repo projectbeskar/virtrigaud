@@ -123,7 +123,9 @@ func TestHostReconciler_NotFrontedBacksOff(t *testing.T) {
 	key := types.NamespacedName{Namespace: "default", Name: "host-nf"}
 	v, ok := r.notFronted.Load(key)
 	require.True(t, ok)
-	v.(*notFrontedStreak).lastError = time.Now().Add(-hostHeartbeatInterval)
+	streak, isStreak := v.(*notFrontedStreak)
+	require.True(t, isStreak)
+	streak.lastError = time.Now().Add(-hostHeartbeatInterval)
 	_, err := r.Reconcile(ctx, hostReq("host-nf"))
 	require.NoError(t, err)
 	assert.Equal(t, 2, logs.count(errLine))
