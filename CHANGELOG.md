@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-17 11:00] - Per-host agent: the boot-start unit is no longer start-limited (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `packaging/systemd/vrtg-agent-boot-start.service`: `StartLimitIntervalSec=0`, no `StartLimitBurst` (was 300 s and 5). Every start counts towards a start limit, successful ones included, so the install start, a package upgrade's restarts and try-restarts and the `Upholds=` re-arm after each stop put the unit in `start-limit-hit` within minutes, and the host reported itself degraded (`systemctl is-system-running`) although nothing had failed. The agent stayed stopped, so safety was not affected. The unit acts at most once per boot (its marker), so further starts do nothing. A failure before this boot's decision (`systemctl` unusable, say) is now retried at systemd's own `Upholds=` pace, with a warning each time, instead of stopping after five tries.
+- `hack/verify-systemd-units.sh`, `cmd/vrtg-agent/units_test.go`: assert `StartLimitIntervalSec=0` without `StartLimitBurst` on both upheld units (the shutdown and boot-start units) and an explicit limit on the setup unit.
+- `docs/per-host-agent-development.md`, `cmd/vrtg-agent/bootstart.go`: the start-limit text says so.
+
+### Why
+A lab run of the shipped units found the boot-start unit failed with `start-limit-hit` after an ordinary package-upgrade sequence. A start limit cannot bound `Upholds=` retries, and the shutdown unit already turns it off for the same reason.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-11-16 18:00] - Per-host agent fixes from running it on real hosts: units, enrolment guidance, Provider identity, compaction (development builds only)
 **Author:** @wrkode (William Rizzo)
 

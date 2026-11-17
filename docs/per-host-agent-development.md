@@ -1272,7 +1272,7 @@ vrtg-agent.service` keeps the agent off at the next boot; `systemctl mask
 vrtg-agent.service` keeps it off entirely, including a manual start. The
 check is made in the boot-start unit's action, not as an `ExecCondition=`:
 a skipped unit is inactive, and `Upholds=` would start it again and again
-until its start limit failed it.
+for the whole boot.
 
 `Upholds=` needs systemd 249 or later. It starts an upheld unit again
 whenever it is found inactive or failed, without end: systemd only paces it
@@ -1284,12 +1284,17 @@ fail because setup failed: the shutdown and boot-start units only want the
 setup unit (and start after it); the shutdown unit's start runs nothing, and
 the boot-start unit's action succeeds and makes no marker when setup is not
 active. Nothing upholds the setup unit: it runs when the boot pulls in the
-units that want or require it. The setup and boot-start units set
+units that want or require it. The setup unit sets
 `StartLimitIntervalSec=300` and `StartLimitBurst=5`, so even a repeated
-start ends in `start-limit-hit`; a boot-start unit in `start-limit-hit`
-only misses starting the agent (start it by hand), and stops nothing. The
-shutdown unit turns its start limit off (see above): a start limit cannot bound
-`Upholds=` retries, and its start runs nothing.
+start ends in `start-limit-hit`. The two upheld units turn their start
+limit off (`StartLimitIntervalSec=0`): a start limit cannot bound
+`Upholds=` retries, and every start counts towards it, successful ones
+included. For the shutdown unit see above. The boot-start unit acts at most
+once per boot, so its restarts by a package upgrade do nothing; with a
+limit, they put it in `start-limit-hit` and the host reported itself
+degraded although nothing had failed. When its action does fail before this
+boot's decision is made (`systemctl` unusable, say), `Upholds=` runs it
+again at systemd's pace, with a warning each time, until the cause is fixed.
 
 When setup fails (a moved user id, say), the journal shows, once or a few
 times at boot, the setup unit's own error (for the owner check: `N file(s)

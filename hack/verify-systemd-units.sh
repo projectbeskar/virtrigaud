@@ -17,8 +17,8 @@
 #    user ids); the upheld units only want it and start after it;
 #  - the boot-start unit acts once per boot ("vrtg-agent boot-start" with a
 #    runtime directory kept across restarts of the unit);
-#  - every unit Upholds= reaches (the shutdown and boot-start units, and the
-#    setup unit they require or want) has an explicit start limit.
+#  - the setup unit has an explicit start limit; the units Upholds= reaches
+#    (the shutdown and boot-start units) are never start-limited.
 #
 # The units start a binary under /usr/lib/virtrigaud that does not exist on a
 # build machine, so each unit is copied to a temporary directory with that
@@ -120,11 +120,9 @@ fi
 if value "${signer}" ReadOnlyPaths | grep -q virtrigaud-signer; then
 	problem "vrtg-agent-signer.service: its key directory is read-only: a renewal cannot write the pending key"
 fi
-for name in vrtg-agent-boot-start.service vrtg-agent-setup.service; do
-	if [ -z "$(value "${UNIT_DIR}/${name}" StartLimitIntervalSec)" ] || [ -z "$(value "${UNIT_DIR}/${name}" StartLimitBurst)" ]; then
-		problem "${name}: no explicit start limit: a repeated start could loop"
-	fi
-done
+if [ -z "$(value "${UNIT_DIR}/vrtg-agent-setup.service" StartLimitIntervalSec)" ] || [ -z "$(value "${UNIT_DIR}/vrtg-agent-setup.service" StartLimitBurst)" ]; then
+	problem "vrtg-agent-setup.service: no explicit start limit: a repeated start could loop"
+fi
 # The shutdown unit must never be start-limited: maintenance stops, starts
 # and Upholds= re-arms count towards a limit, and a unit in start-limit-hit
 # is not re-armed until the window passes, so a reboot then runs no stop
@@ -135,6 +133,14 @@ done
 if [ "$(value "${UNIT_DIR}/vrtg-vm-shutdown.service" StartLimitIntervalSec)" != "0" ] ||
 	[ -n "$(value "${UNIT_DIR}/vrtg-vm-shutdown.service" StartLimitBurst)" ]; then
 	problem "vrtg-vm-shutdown.service: not StartLimitIntervalSec=0 without StartLimitBurst: maintenance could leave it in start-limit-hit and a reboot would then stop no VM"
+fi
+# The same holds for the boot-start unit: every start counts, successful
+# ones included, so a package upgrade's restarts put it in start-limit-hit
+# and the host reported itself degraded although nothing failed. Its action
+# acts at most once per boot.
+if [ "$(value "${UNIT_DIR}/vrtg-agent-boot-start.service" StartLimitIntervalSec)" != "0" ] ||
+	[ -n "$(value "${UNIT_DIR}/vrtg-agent-boot-start.service" StartLimitBurst)" ]; then
+	problem "vrtg-agent-boot-start.service: not StartLimitIntervalSec=0 without StartLimitBurst: a package upgrade could leave it in start-limit-hit and the host degraded"
 fi
 kicker="${UNIT_DIR}/vrtg-agent-boot-start.service"
 if [ "$(value "${kicker}" ExecStart)" != "${BINARY_PATH}vrtg-agent boot-start" ] ||

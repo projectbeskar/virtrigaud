@@ -38,20 +38,25 @@
 # "systemctl disable vrtg-agent.service" keeps the agent off at boot, and
 # "systemctl mask" keeps it off entirely. The check is in the action, not an
 # ExecCondition=: a skipped unit is inactive, and Upholds= would start it
-# again at once, over and over, until its start limit failed it. Here the
-# unit succeeds and stays active.
+# again at once, over and over, for the whole boot. Here the unit succeeds
+# and stays active.
 [Unit]
 Description=VirtRigaud: start the per-host agent once per boot (development builds only)
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
 Wants=vrtg-agent-setup.service
 After=vrtg-agent-setup.service
-# Bounded restarts: Upholds= starts this unit again whenever it is found
-# inactive or failed; its action succeeds whether or not setup did. A unit that keeps failing is started at most 5
-# times in 5 minutes, then stays failed ("Start request repeated too
-# quickly", result start-limit-hit) until "systemctl reset-failed" or a
-# reboot.
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# Never start-limited: StartLimitIntervalSec=0 turns the start limit off
+# (leaving the key out would fall back to the manager's default limit).
+# Every start counts towards a start limit, successful ones included: the
+# install start, the restarts and try-restarts of a package upgrade and the
+# Upholds= re-arm after each stop. A limit of 5 in 5 minutes put the unit in
+# start-limit-hit after one routine upgrade, and the host reported itself
+# degraded although nothing had failed. Its action acts at most once per
+# boot (the marker), so a start after the first does nothing. When it does
+# fail (systemctl unusable, say), Upholds= runs it again at systemd's own
+# pace, with a warning each time, until the cause is fixed; once the marker
+# exists, a run never fails again in this boot.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
