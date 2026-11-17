@@ -43,13 +43,19 @@ DefaultDependencies=no
 After=systemd-sysext.service systemd-sysusers.service local-fs.target
 Before=vrtg-agent.service vrtg-agent-signer.service vrtg-vm-shutdown.service shutdown.target
 Conflicts=shutdown.target
-# Nothing upholds this unit, and the upheld units only want it, so a failure
-# is not retried by Upholds=. It is started when a unit that requires or
-# wants it starts; a unit that keeps failing is started at most 5 times in
-# 5 minutes, then stays failed ("Start request repeated too quickly", result
-# start-limit-hit) until "systemctl reset-failed" or a reboot.
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# Never start-limited: StartLimitIntervalSec=0 turns the start limit off
+# (leaving the key out would fall back to the manager's default limit).
+# Nothing retries this unit by itself: it has no Restart=, nothing upholds
+# it, the upheld units only want it, and a unit whose start fails on it is
+# not restarted automatically. It runs only when a unit that requires or
+# wants it starts, so a failure is retried only by such a start. Every
+# start counts towards a start limit, successful ones included: the install,
+# the restarts of a package upgrade and the starts the upheld units pull in.
+# A limit of 5 in 5 minutes put it in start-limit-hit after one routine
+# upgrade. Inside that window the host reported itself degraded, the agent
+# could not be started, and a reboot skipped the graceful VM stop (the
+# shutdown unit skips while setup has failed), leaving every VM running.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

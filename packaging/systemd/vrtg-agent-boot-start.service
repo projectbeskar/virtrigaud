@@ -53,8 +53,10 @@ After=vrtg-agent-setup.service
 # start-limit-hit after one routine upgrade, and the host reported itself
 # degraded although nothing had failed. Its action acts at most once per
 # boot (the marker), so a start after the first does nothing. When it does
-# fail (systemctl unusable, say), Upholds= runs it again at systemd's own
-# pace, with a warning each time, until the cause is fixed; once the marker
+# fail (systemctl unusable, say), Upholds= runs it again, with a warning
+# each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
+# the cause is fixed; systemd 252 stops after its first burst of 16 runs, so
+# start the agent by hand there once the cause is fixed. Once the marker
 # exists, a run never fails again in this boot.
 StartLimitIntervalSec=0
 

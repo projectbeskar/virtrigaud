@@ -22,6 +22,24 @@ A lab run of re-key recovery from a full store found the agent killed for memory
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-11-17 16:00] - Per-host agent: the setup unit is no longer start-limited (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `packaging/systemd/vrtg-agent-setup.service`: `StartLimitIntervalSec=0`, no `StartLimitBurst` (was 300 s and 5). Successful starts count towards a start limit: the install, one shutdown-guard check and one maintenance sequence already made five, and the next package-style restart within 5 minutes put the unit in `start-limit-hit`. Inside that window the host reported itself degraded, `systemctl start vrtg-agent` failed (the agent requires setup), and a reboot skipped the graceful VM stop (the shutdown unit skips while setup has failed), leaving every VM running (lab, systemd 255). Nothing retries the setup unit by itself, so the limit bounded nothing.
+- `hack/verify-systemd-units.sh`, `cmd/vrtg-agent/units_test.go`: assert `StartLimitIntervalSec=0` without `StartLimitBurst` on the shutdown, boot-start and setup units, and a start limit on the agent and the signer (`Restart=always`: the limit ends a crash loop).
+- `docs/per-host-agent-development.md`, `packaging/systemd/vrtg-agent-boot-start.service`: the start-limit text says so, and a failing boot-start action is retried at systemd's pace on systemd 255 but only for one burst of 16 runs on systemd 252.
+- `test/agent-lab/systemd/maint-contract.sh`: `restart-burst` also restarts the setup unit and checks it for start-limit records.
+
+### Why
+A lab re-check of the boot-start fix found the same start-limit trap on the setup unit, with a worse effect: a reboot shortly after a routine upgrade stopped no VM.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-11-17 11:00] - Per-host agent: the boot-start unit is no longer start-limited (development builds only)
 **Author:** @wrkode (William Rizzo)
 

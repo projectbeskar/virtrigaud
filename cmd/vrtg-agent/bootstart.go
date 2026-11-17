@@ -65,9 +65,8 @@ func bootStart(args []string, log logr.Logger, stderr io.Writer, s systemd.UnitS
 	switch {
 	case err != nil:
 		// A warning, not an error: the host is fine, the agent is merely not
-		// started yet (the unit fails, and Upholds= runs it again at
-		// systemd's pace until it succeeds; the marker keeps a second start
-		// out).
+		// started yet (the unit fails, and Upholds= runs it again; the
+		// marker keeps a second start out).
 		slog.New(logr.ToSlogHandler(log)).Warn(bootStartFailedMessage, "error", err.Error())
 		return 1
 	case got == systemd.BootStartAlreadyDecided:
