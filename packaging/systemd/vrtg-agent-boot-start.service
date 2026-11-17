@@ -55,8 +55,9 @@ After=vrtg-agent-setup.service
 # boot (the marker), so a start after the first does nothing. When it does
 # fail (systemctl unusable, say), Upholds= runs it again, with a warning
 # each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
-# the cause is fixed; systemd 252 stops after its first burst of 16 runs, so
-# start the agent by hand there once the cause is fixed. Once the marker
+# the cause is fixed; on systemd 252 the lab saw only a first burst of 16
+# runs and no further run within 2 minutes, so start the agent by hand there
+# once the cause is fixed. Once the marker
 # exists, a run never fails again in this boot.
 StartLimitIntervalSec=0
 

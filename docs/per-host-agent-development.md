@@ -1325,8 +1325,9 @@ retries anyway. The boot-start unit acts at most once per boot, so its
 restarts do nothing. When its action does fail before this boot's decision
 is made (`systemctl` unusable, say), `Upholds=` runs it again with a warning
 each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
-the cause is fixed, on systemd 252 only for its first burst of 16 runs (then
-start the agent by hand once the cause is fixed). The agent and the signer
+the cause is fixed. On systemd 252 the lab saw only a first burst of 16 runs
+and no further run within 2 minutes, so start the agent by hand there once
+the cause is fixed. The agent and the signer
 keep a start limit: they restart themselves (`Restart=always`), and the
 limit ends a crash loop. Restarting the setup unit restarts them too
 (`Requires=`), so restarting it many times in quick succession (about 10
