@@ -621,3 +621,19 @@ func TestSysusersFixedIDs(t *testing.T) {
 		t.Errorf("ids = %v, want two distinct fixed ids for both users", ids)
 	}
 }
+
+// TestUpheldChainHasBoundedRestarts: every unit Upholds= reaches, directly or
+// through a Requires=, has an explicit start limit, so a unit that keeps
+// failing is not restarted in a loop: the shutdown and boot-start units
+// (upheld) and the setup unit (required by the shutdown unit).
+func TestUpheldChainHasBoundedRestarts(t *testing.T) {
+	for _, name := range []string{shutdownUnit, bootStartUnit, setupUnit} {
+		u := parseUnit(t, name)
+		if got := u.one(t, "Unit", "StartLimitIntervalSec"); got != "300" {
+			t.Errorf("%s: StartLimitIntervalSec = %q", name, got)
+		}
+		if got := u.one(t, "Unit", "StartLimitBurst"); got != "5" {
+			t.Errorf("%s: StartLimitBurst = %q", name, got)
+		}
+	}
+}

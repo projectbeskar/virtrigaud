@@ -23,6 +23,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -71,8 +72,13 @@ func TestBootStartCommand(t *testing.T) {
 	if code := bootStart([]string{"--runtime-dir", other}, logr.Discard(), &stderr, s2); code != 0 || s2.starts != 0 {
 		t.Fatalf("disabled: exit %d, starts %d", code, s2.starts)
 	}
-	if code := bootStart([]string{"--runtime-dir", filepath.Join(other, "missing")}, logr.Discard(), &stderr, &startRecorder{enabled: true}); code != 1 {
+	var logs bytes.Buffer
+	if code := bootStart([]string{"--runtime-dir", filepath.Join(other, "missing")}, newLogger(&logs), &stderr, &startRecorder{enabled: true}); code != 1 {
 		t.Fatalf("missing runtime directory: exit %d", code)
+	}
+	// A failure is a warning that tells the operator what to do.
+	if !strings.Contains(logs.String(), `"level":"WARN"`) || !strings.Contains(logs.String(), "start it by hand: systemctl start vrtg-agent.service") {
+		t.Fatalf("failure log: %s", logs.String())
 	}
 	if code := bootStart([]string{"extra"}, logr.Discard(), &stderr, s); code != 2 {
 		t.Fatalf("bad arguments: exit %d", code)

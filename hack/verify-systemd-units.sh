@@ -15,7 +15,9 @@
 #  - the agent, the signer and the shutdown unit audit filtered privileged
 #    calls and require the setup unit (which refuses moved user ids);
 #  - the boot-start unit acts once per boot ("vrtg-agent boot-start" with a
-#    runtime directory kept across restarts of the unit).
+#    runtime directory kept across restarts of the unit);
+#  - every unit Upholds= reaches (the shutdown and boot-start units, and the
+#    setup unit they require or want) has an explicit start limit.
 #
 # The units start a binary under /usr/lib/virtrigaud that does not exist on a
 # build machine, so each unit is copied to a temporary directory with that
@@ -104,6 +106,11 @@ fi
 if value "${signer}" ReadOnlyPaths | grep -q virtrigaud-signer; then
 	problem "vrtg-agent-signer.service: its key directory is read-only: a renewal cannot write the pending key"
 fi
+for name in vrtg-vm-shutdown.service vrtg-agent-boot-start.service vrtg-agent-setup.service; do
+	if [ -z "$(value "${UNIT_DIR}/${name}" StartLimitIntervalSec)" ] || [ -z "$(value "${UNIT_DIR}/${name}" StartLimitBurst)" ]; then
+		problem "${name}: no explicit start limit: Upholds= could restart it in a loop"
+	fi
+done
 kicker="${UNIT_DIR}/vrtg-agent-boot-start.service"
 if [ "$(value "${kicker}" ExecStart)" != "${BINARY_PATH}vrtg-agent boot-start" ] ||
 	[ "$(value "${kicker}" RuntimeDirectory)" != "vrtg-agent-boot-start" ] ||

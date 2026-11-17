@@ -22,6 +22,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -34,6 +35,9 @@ import (
 // defaultBootStartDir is the boot-start unit's runtime directory
 // (RuntimeDirectory=vrtg-agent-boot-start, kept until reboot).
 const defaultBootStartDir = "/run/vrtg-agent-boot-start"
+
+// bootStartFailedMessage is logged when boot-start did not start the agent.
+const bootStartFailedMessage = "the agent was not started at boot; start it by hand: systemctl start " + systemd.AgentUnit
 
 // bootStartTimeout bounds the two systemctl calls.
 const bootStartTimeout = 30 * time.Second
@@ -60,7 +64,10 @@ func bootStart(args []string, log logr.Logger, stderr io.Writer, s systemd.UnitS
 	got, err := systemd.BootStart(ctx, *dir, systemd.AgentUnit, s)
 	switch {
 	case err != nil:
-		log.Error(err, "the agent is not started")
+		// A warning, not an error: the host is fine, the agent is merely not
+		// started this boot (the unit fails, and Upholds= runs it again a
+		// bounded number of times; the marker keeps a second start out).
+		slog.New(logr.ToSlogHandler(log)).Warn(bootStartFailedMessage, "error", err.Error())
 		return 1
 	case got == systemd.BootStartAlreadyDecided:
 		log.Info("the agent's start at boot was already decided in this boot; nothing is done (a reboot re-arms it)")

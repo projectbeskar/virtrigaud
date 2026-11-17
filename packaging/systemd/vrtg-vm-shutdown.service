@@ -19,6 +19,14 @@ Description=VirtRigaud: stop the per-host agent's VMs at host shutdown (developm
 Documentation=https://github.com/projectbeskar/virtrigaud/blob/main/docs/per-host-agent-development.md
 Requires=vrtg-agent-setup.service
 After=local-fs.target dbus.service vrtg-agent-setup.service
+# Bounded restarts: Upholds= (through multi-user.target, and the shutdown
+# unit's Requires= on the setup unit) starts this unit again whenever it is
+# found inactive or failed. A unit that keeps failing is started at most 5
+# times in 5 minutes, then stays failed ("Start request repeated too
+# quickly", result start-limit-hit) until "systemctl reset-failed" or a
+# reboot.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=oneshot

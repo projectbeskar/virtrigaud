@@ -1199,7 +1199,17 @@ check is made in the boot-start unit's action, not as an `ExecCondition=`:
 a skipped unit is inactive, and `Upholds=` would start it again and again
 until its start limit failed it.
 
-`Upholds=` needs systemd 249 or later.
+`Upholds=` needs systemd 249 or later. It restarts an upheld unit whenever
+it is found inactive or failed, and the shutdown unit requires the setup
+unit, so a setup unit that keeps failing (moved user ids, say) would be
+started again and again. The shutdown, boot-start and setup units therefore
+set `StartLimitIntervalSec=300` and `StartLimitBurst=5`: such a unit is
+started at most five times in five minutes, then stays failed. The journal
+then shows the setup unit's own error (for the owner check: `... is owned by
+uid N, not by virtrigaud-agent (uid M): its uid changed; refusing to start
+the agent`) a few times, followed by `Start request repeated too quickly`
+and `Failed with result 'start-limit-hit'` for the setup unit and the units
+that require it. Fix the cause, then `systemctl reset-failed` (or reboot).
 
 `hack/verify-systemd-units.sh` runs `systemd-analyze verify` on every unit
 (with the binary path replaced, since it does not exist on a build machine)

@@ -28,6 +28,11 @@ metadata:
 spec:
   allowed:
     uris:
+      # The wildcard allows any Provider UID: the UID exists only once the
+      # Provider is created. Once it is known, replace "*" with the exact UID
+      # (kubectl get provider ch -n infra -o jsonpath='{.metadata.uid}'), so
+      # that a Provider re-created under the same name (a new UID) needs this
+      # policy edited before it can get an identity.
       values:
       - "spiffe://example.test/virtrigaud/provider/infra/ch/*"
       required: true
