@@ -421,11 +421,12 @@ func unitShell(t *testing.T, line string) string {
 
 // TestSetupUnitRefusesMovedIDs: the setup unit's owner check decides by
 // content: it passes when the state directories are missing, empty, or hold
-// only regular files owned by their users' uids, whatever the directories'
-// own owners (a bind mount root recreated as root at boot, or directories a
-// boot-time tmpfiles run already re-owned); it fails, naming the files, when
-// a regular file is owned by another uid, or its user does not exist. A
-// symbolic link is not followed.
+// only files, directories and links owned by their users' uids, whatever the
+// owners of the directories tmpfiles manages (the state directories and
+// pki/: a bind mount root recreated as root at boot, or directories a
+// boot-time tmpfiles run already re-owned); it fails, naming the entries,
+// when a file, a subdirectory or a link is owned by another uid, or its user
+// does not exist. A symbolic link is not followed.
 func TestSetupUnitRefusesMovedIDs(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
@@ -490,9 +491,17 @@ func TestSetupUnitRefusesMovedIDs(t *testing.T) {
 	if out, err := run("root", "root", "var/lib/virtrigaud-agent/pki/", "var/lib/virtrigaud-signer/"); err != nil {
 		t.Errorf("empty state directories of another owner were refused: %v %s", err, out)
 	}
-	// A symbolic link is not followed (its target is root's /etc/passwd).
+	// A symbolic link is not followed (its target is root's /etc/passwd);
+	// its own owner counts.
 	if out, err := run(me.Username, me.Username, "var/lib/virtrigaud-agent/link@"); err != nil {
 		t.Errorf("a symbolic link was followed: %v %s", err, out)
+	}
+	if out, err := run("root", me.Username, "var/lib/virtrigaud-agent/link@"); err == nil || !strings.Contains(out, "link") {
+		t.Errorf("a link of another owner was accepted: %v %s", err, out)
+	}
+	// A subdirectory (not one tmpfiles manages) of another owner fails.
+	if out, err := run("root", me.Username, "var/lib/virtrigaud-agent/witness/"); err == nil || !strings.Contains(out, "witness") {
+		t.Errorf("a subdirectory of another owner was accepted: %v %s", err, out)
 	}
 	out, err := run(me.Username, "root", files...)
 	if err == nil || !strings.Contains(out, "host.key") {

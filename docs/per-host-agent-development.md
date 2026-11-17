@@ -1176,11 +1176,15 @@ from 999, some distributions' `adduser` upwards from 100). Fixed ids keep the
 owners of the persistent state directories stable where `/etc/passwd` is
 rebuilt at every boot. If an id is already taken, `systemd-sysusers`
 allocates another one; on such a host it can differ between boots. The setup
-unit's owner check decides by content: every regular file under
-`/var/lib/virtrigaud-agent` and `/var/lib/virtrigaud-signer` (`host-id`,
-`pki/host.crt`, the operation store, `host.key`, ...) must be owned by its
-user's current uid (`find -xdev -type f ! -uid`, symbolic links not
-followed). The directories' own owners are not checked: the boot's
+unit's owner check decides by content: every regular file, directory and
+symbolic link under `/var/lib/virtrigaud-agent` and
+`/var/lib/virtrigaud-signer` (`host-id`, `pki/host.crt`, the operation
+store, `host.key`, ...) must be owned by its user's current uid (`find -xdev
+-mindepth 1 ... ! -uid`; links are not followed, a link's own owner counts).
+Only the directories `systemd-tmpfiles` manages are left out: the state
+directories themselves and the agent's `pki/`. A file system mounted below a
+state directory is not checked (`-xdev`). The directories tmpfiles manages
+are not checked: the boot's
 `systemd-tmpfiles-setup.service` may already have applied the agent's
 `tmpfiles.d` fragment to them (re-owning them, but not the files inside),
 and an immutable host's bind mount root, or a dedicated state file system,

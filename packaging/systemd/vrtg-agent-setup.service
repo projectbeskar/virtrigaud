@@ -17,11 +17,15 @@
 # The fragments are named by file name, so that a fragment of the same name
 # in /etc (for example one that assigns other fixed ids) takes precedence.
 #
-# Between the two tools it checks ownership by content: every regular file
-# under the agent's and the signer's state directories (host-id, pki/host.crt,
-# the operation store, host.key, ...) must be owned by its user's current
-# uid. find runs with -xdev and does not follow symbolic links. The
-# directories' own owners are not checked: the boot's
+# Between the two tools it checks ownership by content: every regular file,
+# directory and symbolic link under the agent's and the signer's state
+# directories (host-id, pki/host.crt, the operation store, host.key, ...)
+# must be owned by its user's current uid; only the directories
+# systemd-tmpfiles manages (the state directories themselves and the
+# agent's pki/) are left out. find runs with -xdev, so a file system mounted
+# below a state directory is not checked, and it does not follow symbolic
+# links (a link's own owner is checked). The directories tmpfiles manages
+# are not checked: the boot's
 # systemd-tmpfiles-setup.service may already have applied the agent's
 # tmpfiles.d fragment to them, and an immutable host's bind mount root, or a
 # dedicated state file system, starts out owned by root; this unit's
@@ -51,7 +55,7 @@ StartLimitBurst=5
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/systemd-sysusers virtrigaud-agent.conf
-ExecStart=/bin/sh -c 'check() { [ -d "$$1" ] || return 0; w=$$(id -u "$$2") || return 1; bad=$$(find "$$1" -xdev -type f ! -uid "$$w" -print) || return 1; [ -z "$$bad" ] && return 0; n=$$(printf "%%s\n" "$$bad" | wc -l); echo "$$n file(s) under $$1 are not owned by $$2 (uid $$w): its uid changed; refusing to start the agent. The first:" >&2; printf "%%s\n" "$$bad" | head -n 10 >&2; return 1; }; check /var/lib/virtrigaud-agent virtrigaud-agent && check /var/lib/virtrigaud-signer virtrigaud-signer'
+ExecStart=/bin/sh -c 'check() { [ -d "$$1" ] || return 0; w=$$(id -u "$$2") || return 1; bad=$$(find "$$1" -xdev -mindepth 1 ! -path "$$1/pki" ! -type b ! -type c ! -type p ! -type s ! -uid "$$w" -print) || return 1; [ -z "$$bad" ] && return 0; n=$$(printf "%%s\n" "$$bad" | wc -l); echo "$$n entries under $$1 are not owned by $$2 (uid $$w): its uid changed; refusing to start the agent. The first:" >&2; printf "%%s\n" "$$bad" | head -n 10 >&2; return 1; }; check /var/lib/virtrigaud-agent virtrigaud-agent && check /var/lib/virtrigaud-signer virtrigaud-signer'
 ExecStart=/usr/bin/systemd-tmpfiles --create virtrigaud-agent.conf
 UMask=0022
 # systemd-sysusers rewrites /etc/passwd, group, shadow and gshadow (through
