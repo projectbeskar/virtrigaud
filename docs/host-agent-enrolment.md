@@ -720,8 +720,13 @@ With approver-policy bound to the manager, a renewal request is often
 approved by approver-policy before the manager decides it. The manager then
 applies its own rules to the approved request (it writes no condition): if
 they hold, it records its approval and publishes the issued certificate; if
-they do not, its certificate is never published (the request is marked
-refused once issued) and a `AgentRenewalDenied` Warning says so. An
+they do not, it marks the request refused at once (`VirtRigaudCertificateRefused`;
+an approved request cannot also be denied) and an `AgentRenewalDenied`
+Warning says so. The refusal is final: the request is not judged again even
+if the rule that failed passes later, its certificate is never published,
+and the renewal starts again with a new request. A request already issued
+before the manager judged it is refused the same way. While approvals are
+suspended (the admission check fails), such requests are not judged. An
 optimistic-lock conflict (the request or the pins Secret written by someone
 else since it was read) is retried at once without an error log; every
 write carries the version it read, and the retry decides again from a

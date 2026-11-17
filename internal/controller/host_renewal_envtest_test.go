@@ -27,6 +27,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -505,6 +506,54 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		cr = reconcileCR(e, cr)
 		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "a certificate the manager would deny is marked refused")
 		Expect(state(e).Renewal == nil || len(state(e).Renewal.Certificate) == 0).To(BeTrue(), "and never published")
+	})
+
+	It("keeps a renewal request it refused after another approver approved it refused, and judges none while approvals are suspended", func() {
+		approveElsewhere := func(cr *unstructured.Unstructured) {
+			Expect(certrequest.SetCondition(cr, certrequest.ConditionApproved, certrequest.StatusTrue, "policy.cert-manager.io",
+				"Approved by CertificateRequestPolicy", time.Now())).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+		}
+
+		// Refused while a rule fails (the renewal's key is recorded as
+		// previously pinned); once the rule passes again, still refused.
+		e := newRenewalEnv()
+		cr := requested(e)
+		setPreviouslyPinned := func(on bool) {
+			h := hostObj(e)
+			l, err := loadHostEnrolment(ctx, k8sClient, e.cfg, h)
+			Expect(err).NotTo(HaveOccurred())
+			pin := l.state.Renewal.KeyPin
+			l.state.PreviousKeyPins = slices.DeleteFunc(l.state.PreviousKeyPins, func(p string) bool { return p == pin })
+			if on {
+				l.state.PreviousKeyPins = append(l.state.PreviousKeyPins, pin)
+			}
+			Expect(saveHostEnrolment(ctx, k8sClient, e.cfg, h, &l)).To(Succeed())
+		}
+		setPreviouslyPinned(true)
+		approveElsewhere(cr)
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "refused at once")
+		setPreviouslyPinned(false) // the rule passes again
+		cr = reconcileCR(e, cr)
+		Expect(state(e).Renewal.Approved).To(BeFalse(), "a refused request is not judged again")
+		issue(e, cr, hostidentitytest.IssueOptions{})
+		cr = reconcileCR(e, cr)
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionRefused)).To(BeTrue(), "still refused")
+		st := state(e)
+		Expect(st.Renewal == nil || (!st.Renewal.Approved && len(st.Renewal.Certificate) == 0)).To(BeTrue(), "never approved, never published")
+
+		// While approvals are suspended, a request another approver approved
+		// is not judged: no approval of the manager's is recorded.
+		e = newRenewalEnv()
+		cr = requested(e)
+		approveElsewhere(cr)
+		e.reqR.Admission = &AdmissionGate{} // never checked: suspended
+		res, err := e.reqR.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: cr.GetNamespace(), Name: cr.GetName()}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(admissionSuspendedRequeue))
+		Expect(state(e).Renewal.Approved).To(BeFalse(), "nothing recorded while approvals are suspended")
+		Expect(certrequest.IsTrue(getCR(e, cr.GetName()), certrequest.ConditionRefused)).To(BeFalse())
 	})
 
 	It("marks an issued renewal certificate refused once its renewal is withdrawn and its key was never pinned", func() {

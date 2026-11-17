@@ -943,8 +943,7 @@ func (r *HostEnrolmentRequestReconciler) judgeRenewal(ctx context.Context, cr *u
 	reqName := cr.GetNamespace() + "/" + cr.GetName()
 	deny := func(host *infravirtrigaudiov1beta1.Host, reason, message string) error {
 		if approvedElsewhere {
-			r.noteApprovedElsewhere(ctx, cr, host, reason, message)
-			return nil
+			return r.refuseApprovedElsewhere(ctx, cr, host, reason, message)
 		}
 		return r.denyRenewal(ctx, cr, host, reason, message)
 	}
@@ -1048,18 +1047,28 @@ func (r *HostEnrolmentRequestReconciler) judgeRenewal(ctx context.Context, cr *u
 	return nil
 }
 
-// noteApprovedElsewhere reports a renewal request that another approver
+// refuseApprovedElsewhere refuses a renewal request that another approver
 // approved although the manager's rules deny it: nothing is recorded as the
-// manager's approval, so its certificate is never published.
-func (r *HostEnrolmentRequestReconciler) noteApprovedElsewhere(ctx context.Context, cr *unstructured.Unstructured,
-	host *infravirtrigaudiov1beta1.Host, reason, message string) {
+// manager's approval, and the request is marked refused at once (it cannot
+// also be denied), which is final: its certificate is never published, even
+// if the rule that failed later passes (the renewal starts again with a new
+// request).
+func (r *HostEnrolmentRequestReconciler) refuseApprovedElsewhere(ctx context.Context, cr *unstructured.Unstructured,
+	host *infravirtrigaudiov1beta1.Host, reason, message string) error {
 	reqName := cr.GetNamespace() + "/" + cr.GetName()
+	if err := markRefused(cr, fmt.Errorf("approved by another approver, but the manager denies it (%s): %s", reason, message), r.now()); err != nil {
+		return err
+	}
+	if err := r.Status().Update(ctx, cr); err != nil {
+		return fmt.Errorf("refuse renewal request %s: %w", reqName, err)
+	}
 	log.FromContext(ctx).Info("A host-agent renewal request was approved by another approver, but the manager's rules deny it; "+
 		"its certificate will not be published", "request", reqName, "reason", reason, "detail", message)
 	if host != nil {
 		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalDenied, "certificate renewal request "+reqName+
 			" was approved by another approver, but the manager denies it ("+reason+"): its certificate is not published")
 	}
+	return nil
 }
 
 // approvedElsewhereUnjudged reports whether cr, approved, is the Host's

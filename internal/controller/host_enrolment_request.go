@@ -170,15 +170,32 @@ func (r *HostEnrolmentRequestReconciler) reconcile(ctx context.Context, req ctrl
 			}
 			return ctrl.Result{}, r.decideRenewal(ctx, cr, iss)
 		case certrequest.IsTrue(cr, certrequest.ConditionApproved) && !certrequest.Failed(cr):
+			// A request the manager refused (or that was denied) stays
+			// refused: nothing is judged again, whatever changed since.
+			if certrequest.IsTrue(cr, certrequest.ConditionRefused) || certrequest.IsTrue(cr, certrequest.ConditionDenied) {
+				return ctrl.Result{}, nil
+			}
 			// Approved by another approver before the manager decided it:
-			// apply the manager's rules first (re-read, no condition written).
+			// apply the manager's rules first (re-read, no condition but a
+			// refusal written), under the same admission gate as a request
+			// it decides itself. One already issued before that is not
+			// judged: completeRenewal refuses it (no approval of the
+			// manager's is recorded).
 			unjudged, err := r.approvedElsewhereUnjudged(ctx, cr)
 			if err != nil {
 				return ctrl.Result{}, err
 			}
-			if unjudged {
+			if unjudged && !renewalRequestFinished(cr) {
+				if r.Admission != nil && !r.Admission.OK() {
+					log.FromContext(ctx).Info("Not judging a host-agent renewal request another approver approved while approvals are suspended",
+						"request", req.String())
+					return ctrl.Result{RequeueAfter: admissionSuspendedRequeue}, nil
+				}
 				if err := r.judgeRenewal(ctx, cr, iss, true); err != nil {
 					return ctrl.Result{}, err
+				}
+				if certrequest.IsTrue(cr, certrequest.ConditionRefused) {
+					return ctrl.Result{}, nil
 				}
 			}
 			return ctrl.Result{}, r.completeRenewal(ctx, cr, iss)
