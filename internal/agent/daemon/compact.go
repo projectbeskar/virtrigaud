@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 )
@@ -93,13 +94,17 @@ func nearCap(live, maxBytes int64) bool {
 	return maxBytes > 0 && live >= maxBytes/compactNearCapDen*compactNearCapNum
 }
 
-// compactDue reports whether a compaction is due at now: never ran, its
-// period has passed since the last one, or the store is near its threshold
-// and the last compaction (which did not take it below) is at least
-// nearWait old.
-func compactDue(now, last time.Time, every, nearWait time.Duration, near bool) bool {
+// compactDue reports whether a compaction is due at now: never ran, a
+// confirmed discard has records left to remove (an interrupted call: until
+// they are removed a full store keeps refusing new operations, so the
+// backoff does not apply), its period has passed since the last one, or the
+// store is near its threshold and the last compaction (which did not take
+// it below) is at least nearWait old.
+func compactDue(now, last time.Time, every, nearWait time.Duration, near, discarding bool) bool {
 	switch {
 	case last.IsZero():
+		return true
+	case discarding && !guard.Off(guard.DiscardPrompt):
 		return true
 	case now.Sub(last) >= every:
 		return true
@@ -144,7 +149,8 @@ func (d *daemon) compactLoop(ctx context.Context, st *opstore.Store) {
 		near := nearCap(live, st.MaxStoreBytes())
 		backoff.grew(live, st.MaxStoreBytes(), every)
 		js, _ := j.State()
-		if js != journal.StateLost && st.Recovered() && !st.Freezing() && compactDue(time.Now(), last, every, backoff.wait, near) {
+		due := compactDue(time.Now(), last, every, backoff.wait, near, st.Discarding())
+		if js != journal.StateLost && st.Recovered() && !st.Freezing() && due {
 			before := j.LiveSize()
 			n, err := st.Compact(ctx, opstore.DefaultCompactBatch)
 			trimmed := 0

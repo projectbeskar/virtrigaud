@@ -60,6 +60,10 @@ const (
 	// PointMidFreeze: one chunk of a re-enrolment's freeze is durable and
 	// the freeze-in-progress marker names the rest.
 	PointMidFreeze journal.Point = "mid-freeze"
+	// PointMidDiscard: one chunk of a confirmed discard is durable (the
+	// predecessor is retired) and the discard-in-progress marker names the
+	// rest.
+	PointMidDiscard journal.Point = "mid-discard"
 )
 
 // DefaultMaxStoreBytes is the default store size above which new operations
@@ -111,6 +115,10 @@ type Options struct {
 	// FreezeScanCap is the most records (of any state) one re-enrolment
 	// freeze transaction reads. Zero uses eight times the chunk size.
 	FreezeScanCap int
+	// DiscardChunk is the most records one transaction of a confirmed
+	// discard removes. Zero uses DefaultDiscardChunk; tests set a small
+	// value to exercise a discard that takes several transactions.
+	DiscardChunk int
 	// Audit receives every admission decision and state change, including
 	// refusals that write nothing, for example to write a structured
 	// system-journal line. It never receives request bytes. Nil discards. It
@@ -182,6 +190,12 @@ type Store struct {
 	// every operation while it is set; Recover and Reenrol finish the freeze.
 	// It is written under mu and read without it (Freezing).
 	freezing atomic.Bool
+	// discarding is set while a confirmed discard has records left to
+	// remove (the discard-in-progress marker exists).
+	discarding atomic.Bool
+	// discardMu serialises confirmed discards (ConfirmFreeze and the resume
+	// in Compact). It is taken before mu, never while holding it.
+	discardMu sync.Mutex
 	// recovered mirrors ready for readers that must not wait for s.mu
 	// (Ready), which Recover holds while it runs.
 	recovered atomic.Bool
@@ -241,6 +255,11 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 	if err := j.View(ctx, func(tx *journal.Tx) error {
 		fm, err := readFreeze(tx)
 		s.freezing.Store(fm != nil)
+		if err != nil {
+			return err
+		}
+		dm, err := readDiscard(tx)
+		s.discarding.Store(dm != nil)
 		return err
 	}); err != nil {
 		var lostErr *journal.LostError
@@ -272,6 +291,10 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 // refuses every operation until Recover or Reenrol finishes it. It does not
 // wait for a freeze in progress.
 func (s *Store) Freezing() bool { return s.freezing.Load() }
+
+// Discarding reports whether a confirmed discard still has records to
+// remove: Compact removes them, and should run soon.
+func (s *Store) Discarding() bool { return s.discarding.Load() }
 
 // Journal returns the underlying journal.
 func (s *Store) Journal() *journal.Store { return s.j }
@@ -646,6 +669,10 @@ func (s *Store) Lookup(ctx context.Context, ref OpRef) (OpView, bool, error) {
 	var v OpView
 	var found bool
 	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		// A retired enrolment's records are being removed or gone.
+		if retired, err := isRetired(tx, ref.EnrolmentID); err != nil || (retired && !guard.Off(guard.RetiredNotHeld)) {
+			return err
+		}
 		k := opKey(ref.EnrolmentID, ref.OpID)
 		rec := &pb.OpRecord{}
 		ok, err := get(tx, bucketOps, k, rec)
@@ -676,6 +703,9 @@ func (s *Store) Lookup(ctx context.Context, ref OpRef) (OpView, bool, error) {
 func (s *Store) HasTombstone(ctx context.Context, ref OpRef) (bool, error) {
 	var ok bool
 	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		if retired, err := isRetired(tx, ref.EnrolmentID); err != nil || (retired && !guard.Off(guard.RetiredNotHeld)) {
+			return err
+		}
 		var err error
 		ok, err = has(tx, bucketTombstones, opKey(ref.EnrolmentID, ref.OpID))
 		return err

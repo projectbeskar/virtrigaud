@@ -367,89 +367,285 @@ func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]
 	return done, nil
 }
 
+// DefaultDiscardChunk is the most records one transaction of a confirmed
+// discard removes (Options.DiscardChunk overrides it). The memory and the
+// latency of one commit then do not depend on how many records the
+// predecessor left: a full store holds hundreds of thousands, and removing
+// them in one transaction made the agent exceed its unit's memory limit.
+const DefaultDiscardChunk = 2048
+
+// errDiscardChunkFull stops the scan of a discard chunk that collected as
+// many keys as the chunk holds.
+var errDiscardChunkFull = errors.New("discard chunk full")
+
+func (s *Store) discardChunk() int {
+	if guard.Off(guard.DiscardChunked) {
+		return int(^uint(0) >> 1)
+	}
+	if s.opts.DiscardChunk > 0 {
+		return s.opts.DiscardChunk
+	}
+	return DefaultDiscardChunk
+}
+
+// discardPrefixes are the records of enrolment prev that a discard removes,
+// in the order it removes them.
+func discardPrefixes(prev []byte) []struct {
+	bucket string
+	prefix []byte
+} {
+	return []struct {
+		bucket string
+		prefix []byte
+	}{{bucketOps, prev}, {bucketTombstones, prev}, {bucketAttempts, prev},
+		{bucketMeta, append([]byte(panicKeyPrefix), prev...)}}
+}
+
+// readDiscard returns the discard-in-progress marker (the retired
+// enrolment whose records are still being removed), or nil.
+func readDiscard(tx *journal.Tx) ([]byte, error) {
+	b, err := tx.Get(bucketMeta, keyDiscard)
+	if err != nil {
+		return nil, fmt.Errorf("read discard marker: %w", err)
+	}
+	if b == nil {
+		return nil, nil
+	}
+	if len(b) != idLen {
+		return nil, fmt.Errorf("%w: discard marker has %d bytes", errCorruptRecord, len(b))
+	}
+	return append([]byte(nil), b...), nil
+}
+
 // ConfirmFreeze discards a frozen enrolment's records, once the manager has
 // confirmed that it holds every operation of that enrolment: the operation
 // records, op_id tombstones, attempt marks, panic counts, the enrolment record
-// and the witness directory. VM tombstones are kept. VM records that the discarded
-// operations held are released (the manager now holds those operations). The
-// enrolment id is remembered as retired: it is never activated again, and a
-// grant naming it is refused UNKNOWN_TO_AGENT, never as definitely not
-// performed. It fails unless prev is frozen and another enrolment is active.
+// and the witness directory. VM tombstones are kept. VM records that the
+// discarded operations held are released (the manager now holds those
+// operations). The enrolment id is remembered as retired: it is never
+// activated again, and a grant naming it is refused UNKNOWN_TO_AGENT, never
+// as definitely not performed. It fails unless prev is frozen and another
+// enrolment is active.
+//
+// The first transaction retires prev, releases its VMs and writes the
+// discard-in-progress marker: from then on the store answers prev's
+// operations as discarded (UNKNOWN_TO_AGENT), whatever records remain.
+// The records are then removed in transactions of at most
+// Options.DiscardChunk records (DefaultDiscardChunk), and the last one
+// removes the enrolment record and the marker. A small predecessor is
+// discarded in that first transaction. A crash, or ctx ending, between
+// chunks leaves the marker: Compact, the next ConfirmFreeze or a relayed
+// confirmation of prev finishes the removal. A discard left by an earlier
+// confirmation is finished before a new one starts.
 func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
+	s.discardMu.Lock()
+	defer s.discardMu.Unlock()
+	pending, _, err := s.sweepPendingLocked(ctx)
+	if err != nil {
+		return fmt.Errorf("confirm freeze: %w", err)
+	}
+	if pending != nil && sameBytes(pending, prev) {
+		// prev was confirmed before and its removal is now complete.
+		return nil
+	}
+	if pending != nil && ctx.Err() != nil {
+		return fmt.Errorf("confirm freeze: %w: an earlier discard is still in progress", ErrEnrolment)
+	}
+	done, _, err := s.discardStep(ctx, prev, true)
+	if err != nil {
+		return fmt.Errorf("confirm freeze: %w", err)
+	}
+	if err := s.fsys.RemoveAll(s.witnessDir(prev)); err != nil {
+		return fmt.Errorf("confirm freeze: remove witnesses: %w", err)
+	}
+	if done {
+		return nil
+	}
+	if err := s.j.CrashPoint(PointMidDiscard); err != nil {
+		return err
+	}
+	if _, _, err := s.sweepPendingLocked(ctx); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("confirm freeze: %w", err)
+	}
+	// prev is retired: its operations are answered as discarded. Records
+	// left by a cancelled ctx are removed by the next Compact.
+	return nil
+}
+
+// resumeDiscard finishes a confirmed discard that a crash or a cancelled
+// context interrupted, and returns the records it removed. Compact calls it.
+func (s *Store) resumeDiscard(ctx context.Context) (int, error) {
+	if guard.Off(guard.DiscardResume) {
+		return 0, nil
+	}
+	s.discardMu.Lock()
+	defer s.discardMu.Unlock()
+	_, n, err := s.sweepPendingLocked(ctx)
+	return n, err
+}
+
+// sweepPendingLocked removes, chunk by chunk, the records of the enrolment
+// the discard-in-progress marker names, until none remain or ctx ends. It
+// returns that enrolment (nil when no discard was in progress) and the
+// records removed. The caller holds discardMu.
+func (s *Store) sweepPendingLocked(ctx context.Context) ([]byte, int, error) {
+	var pending []byte
+	if err := s.j.View(ctx, func(tx *journal.Tx) error {
+		var err error
+		pending, err = readDiscard(tx)
+		return err
+	}); err != nil {
+		return nil, 0, err
+	}
+	if pending == nil {
+		return nil, 0, nil
+	}
+	total := 0
+	for ctx.Err() == nil {
+		done, n, err := s.discardStep(ctx, pending, false)
+		total += n
+		if err != nil {
+			return pending, total, err
+		}
+		if done {
+			return pending, total, nil
+		}
+		if err := s.j.CrashPoint(PointMidDiscard); err != nil {
+			return pending, total, err
+		}
+	}
+	return pending, total, ctx.Err()
+}
+
+// discardStep commits one discard transaction for prev and reports whether
+// prev's records are all gone, and how many it removed. With first set it
+// starts the discard: prev must be frozen, another enrolment active and no
+// discard in progress; it retires prev, releases the VMs its operations
+// held and writes the marker, in the same transaction as the first chunk.
+// Without first it continues the discard the marker names (done when the
+// marker no longer names prev).
+func (s *Store) discardStep(ctx context.Context, prev []byte, first bool) (bool, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.freezing.Load() {
-		return fmt.Errorf("confirm freeze: %w: a freeze is still in progress", ErrEnrolment)
+	if first && s.freezing.Load() {
+		return false, 0, fmt.Errorf("%w: a freeze is still in progress", ErrEnrolment)
 	}
+	done, removed := false, 0
 	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
-		e := &pb.Enrolment{}
-		ok, err := get(tx, bucketEnrolments, prev, e)
+		done, removed = false, 0
+		pending, err := readDiscard(tx)
 		if err != nil {
 			return err
 		}
-		if !ok || (e.GetState() != pb.EnrolmentState_ENROLMENT_STATE_FROZEN && !guard.Off(guard.ConfirmOnlyFrozen)) {
-			return fmt.Errorf("%w: enrolment is not frozen", ErrEnrolment)
-		}
-		act, err := activeEnrolment(tx)
-		if err != nil {
-			return err
-		}
-		if act == nil {
-			return fmt.Errorf("%w: no successor enrolment is active", ErrEnrolment)
-		}
-		for _, b := range []struct {
-			bucket string
-			prefix []byte
-		}{{bucketOps, prev}, {bucketTombstones, prev}, {bucketAttempts, prev},
-			{bucketMeta, append([]byte(panicKeyPrefix), prev...)}} {
-			var keys [][]byte
-			if err := tx.ForEach(b.bucket, b.prefix, func(k, _ []byte) error {
-				keys = append(keys, k)
-				return nil
-			}); err != nil {
+		if first {
+			if pending != nil {
+				return fmt.Errorf("%w: another discard is in progress", ErrEnrolment)
+			}
+			if err := startDiscard(tx, prev); err != nil {
 				return err
 			}
-			for _, k := range keys {
-				if err := tx.Delete(b.bucket, k); err != nil {
-					return err
-				}
-			}
-		}
-		var held []*pb.VMRecord
-		if err := tx.ForEach(bucketVMs, nil, func(_, v []byte) error {
-			vm := &pb.VMRecord{}
-			if err := unmarshalRecord(v, vm); err != nil {
-				return err
-			}
-			if sameBytes(vm.GetBusyEnrolmentId(), prev) {
-				held = append(held, vm)
-			}
+		} else if !sameBytes(pending, prev) {
+			done = true
 			return nil
-		}); err != nil {
-			return err
 		}
-		for _, vm := range held {
-			vm.BusyOpId, vm.BusyEnrolmentId = nil, nil
-			if err := put(tx, bucketVMs, []byte(vm.GetVmUid()), vm); err != nil {
+		limit := s.discardChunk()
+		var keys []struct {
+			bucket string
+			key    []byte
+		}
+		for _, b := range discardPrefixes(prev) {
+			if err := tx.ForEach(b.bucket, b.prefix, func(k, _ []byte) error {
+				if len(keys) == limit {
+					return errDiscardChunkFull
+				}
+				keys = append(keys, struct {
+					bucket string
+					key    []byte
+				}{b.bucket, append([]byte(nil), k...)})
+				return nil
+			}); errors.Is(err, errDiscardChunkFull) {
+				break
+			} else if err != nil {
 				return err
 			}
 		}
-		m, err := readAgentMeta(tx)
-		if err != nil {
+		for _, k := range keys {
+			if err := tx.Delete(k.bucket, k.key); err != nil {
+				return err
+			}
+		}
+		removed = len(keys)
+		if len(keys) == limit {
+			return nil
+		}
+		// Nothing of prev remains: remove its enrolment record and the
+		// marker.
+		done = true
+		if err := tx.Delete(bucketEnrolments, prev); err != nil {
 			return err
 		}
+		return tx.Delete(bucketMeta, keyDiscard)
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	s.discarding.Store(!done)
+	return done, removed, nil
+}
+
+// startDiscard is the start of a confirmed discard of prev, inside the
+// transaction of its first chunk: prev must be frozen and another enrolment
+// active; prev is retired (from now on answered as discarded), the VMs its
+// operations held are released, and the discard-in-progress marker names
+// prev.
+func startDiscard(tx *journal.Tx, prev []byte) error {
+	e := &pb.Enrolment{}
+	ok, err := get(tx, bucketEnrolments, prev, e)
+	if err != nil {
+		return err
+	}
+	if !ok || (e.GetState() != pb.EnrolmentState_ENROLMENT_STATE_FROZEN && !guard.Off(guard.ConfirmOnlyFrozen)) {
+		return fmt.Errorf("%w: enrolment is not frozen", ErrEnrolment)
+	}
+	act, err := activeEnrolment(tx)
+	if err != nil {
+		return err
+	}
+	if act == nil {
+		return fmt.Errorf("%w: no successor enrolment is active", ErrEnrolment)
+	}
+	var held []*pb.VMRecord
+	if err := tx.ForEach(bucketVMs, nil, func(_, v []byte) error {
+		vm := &pb.VMRecord{}
+		if err := unmarshalRecord(v, vm); err != nil {
+			return err
+		}
+		if sameBytes(vm.GetBusyEnrolmentId(), prev) {
+			held = append(held, vm)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, vm := range held {
+		vm.BusyOpId, vm.BusyEnrolmentId = nil, nil
+		if err := put(tx, bucketVMs, []byte(vm.GetVmUid()), vm); err != nil {
+			return err
+		}
+	}
+	m, err := readAgentMeta(tx)
+	if err != nil {
+		return err
+	}
+	retired := false
+	for _, r := range m.GetRetiredEnrolmentIds() {
+		retired = retired || sameBytes(r, prev)
+	}
+	if !retired {
 		m.RetiredEnrolmentIds = append(m.RetiredEnrolmentIds, append([]byte(nil), prev...))
 		if err := put(tx, bucketMeta, keyAgentMeta, m); err != nil {
 			return err
 		}
-		return tx.Delete(bucketEnrolments, prev)
-	})
-	if err != nil {
-		return fmt.Errorf("confirm freeze: %w", err)
 	}
-	dir := s.witnessDir(prev)
-	if err := s.fsys.RemoveAll(dir); err != nil {
-		return fmt.Errorf("confirm freeze: remove witnesses: %w", err)
-	}
-	return nil
+	return tx.Put(bucketMeta, keyDiscard, append([]byte(nil), prev...))
 }

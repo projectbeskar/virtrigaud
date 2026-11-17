@@ -57,6 +57,11 @@ func (s *Store) AnswerOp(ctx context.Context, ref OpRef, continuitySeq uint64) (
 		if v.Host, err = hostViewTx(tx, continuitySeq); err != nil {
 			return err
 		}
+		// A retired enrolment is discarded, also while its records are
+		// still being removed: nothing is found, and it is not held.
+		if retired, err := isRetired(tx, ref.EnrolmentID); err != nil || (retired && !guard.Off(guard.RetiredNotHeld)) {
+			return err
+		}
 		key := opKey(ref.EnrolmentID, ref.OpID)
 		t := &pb.Tombstone{}
 		ok, err := get(tx, bucketTombstones, key, t)

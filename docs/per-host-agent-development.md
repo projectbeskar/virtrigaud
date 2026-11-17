@@ -256,6 +256,20 @@ answered `UNKNOWN_TO_AGENT` (never a definite not-performed), and a re-sent
 grant of it is refused without running anything. A false confirmation
 therefore costs only liveness. A release build ignores the field.
 
+A discard takes effect in one transaction: it retires the enrolment (from
+then on its operations are answered as discarded), releases the VMs its
+operations held, and starts removing its records. The records are removed
+in transactions of at most 2,048 records each, with the store lock released
+between them, so the memory and the latency of one commit do not depend on
+how many records the predecessor left. A full store holds hundreds of
+thousands of them, and a single transaction exceeded the unit's
+`MemoryMax=256M`. A small predecessor is removed in that first transaction.
+When a crash, or the end of the relaying call, interrupts the removal, a
+marker in the store keeps it pending: the agent's compaction finishes it at
+its next check (within a minute, whatever the compaction backoff), and so
+does a later confirmation of the same enrolment. The store shrinks chunk by
+chunk; a full store refuses new operations until it is below its threshold.
+
 ### Host checks
 
 | Check | Refusal reason |
