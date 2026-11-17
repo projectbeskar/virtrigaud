@@ -140,7 +140,7 @@ type Result struct {
 //   - the signer's key is ECDSA P-256 and is the request's key;
 //   - the certificate chains directly to a pinned host identity issuer for
 //     server authentication at Now, is not a CA, has server authentication as
-//     its only usage, lives at most hostidentity.MaxLifetime, has an empty
+//     its only usage, lives at least hostidentity.MinLifetime and at most hostidentity.MaxLifetime, has an empty
 //     subject or the Host's name, carries no DNS, address or e-mail name,
 //     carries exactly the request's URIs (so the enrolment record the manager
 //     drew), and certifies the signer's key (hostidentity.ValidateIssued);

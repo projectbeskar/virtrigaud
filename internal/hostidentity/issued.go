@@ -84,7 +84,8 @@ func RootPool(caBundlePEM []byte) (*x509.CertPool, error) {
 // ValidateIssued checks an issued certificate (chainPEM: the leaf first, then
 // any intermediates) against the authorisation before its key is pinned: it
 // chains to roots for server authentication at now; it meets the certificate
-// profile (CheckLeafProfile); its subject alternative names are exactly the
+// profile (CheckLeafProfile) and its lifetime is at least MinLifetime
+// (CheckLeafMinLifetime; the error then also wraps ErrLifetimeTooShort); its subject alternative names are exactly the
 // authorised host URI and record; and its key is the authorised key.
 func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, now time.Time) (Issued, error) {
 	if roots == nil {
@@ -106,6 +107,9 @@ func ValidateIssued(auth Authorisation, chainPEM []byte, roots *x509.CertPool, n
 	}
 	if err := CheckLeafProfile(leaf, auth.HostName); err != nil {
 		return Issued{}, fmt.Errorf("%w: %v", ErrIssued, err)
+	}
+	if err := CheckLeafMinLifetime(leaf); err != nil {
+		return Issued{}, fmt.Errorf("%w: %w", ErrIssued, err)
 	}
 	rec, err := RecordFromURIs(leaf.URIs, auth.HostURI)
 	if err != nil {

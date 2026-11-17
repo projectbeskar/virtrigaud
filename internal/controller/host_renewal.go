@@ -1176,6 +1176,9 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 		return nil
 	}
 	issued, verr := r.validateRenewed(ctx, host, cur, ren, chain)
+	if errors.Is(verr, hostidentity.ErrLifetimeTooShort) {
+		verr = fmt.Errorf("%s: %w", hostidentity.ReasonIssuedLifetimeTooShort, verr)
+	}
 	if verr != nil {
 		a, gaveUp := l.state.failRenewal(r.now(), "the issued certificate was refused: "+verr.Error())
 		if err := saveHostEnrolment(ctx, r.Client, r.Config, host, &l); err != nil {
@@ -1191,6 +1194,11 @@ func (r *HostEnrolmentRequestReconciler) completeRenewal(ctx context.Context, cr
 			return fmt.Errorf("record the outcome on renewal request %s: %w", reqName, err)
 		}
 		log.FromContext(ctx).Info("Refused the certificate issued for a renewal request", "request", reqName, "host", ns+"/"+name)
+		if errors.Is(verr, hostidentity.ErrLifetimeTooShort) {
+			r.event(host, corev1.EventTypeWarning, eventReasonAgentCertLifetimeTooShort, "the certificate issued for renewal request "+
+				reqName+" was refused and not published: "+verr.Error())
+			return nil
+		}
 		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalRefused, "the certificate issued for renewal request "+reqName+
 			" was refused")
 		return nil

@@ -180,6 +180,9 @@ const (
 	eventReasonAgentEnrolmentApproved = "AgentEnrolmentApproved"
 	eventReasonAgentEnrolled          = "AgentEnrolled"
 	eventReasonAgentCertRejected      = "AgentCertificateRejected"
+	// eventReasonAgentCertLifetimeTooShort: an issued certificate (enrolment
+	// or renewal) lived less than hostidentity.MinLifetime and was not pinned.
+	eventReasonAgentCertLifetimeTooShort = "AgentCertificateLifetimeTooShort"
 	eventReasonAgentRevoked           = "AgentRevoked"
 	eventReasonAgentRecordRetired     = "AgentEnrolmentRecordRetired"
 	eventReasonAgentRekeyed           = "AgentRekeyed"

@@ -466,6 +466,9 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 		return err
 	}
 	issued, verr := r.validateIssued(ctx, host, a, chain)
+	if errors.Is(verr, hostidentity.ErrLifetimeTooShort) {
+		verr = fmt.Errorf("%s: %w", hostidentity.ReasonIssuedLifetimeTooShort, verr)
+	}
 	if verr == nil {
 		if reason, msg := l.state.rekeyBlocked(a.Record.ProviderUID); reason != "" {
 			verr = fmt.Errorf("%s: %s", reason, msg)
@@ -505,6 +508,11 @@ func (r *HostEnrolmentRequestReconciler) complete(ctx context.Context, cr *unstr
 	}
 	if verr != nil {
 		log.FromContext(ctx).Info("Refused the certificate issued for a host-agent enrolment request", "request", reqName, "host", ns+"/"+name)
+		if errors.Is(verr, hostidentity.ErrLifetimeTooShort) {
+			r.event(host, corev1.EventTypeWarning, eventReasonAgentCertLifetimeTooShort, hostidentity.ReasonIssuedLifetimeTooShort+
+				": the certificate issued for request "+reqName+" was refused and not pinned: "+verr.Error())
+			return nil
+		}
 		r.event(host, corev1.EventTypeWarning, eventReasonAgentCertRejected, "the certificate issued for request "+reqName+" was refused")
 		return nil
 	}
