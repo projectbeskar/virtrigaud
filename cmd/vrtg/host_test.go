@@ -96,6 +96,10 @@ func TestHostEnrollOfflineWritesAManifestFromFilesOnly(t *testing.T) {
 	_, err = runVrtg(t, filepath.Join(dir, "no-kubeconfig"), "host", "enroll", "--host", "host-a", "--csr", csrFile,
 		"--issuer-namespace", testIssuerNS, "--issuer", "Issuer/host-agent-ca", "--duration", "800h", "--manifest-out", out)
 	assert.Error(t, err, "a lifetime over thirty days is refused locally")
+	_, err = runVrtg(t, filepath.Join(dir, "no-kubeconfig"), "host", "enroll", "--host", "host-a", "--csr", csrFile,
+		"--issuer-namespace", testIssuerNS, "--issuer", "Issuer/host-agent-ca", "--duration", "6m", "--manifest-out", out)
+	require.Error(t, err, "a lifetime under fifteen minutes is refused locally")
+	assert.Contains(t, err.Error(), "at least 15m0s")
 }
 
 // TestHostEnrollFileHandling: the CSR must be a bounded regular file, and

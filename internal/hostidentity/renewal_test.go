@@ -300,6 +300,9 @@ func TestCheckRenewalRequestSpec(t *testing.T) {
 		"client auth":   func(s *hostidentity.RenewalRequestSpec) { s.Usages = append(s.Usages, hostidentity.UsageClientAuth) },
 		"no lifetime":   func(s *hostidentity.RenewalRequestSpec) { s.Duration = 0 },
 		"long lifetime": func(s *hostidentity.RenewalRequestSpec) { s.Duration = hostidentity.MaxLifetime + time.Hour },
+		"short lifetime": func(s *hostidentity.RenewalRequestSpec) {
+			s.Duration = hostidentity.MinLifetime - time.Second
+		},
 		"other request": func(s *hostidentity.RenewalRequestSpec) { s.CSRPEM = other },
 		"not PEM":       func(s *hostidentity.RenewalRequestSpec) { s.CSRPEM = f.csrDER },
 	} {

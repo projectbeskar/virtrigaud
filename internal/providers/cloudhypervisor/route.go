@@ -68,10 +68,10 @@ func frameBytes(m *emptypb.Empty) []byte { return m.ProtoReflect().GetUnknown() 
 const (
 	// MetadataCause is the ErrorInfo metadata key that names why a host is
 	// unavailable.
-	MetadataCause = "cause"
+	MetadataCause = contracts.HostUnavailableCauseKey
 	// CauseNotFronted: the host is not in the Provider's inventory (unknown,
 	// removed, or its entry was refused).
-	CauseNotFronted = "HostNotFronted"
+	CauseNotFronted = contracts.HostUnavailableCauseNotFronted
 	// CauseAgentIncompatible: the agent's API version is outside the
 	// Provider's version and the one before it.
 	CauseAgentIncompatible = "AgentIncompatible"

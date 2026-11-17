@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -128,6 +129,10 @@ func TestApproverPolicySampleAllowsAgentRequests(t *testing.T) {
 	usages, _, _ := unstructured.NestedStringSlice(p.Object, "spec", "allowed", "usages")
 	isCA, found, _ := unstructured.NestedBool(p.Object, "spec", "allowed", "isCA")
 	maxDuration, _, _ := unstructured.NestedString(p.Object, "spec", "constraints", "maxDuration")
+	minDuration, _, _ := unstructured.NestedString(p.Object, "spec", "constraints", "minDuration")
+	minLifetime, err := time.ParseDuration(minDuration)
+	require.NoError(t, err)
+	assert.Equal(t, hostidentity.MinLifetime, minLifetime, "the policy's minimum lifetime is the manager's")
 	for _, k := range []string{"dnsNames", "ipAddresses", "emailAddresses", "subject"} {
 		_, has, _ := unstructured.NestedFieldNoCopy(p.Object, "spec", "allowed", k)
 		assert.False(t, has, "spec.allowed.%s must not be set: the agent's requests carry none", k)

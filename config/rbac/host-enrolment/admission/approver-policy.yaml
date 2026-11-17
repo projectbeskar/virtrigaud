@@ -45,6 +45,9 @@ spec:
     - "server auth"
     isCA: false
   constraints:
+    # The manager's own lifetime bounds: a certificate shorter than 15
+    # minutes could not be renewed in time.
+    minDuration: 15m
     maxDuration: 720h
     privateKey:
       algorithm: ECDSA

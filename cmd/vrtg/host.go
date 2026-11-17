@@ -110,7 +110,7 @@ whose certificate it will not pin (condition VirtRigaudCertificateRefused).`,
 	f.StringVar(&eo.csrFile, flagCSR, "", "PEM certificate signing request file written by the per-host agent")
 	f.StringVar(&eo.issuerNamespace, flagIssuerNamespace, "", "Namespace of the enrolment CertificateRequests (the host-agent issuer's)")
 	f.StringVar(&eo.issuer, flagIssuer, "", "Issuer reference, kind/name or group/kind/name (the cert-manager host-agent issuer, or the external-PKI reference)")
-	f.DurationVar(&eo.duration, flagDuration, hostidentity.MaxLifetime, "Requested certificate lifetime (at most 720h)")
+	f.DurationVar(&eo.duration, flagDuration, hostidentity.MaxLifetime, "Requested certificate lifetime (at least 15m, at most 720h)")
 	f.StringVar(&eo.manifestOut, flagManifestOut, "", "Write the CertificateRequest to this file instead of creating it (offline)")
 	f.StringVar(&eo.request, flagRequest, "", "External PKI: name of the approved CertificateRequest")
 	f.StringVar(&eo.bundleOut, flagBundleOut, "", "External PKI: write the authorised bundle (CSR and issuance policy) to this file")
@@ -253,8 +253,9 @@ func (o *options) hostEnrollSubmit(cmd *cobra.Command, eo *hostEnrollOptions) er
 	if err != nil {
 		return err
 	}
-	if eo.duration <= 0 || eo.duration > hostidentity.MaxLifetime {
-		return fmt.Errorf("--%s must be positive and at most %s", flagDuration, hostidentity.MaxLifetime)
+	if eo.duration < hostidentity.MinLifetime || eo.duration > hostidentity.MaxLifetime {
+		return fmt.Errorf("--%s must be at least %s (a shorter certificate could not be renewed in time) and at most %s",
+			flagDuration, hostidentity.MinLifetime, hostidentity.MaxLifetime)
 	}
 	csrPEM, err := readBounded(eo.csrFile)
 	if err != nil {

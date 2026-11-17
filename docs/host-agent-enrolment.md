@@ -90,7 +90,17 @@ state write, no event, no hint whether the Host exists).
 | The CSR asks for no extension other than the subject alternative names (and basic constraints with the CA bit clear) | `ExtensionRefused` |
 | No CA certificate (`spec.isCA` false, no CA bit in the CSR) | `CARequested` |
 | `spec.usages` include `server auth` and `digital signature`, and neither `client auth` (the per-host agent is only ever a TLS server) nor `cert sign` or `crl sign` (`key encipherment` is tolerated, nothing else) | `UsagesRefused` |
-| `spec.duration` is set and at most 30 days (`720h`) | `LifetimeRefused` |
+| `spec.duration` is set, at least 15 minutes (`15m`) and at most 30 days (`720h`) | `LifetimeRefused` |
+
+The 15-minute floor keeps a certificate renewable: the agent asks to renew
+at two thirds of the lifetime and draws a new key when its request is not
+answered within half the lifetime then left (a sixth of the lifetime). The
+manager collects the request on its next heartbeat poll, up to a minute
+later, and the issued certificate is staged seconds after; at 15 minutes a
+sixth is 150 seconds. A shorter certificate could have its request
+discarded before it is answered and end pinned to a key the host no longer
+holds. `vrtg host enroll --duration` refuses a shorter lifetime locally, and
+the approver-policy sample sets the same `minDuration`.
 
 Before approving, the manager records the authorisation (request UID, record,
 key pin) in the pins Secret. A denial never changes the pins.
@@ -360,7 +370,8 @@ be re-keyed before its certificate expires.
      unchanged, the current certificate valid (`RenewalNotVerified`);
    - the Host exists, runs an agent, has an identity and is not revoked;
    - the request carries exactly the host's request, agent usages, no CA and
-     a lifetime of at most 30 days, and its key was never pinned.
+     a lifetime of at least 15 minutes and at most 30 days, and its key was
+     never pinned.
 
    A request labelled as a renewal that another principal created (an
    administrator included) is never approved. Approvals are suspended, as for
@@ -717,12 +728,24 @@ minute without a call, and polled again once a re-key pins a new
 certificate. `Ready` turns `CertificateExpired` only once the expiry has
 passed, and no later than a second after it: while the certificate is
 valid, the next check is brought forward to its expiry when that comes
-before the next heartbeat. A re-key that pins a valid certificate in place
-of an expired one re-evaluates the Host at once rather than at the next
-minute. No other change of the Host's pins Secret does: the writes of an
-enrolment or a revocation would only poll a host its Provider does not
-front (each a `GetHostInfo failed` error), and the heartbeat's own writes
-of the verified store position would add a poll per heartbeat. A
+before the next heartbeat. A change of the Host's pins Secret polls the
+Host at once when the poll must follow it: a re-key that pins a valid
+certificate in place of an expired one, the first certificate pinned, and
+every step of a certificate renewal (recorded, request created, approved,
+issued, new key pinned, renewal ended, key pins changed while one is in
+progress). While a renewed certificate is issued and not yet pinned, the
+Host is polled every 5 seconds: the Provider stages the certificate on its
+next call to the host, and the manager pins the new key on the host's next
+answer. No other change of the pins Secret polls the Host: the writes of an
+enrolment before its pin or of a revocation would only poll a host its
+Provider does not front, and the heartbeat's own writes of the verified
+store position would add a poll per heartbeat. A Host its Provider does not
+front (an agent Host waiting for its first certificate) is polled with a
+backoff from 15 seconds, doubled per poll up to the heartbeat's minute, and
+its `GetHostInfo failed` error is logged on the first poll and then at most
+once a minute (the other polls log at verbosity 1); once it has a pinned
+certificate the Provider has not applied yet, it is retried every 15
+seconds. A
 condition's `lastTransitionTime` moves only when its status changes, not
 when only its reason or message does. While a revoked or expired Host is not polled,
 `AgentInventoryVerified` is `False` with reason `NoSignedAnswer` and

@@ -192,6 +192,7 @@ func TestAuthoriseDeniesEachBrokenRule(t *testing.T) {
 		}, hostidentity.ReasonSubjectAltNames},
 		{"lifetime over thirty days", func(r *hostidentity.Request) { r.Duration = 31 * 24 * time.Hour }, hostidentity.ReasonLifetime},
 		{"no lifetime", func(r *hostidentity.Request) { r.Duration = 0 }, hostidentity.ReasonLifetime},
+		{"lifetime under fifteen minutes", func(r *hostidentity.Request) { r.Duration = 6 * time.Minute }, hostidentity.ReasonLifetime},
 		{"CA requested in the spec", func(r *hostidentity.Request) { r.IsCA = true }, hostidentity.ReasonCARequested},
 		{"CA bit in the CSR", func(r *hostidentity.Request) {
 			r.CSRPEM = hostidentitytest.NewCSR(t, key, hostidentitytest.CSROptions{URIs: uris, RequestCA: true})

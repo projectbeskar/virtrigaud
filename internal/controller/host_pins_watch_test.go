@@ -137,13 +137,13 @@ func TestPinsTrustChanged(t *testing.T) {
 	assert.True(t, p.Generic(event.GenericEvent{Object: old}))
 }
 
-// The Host controller's pins Secret watch enqueues only an update that lifts
-// an expired certificate (a re-key); an enrolment, a revocation, a renewal of
-// a valid certificate and store position writes wait for the Host's own
-// schedule, so a host its Provider does not front is not polled for them.
-func TestPinsLiftExpiry(t *testing.T) {
+// The Host controller's pins Secret watch enqueues an update that lifts an
+// expired certificate (a re-key), pins the first certificate, or moves a
+// renewal a step; an enrolment before its pin, a revocation without a
+// renewal and store position writes wait for the Host's own schedule.
+func TestPinsAdvanceHost(t *testing.T) {
 	now := time.Now()
-	p := pinsLiftExpiry(func() time.Time { return now })
+	p := pinsAdvanceHost(func() time.Time { return now })
 	withExpiry := func(id string, at time.Time) hostEnrolmentState {
 		c := enrolmentFor(strings.Repeat(id, 16), "uid-prov-a", 2, strings.Repeat("aa", 32))
 		c.NotAfter = metav1.NewTime(at)
@@ -152,18 +152,50 @@ func TestPinsLiftExpiry(t *testing.T) {
 	sec := func(st hostEnrolmentState) *corev1.Secret { return pinsSecretWith(t, st, HostStoreState{}) }
 	expired, valid := withExpiry("c3", now.Add(-time.Minute)), withExpiry("d4", now.Add(time.Hour))
 	pending := hostEnrolmentState{Pending: &enrolmentRecord{EnrolmentID: strings.Repeat("e5", 16)}}
+	// renewing returns valid with a renewal edited by f.
+	renewing := func(f func(r *renewalState, c *currentEnrolment)) hostEnrolmentState {
+		st := withExpiry("d4", now.Add(time.Hour))
+		st.Renewal = &renewalState{Request: []byte("req"), KeyPin: strings.Repeat("bb", 32), SignerPin: strings.Repeat("aa", 32),
+			Since: metav1.NewTime(now)}
+		if f != nil {
+			f(st.Renewal, st.Current)
+		}
+		return st
+	}
+	requested := func(r *renewalState, _ *currentEnrolment) {
+		r.CertificateRequest, r.CertificateRequestUID = "ns/req", "uid-1"
+	}
+	approved := func(r *renewalState, c *currentEnrolment) { requested(r, c); r.Approved = true }
+	issued := func(r *renewalState, c *currentEnrolment) {
+		approved(r, c)
+		r.Certificate, r.CertificateSHA256 = []byte("der"), strings.Repeat("cc", 32)
+	}
+	pinned := func(r *renewalState, c *currentEnrolment) {
+		issued(r, c)
+		at := metav1.NewTime(now)
+		r.PinnedAt = &at
+		c.KeyPins = append(c.KeyPins, r.KeyPin)
+	}
+	reported := func(r *renewalState, c *currentEnrolment) { issued(r, c); r.OverlapExpiredReported = true }
 	for name, tc := range map[string]struct {
 		old, new hostEnrolmentState
 		want     bool
 	}{
 		"re-key of an expired certificate":   {expired, valid, true},
-		"first enrolment pins a certificate": {pending, valid, false},
+		"first enrolment pins a certificate": {pending, valid, true},
 		"enrolment steps before the pin":     {hostEnrolmentState{}, pending, false},
 		"revocation of an expired host":      {expired, hostEnrolmentState{}, false},
 		"revocation of a valid host":         {valid, hostEnrolmentState{}, false},
-		"renewal of a valid certificate":     {valid, withExpiry("f6", now.Add(2*time.Hour)), false},
 		"still expired":                      {expired, withExpiry("f6", now.Add(-time.Second)), false},
 		"nothing changed":                    {valid, valid, false},
+		"renewal recorded":                   {valid, renewing(nil), true},
+		"renewal request created":            {renewing(nil), renewing(requested), true},
+		"renewal approved":                   {renewing(requested), renewing(approved), true},
+		"renewal issued":                     {renewing(approved), renewing(issued), true},
+		"renewed key pinned":                 {renewing(issued), renewing(pinned), true},
+		"renewal ended, old pin removed":     {renewing(pinned), withExpiry("d4", now.Add(time.Hour)), true},
+		"renewal unchanged":                  {renewing(issued), renewing(issued), false},
+		"renewal report flag only":           {renewing(issued), renewing(reported), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, p.Update(event.UpdateEvent{ObjectOld: sec(tc.old), ObjectNew: sec(tc.new)}))

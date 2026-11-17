@@ -41,6 +41,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -214,7 +215,9 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		}
 	})
 
-	newRenewalEnv := func() *renewalEnv {
+	// newRenewalEnvLiving builds the environment with a current certificate
+	// that lives life.
+	newRenewalEnvLiving := func(life time.Duration) *renewalEnv {
 		e := &renewalEnv{now: time.Now(), rec: record.NewFakeRecorder(64)}
 		for _, p := range []string{"renew-hosts-", "renew-issuer-"} {
 			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: p}}
@@ -262,7 +265,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		csr := hostidentitytest.NewCSR(GinkgoT(), key, hostidentitytest.CSROptions{CommonName: "host-a", URIs: hostidentity.RequestURIs(uri, rec)})
 		// The current certificate lives 20 days, the renewed ones 30, so the
 		// renewed expiry is distinguishable.
-		cb, _ := pem.Decode(e.ca.Issue(GinkgoT(), csr, hostidentitytest.IssueOptions{Lifetime: 20 * 24 * time.Hour}))
+		cb, _ := pem.Decode(e.ca.Issue(GinkgoT(), csr, hostidentitytest.IssueOptions{Lifetime: life}))
 		leaf, err := x509.ParseCertificate(cb.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 		e.oldPin, err = hostidentity.SPKIPin(&key.PublicKey)
@@ -279,6 +282,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		e.reader = &renewalReader{host: e.host}
 		return e
 	}
+	newRenewalEnv := func() *renewalEnv { return newRenewalEnvLiving(20 * 24 * time.Hour) }
 
 	state := func(e *renewalEnv) hostEnrolmentState {
 		sec := &corev1.Secret{}
@@ -471,6 +475,62 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 		}
 		Expect(strings.Join(reasons, "\n")).To(And(ContainSubstring(eventReasonAgentRenewalRequested), ContainSubstring(eventReasonAgentRenewalApproved),
 			ContainSubstring(eventReasonAgentRenewalIssued), ContainSubstring(eventReasonAgentRenewalPinned), ContainSubstring(eventReasonAgentRenewed)))
+	})
+
+	It("renews a short-lived certificate with every step after the request driven by the pins Secret watch, not the heartbeat", func() {
+		life := hostidentity.MinLifetime
+		e := newRenewalEnvLiving(life)
+		pinsSecret := func() *corev1.Secret {
+			sec := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.issuerNS, Name: hostEnrolmentSecretName(e.hostNS, "host-a")}, sec)).To(Succeed())
+			return sec
+		}
+		watch := pinsAdvanceHost(func() time.Time { return e.now })
+		// pollIfWatched runs the Host controller's poll only when the pins
+		// Secret change since before is one its watch enqueues, and fails
+		// otherwise (the step would wait for the next heartbeat). It returns
+		// the Secret the poll was enqueued for, so the next step's change
+		// includes what the poll wrote.
+		pollIfWatched := func(before *corev1.Secret, step string) *corev1.Secret {
+			after := pinsSecret()
+			Expect(watch.Update(event.UpdateEvent{ObjectOld: before, ObjectNew: after})).To(BeTrue(),
+				"%s: the Host's poll follows the pins Secret change at once", step)
+			Expect(heartbeat(e)).To(Equal(answerVerified))
+			return after
+		}
+		Expect(heartbeat(e)).To(Equal(answerVerified), "the first heartbeat learns the agent's API version")
+		// The one heartbeat the renewal waits for: the one that collects the
+		// host's request.
+		e.host.startRenewal(e.hostURI, "host-a")
+		start := e.now
+		s0 := pinsSecret()
+		Expect(heartbeat(e)).To(Equal(answerVerified))
+		Expect(state(e).Renewal).NotTo(BeNil())
+		s1 := pollIfWatched(s0, "renewal recorded")
+		reconcileHost(e)
+		reconcileHost(e)
+		s2 := pollIfWatched(s1, "request created")
+		_, name, _ := strings.Cut(state(e).Renewal.CertificateRequest, "/")
+		cr := reconcileCR(e, getCR(e, name))
+		Expect(certrequest.IsTrue(cr, certrequest.ConditionApproved)).To(BeTrue())
+		s3 := pollIfWatched(s2, "approved")
+		der := issue(e, cr, hostidentitytest.IssueOptions{Lifetime: time.Hour})
+		reconcileCR(e, cr)
+		Expect(state(e).Renewal.Certificate).To(Equal(der))
+		// The poll that follows the issuance stages it on the host (the
+		// Provider's call), and the next answer pins the new key.
+		e.host.stage(der)
+		s4 := pollIfWatched(s3, "issued")
+		newPin, err := hostidentity.SPKIPin(&e.host.newKey.PublicKey)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(state(e).Current.KeyPins).To(ContainElement(newPin), "pinned on the poll that followed the issuance")
+		e.host.activate()
+		pollIfWatched(s4, "pinned")
+		st := state(e)
+		Expect(st.Current.KeyPins).To(Equal([]string{newPin}), "renewed: the old pin is removed")
+		Expect(st.Renewal).To(BeNil())
+		Expect(e.now).To(Equal(start), "no heartbeat interval passed: every step followed the watch")
+		Expect(e.now.Sub(start)).To(BeNumerically("<", life/6), "well within the agent's discard deadline")
 	})
 
 	It("applies its own rules to a renewal request another approver approved first, and publishes only what it would approve", func() {
