@@ -6,6 +6,17 @@ latency and certificate renewal. They are test tooling only: they run as root
 **inside a disposable test VM**, never on a shared host or against an
 existing cluster. The helper binary is `test/agent-lab/cmd/enrol-lab`.
 
+## Prerequisites
+
+- An unprivileged QEMU test bed on a machine of your own and one disposable
+  VM (Ubuntu 24.04, 4 vCPUs, 8 GiB of memory and 20 GiB of disk are enough)
+  with outbound HTTPS for the pinned downloads.
+- A disposable Kubernetes cluster: `setup-cluster.sh` creates a single-node
+  k3s inside that VM. The scripts create and delete cluster-scoped objects
+  (CRDs, ClusterIssuers, policies) and stall issuers on purpose; never point
+  them at a shared or production cluster, and never run them on a shared
+  host. They use the VM's own kubeconfig (`/etc/rancher/k3s/k3s.yaml`) only.
+
 What gets installed in the VM:
 
 - a single-node k3s cluster (pinned version, checksum verified);
@@ -77,6 +88,39 @@ Copy `bin/*` to `$LAB/bin`, the repository's `config/` and
 | `first-cert-stalled.sh HOST PORT [HOLD]` | Enrols a host while the issuer is stalled for HOLD seconds, then completes it; logs the manager's `GetHostInfo failed` lines per minute while the Host waited, when the key was pinned and when a signed answer verified. |
 | `renewal-slow-issuer.sh HOST [HOLD]` | Stalls the issuer for HOLD seconds as soon as the agent made its renewal request, then restores it; logs the renewal events and whether the agent drew a second key. |
 | `watch-renewal.sh HOST [SECONDS] [INTERVAL]` | Logs every change of the Host's `status.agent`, the renewal `CertificateRequest`s, the agent's installed certificate and renewal files, and renewal Events. |
+
+## Running
+
+An online enrolment end to end, as root in the VM, with `$LAB` laid out as
+in "Build":
+
+```sh
+cd "$LAB/scripts"
+./setup-cluster.sh
+./pki.sh
+./install-virtrigaud.sh            # the shipped samples, no patches
+./host-provision.sh h1 9461
+./enrol-online.sh h1 9461
+```
+
+The other scripts run on that installation; most take the name and port of
+a host that `host-provision.sh` prepared (and, for the renewal and
+revocation checks, one that is already enrolled).
+
+## What PASS means
+
+`enrol-online.sh`, `enrol-offline.sh` and `rekey-expired.sh` end with a
+`PASS` line (exit code 0) once the Host reports `AgentAnswerVerified=True`,
+that is, the manager verified a host answer signed with the enrolled key,
+and with a `FAIL` line and exit code 1 otherwise. The setup and install
+scripts stop at the first error (`set -e`) and wait for every component to
+become ready. The fault and negative checks (revocation, renewal, Provider
+certificate, admission, handshake faults, pins conflict, migration volumes)
+print timestamped observations: compare them with the behaviour that
+`docs/host-agent-enrolment.md` and `docs/per-host-agent-development.md`
+describe for that case (for example, a revoked host refused by the Provider,
+a renewal request withdrawn, a Provider certificate without its UID reported
+as `ProviderCertificateRefused`).
 
 ## enrol-lab
 

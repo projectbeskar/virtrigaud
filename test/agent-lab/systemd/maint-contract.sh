@@ -36,7 +36,7 @@
 set -uo pipefail
 . "$(dirname "$0")/common.sh"
 set +e
-CMD=${1:?usage: maint-contract.sh kicker-stopped|boot-state|uid-move USER|uid-restore USER|seccomp-log}
+CMD=${1:?usage: maint-contract.sh kicker-stopped|boot-state|uid-move USER|uid-restore USER|maint-burst|restart-burst [N]|foreign-entries DIR [pki]|seccomp-log}
 fails=0
 agent_state() { systemctl show -p ActiveState --value vrtg-agent.service; }
 check_stopped() {

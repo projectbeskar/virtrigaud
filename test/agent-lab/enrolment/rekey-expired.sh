@@ -61,3 +61,5 @@ for _ in $(seq 1 200); do
   sleep 1
 done
 log "after: AgentEnrolled=$(cond AgentEnrolled) AgentAnswerVerified=$(cond AgentAnswerVerified) Ready=$(cond Ready) expiry=$($K -n "$PROVIDER_NS" get host "$H" -o jsonpath='{.status.agent.certificateExpiry}')"
+if [ "$(cond AgentAnswerVerified)" = True/Verified ]; then log "PASS re-key: a signed host answer verified with the new key"; else
+  log "FAIL re-key: AgentAnswerVerified=$(cond AgentAnswerVerified)"; exit 1; fi

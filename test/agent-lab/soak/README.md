@@ -5,6 +5,14 @@ build) and its operation store. It is test tooling: it runs as root **inside a
 disposable test VM**, never on a shared host. The driver is
 `test/agent-lab/cmd/agent-soak`.
 
+## Prerequisites
+
+An unprivileged QEMU test bed on a machine of your own and one disposable VM
+(any recent systemd distribution; 4 GiB of memory is enough for the kill
+soak) with a second, disposable virtual disk for the agent's state:
+`setup-host.sh` formats it. Never run the tool on a shared or production
+host.
+
 ## Build and prepare
 
 ```sh
@@ -83,6 +91,16 @@ Checks (every violation fails the run; the result is JSON, default
 Outcomes `UNKNOWN` (a once step's witness exists without its effect, or an
 irreversible step's goal was not observed) and `FAILED_DIRTY` are counted and
 reported; they are the store's fail-closed answers, not violations.
+
+A short run, as root in the VM after `setup-host.sh`:
+
+```sh
+/opt/agent-soak/agent-soak soak --kills 50 --workers 4
+```
+
+PASS: the tool prints a JSON result with `"verdict": "PASS"` and exits 0
+when the run recorded no violation of the checks above; any violation sets
+`"verdict": "FAIL"`, lists it under `violation_details`, and exits 1.
 
 ## Store growth
 

@@ -15,6 +15,16 @@ under `/var/lib/virtrigaud-agent/fake-executor/vms/`. Scripts seed powered-on
 fake VMs there and compare their content digest and modification time before
 and after each action: any difference is a VM touched.
 
+## Prerequisites
+
+- An unprivileged QEMU test bed on a machine of your own, and disposable
+  VMs that you can destroy afterwards: Ubuntu 24.04 or Rocky Linux 9 for the
+  package-style runs, a Kairos image for the system extension runs. The
+  scripts change the VM's users, units, kernel command line and file
+  systems; never run them on a shared or production host.
+- A Go toolchain on the build machine; `systemd-repart` and `erofs-utils` in
+  the VM that builds the system extension.
+
 ## Build
 
 ```sh
@@ -47,7 +57,36 @@ Stage directory copied into the VM (`STAGE`): `bin/vrtg-agent`,
 | `persistent-state.sh CASE...` | Puts the state directory on tmpfs, on an overlay whose upper is on tmpfs, on an ext4 loop device backed by tmpfs, or removes the provisioning marker, and expects `StateNotPersistent`; `as-is` expects READY (or a refusal with `EXPECT_AS_IS=refuse`). |
 | `build-sysext.sh STAGE OUT` | Builds an erofs + dm-verity system extension image (no signature partition) carrying exactly the shipped files: binary, every unit and the `multi-user.target.d` drop-in, sysusers.d and tmpfiles.d fragments, and a trust configuration. |
 | `sysext-host.sh` | Immutable-host side (Kairos): `persist on\|off` (bind-mount rule for the state directories), `activate IMAGE` (install and enable for every boot entry), `provision STAGE`, `report` (one block of boot evidence: setup-unit ordering, user ids, units, Hello), `maint` (a maintenance-stopped agent must stay stopped through shutdown-unit stop/start/try-restart, `daemon-reload` and an extension refresh), `kicker-stop` (stopping the once-per-boot start unit by hand must not start a maintenance-stopped agent). |
+| `maint-contract.sh CMD` | The maintenance contract with the shipped units: `kicker-stopped` (a maintenance-stopped agent stays stopped through restarts of the boot-start unit and a package-style reinstall), `boot-state` (after a boot: enablement, unit states, the boot-start unit's log), `uid-move USER` / `uid-restore USER` (a service user moved to another uid: the setup unit fails and the agent and signer stay down; restored: all start), `maint-burst` and `restart-burst N` (routine maintenance in quick succession never puts the shutdown unit in `start-limit-hit`), `foreign-entries DIR [pki]` (entries of another owner under a state directory fail the setup unit, which names them), `seccomp-log` (the filter's EPERM and log channel on a transient unit). |
 | `crash-temps.sh` | Plants the temporaries an interrupted atomic write leaves in `pki/` and in the signer's key directory, kills agent and signer with SIGKILL, and checks that the restarted processes removed them (and kept look-alikes). |
+
+## Running
+
+A minimal run on a fresh VM, as root in the VM, with `STAGE` copied in:
+
+```sh
+EXECUTOR=fake ./install.sh "$STAGE"   # install as shipped, plus the fake-executor drop-ins
+./analyze.sh                          # unit analysis, filter and inventory probe
+./shutdown-guard.sh run 8             # no VM touched by maintenance actions
+./maint-contract.sh kicker-stopped    # a maintenance-stopped agent stays stopped
+systemctl reboot
+# after the reboot:
+./shutdown-guard.sh after-reboot      # the guard stopped every VM at the reboot
+./maint-contract.sh boot-state        # the agent started once at boot
+```
+
+The other scripts are independent checks run the same way on a VM prepared
+by `install.sh`.
+
+## What PASS means
+
+Scripts with checks print one `PASS` or `FAIL` line per check and end with
+`VERDICT PASS` (exit code 0) only when every check passed. `install.sh`,
+`analyze.sh`, `build-sysext.sh` and the `report` command of `sysext-host.sh`
+print evidence (unit states, `systemd-analyze` output, a `Hello` answer)
+for a reader to check: every unit active or, for the oneshots, exited
+successfully, no `SIGSYS` exit or seccomp record, and a signed `Hello`
+answer whose agent state is `READY`.
 
 ## Older agent for the rollback check
 

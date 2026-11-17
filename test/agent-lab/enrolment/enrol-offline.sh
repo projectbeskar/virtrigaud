@@ -98,3 +98,5 @@ for _ in $(seq 1 200); do
   [ "$v" = True ] && break; sleep 1
 done
 log "AgentEnrolled=$($K -n "$PROVIDER_NS" get host "$H" -o jsonpath='{.status.conditions[?(@.type=="AgentEnrolled")].reason}') AgentAnswerVerified=$v"
+if [ "$v" = True ]; then log "PASS offline enrolment: a signed host answer verified"; else
+  log "FAIL offline enrolment: AgentAnswerVerified=$v"; exit 1; fi
