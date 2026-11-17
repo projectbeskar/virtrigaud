@@ -278,7 +278,8 @@ one chunk at most. At most 32 discards can be pending at once; a further
 confirmation is refused, with an error in the agent's log, until compaction
 has finished one, and the predecessor stays frozen until the confirmation is
 relayed again. Compaction removes records only of an enrolment the store
-has retired; a discard marker naming any other fails the compaction.
+has retired; a discard marker naming any other quarantines the store
+(`inconsistent_store`).
 
 ### Host checks
 

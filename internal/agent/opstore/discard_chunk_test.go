@@ -306,7 +306,8 @@ func TestConfirmFreeze_WaitIsBoundedByContext(t *testing.T) {
 
 // A discard marker naming an enrolment that is not retired (damage: only a
 // confirmation writes the marker, and it retires the enrolment first) never
-// makes compaction remove that enrolment's records: it fails closed.
+// makes compaction remove that enrolment's records: the store is
+// quarantined at once.
 func TestCompact_MarkerOfANonRetiredEnrolmentRemovesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.fresh()
@@ -317,7 +318,9 @@ func TestCompact_MarkerOfANonRetiredEnrolmentRemovesNothing(t *testing.T) {
 	})
 	require.NoError(t, err)
 	_, err = h.s.Compact(context.Background(), opstore.DefaultCompactBatch)
-	require.Error(t, err, "compaction refuses the marker")
+	var lost *journal.LostError
+	require.ErrorAs(t, err, &lost, "compaction refuses the marker")
+	assert.True(t, h.s.Lost(), "the store is quarantined")
 	after, enrolment, _ := rawRecords(t, h, h.enrol)
 	assert.Equal(t, before, after, "nothing of the active enrolment was removed")
 	assert.True(t, enrolment)

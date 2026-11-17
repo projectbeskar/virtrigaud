@@ -358,6 +358,8 @@ func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]
 		case err == nil:
 			done = append(done, append([]byte(nil), id...))
 		case errors.Is(err, ErrTooManyDiscards):
+			// The rest of the ids are not tried either: each would be
+			// refused the same way, or is already pending (a no-op).
 			return done, err
 		case errors.Is(err, ErrEnrolment):
 			// Not a frozen predecessor (unknown, already discarded, or a
@@ -546,8 +548,8 @@ func (s *Store) resumeDiscard(ctx context.Context) (int, error) {
 // records removed, whether no discard is pending any more, and the
 // enrolment it worked on. It removes that enrolment's witness directory
 // first, unless witnessed names it (done earlier in this resume). An id
-// the marker names that is not retired is never touched: the store fails
-// closed.
+// the marker names that is not retired is never touched: the store is
+// quarantined (inconsistent_store).
 func (s *Store) resumeStep(ctx context.Context, witnessed []byte) (int, bool, []byte, error) {
 	if err := s.lockDiscard(ctx); err != nil {
 		return 0, false, nil, err
@@ -570,7 +572,12 @@ func (s *Store) resumeStep(ctx context.Context, witnessed []byte) (int, bool, []
 	}
 	prev := pending[0]
 	if !retired && !guard.Off(guard.DiscardOnlyRetired) {
-		return 0, false, nil, fmt.Errorf("%w: the discard marker names an enrolment that is not retired", errCorruptRecord)
+		// Only a confirmation writes the marker, and it retires the
+		// enrolment in the same transaction: this is damage. Quarantine at
+		// once, visibly, rather than stop compaction for good.
+		s.j.Quarantine(journal.LostInconsistentStore, "the discard marker names an enrolment that is not retired")
+		s.emit(AuditEvent{Event: "quarantined", Reason: string(journal.LostInconsistentStore)})
+		return 0, false, nil, &journal.LostError{Reason: journal.LostInconsistentStore}
 	}
 	if !sameBytes(prev, witnessed) {
 		// A removal that failed in ConfirmFreeze is retried here.
