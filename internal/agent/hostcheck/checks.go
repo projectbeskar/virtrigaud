@@ -244,8 +244,11 @@ func CheckSignerKeyDirPersistent(p Probe, keyFile string) error {
 	if err := checkPersistent(p, ReasonSignerKeyNotPersistent, check, filepath.Dir(keyFile)); err != nil {
 		return err
 	}
-	if _, err := p.Lstat(keyFile); err != nil {
+	switch _, err := p.Lstat(keyFile); {
+	case errors.Is(err, fs.ErrNotExist):
 		return nil // no key yet (enroll csr makes it): nothing else to look at
+	case err != nil:
+		return refuse(ReasonSignerKeyNotPersistent, check, "cannot look at %s: %v", keyFile, err)
 	}
 	return checkPersistent(p, ReasonSignerKeyNotPersistent, check, keyFile)
 }

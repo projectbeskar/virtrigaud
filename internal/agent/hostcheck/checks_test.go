@@ -346,6 +346,25 @@ func TestSignerKeyFileOwnMount(t *testing.T) {
 	require.NoError(t, hostcheck.CheckSignerKeyDirPersistent(p, keyFile))
 }
 
+// lstatErrProbe fails every Lstat with a permission error.
+type lstatErrProbe struct{ *hostchecktest.Fake }
+
+func (lstatErrProbe) Lstat(path string) (hostcheck.FileInfo, error) {
+	return hostcheck.FileInfo{}, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrPermission}
+}
+
+// TestSignerKeyFileLstatError: an error other than "does not exist" when
+// looking at the key file refuses; only a missing key skips its mount check.
+func TestSignerKeyFileLstatError(t *testing.T) {
+	keyFile := "/var/lib/virtrigaud-signer/host.key"
+	err := hostcheck.CheckSignerKeyDirPersistent(lstatErrProbe{healthy()}, keyFile)
+	require.Error(t, err)
+	f, ok := hostcheck.AsFailure(err)
+	require.True(t, ok)
+	assert.Equal(t, hostcheck.ReasonSignerKeyNotPersistent, f.Reason)
+	assert.Contains(t, err.Error(), keyFile)
+}
+
 // notExistProbe reports every path as missing.
 type notExistProbe struct{ *hostchecktest.Fake }
 
