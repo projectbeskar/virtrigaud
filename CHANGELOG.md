@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-17 21:00] - Per-host agent: enrolment and the signer refuse non-persistent storage (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `cmd/vrtg-agent/enroll.go`: `enroll csr` and `enroll install` did not check that the agent's state directory is on persistent storage, so on a host whose state is in memory (an immutable host with no persistent volume, where `/var` falls back to tmpfs) enrolment succeeded and the identity was lost at the next reboot. Both steps now refuse, before anything is written, with an error naming the directory and its file system (`hostcheck.CheckPersistent`'s rule). `enroll csr` has a new `--state-dir` flag (default `/var/lib/virtrigaud-agent`; only its mount is looked at) and also refuses when the directory of `--key-file` is not persistent, before it creates the host key.
+- `internal/agent/signer/run.go`: the signer refuses to start (logging `start refused` with reason `SignerKeyNotPersistent`) when the directory of its key file is not on persistent storage. `RunOptions.Probe` is new (nil is the real host).
+- `internal/agent/hostcheck/checks.go`, `doc.go`: `CheckEnrolStatePersistent`, `CheckSignerKeyDirPersistent` and the `SignerKeyNotPersistent` reason, sharing `CheckPersistent`'s rule; `CheckPersistent` is unchanged.
+- `internal/agent/internal/guard/guard.go`: mutation guards `enrol-state-persistent` and `signer-key-dir-persistent`, each killed by a test.
+- `internal/agent/hostcheck/checks_test.go`, `internal/agent/signer/run_test.go`, `cmd/vrtg-agent/enroll_test.go`: a refusal test per step and directory, and the persistent case still passes.
+- `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`: the host checks table, the enrolment steps and the enrolment page describe the checks.
+
+### Why
+Maintainer decision MD-37 (item O-10): the agent already refused to start on non-persistent state, but enrolment and the signer's key directory were not covered, so a host could enrol and lose its identity or key at reboot.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Development builds only: release builds ship neither the agent nor the signer. No public CRD or protobuf change. A development host whose signer key directory is on tmpfs now fails to start the signer until the directory is on persistent storage.
+
 ## [2026-11-17 19:00] - Per-host agent: discard a re-keyed Host's predecessor in bounded chunks (development builds only)
 **Author:** @wrkode (William Rizzo)
 
