@@ -24,8 +24,9 @@ the recommended ClusterIssuer), and could sign CA-valid host-agent
 certificates with no approval at all. No rbac.additionalRules entry may cover
 core-group Secrets, and each entry's apiGroups and resources must be lists of
 strings so that this can be checked. experimental.hostEnrolment.caKeySecret is
-required with a cert-manager signer (a signer in the cert-manager.io group).
-The chart cannot tell where an external signer keeps its key: declaring
+required with a cert-manager signer (<resource>.cert-manager.io, exactly one
+label before the group; a sub-group such as awspca.cert-manager.io is an
+external issuer's). The chart cannot tell where an external signer keeps its key: declaring
 caKeySecret when that key is in the cluster is the operator's responsibility.
 Neither the enrolment namespace
 nor the namespace of the sub-CA key Secret may be listed in
@@ -38,13 +39,15 @@ rbac.secrets.providerNamespaces or workloadNamespaces:
     of workloads, and only the manager may write Secrets in the enrolment
     namespace.
 
-The development manager checks its Secret access, and the RBAC escalation
-primitives that could widen it, with SelfSubjectAccessReviews at startup and
-every few minutes (--dev-host-enrolment-ca-key-secret), whatever renders its
-RBAC. Those reviews need
-create on selfsubjectaccessreviews, which Kubernetes grants every
-authenticated user through the default system:basic-user ClusterRole, so no
-rule is added for them.
+The development manager checks its Secret access and the listed escalation
+paths, cluster-wide and in the declared key namespace
+(--dev-host-enrolment-ca-key-secret), at startup and every few minutes, whatever
+renders its RBAC. It uses SelfSubjectAccessReviews and a SelfSubjectRulesReview,
+which also finds grants limited by resourceNames. It does not review other
+namespaces (see docs/host-agent-enrolment.md). Those reviews need create on
+selfsubjectaccessreviews and selfsubjectrulesreviews, which Kubernetes grants
+every authenticated user through the default system:basic-user ClusterRole, so
+no rule is added for them.
 */ -}}
 {{- $he := ((.Values.experimental | default dict).hostEnrolment | default dict) }}
 {{- if and .Values.rbac.create $he.enabled }}
@@ -83,7 +86,7 @@ rule is added for them.
 {{- end }}
 {{- $certManagerSigner := false }}
 {{- range $he.signerNames }}
-{{- if hasSuffix ".cert-manager.io" (first (splitList "/" .)) }}
+{{- if regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.cert-manager\\.io$" (first (splitList "/" .)) }}
 {{- $certManagerSigner = true }}
 {{- end }}
 {{- end }}
@@ -112,6 +115,9 @@ rule is added for them.
 {{- end }}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$" (first (splitList "/" .))) }}
 {{- fail (printf "experimental.hostEnrolment.signerNames: %q must start with a lowercase <resource>.<group> with no trailing dot" .) }}
+{{- end }}
+{{- if eq (first (splitList "/" .)) "cert-manager.io" }}
+{{- fail (printf "experimental.hostEnrolment.signerNames: %q names no resource; a cert-manager signer is issuers.cert-manager.io/<namespace>.<name> or clusterissuers.cert-manager.io/<name>" .) }}
 {{- end }}
 {{- end }}
 apiVersion: rbac.authorization.k8s.io/v1

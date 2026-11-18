@@ -345,19 +345,20 @@ experimental:
     # cert-manager/host-agent-ca for a ClusterIssuer whose key lives in
     # cert-manager's cluster resource namespace. Required when signerNames
     # lists a cert-manager signer (issuers.cert-manager.io/... or
-    # clusterissuers.cert-manager.io/...). The chart cannot tell where an
-    # external signer keeps its key: if that key is in this cluster, you must
-    # declare it here too. Rendering fails when the Secret is
+    # clusterissuers.cert-manager.io/...; a sub-group such as
+    # awspca.cert-manager.io counts as external). The chart cannot tell where
+    # an external signer keeps its key: if that key is in this cluster, you
+    # must declare it here too. Rendering fails when the Secret is
     # in the enrolment namespace or its namespace is listed in
     # rbac.secrets.providerNamespaces or workloadNamespaces. The chart does
     # not start the enrolment manager: pass the same value to it as
     # --dev-host-enrolment-ca-key-secret. The manager then refuses to run
     # enrolment while any of its RBAC rules, even one limited to named
-    # objects, covers Secrets in that namespace, exec, attach or ephemeral
-    # containers on pods there, impersonation, ServiceAccount tokens,
-    # changes to role bindings, or bind or escalate on roles. It warns,
-    # without refusing, while it may create or change Deployments or create
-    # Pods in that namespace.
+    # objects, covers Secrets in that namespace, changing, exec, attach or
+    # ephemeral containers on pods there, nodes/proxy, impersonation,
+    # ServiceAccount tokens, changes to role bindings, or bind or escalate on
+    # roles. It warns, without refusing, while it may create or change
+    # workloads in that namespace. It does not review other namespaces.
     caKeySecret: ""
     # Exact cert-manager signer names the manager may approve for, e.g.
     # issuers.cert-manager.io/<namespace>.<name> or
