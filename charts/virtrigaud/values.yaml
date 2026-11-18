@@ -323,7 +323,11 @@ rbac:
 # flags. Off by default; see docs/host-agent-enrolment.md.
 experimental:
   hostEnrolment:
-    # Render the enrolment Role/ClusterRole and their bindings.
+    # Render the enrolment Role/ClusterRole and their bindings. Needs
+    # rbac.secrets.scope: namespaced (rendering fails otherwise): with the
+    # cluster scope the manager could read the host-agent subordinate CA's
+    # key. The development manager refuses to run enrolment while it may
+    # get or list Secrets in all namespaces, whatever renders its RBAC.
     enabled: false
     # Must be set to true together with enabled: an explicit statement that
     # the manager image is a development build. Rendering fails otherwise.
@@ -331,8 +335,18 @@ experimental:
     # Namespace of the host-agent issuer, of the enrolment
     # CertificateRequests and of the pins Secrets
     # (--dev-host-enrolment-namespace). Grant nobody but the manager Secret
-    # write access in it.
+    # write access in it. It must not be listed in
+    # rbac.secrets.providerNamespaces or workloadNamespaces (rendering fails).
     namespace: ""
+    # Optional: <namespace>/<name> of the host-agent subordinate CA's key
+    # Secret, e.g. cert-manager/host-agent-ca for a ClusterIssuer whose key
+    # lives in cert-manager's cluster resource namespace. Rendering fails when
+    # its namespace is the enrolment namespace or is listed in
+    # rbac.secrets.providerNamespaces or workloadNamespaces. The chart does
+    # not start the enrolment manager: pass the same value to it as
+    # --dev-host-enrolment-ca-key-secret, and it refuses to run enrolment
+    # while it may get, list or watch that Secret.
+    caKeySecret: ""
     # Exact cert-manager signer names the manager may approve for, e.g.
     # issuers.cert-manager.io/<namespace>.<name> or
     # clusterissuers.cert-manager.io/<name>. No wildcard is accepted.

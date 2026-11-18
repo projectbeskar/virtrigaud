@@ -16,6 +16,29 @@ Secrets in the enrolment namespace.
 It renders only with experimental.hostEnrolment.developmentBuild=true, an
 explicit statement that the manager image is a development build (a release
 manager cannot use these grants).
+
+It also renders only with rbac.secrets.scope=namespaced: with the cluster
+scope the manager can read every Secret, including the host-agent
+subordinate CA's key Secret (in cert-manager's cluster resource namespace for
+the recommended ClusterIssuer), and could sign CA-valid host-agent
+certificates with no approval at all. Neither the enrolment namespace nor the
+namespace of the declared sub-CA key Secret
+(experimental.hostEnrolment.caKeySecret) may be listed in
+rbac.secrets.providerNamespaces or workloadNamespaces:
+
+  - The sub-CA key namespace must give the manager no Secret access at all.
+  - The enrolment namespace gets its Secret verbs from this file's Role only.
+    A namespaced-grant Role there would add no verb, but listing it declares
+    it a namespace of Provider objects (whose authors write Secrets there) or
+    of workloads, and only the manager may write Secrets in the enrolment
+    namespace.
+
+The development manager checks the same at startup with
+SelfSubjectAccessReviews (--dev-host-enrolment-ca-key-secret), so a manager
+whose RBAC is not rendered by this chart is held to it too. Those reviews need
+create on selfsubjectaccessreviews, which Kubernetes grants every
+authenticated user through the default system:basic-user ClusterRole, so no
+rule is added for them.
 */ -}}
 {{- $he := ((.Values.experimental | default dict).hostEnrolment | default dict) }}
 {{- if and .Values.rbac.create $he.enabled }}
@@ -23,6 +46,30 @@ manager cannot use these grants).
 {{- fail "experimental.hostEnrolment.enabled needs experimental.hostEnrolment.developmentBuild=true: per-host agent enrolment works only with a development build of the manager (built with the virtrigaud_dev tag); a release manager refuses its flags and must not hold a signer approve grant" }}
 {{- end }}
 {{- $ns := required "experimental.hostEnrolment.namespace is required when experimental.hostEnrolment.enabled is true" $he.namespace }}
+{{- if ne (include "virtrigaud.secretsScope" .) "namespaced" }}
+{{- fail "experimental.hostEnrolment.enabled needs rbac.secrets.scope=namespaced: with the cluster scope the manager can read every Secret in the cluster, including the host-agent subordinate CA's key, and a compromised manager could then sign CA-valid host-agent certificates without any approval; the sub-CA key must not be readable by the manager (list the namespaces the manager needs in rbac.secrets.providerNamespaces and workloadNamespaces, see docs/manager-secret-access.md)" }}
+{{- end }}
+{{- $ns = include "virtrigaud.secretNamespaceList" (dict "value" (list $ns) "name" "experimental.hostEnrolment.namespace") }}
+{{- $secretsValues := (dig "secrets" dict (.Values.rbac | default dict)) | default dict }}
+{{- $providerNamespaces := splitList "," (include "virtrigaud.secretProviderNamespaces" .) }}
+{{- $workloadNamespaces := splitList "," (include "virtrigaud.secretNamespaceList" (dict "value" $secretsValues.workloadNamespaces "name" "rbac.secrets.workloadNamespaces")) }}
+{{- $granted := concat $providerNamespaces $workloadNamespaces }}
+{{- if has $ns $granted }}
+{{- fail (printf "experimental.hostEnrolment.namespace %q must not be listed in rbac.secrets.providerNamespaces or workloadNamespaces: only the manager may write Secrets in the enrolment namespace, and its Secret access there comes from the enrolment Role alone; keep Provider objects and workloads in other namespaces" $ns) }}
+{{- end }}
+{{- with $he.caKeySecret }}
+{{- $parts := splitList "/" (toString .) }}
+{{- if or (ne (len $parts) 2) (gt (len (index $parts 0)) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (index $parts 0))) (gt (len (index $parts 1)) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" (index $parts 1))) }}
+{{- fail (printf "experimental.hostEnrolment.caKeySecret: %q must be <namespace>/<name> of the host-agent subordinate CA's key Secret" (toString .)) }}
+{{- end }}
+{{- $keyNS := index $parts 0 }}
+{{- if eq $keyNS $ns }}
+{{- fail (printf "experimental.hostEnrolment.caKeySecret: the sub-CA key Secret must not be in the enrolment namespace %q, where the manager can read and write Secrets; use a ClusterIssuer, whose key Secret lives in cert-manager's cluster resource namespace" $ns) }}
+{{- end }}
+{{- if has $keyNS $granted }}
+{{- fail (printf "experimental.hostEnrolment.caKeySecret: namespace %q is listed in rbac.secrets.providerNamespaces or workloadNamespaces; the sub-CA key must not be readable by the manager, so grant it no Secret access in that namespace" $keyNS) }}
+{{- end }}
+{{- end }}
 {{- if not $he.signerNames }}
 {{- fail "experimental.hostEnrolment.signerNames must list the host-agent signer name(s), e.g. issuers.cert-manager.io/<namespace>.<name>" }}
 {{- end }}

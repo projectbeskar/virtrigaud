@@ -34,6 +34,11 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+// hostEnrolmentNamespacedSecrets are the chart values of the namespaced
+// Secret grant that per-host agent enrolment requires.
+var hostEnrolmentNamespacedSecrets = []string{"--set", "rbac.secrets.scope=namespaced",
+	"--set", "rbac.secrets.providerNamespaces={virt-a}", "--set", "rbac.secrets.workloadNamespaces={tenant-1}"}
+
 // assertHostEnrolmentRBAC checks a rendered set of enrolment RBAC objects:
 // approve on exact signers only, CertificateRequest access in one namespace
 // through a Role, no Secret access and no wildcard anywhere.
@@ -144,15 +149,17 @@ func TestRBAC_HostEnrolmentChartTemplate(t *testing.T) {
 	require.NoError(t, err, string(off))
 	assert.NotContains(t, string(off), "host-enrolment", "off by default")
 
-	out, err := exec.Command(helm, "template", "t", chart, "--show-only", "templates/host-enrolment-rbac.yaml", // #nosec G204 -- test-controlled arguments
+	out, err := exec.Command(helm, append([]string{"template", "t", chart, "--show-only", "templates/host-enrolment-rbac.yaml", // #nosec G204 -- test-controlled arguments
 		"--set", "experimental.hostEnrolment.enabled=true",
 		"--set", "experimental.hostEnrolment.developmentBuild=true",
 		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
-		"--set", "experimental.hostEnrolment.signerNames={clusterissuers.cert-manager.io/host-agent-ca}").CombinedOutput()
+		"--set", "experimental.hostEnrolment.signerNames={clusterissuers.cert-manager.io/host-agent-ca}"},
+		hostEnrolmentNamespacedSecrets...)...).CombinedOutput()
 	require.NoError(t, err, string(out))
 	assertHostEnrolmentRBAC(t, splitYAMLDocs(t, out), "host-agent-pki", []string{"clusterissuers.cert-manager.io/host-agent-ca"})
 
 	noDev, err := exec.Command(helm, "template", "t", chart, // #nosec G204 -- test-controlled arguments
+		"--set", "rbac.secrets.scope=namespaced", "--set", "rbac.secrets.providerNamespaces={virt-a}",
 		"--set", "experimental.hostEnrolment.enabled=true",
 		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
 		"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/host-agent-pki.host-agent-ca}").CombinedOutput()
@@ -165,10 +172,86 @@ func TestRBAC_HostEnrolmentChartTemplate(t *testing.T) {
 		"no namespace":    {"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/x.y}"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			all := append([]string{"template", "t", chart, "--set", "experimental.hostEnrolment.enabled=true",
-				"--set", "experimental.hostEnrolment.developmentBuild=true"}, args...)
+			all := append(append([]string{"template", "t", chart, "--set", "experimental.hostEnrolment.enabled=true",
+				"--set", "experimental.hostEnrolment.developmentBuild=true"}, hostEnrolmentNamespacedSecrets...), args...)
 			out, err := exec.Command(helm, all...).CombinedOutput() // #nosec G204 -- test-controlled arguments
 			assert.Error(t, err, string(out))
 		})
 	}
+}
+
+// TestRBAC_HostEnrolmentChartNeedsNamespacedSecretGrant: the enrolment RBAC
+// renders only with the namespaced Secret grant, never with the enrolment
+// namespace or the declared sub-CA key Secret's namespace among the
+// namespaces that grant the manager Secret access.
+func TestRBAC_HostEnrolmentChartNeedsNamespacedSecretGrant(t *testing.T) {
+	enrolment := []string{"--set", "experimental.hostEnrolment.enabled=true",
+		"--set", "experimental.hostEnrolment.developmentBuild=true",
+		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
+		"--set", "experimental.hostEnrolment.signerNames={clusterissuers.cert-manager.io/host-agent-ca}"}
+	render := func(t *testing.T, args ...string) (string, error) {
+		t.Helper()
+		return secretRBACRender(t, append(append([]string{}, enrolment...), args...)...)
+	}
+
+	t.Run("accepted", func(t *testing.T) {
+		for name, args := range map[string][]string{
+			"namespaced grant":                         hostEnrolmentNamespacedSecrets,
+			"namespaced grant with a sub-CA key":       append([]string{"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/host-agent-ca"}, hostEnrolmentNamespacedSecrets...),
+			"sub-CA key name with dots":                append([]string{"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/host-agent.ca-key"}, hostEnrolmentNamespacedSecrets...),
+			"namespaced grant, release-namespace RBAC": append([]string{"--set", "rbac.scope=namespace"}, hostEnrolmentNamespacedSecrets...),
+		} {
+			t.Run(name, func(t *testing.T) {
+				out, err := render(t, args...)
+				require.NoError(t, err, out)
+				grants, _ := renderedSecretGrants(t, out)
+				for g := range grants {
+					assert.NotContains(t, g, "cert-manager/", "no Secret grant in the sub-CA key namespace")
+					assert.NotContains(t, g, "ClusterRole", "no cluster-wide Secret grant")
+				}
+				assert.Contains(t, grants, "Role host-agent-pki/rel-virtrigaud-host-enrolment")
+			})
+		}
+	})
+
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"default cluster scope": {nil, "needs rbac.secrets.scope=namespaced"},
+		"explicit cluster scope": {[]string{"--set", "rbac.secrets.scope=cluster"},
+			"the sub-CA key must not be readable by the manager"},
+		"enrolment namespace is a Provider namespace": {[]string{"--set", "rbac.secrets.scope=namespaced",
+			"--set", "rbac.secrets.providerNamespaces={virt-a,host-agent-pki}"},
+			`experimental.hostEnrolment.namespace "host-agent-pki" must not be listed`},
+		"enrolment namespace is a workload namespace": {[]string{"--set", "rbac.secrets.scope=namespaced",
+			"--set", "rbac.secrets.providerNamespaces={virt-a}", "--set", "rbac.secrets.workloadNamespaces={host-agent-pki}"},
+			`experimental.hostEnrolment.namespace "host-agent-pki" must not be listed`},
+		"sub-CA key in the enrolment namespace": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=host-agent-pki/ca-key"},
+			hostEnrolmentNamespacedSecrets...), "must not be in the enrolment namespace"},
+		"sub-CA key in a Provider namespace": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=virt-a/ca-key"},
+			hostEnrolmentNamespacedSecrets...), `namespace "virt-a" is listed`},
+		"sub-CA key in a workload namespace": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=tenant-1/ca-key"},
+			hostEnrolmentNamespacedSecrets...), `namespace "tenant-1" is listed`},
+		"sub-CA key without a namespace": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=ca-key"},
+			hostEnrolmentNamespacedSecrets...), "must be <namespace>/<name>"},
+		"sub-CA key with an extra segment": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=a/b/c"},
+			hostEnrolmentNamespacedSecrets...), "must be <namespace>/<name>"},
+		"sub-CA key with an invalid namespace": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=Cert_Manager/ca"},
+			hostEnrolmentNamespacedSecrets...), "must be <namespace>/<name>"},
+		"sub-CA key with an empty name": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/"},
+			hostEnrolmentNamespacedSecrets...), "must be <namespace>/<name>"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, err := render(t, tc.args...)
+			require.Error(t, err, out)
+			assert.Contains(t, out, tc.want)
+		})
+	}
+
+	// With rbac.create=false the chart renders no enrolment RBAC and checks
+	// nothing: the manager's startup check holds whoever grants it RBAC.
+	out, err := render(t, "--set", "rbac.create=false")
+	require.NoError(t, err, out)
+	assert.NotContains(t, out, "host-enrolment")
 }
