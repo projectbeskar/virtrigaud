@@ -1273,9 +1273,13 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   `soft-reboot.target`'s `ActiveEnterTimestampMonotonic` (`systemctl
   show`), which is 0 until the first soft reboot and is the time of the
   last soft reboot after it. The monotonic clock does not restart at a soft
-  reboot, and systemd keeps every unit's timestamps across a soft reboot, a
-  `daemon-reexec` and a `daemon-reload`, so the value changes at each soft
-  reboot and only then. This boot's marker is
+  reboot, and systemd keeps the timestamps of the units it keeps loaded
+  across a soft reboot, a `daemon-reexec` and a `daemon-reload`; the target
+  stays loaded (`systemd-journald.service` conflicts with it), so the value
+  changes at each soft reboot and only then. If it ever read 0 after a soft
+  reboot, the command would treat the userspace as the boot's own and every
+  agent started since the boot as already started: it could miss a start,
+  never make a second one. This boot's marker is
   `/run/vrtg-agent-boot-start/started` while the value is 0 and
   `/run/vrtg-agent-boot-start/started.<value>` after a soft reboot. The
   command does nothing when this boot's marker already exists. A marker of
@@ -1288,7 +1292,8 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   agent unit's `InactiveExitTimestampMonotonic`, and the agent counts as
   started this boot when that time is after the time this boot began (a
   non-zero value alone is not enough: the value from before a soft reboot is
-  kept). Then it makes the marker and starts nothing, so an agent started by
+  kept while the unit stays loaded; a disabled agent that nothing references
+  may be unloaded and read 0, and a disabled agent is never started). Then it makes the marker and starts nothing, so an agent started by
   hand after a failed setup and stopped for maintenance is not started again
   by a package's restart of the unit, and neither is an agent its own
   `[Install]` links started after a soft reboot. Otherwise it runs after the

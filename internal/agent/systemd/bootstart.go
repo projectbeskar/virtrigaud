@@ -87,19 +87,26 @@ type UnitStarter interface {
 
 // LastSoftReboot implements UnitStarter from SoftRebootTarget's
 // ActiveEnterTimestampMonotonic. The monotonic clock does not restart at a
-// soft reboot, and the manager keeps its units' timestamps across a soft
-// reboot, a daemon-reexec and a daemon-reload, so the value changes at each
-// soft reboot and only then. It is 0 until the first soft reboot of the boot,
-// and on a systemd without soft reboot (before 254), where the target does
-// not exist and systemctl shows 0.
+// soft reboot, and the manager keeps the timestamps of the units it keeps
+// loaded across a soft reboot, a daemon-reexec and a daemon-reload. The
+// target stays loaded (systemd-journald.service conflicts with it), so the
+// value changes at each soft reboot and only then. It is 0 until the first
+// soft reboot of the boot, and on a systemd without soft reboot (before
+// 254), where the target does not exist and systemctl shows 0. Were the
+// target ever unloaded, the value would read 0: this boot would then look
+// like the boot's own, and StartedSince(0) holds for any agent started since
+// the boot, so the error could only miss a start, never make a second one.
 func (s Systemctl) LastSoftReboot(ctx context.Context) (uint64, error) {
 	return s.showUint(ctx, SoftRebootTarget, propActiveEnterMono)
 }
 
 // StartedSince implements UnitStarter from the unit's
 // InactiveExitTimestampMonotonic. The manager keeps that timestamp across a
-// soft reboot (the monotonic clock goes on), so a non-zero value alone does
-// not mean "started in this userspace": only a value after since does.
+// soft reboot while the unit stays loaded (the monotonic clock goes on), so a
+// non-zero value alone does not mean "started in this userspace": only a
+// value after since does. A unit the manager unloads (an inactive unit that
+// nothing references, such as a disabled agent) reads 0, never started;
+// BootStart does not start a disabled agent.
 func (s Systemctl) StartedSince(ctx context.Context, unit string, since uint64) (bool, error) {
 	v, err := s.showUint(ctx, unit, propInactiveExitMono)
 	if err != nil {
