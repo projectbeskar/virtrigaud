@@ -120,10 +120,10 @@ const (
 	// host-agent subordinate CA an issued certificate must chain to.
 	DevHostEnrolmentCABundleFileFlagName = "dev-host-enrolment-ca-bundle-file"
 	// DevHostEnrolmentCAKeySecretFlagName names, as <namespace>/<name>, the
-	// Secret holding the host-agent subordinate CA's private key (optional).
-	// With it, the manager also refuses to run enrolment while it may read
-	// that Secret (CheckHostEnrolmentSecretAccess). Only a development build
-	// registers it.
+	// Secret holding the host-agent subordinate CA's private key. It is
+	// required with a cert-manager issuer: the manager refuses to run enrolment while it
+	// may read that Secret (CheckHostEnrolmentSecretAccess). Only a
+	// development build registers it.
 	DevHostEnrolmentCAKeySecretFlagName = "dev-host-enrolment-ca-key-secret" // #nosec G101 -- a flag name, not a credential
 )
 
@@ -245,9 +245,10 @@ type HostEnrolmentConfig struct {
 	// CABundle is the PEM bundle of the subordinate CA. It is the only CA
 	// bundle ever rendered into an inventory.
 	CABundle []byte
-	// CAKeySecret is the Secret holding the subordinate CA's private key,
-	// or nil when the operator did not declare it. The manager must not be
-	// able to read it; it is never read here.
+	// CAKeySecret is the Secret holding the subordinate CA's private key.
+	// ParseHostEnrolmentConfig requires it with a cert-manager issuer; it is
+	// nil only with an external PKI alone (the key is outside the cluster).
+	// The manager must not be able to read it; it is never read here.
 	CAKeySecret *types.NamespacedName
 	// InstallID is the 16-byte install identifier (from the development
 	// operation signer).
@@ -263,7 +264,9 @@ type HostEnrolmentConfig struct {
 // flag set it returns nil and no error (enrolment disabled). A release build
 // refuses any flag. Otherwise the namespace, the admin group, the trust
 // domain, the CA bundle, at least one issuer and the install id (a loaded
-// development signer) are required, and an external-PKI reference must name
+// development signer) are required, the sub-CA key Secret is required with a
+// cert-manager issuer (it must not be in the enrolment namespace), and an
+// external-PKI reference must name
 // an explicit group other than cert-manager.io (cert-manager's controllers
 // would otherwise act on it).
 func ParseHostEnrolmentConfig(f HostEnrolmentFlags, installID []byte) (*HostEnrolmentConfig, error) {
@@ -325,17 +328,23 @@ func ParseHostEnrolmentConfig(f HostEnrolmentFlags, installID []byte) (*HostEnro
 		return nil, fmt.Errorf("--%s: %w", DevHostEnrolmentCABundleFileFlagName, err)
 	}
 	cfg.CABundle = data
-	if f.CAKeySecret != "" {
-		key, err := parseCAKeySecret(f.CAKeySecret)
-		if err != nil {
-			return nil, fmt.Errorf("--%s: %w", DevHostEnrolmentCAKeySecretFlagName, err)
+	if f.CAKeySecret == "" {
+		if cfg.CertManagerIssuer != nil {
+			return nil, fmt.Errorf("--%s is required with --%s: the manager checks at startup that it cannot read the host-agent sub-CA key Secret",
+				DevHostEnrolmentCAKeySecretFlagName, DevHostEnrolmentIssuerFlagName)
 		}
-		if key.Namespace == cfg.Namespace {
-			return nil, fmt.Errorf("--%s: the sub-CA key Secret must not be in the enrolment namespace %s, where the manager reads and writes Secrets; "+
-				"use a ClusterIssuer, whose key Secret lives in cert-manager's cluster resource namespace", DevHostEnrolmentCAKeySecretFlagName, cfg.Namespace)
-		}
-		cfg.CAKeySecret = &key
+		// External PKI only: the signing key is outside the cluster.
+		return cfg, nil
 	}
+	key, err := parseCAKeySecret(f.CAKeySecret)
+	if err != nil {
+		return nil, fmt.Errorf("--%s: %w", DevHostEnrolmentCAKeySecretFlagName, err)
+	}
+	if key.Namespace == cfg.Namespace {
+		return nil, fmt.Errorf("--%s: the sub-CA key Secret must not be in the enrolment namespace %s, where the manager reads and writes Secrets; "+
+			"use a ClusterIssuer, whose key Secret lives in cert-manager's cluster resource namespace", DevHostEnrolmentCAKeySecretFlagName, cfg.Namespace)
+	}
+	cfg.CAKeySecret = &key
 	return cfg, nil
 }
 

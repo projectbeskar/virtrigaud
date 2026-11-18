@@ -143,27 +143,37 @@ func ruleCovers(r admissionregistrationv1.RuleWithOperations, op admissionregist
 // admission check.
 const DefaultAdmissionRecheckInterval = 3 * time.Minute
 
-// AdmissionGate re-runs CheckCertManagerAdmission periodically; while the
-// last check failed, the request reconciler approves nothing. It is a
-// manager Runnable: Start runs until its context is cancelled.
+// AdmissionGate re-runs CheckCertManagerAdmission, and SecretAccess when set,
+// periodically; while the last check failed, the request reconciler decides
+// nothing. It is a manager Runnable: Start runs until its context is
+// cancelled.
 type AdmissionGate struct {
 	// Reader is a live API reader.
 	Reader client.Reader
 	// Namespace is the enrolment namespace.
 	Namespace string
+	// SecretAccess, when set, is run after the admission check (the manager
+	// passes CheckHostEnrolmentSecretAccess): a Secret grant added after
+	// startup that would expose the sub-CA key suspends approvals too.
+	SecretAccess func(ctx context.Context) error
 	// Interval between checks (zero: DefaultAdmissionRecheckInterval).
 	Interval time.Duration
 	ok       atomic.Bool
 }
 
-// Check runs the admission check once and records its outcome.
+// Check runs the admission check and the Secret access check once and
+// records their outcome.
 func (g *AdmissionGate) Check(ctx context.Context) error {
 	err := CheckCertManagerAdmission(ctx, g.Reader, g.Namespace)
+	if err == nil && g.SecretAccess != nil {
+		err = g.SecretAccess(ctx)
+	}
 	was := g.ok.Swap(err == nil)
 	if was && err != nil {
 		log.FromContext(ctx).Error(err, "Per-host agent enrolment approvals are suspended")
 	} else if !was && err == nil {
-		log.FromContext(ctx).Info("Per-host agent enrolment approvals are resumed: the admission webhooks cover CertificateRequests again")
+		log.FromContext(ctx).Info("Per-host agent enrolment approvals are resumed: the admission webhooks cover CertificateRequests " +
+			"and the manager may not read the sub-CA key Secret")
 	}
 	return err
 }

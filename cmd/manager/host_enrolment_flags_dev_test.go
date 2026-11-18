@@ -23,12 +23,17 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/projectbeskar/virtrigaud/cmd/internal/envtestutil"
 	"github.com/projectbeskar/virtrigaud/internal/controller"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity/hostidentitytest"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 )
 
 // managerSubprocessCAKeySecretEnv carries the
@@ -71,4 +76,51 @@ func TestDevHostEnrolmentCAKeySecretFlag_DevBuildRefusesItAlone(t *testing.T) {
 			assert.Contains(t, string(out), "invalid per-host agent enrolment flags")
 		})
 	}
+}
+
+// managerSubprocessArgsEnv carries the newline-separated arguments the
+// enrolment startup-check test's child process starts main() with.
+const managerSubprocessArgsEnv = "VIRTRIGAUD_TEST_MANAGER_ARGS"
+
+// TestDevHostEnrolment_RefusesWhenSecretsReadableClusterWide: a development
+// manager with valid enrolment flags, connected to a real API server as a
+// user who may read every Secret (system:masters), refuses to run per-host
+// agent enrolment at startup (exit 1) and names the accesses it found, and
+// never the contents of a Secret.
+func TestDevHostEnrolment_RefusesWhenSecretsReadableClusterWide(t *testing.T) {
+	if os.Getenv(managerSubprocessEnv) == "1" {
+		os.Args = append([]string{"manager"}, strings.Split(os.Getenv(managerSubprocessArgsEnv), "\n")...)
+		main()
+		return
+	}
+	env := envtestutil.Start(t, filepath.Join("test", "crds", "cert-manager"))
+	dir := t.TempDir()
+	signer := filepath.Join(dir, "signer.pem")
+	data, err := operation.GenerateDevSignerKey()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(signer, data, 0o600))
+	ca := hostidentitytest.NewCA(t)
+	bundle := filepath.Join(dir, "ca.pem")
+	require.NoError(t, os.WriteFile(bundle, ca.PEM, 0o600))
+	args := []string{
+		"--metrics-bind-address=0", "--health-probe-bind-address=0",
+		"--dev-operation-signer-key-file=" + signer,
+		"--" + controller.DevHostEnrolmentNamespaceFlagName + "=host-agent-pki",
+		"--" + controller.DevHostEnrolmentIssuerFlagName + "=ClusterIssuer/host-agent-ca",
+		"--" + controller.DevHostEnrolmentAdminGroupFlagName + "=enrolment-admins",
+		"--" + controller.DevHostEnrolmentTrustDomainFlagName + "=cluster.test",
+		"--" + controller.DevHostEnrolmentCABundleFileFlagName + "=" + bundle,
+		"--" + controller.DevHostEnrolmentCAKeySecretFlagName + "=cert-manager/host-agent-ca",
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDevHostEnrolment_RefusesWhenSecretsReadableClusterWide$") // #nosec G204 -- re-runs this test binary
+	cmd.Env = append(os.Environ(), managerSubprocessEnv+"=1", managerSubprocessArgsEnv+"="+strings.Join(args, "\n"),
+		"KUBECONFIG="+env.KubeconfigPath, "KUBERNETES_SERVICE_HOST=", "HOME="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr, "the manager must exit: %s", out)
+	assert.Equal(t, 1, exitErr.ExitCode(), "%s", out)
+	assert.Contains(t, string(out), "refusing to run per-host agent enrolment")
+	assert.Contains(t, string(out), "get secrets in all namespaces")
+	assert.Contains(t, string(out), "get secrets named cert-manager/host-agent-ca")
+	assert.NotContains(t, string(out), "admission webhook", "the Secret check runs before the admission check")
 }

@@ -29,95 +29,187 @@ import (
 
 // ErrHostEnrolmentSecretAccess is returned by CheckHostEnrolmentSecretAccess
 // when the manager may read Secrets it must not be able to read while it runs
-// per-host agent enrolment: Secrets in every namespace, or the declared
-// host-agent subordinate CA key Secret.
-var ErrHostEnrolmentSecretAccess = errors.New("the manager may read Secrets that would expose the host-agent subordinate CA key")
+// per-host agent enrolment (Secrets in every namespace, or the host-agent
+// subordinate CA key Secret), or may grant itself such access.
+var ErrHostEnrolmentSecretAccess = errors.New("the manager may read, or grant itself access to, Secrets that would expose the host-agent subordinate CA key")
 
-// secretsResource is the core Secret resource name.
-const secretsResource = "secrets"
+// Resource names and API groups of the enrolment access reviews.
+const (
+	secretsResource             = "secrets"
+	serviceAccountsResource     = "serviceaccounts"
+	tokenSubresource            = "token"
+	rbacAPIGroup                = "rbac.authorization.k8s.io"
+	rolesResource               = "roles"
+	clusterRolesResource        = "clusterroles"
+	roleBindingsResource        = "rolebindings"
+	clusterRoleBindingsResource = "clusterrolebindings"
+	appsAPIGroup                = "apps"
+	deploymentsResource         = "deployments"
+	podsResource                = "pods"
+	verbCreate                  = "create"
+)
 
-// clusterWideSecretReadVerbs are the Secret verbs, in all namespaces, that
-// any of which would let the manager read the sub-CA key wherever it lives
-// (watch returns whole objects, like list).
-var clusterWideSecretReadVerbs = []string{"get", "list", "watch"}
+// secretDataVerbs are the Secret verbs whose responses carry Secret data:
+// get, list and watch, and update, patch, delete and deletecollection, which
+// return the object (or the deleted objects).
+var secretDataVerbs = []string{"get", "list", "watch", "update", "patch", "delete", "deletecollection"}
 
-// caKeyNamespaceReadVerbs are the namespace-wide Secret verbs that would
-// return the sub-CA key Secret with the others of its namespace.
-var caKeyNamespaceReadVerbs = []string{"list", "watch"}
+// namedSecretDataVerbs are the verbs reviewed on the named sub-CA key
+// Secret. list and watch are included: a resourceNames rule allows a list or
+// watch with a metadata.name field selector.
+var namedSecretDataVerbs = []string{"get", "list", "watch", "update", "patch", "delete"}
 
-// secretReadReview is one Secret access the manager must not hold.
-type secretReadReview struct {
+// namespaceSecretDataVerbs are the verbs reviewed on every Secret of the
+// sub-CA key namespace (a named review already covers get).
+var namespaceSecretDataVerbs = []string{"list", "watch", "update", "patch", "delete", "deletecollection"}
+
+// accessReview is one access the manager must not hold.
+type accessReview struct {
 	// attrs are the reviewed resource attributes.
 	attrs authorizationv1.ResourceAttributes
-	// desc names the access in a refusal ("list Secrets in all namespaces").
+	// desc names the access in a refusal ("list secrets in all namespaces").
 	desc string
 }
 
-// hostEnrolmentSecretReviews lists the Secret accesses that refuse
-// enrolment: get, list and watch on Secrets in all namespaces and, with a
-// declared sub-CA key Secret, get on it and list and watch in its namespace.
-func hostEnrolmentSecretReviews(cfg *HostEnrolmentConfig) []secretReadReview {
-	var reviews []secretReadReview
-	for _, verb := range clusterWideSecretReadVerbs {
-		reviews = append(reviews, secretReadReview{
-			attrs: authorizationv1.ResourceAttributes{Verb: verb, Resource: secretsResource},
-			desc:  verb + " Secrets in all namespaces",
-		})
+// newAccessReview builds a review and its description.
+func newAccessReview(group, resource, subresource, verb, namespace, name string) accessReview {
+	what := resource
+	if group != "" {
+		what = resource + "." + group
+	}
+	if subresource != "" {
+		what += "/" + subresource
+	}
+	where := "in all namespaces"
+	switch {
+	case name != "":
+		where = "named " + namespace + "/" + name
+	case namespace != "":
+		where = "in namespace " + namespace
+	}
+	return accessReview{
+		attrs: authorizationv1.ResourceAttributes{Group: group, Resource: resource, Subresource: subresource, Verb: verb,
+			Namespace: namespace, Name: name},
+		desc: verb + " " + what + " " + where,
+	}
+}
+
+// hostEnrolmentSecretReviews lists the accesses that refuse enrolment:
+//
+//   - every verb that returns Secret data, on Secrets in all namespaces;
+//   - with a declared sub-CA key Secret: those verbs on that Secret (get,
+//     list, watch, update, patch, delete) and on every Secret of its
+//     namespace (list, watch, update, patch, delete, deletecollection);
+//   - escalation primitives that would let the manager grant itself any of
+//     the above: impersonate on users, groups and serviceaccounts; create on
+//     serviceaccounts/token and on rolebindings (in all namespaces and in the
+//     key namespace) and on clusterrolebindings; bind and escalate on roles
+//     and clusterroles (in all namespaces and in the key namespace).
+func hostEnrolmentSecretReviews(cfg *HostEnrolmentConfig) []accessReview {
+	var reviews []accessReview
+	scopes := []string{""}
+	for _, verb := range secretDataVerbs {
+		reviews = append(reviews, newAccessReview("", secretsResource, "", verb, "", ""))
 	}
 	if key := cfg.CAKeySecret; key != nil {
-		reviews = append(reviews, secretReadReview{
-			attrs: authorizationv1.ResourceAttributes{Namespace: key.Namespace, Verb: "get", Resource: secretsResource, Name: key.Name},
-			desc:  "get the sub-CA key Secret " + key.String(),
-		})
-		for _, verb := range caKeyNamespaceReadVerbs {
-			reviews = append(reviews, secretReadReview{
-				attrs: authorizationv1.ResourceAttributes{Namespace: key.Namespace, Verb: verb, Resource: secretsResource},
-				desc:  verb + " Secrets in the sub-CA key namespace " + key.Namespace,
-			})
+		scopes = append(scopes, key.Namespace)
+		for _, verb := range namedSecretDataVerbs {
+			reviews = append(reviews, newAccessReview("", secretsResource, "", verb, key.Namespace, key.Name))
+		}
+		for _, verb := range namespaceSecretDataVerbs {
+			reviews = append(reviews, newAccessReview("", secretsResource, "", verb, key.Namespace, ""))
+		}
+	}
+	for _, resource := range []string{"users", "groups", serviceAccountsResource} {
+		reviews = append(reviews, newAccessReview("", resource, "", "impersonate", "", ""))
+	}
+	for _, ns := range scopes {
+		reviews = append(reviews,
+			newAccessReview("", serviceAccountsResource, tokenSubresource, verbCreate, ns, ""),
+			newAccessReview(rbacAPIGroup, roleBindingsResource, "", verbCreate, ns, ""))
+	}
+	reviews = append(reviews, newAccessReview(rbacAPIGroup, clusterRoleBindingsResource, "", verbCreate, "", ""))
+	for _, ns := range scopes {
+		for _, resource := range []string{rolesResource, clusterRolesResource} {
+			for _, verb := range []string{"bind", "escalate"} {
+				reviews = append(reviews, newAccessReview(rbacAPIGroup, resource, "", verb, ns, ""))
+			}
 		}
 	}
 	return reviews
 }
 
-// CheckHostEnrolmentSecretAccess refuses per-host agent enrolment while the
-// manager may read the host-agent subordinate CA's key: it asks the API
-// server, with SelfSubjectAccessReviews, whether the manager may get, list or
-// watch Secrets in all namespaces and, when cfg.CAKeySecret is declared, get
-// that Secret or list or watch Secrets in its namespace. Any allowed access
-// refuses (ErrHostEnrolmentSecretAccess). It fails closed: a review that
-// cannot be created, or that the authorizer could not evaluate fully
-// (status.evaluationError), refuses as well.
-//
-// The reviews need create on selfsubjectaccessreviews, which Kubernetes
-// grants every authenticated user through the default system:basic-user
-// ClusterRole; no rule is added for it. Nothing here reads a Secret, and a
-// refusal names only verbs, namespaces and the declared Secret name.
-func CheckHostEnrolmentSecretAccess(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig) error {
-	if cfg == nil {
-		return nil
-	}
+// runAccessReviews asks each review as a SelfSubjectAccessReview and returns
+// the descriptions of the allowed ones. A review that cannot be created, or
+// that the authorizer could not fully evaluate, is an error.
+func runAccessReviews(ctx context.Context, c client.Client, reviews []accessReview) ([]string, error) {
 	logger := log.FromContext(ctx)
 	var allowed []string
-	for _, r := range hostEnrolmentSecretReviews(cfg) {
+	for _, r := range reviews {
 		attrs := r.attrs
 		review := &authorizationv1.SelfSubjectAccessReview{Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &attrs}}
 		if err := c.Create(ctx, review); err != nil {
-			return fmt.Errorf("check whether the manager may %s: %w", r.desc, err)
+			return nil, fmt.Errorf("check whether the manager may %s: %w", r.desc, err)
 		}
 		switch {
 		case review.Status.Allowed:
 			allowed = append(allowed, r.desc)
 		case review.Status.EvaluationError != "":
-			return fmt.Errorf("check whether the manager may %s: the authorizer could not evaluate it: %s",
+			return nil, fmt.Errorf("check whether the manager may %s: the authorizer could not evaluate it: %s",
 				r.desc, review.Status.EvaluationError)
 		default:
-			logger.V(1).Info("Secret access denied, as per-host agent enrolment requires", "access", r.desc)
+			logger.V(1).Info("Access denied, as per-host agent enrolment requires", "access", r.desc)
 		}
+	}
+	return allowed, nil
+}
+
+// CheckHostEnrolmentSecretAccess refuses per-host agent enrolment while the
+// manager may read the host-agent subordinate CA's key, or grant itself that
+// access, as far as its RBAC shows: it asks the API server, with
+// SelfSubjectAccessReviews, for each access hostEnrolmentSecretReviews lists.
+// Any allowed access refuses (ErrHostEnrolmentSecretAccess). It fails closed:
+// a review that cannot be created, or that the authorizer could not evaluate
+// fully (status.evaluationError), refuses as well.
+//
+// It does not see admission policies or the workload path (a pod that mounts
+// the Secret); HostEnrolmentWorkloadAccess reports the latter.
+//
+// The reviews need create on selfsubjectaccessreviews, which Kubernetes
+// grants every authenticated user through the default system:basic-user
+// ClusterRole; no rule is added for it. Nothing here reads a Secret, and a
+// refusal names only verbs, resources, namespaces and the declared Secret
+// name.
+func CheckHostEnrolmentSecretAccess(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	allowed, err := runAccessReviews(ctx, c, hostEnrolmentSecretReviews(cfg))
+	if err != nil {
+		return err
 	}
 	if len(allowed) > 0 {
 		return fmt.Errorf("%w: it may %s; per-host agent enrolment needs the namespaced Secret grant "+
-			"(Helm rbac.secrets.scope=namespaced, see docs/manager-secret-access.md) and no Secret access in the sub-CA key's namespace",
+			"(Helm rbac.secrets.scope=namespaced, see docs/manager-secret-access.md), no Secret access in the sub-CA key's namespace "+
+			"and no grant that lets the manager impersonate, mint tokens or bind roles",
 			ErrHostEnrolmentSecretAccess, strings.Join(allowed, ", "))
 	}
 	return nil
+}
+
+// HostEnrolmentWorkloadAccess reports whether the manager may create
+// Deployments or Pods in the sub-CA key Secret's namespace: such a workload
+// could mount the key Secret, or run under an existing ServiceAccount there,
+// with no Secret RBAC involved. It returns the allowed accesses (none when no
+// key Secret is declared). The caller warns rather than refuses: an
+// admission policy, which a review cannot see, may still forbid them.
+func HostEnrolmentWorkloadAccess(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig) ([]string, error) {
+	if cfg == nil || cfg.CAKeySecret == nil {
+		return nil, nil
+	}
+	ns := cfg.CAKeySecret.Namespace
+	return runAccessReviews(ctx, c, []accessReview{
+		newAccessReview(appsAPIGroup, deploymentsResource, "", verbCreate, ns, ""),
+		newAccessReview("", podsResource, "", verbCreate, ns, ""),
+	})
 }

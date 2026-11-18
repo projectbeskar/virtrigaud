@@ -786,13 +786,30 @@ func main() {
 			setupLog.Error(err, "refusing to run per-host agent enrolment")
 			os.Exit(1)
 		}
-		setupLog.Info("Per-host agent enrolment: the manager may not read Secrets in all namespaces",
+		setupLog.Info("Per-host agent enrolment: the manager may not read Secrets in all namespaces or the sub-CA key Secret",
 			"caKeySecretChecked", hostEnrolment.CAKeySecret != nil)
+		// A workload in the key Secret's namespace could mount it with no
+		// Secret RBAC; warn only, since admission policies may forbid it.
+		checkCtx, checkCancel = context.WithTimeout(ctrl.LoggerInto(context.Background(), setupLog), 30*time.Second)
+		workload, werr := controller.HostEnrolmentWorkloadAccess(checkCtx, direct, hostEnrolment)
+		checkCancel()
+		switch {
+		case werr != nil:
+			setupLog.Error(werr, "WARNING: could not check whether the manager may create workloads in the sub-CA key Secret's namespace")
+		case len(workload) > 0:
+			setupLog.Info("WARNING: the manager may create workloads in the sub-CA key Secret's namespace; a pod there could mount the "+
+				"key Secret or run under an existing ServiceAccount. Restrict the manager's Deployments to the Provider namespaces and "+
+				"its pods to the ServiceAccounts it creates with an admission policy (see docs/host-agent-enrolment.md)",
+				"allowed", workload)
+		}
 		// Fail closed: the requester fields of a CertificateRequest are
 		// trustworthy only behind cert-manager's admission webhooks.
-		// The check is re-run periodically; while it fails, no request is
-		// decided.
-		admissionGate := &controller.AdmissionGate{Reader: mgr.GetAPIReader(), Namespace: hostEnrolment.Namespace}
+		// The check, and the Secret access check above, are re-run
+		// periodically; while either fails, no request is decided.
+		admissionGate := &controller.AdmissionGate{Reader: mgr.GetAPIReader(), Namespace: hostEnrolment.Namespace,
+			SecretAccess: func(ctx context.Context) error {
+				return controller.CheckHostEnrolmentSecretAccess(ctx, direct, hostEnrolment)
+			}}
 		checkCtx, checkCancel = context.WithTimeout(context.Background(), 30*time.Second)
 		err = admissionGate.Check(checkCtx)
 		checkCancel()

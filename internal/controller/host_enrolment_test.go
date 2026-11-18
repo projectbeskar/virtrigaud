@@ -51,11 +51,11 @@ func TestParseHostEnrolmentConfig(t *testing.T) {
 	require.NoError(t, os.WriteFile(caFile, ca.PEM, 0o600))
 	clusterIssuer := HostEnrolmentFlags{
 		Namespace: "host-agent-pki", Issuer: "ClusterIssuer/host-agent-ca", AdminGroup: "enrolment-admins",
-		TrustDomain: "cluster.test",
+		TrustDomain: "cluster.test", CAKeySecret: "cert-manager/host-agent-ca",
 	}
 	full := HostEnrolmentFlags{
 		Namespace: "host-agent-pki", Issuer: "Issuer/host-agent-ca", AdminGroup: "enrolment-admins",
-		TrustDomain: "cluster.test", CABundleFile: caFile,
+		TrustDomain: "cluster.test", CABundleFile: caFile, CAKeySecret: "cert-manager/host-agent-ca",
 	}
 	installID := bytes.Repeat([]byte{1}, 16)
 
