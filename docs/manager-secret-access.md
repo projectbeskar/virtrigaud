@@ -206,22 +206,29 @@ key and sign host-agent certificates with no approval.
   the enrolment namespace.
 - The development manager refuses to run enrolment while its access reviews
   or its listed RBAC rules show that it may use Secrets in all namespaces, the
-  key Secret or Secrets in its namespace, enter pods in that namespace (exec,
-  attach, ephemeral containers), impersonate, mint ServiceAccount tokens,
-  change role bindings, or bind or escalate roles. Rules limited by
+  key Secret or Secrets in its namespace, change or enter pods in that
+  namespace (update, patch, exec, attach, ephemeral containers), use
+  `nodes/proxy`, impersonate, mint ServiceAccount tokens, change role bindings,
+  or bind or escalate roles. Rules limited by
   `resourceNames` count. It repeats the reviews once when its controllers start
   and then every three minutes, and suspends approvals while they fail. A failed review
-  counts as a refusal, and so do rules that cannot be listed completely: an
-  authorizer that cannot enumerate rules makes enrolment refuse. The reviews
+  counts as a refusal, and so do rules that cannot be listed completely: a
+  cluster with a webhook authorizer in its chain, which commonly includes
+  managed Kubernetes, always reports incomplete rules, so enrolment refuses
+  there. The reviews
   also apply when the chart does not render the manager's RBAC
   (`rbac.create: false`, or Kustomize).
-- It warns, without refusing, while it may create, update or patch Deployments
-  or create Pods in the key Secret's namespace, which it may with the default
+- It warns, without refusing, while it may create or change workloads
+  (Deployments, DaemonSets, StatefulSets, ReplicaSets, CronJobs, Jobs, Pods) in
+  the key Secret's namespace, which it may for Deployments with the default
   `rbac.scope: cluster` (see [What remains](#what-remains)). An admission
   policy that closes this path must cover `CREATE` and `UPDATE`, because
   changing a workload that already runs there is also a path to the key.
 
-Details, and what these checks do not cover, are in
+These checks are defence in depth against misconfigured RBAC and do not prove
+that the manager cannot reach the key. They review grants cluster-wide and in
+the key namespace only, not in other namespaces. Details, and what they do not
+cover, are in
 [host-agent-enrolment.md](host-agent-enrolment.md#the-manager-must-not-read-the-sub-ca-key).
 
 ### Performance

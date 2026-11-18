@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `charts/virtrigaud/templates/host-enrolment-rbac.yaml`: `experimental.hostEnrolment.enabled` now fails the render in these cases:
   - `rbac.secrets.scope` is not `namespaced`. With the default cluster scope the manager can read every Secret, including the host-agent subordinate CA's key Secret, so a compromised manager could sign CA-valid host-agent certificates with no approval.
   - An `rbac.additionalRules` entry covers `secrets` (or `*`) in the core API group (`""` or `*`), is not a rule, or has `apiGroups` or `resources` that are not lists of strings (it could not be checked).
-  - A `signerNames` entry does not start with a lowercase `<resource>.<group>` without a trailing dot.
-  - `signerNames` lists a signer in the `cert-manager.io` group and the new `experimental.hostEnrolment.caKeySecret` (`<namespace>/<name>` of the sub-CA key Secret) is empty.
+  - A `signerNames` entry does not start with a lowercase `<resource>.<group>` without a trailing dot, or is a bare `cert-manager.io/...`.
+  - `signerNames` lists a signer in the `cert-manager.io` group itself (one label before the group; a sub-group such as `awspca.cert-manager.io` counts as external) and the new `experimental.hostEnrolment.caKeySecret` (`<namespace>/<name>` of the sub-CA key Secret) is empty.
   - The key Secret is in the enrolment namespace.
   - The enrolment namespace or the key Secret's namespace is listed in `rbac.secrets.providerNamespaces` or `workloadNamespaces`. For the enrolment namespace, listing it adds no Secret verb, but it declares the namespace a home for Provider objects or workloads, and only the manager may write Secrets there.
 
@@ -22,17 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `get`, `list`, `watch`, `update`, `patch`, `delete` or `deletecollection` Secrets in all namespaces;
   - `get`, `list`, `watch`, `update`, `patch` or `delete` the key Secret by name (a `resourceNames` rule allows a list or watch with a field selector);
   - `list`, `watch`, `update`, `patch`, `delete` or `deletecollection` Secrets in the key namespace;
-  - `get` or `create` `pods/exec` or `pods/attach`, or `update` or `patch` `pods/ephemeralcontainers`, in the key namespace;
+  - `get` or `create` `pods/exec` or `pods/attach`, or `update` or `patch` `pods` or `pods/ephemeralcontainers`, in the key namespace;
+  - `get` or `create` `nodes/proxy`;
   - `impersonate` users or groups, or ServiceAccounts in all namespaces or in the key namespace;
   - `create` `serviceaccounts/token`, or `create`, `update` or `patch` RoleBindings, in all namespaces or in the key namespace; `create`, `update` or `patch` ClusterRoleBindings;
   - `bind` or `escalate` Roles or ClusterRoles in all namespaces or in the key namespace.
 
   A plain `delete` returns no Secret data; it is reviewed because deleting the key is destructive.
 
-  A review with no object name does not match a rule limited by `resourceNames`, so the check also lists the manager's rules with a SelfSubjectRulesReview (in the key namespace, or in the enrolment namespace with no key declared). Any rule that grants impersonation (users, groups, ServiceAccounts, uids, user extras), `serviceaccounts/token`, a write to role bindings, or `bind` or `escalate` on roles refuses, whatever its `resourceNames` and including wildcards. With a declared key, so does any rule on Secrets or on entering pods.
+  A review with no object name does not match a rule limited by `resourceNames`, so the check also lists the manager's rules with a SelfSubjectRulesReview (in the key namespace, or in the enrolment namespace with no key declared). Any rule that grants impersonation (users, groups, ServiceAccounts, uids, user extras), `serviceaccounts/token`, a write to role bindings, `bind` or `escalate` on roles, or `nodes/proxy` refuses, whatever its `resourceNames` and including wildcards. With a declared key, so does any rule on Secrets or on entering pods.
 
-  It fails closed: a review error, an authorizer evaluation error, or rules that cannot be listed completely refuse too, so an authorizer that cannot enumerate rules makes enrolment refuse. A refusal names only verbs, resources, namespaces and object names. The chart's manager and enrolment RBAC grant none of these accesses, with `rbac.scope` `cluster` or `namespace`.
-- `internal/controller/host_enrolment_secret_access.go`: new `HostEnrolmentWorkloadAccess` reports whether the manager may create, update or patch Deployments or create Pods in the key namespace.
+  It fails closed: a review error, an authorizer evaluation error, or rules that cannot be listed completely refuse too, so enrolment refuses on any cluster with a webhook authorizer in its chain, which commonly includes managed Kubernetes. There is no override. A refusal names only verbs, resources, namespaces and object names. The chart's manager and enrolment RBAC grant none of these accesses, with `rbac.scope` `cluster` or `namespace`.
+- `internal/controller/host_enrolment_secret_access.go`: new `HostEnrolmentWorkloadAccess` reports whether the manager may create, update or patch Deployments, DaemonSets, StatefulSets, ReplicaSets or CronJobs, or create Jobs or Pods, in the key namespace.
 - `cmd/manager/main.go`: a manager with the `--dev-host-enrolment-*` flags runs the check at startup, before the cert-manager admission check, and exits on refusal. It logs a `WARNING` while it may create or change those workloads; that cannot be refused, because admission policies are invisible to the reviews, and it fires with the chart's default `rbac.scope: cluster`. If the client for the startup checks cannot be built, the manager exits; before, certificate renewal was only switched off.
 - `internal/controller/host_enrolment_admission.go`: `AdmissionGate` gains `SecretAccess`. The manager passes the Secret access check, so it runs with the admission check when the gate starts and then every three minutes; a change is noticed within the interval plus the duration of a check. While either fails, no CertificateRequest is decided and the gate logs that approvals are suspended. Only a real recovery is logged as resumed.
 - `internal/controller/host_enrolment.go`: the external-PKI issuer group is compared with `cert-manager.io` case-insensitively.
@@ -49,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `docs/host-agent-enrolment.md`: the stale residual ("the manager's existing cluster-wide Secret permission … Narrowing that grant is separate work") is replaced by a section on the checks, the periodic re-check and the workload warning. It also states what remains:
   - A Deployment in the key namespace that mounts the key or runs under an existing ServiceAccount there, or a change to a workload that already runs there. The remedy is an admission policy on `CREATE` and `UPDATE` that restricts the manager's Deployments to the Provider namespaces and their pods to the ServiceAccounts the manager creates.
+  - Grants in any namespace other than the key namespace, which are not reviewed. The docs recommend keeping the key in the namespace where cert-manager runs.
   - Grants added between re-checks.
   - An external signer that keeps its key in this cluster and is not declared.
   - The API approval path, bounded by key pinning and the admission or approver policies.
@@ -57,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/manager-secret-access.md`, `config/rbac/host-enrolment/README.md`: the enrolment requirements, the checks, a `kubectl auth can-i` line for the key Secret, and the new tests.
 
 ### Why
-The recommended issuer is a cert-manager ClusterIssuer, whose sub-CA key Secret lives in cert-manager's cluster resource namespace. The manager's default cluster-wide Secret grant reached that key, so enrolment is now tied to the namespaced grant added earlier.
+The recommended issuer is a cert-manager ClusterIssuer, whose sub-CA key Secret lives in cert-manager's cluster resource namespace. The manager's default cluster-wide Secret grant reached that key, so enrolment is now tied to the namespaced grant added earlier. The checks are defence in depth against misconfigured RBAC; they do not prove that the manager cannot reach the key.
 
 ### Impact
 - [ ] Breaking change

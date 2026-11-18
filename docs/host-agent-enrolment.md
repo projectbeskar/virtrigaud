@@ -575,7 +575,19 @@ the status.
 Whoever reads the sub-CA key can sign CA-valid host-agent certificates with
 no approval at all. Enrolment therefore requires the manager's namespaced
 Secret grant ([manager-secret-access.md](manager-secret-access.md#opt-in-namespaced-scope)),
-and two checks enforce it:
+and the chart and the manager check for it.
+
+**What the checks guarantee.** These checks are defence in depth against
+misconfigured RBAC. They do not prove that the manager cannot reach the key.
+They refuse Secret access and the escalation paths listed below when those are
+granted cluster-wide or in the declared key namespace. They do not review any
+other namespace: a Role in a third namespace is not seen, for example in the
+namespace where the signer controller runs, if that differs from the key
+namespace. Keep the sub-CA key in the namespace where cert-manager itself runs,
+which is the default for its cluster resource namespace. The key namespace and
+the controller's namespace are then the same one, and it is reviewed.
+
+The two checks are:
 
 - **Helm.** With `experimental.hostEnrolment.enabled`, rendering fails:
   - unless `rbac.secrets.scope` is `namespaced`;
@@ -584,13 +596,15 @@ and two checks enforce it:
   - when an `rbac.additionalRules` entry is not a rule, or its `apiGroups` or
     `resources` are not lists of strings, so that it cannot be checked;
   - when a `signerNames` entry does not start with a lowercase
-    `<resource>.<group>` without a trailing dot;
+    `<resource>.<group>` without a trailing dot, or names `cert-manager.io`
+    with no resource;
   - when `experimental.hostEnrolment.caKeySecret` is empty and
-    `signerNames` lists a signer in the `cert-manager.io` group, such as
+    `signerNames` lists a signer in the `cert-manager.io` group itself, such as
     `issuers.cert-manager.io/...` or `clusterissuers.cert-manager.io/...`. It
-    names the sub-CA key Secret as `<namespace>/<name>`. The chart cannot tell
-    where an external signer keeps its key, so declare it there too if that
-    key is in this cluster;
+    names the sub-CA key Secret as `<namespace>/<name>`. A sub-group, such as
+    `awspcaclusterissuers.awspca.cert-manager.io/...`, is an external issuer.
+    The chart cannot tell where an external signer keeps its key, so declare
+    it there too if that key is in this cluster;
   - when the enrolment namespace is listed in
     `rbac.secrets.providerNamespaces` or `workloadNamespaces`: only the
     manager may write Secrets there, and listing it would declare it a
@@ -617,8 +631,9 @@ and two checks enforce it:
   - `list`, `watch`, `update`, `patch`, `delete` or `deletecollection`
     Secrets in the key Secret's namespace;
   - `get` or `create` `pods/exec` or `pods/attach`, or `update` or `patch`
-    `pods/ephemeralcontainers`, in the key Secret's namespace (`get` authorizes
-    a WebSocket connection on API servers before Kubernetes 1.31);
+    `pods/ephemeralcontainers` or `pods`, in the key Secret's namespace (`get`
+    authorizes a WebSocket connection on API servers before Kubernetes 1.31);
+  - `get` or `create` `nodes/proxy`;
   - `impersonate` users or groups, or ServiceAccounts in all namespaces or in
     the key namespace;
   - `create` ServiceAccount tokens (`serviceaccounts/token`), or `create`,
@@ -640,16 +655,20 @@ and two checks enforce it:
   - `create` on `serviceaccounts/token`;
   - `create`, `update` or `patch` on RoleBindings or ClusterRoleBindings;
   - `bind` or `escalate` on Roles or ClusterRoles;
+  - `get` or `create` on `nodes/proxy`;
   - with a declared key: any read or write verb on Secrets, `get` or `create`
-    on `pods/exec` or `pods/attach`, or `update` or `patch` on
+    on `pods/exec` or `pods/attach`, or `update` or `patch` on `pods` or
     `pods/ephemeralcontainers`.
 
   If any access is allowed, the manager logs the allowed accesses and exits.
   It also exits if a review fails, if the authorizer reports an evaluation
-  error, or if the rules cannot be listed completely. **An authorizer that
-  cannot enumerate rules, such as a webhook authorizer, therefore makes
-  enrolment refuse to run**, and so does a role binding of the manager that
-  refers to a missing role. The reviews ask the API server's authorizers, so
+  error, or if the rules cannot be listed completely. **A cluster with a
+  webhook authorizer in its authorization chain always reports incomplete
+  rules, so enrolment refuses to run there. This commonly includes managed
+  Kubernetes services.** There is no override. A dangling role binding also
+  refuses: one that refers to a missing role and applies to the manager
+  directly or through any group it belongs to, such as `system:authenticated`.
+  The reviews ask the API server's authorizers, so
   they cover the manager's RBAC whatever renders it (the chart, Kustomize or
   hand-written roles). They do not see admission policies. They need `create`
   on `selfsubjectaccessreviews` and `selfsubjectrulesreviews`, which Kubernetes
@@ -666,14 +685,17 @@ startup therefore suspends approvals within the interval plus the time one
 check takes.
 
 At startup the manager also asks whether it may `create`, `update` or `patch`
-Deployments (`apps`) or `create` Pods in the key Secret's namespace, and logs a
-`WARNING` naming them if it may. It does not refuse, because an admission
+Deployments, DaemonSets, StatefulSets, ReplicaSets or CronJobs, or `create`
+Jobs or Pods, in the key Secret's namespace, and logs a `WARNING` naming them
+if it may. It does not refuse, because an admission
 policy, which the reviews cannot see, may forbid them. With the chart's default
 `rbac.scope: cluster`, the manager's ClusterRole may create, update and patch
 Deployments in every namespace, so the warning fires.
 
 The checks do not cover these paths:
 
+- **Other namespaces.** Grants in a namespace other than the key namespace are
+  not reviewed (see [What the checks guarantee](#the-manager-must-not-read-the-sub-ca-key)).
 - **Workloads.** A compromised manager with a cluster-wide Deployment grant
   can create a Deployment in the key Secret's namespace that mounts the key
   Secret, or that runs under an existing ServiceAccount there, such as
@@ -683,8 +705,9 @@ The checks do not cover these paths:
   Secret RBAC of the manager involved (see also
   [What remains](manager-secret-access.md#what-remains)). To close this path,
   use an admission policy (a ValidatingAdmissionPolicy, Kyverno or Gatekeeper)
-  on the manager's ServiceAccount that covers both `CREATE` and `UPDATE`. It
-  must let the manager write Deployments only in the Provider namespaces, allow
+  on the manager's ServiceAccount that covers both `CREATE` and `UPDATE`, for
+  every workload kind the manager may write. It
+  must let the manager write workloads only in the Provider namespaces, allow
   their pods only the ServiceAccounts the manager creates for providers, and
   so block any change to existing workloads in the key Secret's namespace.
 - **Between re-checks.** A grant added after the last review works until the
@@ -693,6 +716,9 @@ The checks do not cover these paths:
   time, within what Kubernetes RBAC lets them grant.
 - **An undeclared key.** With an external PKI alone and no declared key
   Secret, nothing checks the namespace where that signer keeps its key.
+- **Paths RBAC review cannot list.** The reviews cover the listed accesses
+  only. Other routes to the key, such as access to a node, to etcd or to a
+  backup, are outside them.
 - **The API approval path.** Whoever holds the manager's ServiceAccount, or
   can create Roles that grant it more, can still use the approval path
   described in [RBAC](#rbac): `create` on `certificaterequests`, `update` on
