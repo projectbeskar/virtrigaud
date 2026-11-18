@@ -54,6 +54,14 @@ const (
 	appsAPIGroup                = "apps"
 	deploymentsResource         = "deployments"
 	podsResource                = "pods"
+	nodesResource               = "nodes"
+	proxySubresource            = "proxy"
+	daemonSetsResource          = "daemonsets"
+	statefulSetsResource        = "statefulsets"
+	replicaSetsResource         = "replicasets"
+	batchAPIGroup               = "batch"
+	jobsResource                = "jobs"
+	cronJobsResource            = "cronjobs"
 	execSubresource             = "exec"
 	attachSubresource           = "attach"
 	ephemeralSubresource        = "ephemeralcontainers"
@@ -117,8 +125,9 @@ func newAccessReview(group, resource, subresource, verb, namespace, name string)
 	}
 }
 
-// bindingWriteVerbs are the verbs that change who a role binding applies to.
-var bindingWriteVerbs = []string{verbCreate, verbUpdate, verbPatch}
+// objectWriteVerbs are the verbs that write a role binding or a workload
+// controller: create, update and patch.
+var objectWriteVerbs = []string{verbCreate, verbUpdate, verbPatch}
 
 // podExecVerbs are the verbs of pods/exec and pods/attach: create, and get,
 // which authorizes a WebSocket connection on API servers before Kubernetes
@@ -129,6 +138,14 @@ var podExecVerbs = []string{verbGet, verbCreate}
 // running pod.
 var ephemeralContainerVerbs = []string{verbUpdate, verbPatch}
 
+// podWriteVerbs are the verbs that change a running pod (its image, for
+// one).
+var podWriteVerbs = []string{verbUpdate, verbPatch}
+
+// nodeProxyVerbs are the nodes/proxy verbs that reach the kubelet API, and
+// through it the containers of every pod on the node.
+var nodeProxyVerbs = []string{verbGet, verbCreate}
+
 // hostEnrolmentSecretReviews lists the accesses that refuse enrolment. The
 // rules review (forbiddenRulesFor) also catches the name-limited rules these
 // reviews cannot see:
@@ -137,13 +154,18 @@ var ephemeralContainerVerbs = []string{verbUpdate, verbPatch}
 //   - with a declared sub-CA key Secret: those verbs on that Secret (get,
 //     list, watch, update, patch, delete) and on every Secret of its
 //     namespace (list, watch, update, patch, delete, deletecollection), and
-//     exec, attach and ephemeral containers on pods in its namespace;
+//     update, patch, exec, attach and ephemeral containers on pods in its
+//     namespace;
+//   - get and create on nodes/proxy;
 //   - escalation primitives that would let the manager grant itself any of
 //     the above: impersonate on users and groups, and on serviceaccounts,
 //     create on serviceaccounts/token, create, update and patch on
 //     rolebindings, and bind and escalate on roles and clusterroles (each in
 //     all namespaces and in the key namespace); create, update and patch on
 //     clusterrolebindings.
+//
+// Namespaces other than the key namespace are not reviewed one by one: a
+// Role in a third namespace is not seen.
 func hostEnrolmentSecretReviews(cfg *HostEnrolmentConfig) []accessReview {
 	var reviews []accessReview
 	scopes := []string{""}
@@ -166,6 +188,12 @@ func hostEnrolmentSecretReviews(cfg *HostEnrolmentConfig) []accessReview {
 		for _, verb := range ephemeralContainerVerbs {
 			reviews = append(reviews, newAccessReview("", podsResource, ephemeralSubresource, verb, key.Namespace, ""))
 		}
+		for _, verb := range podWriteVerbs {
+			reviews = append(reviews, newAccessReview("", podsResource, "", verb, key.Namespace, ""))
+		}
+	}
+	for _, verb := range nodeProxyVerbs {
+		reviews = append(reviews, newAccessReview("", nodesResource, proxySubresource, verb, "", ""))
 	}
 	for _, resource := range []string{usersResource, groupsResource} {
 		reviews = append(reviews, newAccessReview("", resource, "", verbImpersonate, "", ""))
@@ -174,11 +202,11 @@ func hostEnrolmentSecretReviews(cfg *HostEnrolmentConfig) []accessReview {
 		reviews = append(reviews,
 			newAccessReview("", serviceAccountsResource, "", verbImpersonate, ns, ""),
 			newAccessReview("", serviceAccountsResource, tokenSubresource, verbCreate, ns, ""))
-		for _, verb := range bindingWriteVerbs {
+		for _, verb := range objectWriteVerbs {
 			reviews = append(reviews, newAccessReview(rbacAPIGroup, roleBindingsResource, "", verb, ns, ""))
 		}
 	}
-	for _, verb := range bindingWriteVerbs {
+	for _, verb := range objectWriteVerbs {
 		reviews = append(reviews, newAccessReview(rbacAPIGroup, clusterRoleBindingsResource, "", verb, "", ""))
 	}
 	for _, ns := range scopes {
@@ -272,17 +300,19 @@ func forbiddenRulesFor(cfg *HostEnrolmentConfig) []forbiddenRule {
 		{group: authenticationAPIGroup, resource: uidsResource, verbs: []string{verbImpersonate}},
 		{group: authenticationAPIGroup, resource: userExtrasResource, anySubresource: true, verbs: []string{verbImpersonate}},
 		{resource: serviceAccountsResource, subresource: tokenSubresource, verbs: []string{verbCreate}},
-		{group: rbacAPIGroup, resource: roleBindingsResource, verbs: bindingWriteVerbs},
-		{group: rbacAPIGroup, resource: clusterRoleBindingsResource, verbs: bindingWriteVerbs},
+		{group: rbacAPIGroup, resource: roleBindingsResource, verbs: objectWriteVerbs},
+		{group: rbacAPIGroup, resource: clusterRoleBindingsResource, verbs: objectWriteVerbs},
 		{group: rbacAPIGroup, resource: rolesResource, verbs: []string{verbBind, verbEscalate}},
 		{group: rbacAPIGroup, resource: clusterRolesResource, verbs: []string{verbBind, verbEscalate}},
+		{resource: nodesResource, subresource: proxySubresource, verbs: nodeProxyVerbs},
 	}
 	if cfg.CAKeySecret != nil {
 		forbidden = append(forbidden,
 			forbiddenRule{resource: secretsResource, verbs: append([]string{verbCreate}, secretDataVerbs...)},
 			forbiddenRule{resource: podsResource, subresource: execSubresource, verbs: podExecVerbs},
 			forbiddenRule{resource: podsResource, subresource: attachSubresource, verbs: podExecVerbs},
-			forbiddenRule{resource: podsResource, subresource: ephemeralSubresource, verbs: ephemeralContainerVerbs})
+			forbiddenRule{resource: podsResource, subresource: ephemeralSubresource, verbs: ephemeralContainerVerbs},
+			forbiddenRule{resource: podsResource, verbs: podWriteVerbs})
 	}
 	return forbidden
 }
@@ -349,8 +379,11 @@ func reviewManagerRules(ctx context.Context, c client.Client, cfg *HostEnrolment
 // fully (status.evaluationError), and rules that cannot be listed completely
 // (ErrHostEnrolmentRulesIncomplete) refuse as well.
 //
-// It does not see admission policies or the workload path (a pod that mounts
-// the Secret); HostEnrolmentWorkloadAccess reports the latter.
+// This is defence in depth against misconfigured RBAC; it does not prove that
+// the manager cannot reach the key. It reviews grants cluster-wide and in the
+// key namespace only, so a Role in a third namespace is not seen. It does not
+// see admission policies or the workload path (a pod that mounts the Secret);
+// HostEnrolmentWorkloadAccess reports the latter.
 //
 // The reviews need create on selfsubjectaccessreviews and
 // selfsubjectrulesreviews, which Kubernetes grants every authenticated user
@@ -381,21 +414,33 @@ func CheckHostEnrolmentSecretAccess(ctx context.Context, c client.Client, cfg *H
 	return nil
 }
 
-// HostEnrolmentWorkloadAccess reports whether the manager may create or
-// change Deployments, or create Pods, in the sub-CA key Secret's namespace:
-// such a workload could mount the key Secret, or run under an existing
-// ServiceAccount there, with no Secret RBAC involved. It returns the allowed accesses (none when no
-// key Secret is declared). The caller warns rather than refuses: an
-// admission policy, which a review cannot see, may still forbid them.
+// HostEnrolmentWorkloadAccess reports whether the manager may start or change
+// a workload in the sub-CA key Secret's namespace: create Pods or Jobs, or
+// create, update or patch Deployments, DaemonSets, StatefulSets, ReplicaSets
+// or CronJobs. Such a workload could mount the key Secret, or run under an
+// existing ServiceAccount there, with no Secret RBAC involved. It returns the
+// allowed accesses (none when no key Secret is declared). The caller warns
+// rather than refuses: an admission policy, which a review cannot see, may
+// still forbid them.
 func HostEnrolmentWorkloadAccess(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig) ([]string, error) {
 	if cfg == nil || cfg.CAKeySecret == nil {
 		return nil, nil
 	}
 	ns := cfg.CAKeySecret.Namespace
-	return runAccessReviews(ctx, c, []accessReview{
-		newAccessReview(appsAPIGroup, deploymentsResource, "", verbCreate, ns, ""),
-		newAccessReview(appsAPIGroup, deploymentsResource, "", verbUpdate, ns, ""),
-		newAccessReview(appsAPIGroup, deploymentsResource, "", verbPatch, ns, ""),
-		newAccessReview("", podsResource, "", verbCreate, ns, ""),
-	})
+	var reviews []accessReview
+	for _, controller := range []struct{ group, resource string }{
+		{appsAPIGroup, deploymentsResource},
+		{appsAPIGroup, daemonSetsResource},
+		{appsAPIGroup, statefulSetsResource},
+		{appsAPIGroup, replicaSetsResource},
+		{batchAPIGroup, cronJobsResource},
+	} {
+		for _, verb := range objectWriteVerbs {
+			reviews = append(reviews, newAccessReview(controller.group, controller.resource, "", verb, ns, ""))
+		}
+	}
+	reviews = append(reviews,
+		newAccessReview(batchAPIGroup, jobsResource, "", verbCreate, ns, ""),
+		newAccessReview("", podsResource, "", verbCreate, ns, ""))
+	return runAccessReviews(ctx, c, reviews)
 }

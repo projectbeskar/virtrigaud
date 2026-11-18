@@ -200,6 +200,18 @@ var _ = Describe("Per-host agent enrolment Secret access check (envtest)", func(
 		grant("ephemeral", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"pods/ephemeralcontainers"}, Verbs: []string{"patch"}},
 			"patch pods/ephemeralcontainers in namespace "+keyNS)
 
+		By("Grants to change a running pod in the key namespace refuse, also when limited to one pod")
+		grant("patch-pods", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"patch"}},
+			"patch pods in namespace "+keyNS)
+		grant("update-one-pod", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"update"},
+			ResourceNames: []string{"cainjector"}}, "update pods through an RBAC rule limited to cainjector")
+
+		By("Grants on nodes/proxy refuse, also when limited to one node")
+		grant("node-proxy", true, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"nodes/proxy"}, Verbs: []string{"get"}},
+			"get nodes/proxy in all namespaces")
+		grant("one-node-proxy", true, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"nodes/proxy"}, Verbs: []string{"create"},
+			ResourceNames: []string{"node-1"}}, "create nodes/proxy through an RBAC rule limited to node-1")
+
 		By("A cluster-wide grant to impersonate ServiceAccounts refuses")
 		grant("impersonate", true, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"impersonate"}},
 			"impersonate serviceaccounts in all namespaces")

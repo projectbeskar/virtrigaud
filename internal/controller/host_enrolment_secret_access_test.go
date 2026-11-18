@@ -127,9 +127,10 @@ func TestCheckHostEnrolmentSecretAccess(t *testing.T) {
 	}
 	wantKey = append(wantKey, "cert-manager:get:/pods/exec", "cert-manager:create:/pods/exec",
 		"cert-manager:get:/pods/attach", "cert-manager:create:/pods/attach",
-		"cert-manager:update:/pods/ephemeralcontainers", "cert-manager:patch:/pods/ephemeralcontainers")
+		"cert-manager:update:/pods/ephemeralcontainers", "cert-manager:patch:/pods/ephemeralcontainers",
+		"cert-manager:update:/pods", "cert-manager:patch:/pods")
 	escalation := func(scopes ...string) []string {
-		out := []string{":impersonate:/users", ":impersonate:/groups", ":create:rbac.authorization.k8s.io/clusterrolebindings",
+		out := []string{":get:/nodes/proxy", ":create:/nodes/proxy", ":impersonate:/users", ":impersonate:/groups", ":create:rbac.authorization.k8s.io/clusterrolebindings",
 			":update:rbac.authorization.k8s.io/clusterrolebindings", ":patch:rbac.authorization.k8s.io/clusterrolebindings"}
 		for _, ns := range scopes {
 			out = append(out, ns+":impersonate:/serviceaccounts", ns+":create:/serviceaccounts/token",
@@ -200,6 +201,10 @@ func TestCheckHostEnrolmentSecretAccess(t *testing.T) {
 		"impersonate ServiceAccounts in the key namespace": {"cert-manager:impersonate:/serviceaccounts", "impersonate serviceaccounts in namespace cert-manager"},
 		"patch RoleBindings in the key namespace":          {"cert-manager:patch:rbac.authorization.k8s.io/rolebindings", "patch rolebindings.rbac.authorization.k8s.io in namespace cert-manager"},
 		"update ClusterRoleBindings":                       {":update:rbac.authorization.k8s.io/clusterrolebindings", "update clusterrolebindings.rbac.authorization.k8s.io in all namespaces"},
+		"nodes/proxy get":                                  {":get:/nodes/proxy", "get nodes/proxy in all namespaces"},
+		"nodes/proxy create":                               {":create:/nodes/proxy", "create nodes/proxy in all namespaces"},
+		"patch pods in the key namespace":                  {"cert-manager:patch:/pods", "patch pods in namespace cert-manager"},
+		"update pods in the key namespace":                 {"cert-manager:update:/pods", "update pods in namespace cert-manager"},
 		"exec in the key namespace":                        {"cert-manager:create:/pods/exec", "create pods/exec in namespace cert-manager"},
 		"attach in the key namespace":                      {"cert-manager:create:/pods/attach", "create pods/attach in namespace cert-manager"},
 		"ephemeral containers in the key namespace":        {"cert-manager:patch:/pods/ephemeralcontainers", "patch pods/ephemeralcontainers in namespace cert-manager"},
@@ -288,6 +293,10 @@ func TestCheckHostEnrolmentSecretAccess_Rules(t *testing.T) {
 		"create a named binding":   {rule("create", rbacGroup, "rolebindings", "rb"), "create rolebindings.rbac.authorization.k8s.io through"},
 		"read the key by name":     {rule("get", "", "secrets", "host-agent-ca"), "get secrets through an RBAC rule limited to host-agent-ca"},
 		"create Secrets":           {rule("create", "", "secrets"), "create secrets through"},
+		"nodes/proxy of one node":  {rule("get", "", "nodes/proxy", "node-1"), "get nodes/proxy through an RBAC rule limited to node-1"},
+		"nodes/proxy by wildcard":  {rule("create", "", "*/proxy"), "create nodes/proxy through"},
+		"patch one pod":            {rule("patch", "", "pods", "cainjector"), "patch pods through an RBAC rule limited to cainjector"},
+		"update one pod":           {rule("update", "", "pods", "cainjector"), "update pods through"},
 		"exec in one pod":          {rule("create", "", "pods/exec", "cainjector"), "create pods/exec through an RBAC rule limited to cainjector"},
 		"exec over a WebSocket":    {rule("get", "", "pods/exec", "cainjector"), "get pods/exec through"},
 		"attach to one pod":        {rule("create", "", "pods/attach", "cainjector"), "create pods/attach through"},
@@ -362,8 +371,20 @@ func TestHostEnrolmentWorkloadAccess(t *testing.T) {
 	got, err := HostEnrolmentWorkloadAccess(ctx, c, cfg)
 	require.NoError(t, err)
 	assert.Empty(t, got)
-	assert.Equal(t, []string{"cert-manager:create:apps/deployments", "cert-manager:update:apps/deployments",
-		"cert-manager:patch:apps/deployments", "cert-manager:create:/pods"}, *asked)
+	var wantWorkloads []string
+	for _, res := range []string{"apps/deployments", "apps/daemonsets", "apps/statefulsets", "apps/replicasets", "batch/cronjobs"} {
+		for _, verb := range []string{"create", "update", "patch"} {
+			wantWorkloads = append(wantWorkloads, "cert-manager:"+verb+":"+res)
+		}
+	}
+	wantWorkloads = append(wantWorkloads, "cert-manager:create:batch/jobs", "cert-manager:create:/pods")
+	assert.Equal(t, wantWorkloads, *asked)
+	for _, k := range wantWorkloads {
+		c, _ := ssarClient(t, allowOnly(k))
+		got, err := HostEnrolmentWorkloadAccess(ctx, c, cfg)
+		require.NoError(t, err)
+		assert.Len(t, got, 1, k)
+	}
 
 	c, _ = ssarClient(t, allowOnly("cert-manager:create:apps/deployments"))
 	got, err = HostEnrolmentWorkloadAccess(ctx, c, cfg)
