@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-18 00:30] - Per-host agent mutation test: count only behavioural kills (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `hack/agent-mutation.sh`: a guard missing from `guard.All()` was counted as killed, because `TestMutationGuardIsKnown` refuses an unknown guard name, and that failure was taken for a test noticing the guard's removal. The rounds now skip that test, and a preflight requires it to pass for every guard, so a guard missing from `All()` stops the script.
+- `internal/agent/internal/guard/guard.go`: eight guards were missing from `All()` (`renew-chain`, `renew-profile`, `renew-same-identity`, `renew-pending-key`, `renew-activate-staged`, `renewal-only-when-asked`, `signer-renewal-uris`, `signer-activate-pin`). They are now listed.
+
+### Added
+- `internal/agent/internal/guard/guard_test.go`: `TestAllListsEveryGuard` checks that `All()` lists every `Name` constant declared in `guard.go`, exactly once.
+- `internal/agent/answer/renewal_test.go`: `TestHostAnswerPendingRenewalOnlyWhenAsked`, the first behavioural test of `renewal-only-when-asked`: a pending renewal request goes only into the answer of a request that asked for one.
+
+### Why
+Earlier mutation results overstated coverage: those eight guards counted as killed although only the known-name check had failed. Re-measured without that check, seven are killed by behavioural tests (renewal staging, end-to-end renewal and signer renewal tests), and `renewal-only-when-asked` survived until its new test.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Tests and test tooling only. No product code change.
+
 ## [2026-11-17 23:00] - Per-host agent: enrolment and the signer refuse non-persistent storage (development builds only)
 **Author:** @wrkode (William Rizzo)
 

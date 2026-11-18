@@ -7,7 +7,11 @@
 # VIRTRIGAUD_MUTATION environment variable. This script first checks that the
 # tests pass with no guard off, then runs them once per guard and expects at
 # least one test to fail. A guard whose removal no test notices is a
-# surviving mutant: the script prints it and exits 1.
+# surviving mutant: the script prints it and exits 1. Only a behavioural test
+# counts: TestMutationGuardIsKnown, which refuses a guard missing from
+# guard.All(), is skipped in the rounds and must pass for every guard in a
+# preflight, so a guard missing from All() stops the script instead of being
+# counted as killed.
 #
 # Each round runs the tests twice: as a release build, and as a development
 # build (virtrigaud_dev), whose operation path (runners, the fake executor)
@@ -24,9 +28,18 @@ PKGS="./internal/agent/..."
 TAGS="virtrigaud_mutation"
 DEV_TAGS="virtrigaud_mutation,virtrigaud_dev"
 
-# run_tests runs the agent tests in both builds; it fails when either fails.
+# KNOWN_TEST refuses a VIRTRIGAUD_MUTATION value that names no guard. It is
+# not a behavioural test: its failure says the guard is missing from
+# guard.All(), not that a test noticed the guard's removal. The rounds skip it,
+# and the preflight below requires it to pass for every guard, so that a guard
+# missing from All() is an error rather than a mutant counted as killed.
+KNOWN_TEST='^TestMutationGuardIsKnown$'
+
+# run_tests runs the agent tests in both builds, without KNOWN_TEST; it fails
+# when either fails.
 run_tests() {
-	go test -count=1 -tags "${TAGS}" ${PKGS} && go test -count=1 -tags "${DEV_TAGS}" ${PKGS}
+	go test -count=1 -tags "${TAGS}" -skip "${KNOWN_TEST}" ${PKGS} &&
+		go test -count=1 -tags "${DEV_TAGS}" -skip "${KNOWN_TEST}" ${PKGS}
 }
 export VIRTRIGAUD_MODEL_RUNS="${VIRTRIGAUD_MODEL_RUNS:-3000}"
 
@@ -35,6 +48,14 @@ if [ -z "${guards}" ]; then
 	echo "agent-mutation: no guards found" >&2
 	exit 1
 fi
+
+echo "agent-mutation: preflight (every guard is in guard.All())"
+for g in ${guards}; do
+	if ! VIRTRIGAUD_MUTATION="${g}" go test -count=1 -tags "${TAGS}" -run "${KNOWN_TEST}" ./internal/agent/opstore/ >/dev/null 2>&1; then
+		echo "agent-mutation: guard ${g} is missing from guard.All()" >&2
+		exit 1
+	fi
+done
 
 echo "agent-mutation: baseline (no guard off)"
 if ! VIRTRIGAUD_MUTATION="" run_tests >/dev/null; then
