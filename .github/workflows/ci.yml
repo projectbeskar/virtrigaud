@@ -74,6 +74,38 @@ jobs:
           flags: unittests
           name: codecov-umbrella
 
+  # The per-host agent, its enrolment and the clustered Cloud Hypervisor paths
+  # exist only in development builds (-tags virtrigaud_dev). `make test` above
+  # builds without the tag, so their tests run only here. Helm is installed
+  # explicitly because the chart render tests skip without it.
+  test-dev:
+    name: Test (development build)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Helm
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e  # v5.1.0
+        with:
+          version: 'v3.17.2'
+
+      - name: Download dependencies
+        run: ./hack/retry.sh go mod download
+
+      - name: Run go vet (development build)
+        run: go list -tags virtrigaud_dev ./... | grep -v '/test/integration' | xargs go vet -tags virtrigaud_dev
+
+      - name: Run tests (development build)
+        run: make test-dev
+
   # ADR-0008 Tier 2: exercise go-libvirt against a REAL libvirtd via the built-in
   # test:///default driver (no KVM, no qemu, no privilege). This is what proves
   # go-libvirt parses a live daemon's DomainGetXMLDesc into the right libvirtxml
@@ -827,13 +859,14 @@ jobs:
   ci:
     name: CI Summary
     runs-on: ubuntu-22.04
-    needs: [test, lint, security, govulncheck, generate, build, build-tools, build-images-pr, helm, conformance, integration, catalog-validation, api-conversion-tests, proto-breaking]
+    needs: [test, test-dev, lint, security, govulncheck, generate, build, build-tools, build-images-pr, helm, conformance, integration, catalog-validation, api-conversion-tests, proto-breaking]
     if: always()
     steps:
       - name: Check CI Results
         run: |
           echo "CI Summary:"
           echo "- Test: ${{ needs.test.result }}"
+          echo "- Test (development build): ${{ needs.test-dev.result }}"
           echo "- Lint: ${{ needs.lint.result }}"
           echo "- Security: ${{ needs.security.result }}"
           echo "- Govulncheck: ${{ needs.govulncheck.result }}"
@@ -850,6 +883,7 @@ jobs:
 
           # Fail if any required job failed
           if [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.test-dev.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.security.result }}" != "success" ]] || \
              [[ "${{ needs.govulncheck.result }}" != "success" ]] || \
