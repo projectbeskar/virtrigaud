@@ -196,17 +196,23 @@ Per-host agent enrolment (development builds only) requires this mode: a
 manager that can read every Secret can read the host-agent subordinate CA's
 key and sign host-agent certificates with no approval.
 
-- With `experimental.hostEnrolment.enabled`, rendering fails unless
-  `scope` is `namespaced`. It also fails when the enrolment namespace, or the
-  namespace of the sub-CA key Secret named by
-  `experimental.hostEnrolment.caKeySecret`, is listed in `providerNamespaces`
-  or `workloadNamespaces`, or when that Secret is in the enrolment namespace.
-- At startup, the development manager refuses to run enrolment while it may
-  `get`, `list` or `watch` Secrets in all namespaces, or, with
-  `--dev-host-enrolment-ca-key-secret`, `get` that Secret or `list` or
-  `watch` Secrets in its namespace. A failed review refuses too. This check
-  also applies when the chart does not render the manager's RBAC
-  (`rbac.create: false`, or Kustomize).
+- With `experimental.hostEnrolment.enabled`, rendering fails unless `scope`
+  is `namespaced`, and when an `rbac.additionalRules` entry covers core-group
+  Secrets. `experimental.hostEnrolment.caKeySecret` (the sub-CA key Secret)
+  is required with a cert-manager signer. Rendering also fails when the
+  enrolment namespace or the key Secret's namespace is listed in
+  `providerNamespaces` or `workloadNamespaces`, or when the key Secret is in
+  the enrolment namespace.
+- The development manager refuses to run enrolment while SelfSubjectAccess
+  reviews show that it may read Secrets in all namespaces, read the key
+  Secret or Secrets in its namespace (any verb that returns Secret data), or
+  impersonate, mint ServiceAccount tokens or bind roles. It repeats the
+  reviews every three minutes and suspends approvals while they fail. A
+  failed review counts as a refusal. The reviews also apply when the chart
+  does not render the manager's RBAC (`rbac.create: false`, or Kustomize).
+- It warns, without refusing, while it may create Deployments or Pods in the
+  key Secret's namespace, which it may with the default `rbac.scope: cluster`
+  (see [What remains](#what-remains)).
 
 Details, and what these checks do not cover, are in
 [host-agent-enrolment.md](host-agent-enrolment.md#the-manager-must-not-read-the-sub-ca-key).
@@ -271,3 +277,6 @@ your sub-CA key Secret.
   `internal/controller/host_enrolment_secret_access_envtest_test.go` test the
   enrolment startup check, the latter as the manager's ServiceAccount against
   a real API server with the chart's RBAC.
+- `cmd/manager/host_enrolment_flags_dev_test.go` starts a development manager
+  with the enrolment flags against a real API server, as a user who may read
+  every Secret, and checks that it refuses to run enrolment.

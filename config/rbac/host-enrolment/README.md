@@ -22,13 +22,15 @@ Edit the placeholders before applying:
 - `virtrigaud-system` / `virtrigaud-controller-manager`: the manager's
   ServiceAccount.
 
-The manager must not be able to read Secrets in all namespaces, or the
-sub-CA key Secret: at startup it refuses to run enrolment otherwise (see
-`docs/host-agent-enrolment.md`, "The manager must not read the sub-CA key").
-`config/rbac/role.yaml` grants Secret access in all namespaces, so replace
-that grant with per-namespace Roles first (`docs/manager-secret-access.md`,
-"Kustomize"), and pass `--dev-host-enrolment-ca-key-secret=<namespace>/<name>`
-so that the check also covers the sub-CA key Secret.
+The manager must not be able to read Secrets in all namespaces or the sub-CA
+key Secret, or grant itself that access (impersonation, token minting, role
+binding): it refuses to run enrolment otherwise, and suspends approvals if a
+re-check fails later (see `docs/host-agent-enrolment.md`, "The manager must
+not read the sub-CA key"). `config/rbac/role.yaml` grants Secret access in
+all namespaces, so replace that grant with per-namespace Roles first
+(`docs/manager-secret-access.md`, "Kustomize"). Pass
+`--dev-host-enrolment-ca-key-secret=<namespace>/<name>`; it is required with
+a cert-manager issuer.
 
 What is granted, and nothing more:
 
