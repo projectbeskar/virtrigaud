@@ -21,9 +21,11 @@ It also renders only with rbac.secrets.scope=namespaced: with the cluster
 scope the manager can read every Secret, including the host-agent
 subordinate CA's key Secret (in cert-manager's cluster resource namespace for
 the recommended ClusterIssuer), and could sign CA-valid host-agent
-certificates with no approval at all. Neither the enrolment namespace nor the
-namespace of the declared sub-CA key Secret
-(experimental.hostEnrolment.caKeySecret) may be listed in
+certificates with no approval at all. No rbac.additionalRules entry may cover
+core-group Secrets. experimental.hostEnrolment.caKeySecret is required with a
+cert-manager signer (issuers.cert-manager.io or clusterissuers.cert-manager.io;
+an external PKI's key is outside the cluster). Neither the enrolment namespace
+nor the namespace of the sub-CA key Secret may be listed in
 rbac.secrets.providerNamespaces or workloadNamespaces:
 
   - The sub-CA key namespace must give the manager no Secret access at all.
@@ -33,9 +35,10 @@ rbac.secrets.providerNamespaces or workloadNamespaces:
     of workloads, and only the manager may write Secrets in the enrolment
     namespace.
 
-The development manager checks the same at startup with
-SelfSubjectAccessReviews (--dev-host-enrolment-ca-key-secret), so a manager
-whose RBAC is not rendered by this chart is held to it too. Those reviews need
+The development manager checks its Secret access, and the RBAC escalation
+primitives that could widen it, with SelfSubjectAccessReviews at startup and
+every few minutes (--dev-host-enrolment-ca-key-secret), whatever renders its
+RBAC. Those reviews need
 create on selfsubjectaccessreviews, which Kubernetes grants every
 authenticated user through the default system:basic-user ClusterRole, so no
 rule is added for them.
@@ -56,6 +59,22 @@ rule is added for them.
 {{- $granted := concat $providerNamespaces $workloadNamespaces }}
 {{- if has $ns $granted }}
 {{- fail (printf "experimental.hostEnrolment.namespace %q must not be listed in rbac.secrets.providerNamespaces or workloadNamespaces: only the manager may write Secrets in the enrolment namespace, and its Secret access there comes from the enrolment Role alone; keep Provider objects and workloads in other namespaces" $ns) }}
+{{- end }}
+{{- range $i, $rule := (.Values.rbac.additionalRules | default list) }}
+{{- $groups := $rule.apiGroups | default list }}
+{{- $resources := $rule.resources | default list }}
+{{- if and (or (has "" $groups) (has "*" $groups)) (or (has "secrets" $resources) (has "*" $resources)) }}
+{{- fail (printf "rbac.additionalRules[%d] grants Secret access in the core API group; it cannot be used with experimental.hostEnrolment.enabled: the sub-CA key must not be readable by the manager" $i) }}
+{{- end }}
+{{- end }}
+{{- $certManagerSigner := false }}
+{{- range $he.signerNames }}
+{{- if or (hasPrefix "issuers.cert-manager.io/" .) (hasPrefix "clusterissuers.cert-manager.io/" .) }}
+{{- $certManagerSigner = true }}
+{{- end }}
+{{- end }}
+{{- if and $certManagerSigner (not $he.caKeySecret) }}
+{{- fail "experimental.hostEnrolment.caKeySecret is required with a cert-manager signer: <namespace>/<name> of the host-agent subordinate CA's key Secret (for a ClusterIssuer, in cert-manager's cluster resource namespace), so that the chart and the manager can check that the manager cannot read it" }}
 {{- end }}
 {{- with $he.caKeySecret }}
 {{- $parts := splitList "/" (toString .) }}

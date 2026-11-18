@@ -39,6 +39,10 @@ import (
 var hostEnrolmentNamespacedSecrets = []string{"--set", "rbac.secrets.scope=namespaced",
 	"--set", "rbac.secrets.providerNamespaces={virt-a}", "--set", "rbac.secrets.workloadNamespaces={tenant-1}"}
 
+// hostEnrolmentCAKey is the chart value naming the sub-CA key Secret, which a
+// cert-manager signer requires.
+var hostEnrolmentCAKey = []string{"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/host-agent-ca"}
+
 // assertHostEnrolmentRBAC checks a rendered set of enrolment RBAC objects:
 // approve on exact signers only, CertificateRequest access in one namespace
 // through a Role, no Secret access and no wildcard anywhere.
@@ -154,7 +158,7 @@ func TestRBAC_HostEnrolmentChartTemplate(t *testing.T) {
 		"--set", "experimental.hostEnrolment.developmentBuild=true",
 		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
 		"--set", "experimental.hostEnrolment.signerNames={clusterissuers.cert-manager.io/host-agent-ca}"},
-		hostEnrolmentNamespacedSecrets...)...).CombinedOutput()
+		append(hostEnrolmentCAKey, hostEnrolmentNamespacedSecrets...)...)...).CombinedOutput()
 	require.NoError(t, err, string(out))
 	assertHostEnrolmentRBAC(t, splitYAMLDocs(t, out), "host-agent-pki", []string{"clusterissuers.cert-manager.io/host-agent-ca"})
 
@@ -172,8 +176,8 @@ func TestRBAC_HostEnrolmentChartTemplate(t *testing.T) {
 		"no namespace":    {"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/x.y}"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			all := append(append([]string{"template", "t", chart, "--set", "experimental.hostEnrolment.enabled=true",
-				"--set", "experimental.hostEnrolment.developmentBuild=true"}, hostEnrolmentNamespacedSecrets...), args...)
+			all := append(append(append([]string{"template", "t", chart, "--set", "experimental.hostEnrolment.enabled=true",
+				"--set", "experimental.hostEnrolment.developmentBuild=true"}, hostEnrolmentCAKey...), hostEnrolmentNamespacedSecrets...), args...)
 			out, err := exec.Command(helm, all...).CombinedOutput() // #nosec G204 -- test-controlled arguments
 			assert.Error(t, err, string(out))
 		})
@@ -188,7 +192,8 @@ func TestRBAC_HostEnrolmentChartNeedsNamespacedSecretGrant(t *testing.T) {
 	enrolment := []string{"--set", "experimental.hostEnrolment.enabled=true",
 		"--set", "experimental.hostEnrolment.developmentBuild=true",
 		"--set", "experimental.hostEnrolment.namespace=host-agent-pki",
-		"--set", "experimental.hostEnrolment.signerNames={clusterissuers.cert-manager.io/host-agent-ca}"}
+		"--set", "experimental.hostEnrolment.signerNames={clusterissuers.cert-manager.io/host-agent-ca}",
+		"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/host-agent-ca"}
 	render := func(t *testing.T, args ...string) (string, error) {
 		t.Helper()
 		return secretRBACRender(t, append(append([]string{}, enrolment...), args...)...)
@@ -196,7 +201,12 @@ func TestRBAC_HostEnrolmentChartNeedsNamespacedSecretGrant(t *testing.T) {
 
 	t.Run("accepted", func(t *testing.T) {
 		for name, args := range map[string][]string{
-			"namespaced grant":                         hostEnrolmentNamespacedSecrets,
+			"namespaced grant": hostEnrolmentNamespacedSecrets,
+			"unrelated additional rule": append([]string{"--set-json",
+				`rbac.additionalRules=[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get"]}]`}, hostEnrolmentNamespacedSecrets...),
+			"external PKI signer only, no sub-CA key": append([]string{"--set", "experimental.hostEnrolment.caKeySecret=",
+				"--set", "experimental.hostEnrolment.signerNames={externalissuers.pki.example.test/host-agent-pki.enterprise}"},
+				hostEnrolmentNamespacedSecrets...),
 			"namespaced grant with a sub-CA key":       append([]string{"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/host-agent-ca"}, hostEnrolmentNamespacedSecrets...),
 			"sub-CA key name with dots":                append([]string{"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/host-agent.ca-key"}, hostEnrolmentNamespacedSecrets...),
 			"namespaced grant, release-namespace RBAC": append([]string{"--set", "rbac.scope=namespace"}, hostEnrolmentNamespacedSecrets...),
@@ -233,6 +243,20 @@ func TestRBAC_HostEnrolmentChartNeedsNamespacedSecretGrant(t *testing.T) {
 			hostEnrolmentNamespacedSecrets...), `namespace "virt-a" is listed`},
 		"sub-CA key in a workload namespace": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=tenant-1/ca-key"},
 			hostEnrolmentNamespacedSecrets...), `namespace "tenant-1" is listed`},
+		"no sub-CA key with a cert-manager signer": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret="},
+			hostEnrolmentNamespacedSecrets...), "experimental.hostEnrolment.caKeySecret is required with a cert-manager signer"},
+		"no sub-CA key with a namespaced cert-manager issuer": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=",
+			"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/host-agent-pki.ca}"},
+			hostEnrolmentNamespacedSecrets...), "experimental.hostEnrolment.caKeySecret is required"},
+		"additional rule on Secrets": {append([]string{"--set-json",
+			`rbac.additionalRules=[{"apiGroups":[""],"resources":["configmaps"],"verbs":["get"]},{"apiGroups":[""],"resources":["secrets"],"verbs":["get"]}]`},
+			hostEnrolmentNamespacedSecrets...), "rbac.additionalRules[1] grants Secret access"},
+		"additional rule on every core resource": {append([]string{"--set-json",
+			`rbac.additionalRules=[{"apiGroups":[""],"resources":["*"],"verbs":["list"]}]`},
+			hostEnrolmentNamespacedSecrets...), "rbac.additionalRules[0] grants Secret access"},
+		"additional rule on every group": {append([]string{"--set-json",
+			`rbac.additionalRules=[{"apiGroups":["*"],"resources":["secrets"],"verbs":["watch"]}]`},
+			hostEnrolmentNamespacedSecrets...), "rbac.additionalRules[0] grants Secret access"},
 		"sub-CA key without a namespace": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=ca-key"},
 			hostEnrolmentNamespacedSecrets...), "must be <namespace>/<name>"},
 		"sub-CA key with an extra segment": {append([]string{"--set", "experimental.hostEnrolment.caKeySecret=a/b/c"},
