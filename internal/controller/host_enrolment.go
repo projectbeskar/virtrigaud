@@ -247,7 +247,8 @@ type HostEnrolmentConfig struct {
 	CABundle []byte
 	// CAKeySecret is the Secret holding the subordinate CA's private key.
 	// ParseHostEnrolmentConfig requires it with a cert-manager issuer; it is
-	// nil only with an external PKI alone (the key is outside the cluster).
+	// nil only with an external PKI alone, where declaring a key that is
+	// kept in this cluster is the operator's responsibility.
 	// The manager must not be able to read it; it is never read here.
 	CAKeySecret *types.NamespacedName
 	// InstallID is the 16-byte install identifier (from the development
@@ -309,7 +310,7 @@ func ParseHostEnrolmentConfig(f HostEnrolmentFlags, installID []byte) (*HostEnro
 		if err != nil {
 			return nil, fmt.Errorf("--%s: %w", DevHostEnrolmentExternalPKIIssuerFlagName, err)
 		}
-		if ref.Group == certrequest.Group {
+		if strings.EqualFold(ref.Group, certrequest.Group) {
 			return nil, fmt.Errorf("--%s must not use the %s group: cert-manager's controllers act on it", DevHostEnrolmentExternalPKIIssuerFlagName, certrequest.Group)
 		}
 		cfg.ExternalPKIIssuer = &ref
@@ -333,7 +334,9 @@ func ParseHostEnrolmentConfig(f HostEnrolmentFlags, installID []byte) (*HostEnro
 			return nil, fmt.Errorf("--%s is required with --%s: the manager checks at startup that it cannot read the host-agent sub-CA key Secret",
 				DevHostEnrolmentCAKeySecretFlagName, DevHostEnrolmentIssuerFlagName)
 		}
-		// External PKI only: the signing key is outside the cluster.
+		// External PKI only: the manager cannot tell where that signer keeps
+		// its key. Declaring a key kept in this cluster is the operator's
+		// responsibility.
 		return cfg, nil
 	}
 	key, err := parseCAKeySecret(f.CAKeySecret)

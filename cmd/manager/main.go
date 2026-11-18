@@ -788,18 +788,19 @@ func main() {
 		}
 		setupLog.Info("Per-host agent enrolment: the manager may not read Secrets in all namespaces or the sub-CA key Secret",
 			"caKeySecretChecked", hostEnrolment.CAKeySecret != nil)
-		// A workload in the key Secret's namespace could mount it with no
-		// Secret RBAC; warn only, since admission policies may forbid it.
+		// A new or changed workload in the key Secret's namespace could mount
+		// it with no Secret RBAC; warn only, since admission policies may
+		// forbid it.
 		checkCtx, checkCancel = context.WithTimeout(ctrl.LoggerInto(context.Background(), setupLog), 30*time.Second)
 		workload, werr := controller.HostEnrolmentWorkloadAccess(checkCtx, direct, hostEnrolment)
 		checkCancel()
 		switch {
 		case werr != nil:
-			setupLog.Error(werr, "WARNING: could not check whether the manager may create workloads in the sub-CA key Secret's namespace")
+			setupLog.Error(werr, "WARNING: could not check whether the manager may create or change workloads in the sub-CA key Secret's namespace")
 		case len(workload) > 0:
-			setupLog.Info("WARNING: the manager may create workloads in the sub-CA key Secret's namespace; a pod there could mount the "+
-				"key Secret or run under an existing ServiceAccount. Restrict the manager's Deployments to the Provider namespaces and "+
-				"its pods to the ServiceAccounts it creates with an admission policy (see docs/host-agent-enrolment.md)",
+			setupLog.Info("WARNING: the manager may create or change workloads in the sub-CA key Secret's namespace; a pod there could mount the "+
+				"key Secret or run under an existing ServiceAccount. Use an admission policy on CREATE and UPDATE that keeps the manager's "+
+				"Deployments in the Provider namespaces and their pods on the ServiceAccounts it creates (see docs/host-agent-enrolment.md)",
 				"allowed", workload)
 		}
 		// Fail closed: the requester fields of a CertificateRequest are

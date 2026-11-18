@@ -96,20 +96,37 @@ var _ = Describe("Per-host agent enrolment Secret access check (envtest)", func(
 		mgr := apply(relNS, enrolment...)
 		withKey := &HostEnrolmentConfig{Namespace: enrolNS, CAKeySecret: &key}
 
-		By("The namespaced grant and the enrolment Role pass, with and without a declared key")
-		// RBAC objects reach the authorizer asynchronously: wait until the
-		// enrolment Role is in force.
-		Eventually(func() bool {
-			r := &authorizationSSAR{c: mgr}
-			return r.allowed(ctx, enrolNS, "create", "")
-		}, "30s", "200ms").Should(BeTrue())
+		// waitForChartRBAC waits until the Roles and the manager's
+		// ClusterRole or Role are in force: a pass before that would prove
+		// nothing. managerNS is a namespace the manager's own rules cover.
+		waitForChartRBAC := func(c client.Client, managerNS string) {
+			Eventually(func() bool {
+				r := &authorizationSSAR{c: c}
+				return r.allowed(ctx, enrolNS, "create", "")
+			}, "30s", "200ms").Should(BeTrue())
+			Eventually(func() ([]string, error) {
+				return HostEnrolmentWorkloadAccess(ctx, c, &HostEnrolmentConfig{CAKeySecret: &types.NamespacedName{Namespace: managerNS, Name: key.Name}})
+			}, "30s", "200ms").Should(ContainElement("create deployments.apps in namespace " + managerNS))
+		}
+
+		By("The chart's RBAC with rbac.scope=cluster passes")
+		waitForChartRBAC(mgr, keyNS)
 		Expect(CheckHostEnrolmentSecretAccess(ctx, mgr, withKey)).To(Succeed(),
 			"the chart's manager and enrolment RBAC grant no Secret read outside the enrolment namespace and no escalation primitive")
 
-		By("The chart's cluster-scoped manager may create Deployments in the key namespace: a warning, not a refusal")
+		By("The chart's cluster-scoped manager may create and change Deployments in the key namespace: a warning, not a refusal")
 		workload, err := HostEnrolmentWorkloadAccess(ctx, mgr, withKey)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(workload).To(Equal([]string{"create deployments.apps in namespace " + keyNS}))
+		Expect(workload).To(Equal([]string{"create deployments.apps in namespace " + keyNS,
+			"update deployments.apps in namespace " + keyNS, "patch deployments.apps in namespace " + keyNS}))
+
+		By("The chart's RBAC with rbac.scope=namespace passes, with no workload access in the key namespace")
+		namespaced := apply(relNS+"-ns", append([]string{"--set", "rbac.scope=namespace"}, enrolment...)...)
+		waitForChartRBAC(namespaced, relNS)
+		Expect(CheckHostEnrolmentSecretAccess(ctx, namespaced, withKey)).To(Succeed())
+		workload, err = HostEnrolmentWorkloadAccess(ctx, namespaced, withKey)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(workload).To(BeEmpty())
 
 		// grant binds a Role (in keyNS, or a ClusterRole when cluster) to
 		// the manager's ServiceAccounts, waits until the check refuses with
@@ -158,6 +175,30 @@ var _ = Describe("Per-host agent enrolment Secret access check (envtest)", func(
 		By("A grant to mint ServiceAccount tokens in the key namespace refuses")
 		grant("tokens", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{"create"}},
 			"create serviceaccounts/token in namespace "+keyNS)
+
+		By("A Role to impersonate ServiceAccounts in the key namespace refuses")
+		grant("impersonate-sa", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"impersonate"}},
+			"impersonate serviceaccounts in namespace "+keyNS)
+
+		By("Grants limited by resourceNames, which an access review cannot match, refuse through the rules review")
+		grant("impersonate-masters", true, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"groups"}, Verbs: []string{"impersonate"},
+			ResourceNames: []string{"system:masters"}}, "impersonate groups through an RBAC rule limited to system:masters")
+		grant("impersonate-user", true, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"users"}, Verbs: []string{"impersonate"},
+			ResourceNames: []string{"admin"}}, "impersonate users through an RBAC rule limited to admin")
+		grant("token-one-sa", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{"create"},
+			ResourceNames: []string{"cert-manager"}}, "create serviceaccounts/token through an RBAC rule limited to cert-manager")
+		grant("bind-cluster-admin", true, rbacv1.PolicyRule{APIGroups: []string{rbacv1.GroupName}, Resources: []string{"clusterroles"}, Verbs: []string{"bind"},
+			ResourceNames: []string{"cluster-admin"}}, "bind clusterroles.rbac.authorization.k8s.io through an RBAC rule limited to cluster-admin")
+		grant("patch-one-binding", false, rbacv1.PolicyRule{APIGroups: []string{rbacv1.GroupName}, Resources: []string{"rolebindings"}, Verbs: []string{"patch"},
+			ResourceNames: []string{"cert-manager"}}, "patch rolebindings.rbac.authorization.k8s.io through an RBAC rule limited to cert-manager")
+
+		By("Grants to enter pods in the key namespace refuse, also when limited to one pod")
+		grant("exec", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"pods/exec"}, Verbs: []string{"create"}},
+			"create pods/exec in namespace "+keyNS)
+		grant("attach-one-pod", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"pods/attach"}, Verbs: []string{"create"},
+			ResourceNames: []string{"cainjector"}}, "create pods/attach through an RBAC rule limited to cainjector")
+		grant("ephemeral", false, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"pods/ephemeralcontainers"}, Verbs: []string{"patch"}},
+			"patch pods/ephemeralcontainers in namespace "+keyNS)
 
 		By("A cluster-wide grant to impersonate ServiceAccounts refuses")
 		grant("impersonate", true, rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"impersonate"}},

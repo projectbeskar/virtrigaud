@@ -143,10 +143,14 @@ func ruleCovers(r admissionregistrationv1.RuleWithOperations, op admissionregist
 // admission check.
 const DefaultAdmissionRecheckInterval = 3 * time.Minute
 
-// AdmissionGate re-runs CheckCertManagerAdmission, and SecretAccess when set,
-// periodically; while the last check failed, the request reconciler decides
-// nothing. It is a manager Runnable: Start runs until its context is
-// cancelled.
+// admissionCheckTimeout bounds one run of the gate's checks.
+const admissionCheckTimeout = 30 * time.Second
+
+// AdmissionGate runs CheckCertManagerAdmission, and SecretAccess when set,
+// when it starts and then periodically; while the last check failed, the
+// request reconciler decides nothing. A change is therefore noticed within
+// the interval plus the duration of a check. It is a manager Runnable: Start
+// runs until its context is cancelled.
 type AdmissionGate struct {
 	// Reader is a live API reader.
 	Reader client.Reader
@@ -159,6 +163,9 @@ type AdmissionGate struct {
 	// Interval between checks (zero: DefaultAdmissionRecheckInterval).
 	Interval time.Duration
 	ok       atomic.Bool
+	// failed records that the last check failed, so that only a recovery is
+	// logged as one (not the first check that passes).
+	failed atomic.Bool
 }
 
 // Check runs the admission check and the Secret access check once and
@@ -169,11 +176,11 @@ func (g *AdmissionGate) Check(ctx context.Context) error {
 		err = g.SecretAccess(ctx)
 	}
 	was := g.ok.Swap(err == nil)
+	failedBefore := g.failed.Swap(err != nil)
 	if was && err != nil {
 		log.FromContext(ctx).Error(err, "Per-host agent enrolment approvals are suspended")
-	} else if !was && err == nil {
-		log.FromContext(ctx).Info("Per-host agent enrolment approvals are resumed: the admission webhooks cover CertificateRequests " +
-			"and the manager may not read the sub-CA key Secret")
+	} else if failedBefore && err == nil {
+		log.FromContext(ctx).Info("Per-host agent enrolment approvals are resumed: the enrolment checks pass again")
 	}
 	return err
 }
@@ -181,13 +188,14 @@ func (g *AdmissionGate) Check(ctx context.Context) error {
 // OK reports whether the last check passed.
 func (g *AdmissionGate) OK() bool { return g != nil && g.ok.Load() }
 
-// Start implements manager.Runnable: it re-checks every Interval until ctx
-// is cancelled.
+// Start implements manager.Runnable: it checks immediately, then every
+// Interval until ctx is cancelled.
 func (g *AdmissionGate) Start(ctx context.Context) error {
 	interval := g.Interval
 	if interval <= 0 {
 		interval = DefaultAdmissionRecheckInterval
 	}
+	g.checkBounded(ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -195,11 +203,17 @@ func (g *AdmissionGate) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			_ = g.Check(checkCtx) // the outcome is recorded and logged
-			cancel()
+			g.checkBounded(ctx)
 		}
 	}
+}
+
+// checkBounded runs one check with a time limit; the outcome is recorded and
+// logged by Check.
+func (g *AdmissionGate) checkBounded(ctx context.Context) {
+	checkCtx, cancel := context.WithTimeout(ctx, admissionCheckTimeout)
+	defer cancel()
+	_ = g.Check(checkCtx)
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable: every

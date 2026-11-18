@@ -31,7 +31,8 @@ import (
 func registerDevHostEnrolmentCAKeySecretFlag(fs *flag.FlagSet, f *controller.HostEnrolmentFlags) {
 	fs.StringVar(&f.CAKeySecret, controller.DevHostEnrolmentCAKeySecretFlagName, "",
 		"DEVELOPMENT ONLY. <namespace>/<name> of the Secret holding the host-agent subordinate CA's private key "+
-			"(for a ClusterIssuer, in cert-manager's cluster resource namespace). Optional. With it, per-host agent "+
-			"enrolment refuses to run while the manager may get that Secret or list or watch Secrets in its "+
-			"namespace; without it, only the check for Secret access in all namespaces applies.")
+			"(for a ClusterIssuer, in cert-manager's cluster resource namespace). Required with --"+
+			controller.DevHostEnrolmentIssuerFlagName+". With an external PKI alone, set it whenever that signer keeps "+
+			"its key in this cluster: the manager cannot tell. Per-host agent enrolment refuses to run while the manager "+
+			"may read that Secret or Secrets in its namespace, or enter pods there.")
 }
