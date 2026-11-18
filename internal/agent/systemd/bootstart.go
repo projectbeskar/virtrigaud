@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 )
 
 // AgentUnit is the per-host agent's unit.
@@ -35,9 +37,47 @@ const AgentUnit = "vrtg-agent.service"
 const SetupUnit = "vrtg-agent-setup.service"
 
 // BootStartMarker is the file, in the boot-start unit's runtime directory,
-// whose existence records that this boot's decision to start the agent was
-// made.
+// whose existence records that the decision to start the agent was made in
+// the userspace started by the boot (no soft reboot since). After a soft
+// reboot the marker is BootStartMarkerName of that soft reboot's time.
 const BootStartMarker = "started"
+
+// SoftRebootTarget is the target a soft reboot (systemctl soft-reboot,
+// systemd 254 and later) reaches just before the new userspace starts.
+const SoftRebootTarget = "soft-reboot.target"
+
+// propActiveEnterMono and propInactiveExitMono are the unit properties read
+// by LastSoftReboot and StartedSince.
+const (
+	propActiveEnterMono  = "ActiveEnterTimestampMonotonic"
+	propInactiveExitMono = "InactiveExitTimestampMonotonic"
+)
+
+// BootStartMarkerName is the marker's file name for the userspace whose last
+// soft reboot happened at softReboot (LastSoftReboot): BootStartMarker for 0
+// (no soft reboot since the boot, the name earlier versions used), and
+// BootStartMarker + "." + softReboot otherwise. A marker of an earlier
+// userspace has another name, so it is ignored, and each userspace's marker
+// is created exclusively.
+func BootStartMarkerName(softReboot uint64) string {
+	if softReboot == 0 {
+		return BootStartMarker
+	}
+	return BootStartMarker + "." + strconv.FormatUint(softReboot, 10)
+}
+
+// ErrBootStartUndecided marks a BootStart error returned before this boot's
+// decision was made: nothing was started by this run, and whether the agent
+// was already started this boot is unknown to it (an earlier run, an
+// operator or the agent's own links may have started it). An error without
+// it came after this boot's marker was made: the agent was not started by
+// boot-start in this boot.
+var ErrBootStartUndecided = errors.New("nothing was decided")
+
+// undecided wraps err as a failure before this boot's decision.
+func undecided(err error) error {
+	return fmt.Errorf("boot-start: %w (%w)", err, ErrBootStartUndecided)
+}
 
 // UnitStarter asks the service manager about a unit and starts it.
 type UnitStarter interface {
@@ -48,25 +88,57 @@ type UnitStarter interface {
 	StartNoBlock(ctx context.Context, unit string) error
 	// Active reports whether unit is active (systemctl is-active succeeds).
 	Active(ctx context.Context, unit string) (bool, error)
-	// StartedThisBoot reports whether unit was started (left the inactive
-	// state) at any time since this boot began.
-	StartedThisBoot(ctx context.Context, unit string) (bool, error)
+	// LastSoftReboot reports when the current userspace began with a soft
+	// reboot, in microseconds of the monotonic clock, or 0 when it is the
+	// userspace the boot started (no soft reboot since, or a systemd without
+	// soft reboot).
+	LastSoftReboot(ctx context.Context) (uint64, error)
+	// StartedSince reports whether unit was started (left the inactive
+	// state) after the monotonic time since, in microseconds.
+	StartedSince(ctx context.Context, unit string, since uint64) (bool, error)
 }
 
-// StartedThisBoot implements UnitStarter from the unit's
-// InactiveExitTimestampMonotonic: the monotonic clock restarts at each
-// boot, so a non-zero value means the unit left the inactive state during
-// this boot.
-func (s Systemctl) StartedThisBoot(ctx context.Context, unit string) (bool, error) {
-	out, err := exec.CommandContext(ctx, s.bin(), "show", "--property=InactiveExitTimestampMonotonic", "--value", unit).Output() // #nosec G204 -- fixed binary, a unit name of ours
+// LastSoftReboot implements UnitStarter from SoftRebootTarget's
+// ActiveEnterTimestampMonotonic. The monotonic clock does not restart at a
+// soft reboot, and the manager keeps the timestamps of the units it keeps
+// loaded across a soft reboot, a daemon-reexec and a daemon-reload. The
+// target stays loaded (systemd-journald.service conflicts with it), so the
+// value changes at each soft reboot and only then. It is 0 until the first
+// soft reboot of the boot, and on a systemd without soft reboot (before
+// 254), where the target does not exist and systemctl shows 0. Were the
+// target ever unloaded, the value would read 0: this boot would then look
+// like the boot's own, and StartedSince(0) holds for any agent started since
+// the boot, so the error could only miss a start, never make a second one.
+func (s Systemctl) LastSoftReboot(ctx context.Context) (uint64, error) {
+	return s.showUint(ctx, SoftRebootTarget, propActiveEnterMono)
+}
+
+// StartedSince implements UnitStarter from the unit's
+// InactiveExitTimestampMonotonic. The manager keeps that timestamp across a
+// soft reboot while the unit stays loaded (the monotonic clock goes on), so a
+// non-zero value alone does not mean "started in this userspace": only a
+// value after since does. A unit the manager unloads (an inactive unit that
+// nothing references, such as a disabled agent) reads 0, never started;
+// BootStart does not start a disabled agent.
+func (s Systemctl) StartedSince(ctx context.Context, unit string, since uint64) (bool, error) {
+	v, err := s.showUint(ctx, unit, propInactiveExitMono)
 	if err != nil {
-		return false, fmt.Errorf("systemctl show %s: %w", unit, err)
+		return false, err
+	}
+	return v > since, nil
+}
+
+// showUint reads one unsigned property of unit with systemctl show.
+func (s Systemctl) showUint(ctx context.Context, unit, prop string) (uint64, error) {
+	out, err := exec.CommandContext(ctx, s.bin(), "show", "--property="+prop, "--value", unit).Output() // #nosec G204 -- fixed binary, a unit and property name of ours
+	if err != nil {
+		return 0, fmt.Errorf("systemctl show %s: %w", unit, err)
 	}
 	v, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
 	if err != nil {
-		return false, fmt.Errorf("systemctl show %s: InactiveExitTimestampMonotonic %q: %w", unit, strings.TrimSpace(string(out)), err)
+		return 0, fmt.Errorf("systemctl show %s: %s %q: %w", unit, prop, strings.TrimSpace(string(out)), err)
 	}
-	return v != 0, nil
+	return v, nil
 }
 
 // Active implements UnitStarter: systemctl is-active --quiet exits 0 for an
@@ -135,9 +207,10 @@ func (s Systemctl) StartNoBlock(ctx context.Context, unit string) error {
 // BootStartOutcome is what BootStart did.
 type BootStartOutcome int
 
-// The outcomes of BootStart.
+// The outcomes of BootStart. "This boot" is the current userspace: the one
+// the boot started, or the one the last soft reboot started.
 const (
-	// BootStartAlreadyDecided: the marker existed; this boot's decision was
+	// BootStartAlreadyDecided: this boot's marker existed; the decision was
 	// made before (the unit was restarted, by hand or by a package script),
 	// so nothing is done.
 	BootStartAlreadyDecided BootStartOutcome = iota
@@ -157,44 +230,65 @@ const (
 	BootStartSetupNotActive
 )
 
-// BootStart starts the agent at most once per boot, once the setup unit
-// succeeded: while the setup unit is not active it does nothing and makes
-// no marker (BootStartSetupNotActive). It then creates the marker in
-// runtimeDir (a directory that survives restarts of the unit but
-// not a reboot), exclusively: if it exists, the decision was made earlier in
-// this boot and nothing is done, so a restart of the boot-start unit never
-// starts an agent stopped for maintenance. The marker is created before the
-// start, so an interruption between the two can only miss a start (the
-// fail-safe direction: an operator can start the agent), never start it
-// twice. Then, only while unit is enabled, it queues its start without
-// waiting for it. Any error leaves the agent unstarted.
+// BootStart starts the agent at most once per boot, a soft reboot counting
+// as a boot, once the setup unit succeeded. It first reads when the current
+// userspace began (LastSoftReboot: 0 for the boot, the soft reboot's time
+// otherwise); this boot's marker is BootStartMarkerName of that time, in
+// runtimeDir (a directory that survives restarts of the unit and a soft
+// reboot, but not a reboot). If the marker exists, the decision was made
+// earlier in this boot and nothing is done, so a restart of the boot-start
+// unit never starts an agent stopped for maintenance. A marker of an earlier
+// userspace has another name and does not count: a soft reboot re-arms the
+// start as a reboot does. If the agent was started since this boot began,
+// that is the boot's decision: the marker is made and nothing is started.
+// While the setup unit is not active it does nothing and makes no marker
+// (BootStartSetupNotActive). Otherwise it creates the marker exclusively
+// (if another run made it first, nothing is done), and the marker is
+// created before the start, so an interruption between the two can only
+// miss a start (the fail-safe direction: an operator can start the agent),
+// never start it twice. Then, only while unit is enabled, it queues its start
+// without waiting for it. Any error leaves the agent unstarted by this run;
+// an error before this boot's marker was made wraps ErrBootStartUndecided
+// (the time of the last soft reboot is read first, so a run can fail that
+// way even when the marker exists).
 func BootStart(ctx context.Context, runtimeDir, unit string, s UnitStarter) (BootStartOutcome, error) {
 	if runtimeDir == "" || !filepath.IsAbs(runtimeDir) {
-		return 0, fmt.Errorf("boot-start: runtime directory %q is not an absolute path", runtimeDir)
+		return 0, undecided(fmt.Errorf("runtime directory %q is not an absolute path", runtimeDir))
 	}
-	if _, err := os.Lstat(filepath.Join(runtimeDir, BootStartMarker)); err == nil {
+	softReboot, err := s.LastSoftReboot(ctx)
+	if err != nil {
+		return 0, undecided(err)
+	}
+	marker := filepath.Join(runtimeDir, BootStartMarkerName(softReboot))
+	if _, err := os.Lstat(marker); err == nil && !guard.Off(guard.BootStartMarker) {
 		return BootStartAlreadyDecided, nil
 	}
 	// Any start of the agent during this boot is the boot's decision.
-	if started, err := s.StartedThisBoot(ctx, unit); err != nil {
-		return 0, fmt.Errorf("boot-start: %w", err)
-	} else if started {
-		if err := createMarker(runtimeDir); err != nil && !errors.Is(err, fs.ErrExist) {
-			return 0, err
+	if started, err := s.StartedSince(ctx, unit, softReboot); err != nil {
+		return 0, undecided(err)
+	} else if started && !guard.Off(guard.BootStartStartedSince) {
+		if err := createMarker(marker); err != nil && !errors.Is(err, fs.ErrExist) {
+			return 0, undecided(err)
 		}
 		return BootStartStartedByOther, nil
 	}
 	if ok, err := s.Active(ctx, SetupUnit); err != nil {
-		return 0, fmt.Errorf("boot-start: %w", err)
+		return 0, undecided(err)
 	} else if !ok {
 		return BootStartSetupNotActive, nil
 	}
-	switch err := createMarker(runtimeDir); {
+	// Another run may have made the marker since the check above: the
+	// exclusive create decides which run acts.
+	switch err := createMarker(marker); {
 	case errors.Is(err, fs.ErrExist):
-		return BootStartAlreadyDecided, nil
+		if !guard.Off(guard.BootStartMarkerExcl) {
+			return BootStartAlreadyDecided, nil
+		}
 	case err != nil:
-		return 0, err
+		return 0, undecided(err)
 	}
+	// This boot's marker exists: from here, a failure misses this boot's
+	// start (no later run starts the agent).
 	enabled, err := s.Enabled(ctx, unit)
 	if err != nil {
 		return 0, fmt.Errorf("boot-start: %w", err)
@@ -208,18 +302,18 @@ func BootStart(ctx context.Context, runtimeDir, unit string, s UnitStarter) (Boo
 	return BootStartStarted, nil
 }
 
-// createMarker creates the boot's marker in runtimeDir, exclusively: an
-// error matching fs.ErrExist means it was there.
-func createMarker(runtimeDir string) error {
-	f, err := os.OpenFile(filepath.Join(runtimeDir, BootStartMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- the unit's own runtime directory
+// createMarker creates the marker file path, exclusively: an error matching
+// fs.ErrExist means it was there.
+func createMarker(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- in the unit's own runtime directory
 	if errors.Is(err, fs.ErrExist) {
 		return err
 	}
 	if err != nil {
-		return fmt.Errorf("boot-start: create the marker: %w", err)
+		return fmt.Errorf("create the marker: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("boot-start: close the marker: %w", err)
+		return fmt.Errorf("close the marker: %w", err)
 	}
 	return nil
 }

@@ -44,7 +44,7 @@ VM. Neither build links Kubernetes or the VirtRigaud API packages.
 | `vrtg-agent run` | Runs the agent until SIGTERM or SIGINT. |
 | `vrtg-agent signer` | Runs the host key signer until SIGTERM or SIGINT: a separate process and user that holds the host private key and signs for the agent over a Unix socket (see [Host key signer](#host-key-signer)). The same in a release and a development build; it has no development-only setting. |
 | `vrtg-agent shutdown-vms` | Stops every VM of the executor, only while the host is shutting down (see [Units](#systemd-units)). |
-| `vrtg-agent boot-start` | Development builds only (a release build prints that it is not available and exits 1). Starts the agent at most once per boot, while `vrtg-agent.service` is enabled: the action of `vrtg-agent-boot-start.service` (see [Units](#systemd-units)). `--runtime-dir` (default `$RUNTIME_DIRECTORY`, then `/run/vrtg-agent-boot-start`) holds the once-per-boot marker. |
+| `vrtg-agent boot-start` | Development builds only (a release build prints that it is not available and exits 1). Starts the agent at most once per boot (a soft reboot counts as a boot), while `vrtg-agent.service` is enabled: the action of `vrtg-agent-boot-start.service` (see [Units](#systemd-units)). `--runtime-dir` (default `$RUNTIME_DIRECTORY`, then `/run/vrtg-agent-boot-start`) holds the once-per-boot markers. |
 | `vrtg-agent enroll csr` / `enroll install` | Development builds only (a release build prints that it is not available and exits 1). The two steps of host enrolment: `csr`, run as the signer's user, creates the host key and writes the certificate signing request; `install`, run as the agent's user, checks and installs the issued certificate (see [Enrolment](#enrolment)). |
 | `vrtg-agent version` | Prints the version. |
 
@@ -1266,40 +1266,76 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   maintenance stop). `vrtg-agent-boot-start.service` is upheld instead: a
   `oneshot` with `RemainAfterExit=yes` whose only action is `vrtg-agent
   boot-start` (development builds), with no dependency on the agent's unit.
-  That command acts at most once per boot: it first creates the marker
-  `/run/vrtg-agent-boot-start/started` exclusively and does nothing when it
-  already exists; the unit's runtime directory is kept when the unit stops
-  (`RuntimeDirectoryPreserve=yes`) and goes with the reboot. Only then, and
-  only while `systemctl is-enabled vrtg-agent.service` succeeds (enabled,
-  enabled-runtime, static, ...), it runs `systemctl --no-block start
-  vrtg-agent.service`. The marker is made before the start, so an
-  interruption can only miss a start (start the agent by hand), never start
-  it twice. It runs after the setup unit (it wants it and is ordered after
-  it) and makes its marker only once that unit is active: when setup failed
-  it logs a warning that says to fix the cause and start the agent by hand,
-  makes no marker and succeeds, so a later start of the unit, after the fix,
-  still acts once in that boot. Any start of the agent during the boot is
-  that boot's decision: before anything else the command reads the agent
-  unit's `InactiveExitTimestampMonotonic` (`systemctl show`; the monotonic
-  clock restarts at each boot, so a non-zero value means the agent was
-  started this boot, by hand or by its own `[Install]` links). Then it
-  makes the marker and starts nothing, so an agent started by hand after a
-  failed setup and stopped for maintenance is not started again by a
-  package's restart of the unit.
+  That command acts at most once per boot, and a soft reboot (`systemctl
+  soft-reboot`) counts as a boot. "This boot" is the userspace that is
+  running: the one the boot started, or the one the last soft reboot
+  started. The command first reads when that userspace began:
+  `soft-reboot.target`'s `ActiveEnterTimestampMonotonic` (`systemctl
+  show`), which is 0 until the first soft reboot and is the time of the
+  last soft reboot after it. The monotonic clock does not restart at a soft
+  reboot, and systemd keeps the timestamps of the units it keeps loaded
+  across a soft reboot, a `daemon-reexec` and a `daemon-reload`; the target
+  stays loaded (`systemd-journald.service` conflicts with it), so the value
+  changes at each soft reboot and only then. If it ever read 0 after a soft
+  reboot, the command would treat the userspace as the boot's own and every
+  agent started since the boot as already started: it could miss a start,
+  never make a second one. A soft reboot that reaches `soft-reboot.target`
+  and then fails still counts as a new generation. That is safe: the soft
+  reboot's transaction already stopped the agent, so a start in the new
+  generation is not a second start. This boot's marker is
+  `/run/vrtg-agent-boot-start/started` while the value is 0 and
+  `/run/vrtg-agent-boot-start/started.<value>` after a soft reboot. The
+  command does nothing when this boot's marker already exists. A marker of
+  an earlier userspace has another name, so it does not count (a soft reboot
+  keeps `/run` and the boot id, so the earlier markers are still there; one
+  empty file per soft reboot, removed with the rest of `/run` at the next
+  reboot). The unit's runtime directory is kept when the unit stops
+  (`RuntimeDirectoryPreserve=yes`) and goes with the reboot. Any start of
+  the agent during this boot is that boot's decision: the command reads the
+  agent unit's `InactiveExitTimestampMonotonic`, and the agent counts as
+  started this boot when that time is after the time this boot began (a
+  non-zero value alone is not enough: the value from before a soft reboot is
+  kept while the unit stays loaded; a disabled agent that nothing references
+  may be unloaded and read 0, and a disabled agent is never started).
+  Then it makes the marker and starts nothing, so an agent started by
+  hand after a failed setup and stopped for maintenance is not started again
+  by a package's restart of the unit, and neither is an agent its own
+  `[Install]` links started after a soft reboot. Otherwise it runs after the
+  setup unit (it wants it and is ordered after it) and makes its marker only
+  once that unit is active: when setup failed it logs a warning that says to
+  fix the cause and start the agent by hand, makes no marker and succeeds,
+  so a later start of the unit, after the fix, still acts once in that boot.
+  It creates this boot's marker exclusively (when another run made it
+  first, it does nothing). Only then, and only while `systemctl is-enabled
+  vrtg-agent.service` succeeds (enabled, enabled-runtime, static, ...), it
+  runs `systemctl --no-block start vrtg-agent.service`. The marker is made
+  before the start, so an interruption can only miss a start (start the
+  agent by hand), never start it twice.
 
-  A soft reboot (`systemctl soft-reboot`) keeps `/run` and the boot id, so
-  the marker survives it (and keying the marker to the boot id would not
-  help: it does not change either). After a soft reboot the boot-start unit
-  reports that the decision was already made and the agent stays stopped
-  until it is started by hand: `systemctl start vrtg-agent.service`. That
-  is the safe direction; a full reboot re-arms the unit. It runs once per boot and stays active, so `Upholds=` does not run it
+  After a soft reboot the agent is therefore started again, exactly as
+  after a reboot: the shutdown unit counts `soft-reboot.target` as a host
+  shutdown and stopped every VM, and the boot-start unit, upheld again in
+  the new userspace, starts the agent once. An agent stopped for maintenance
+  before a soft reboot is started by it, as by a reboot; to keep it off
+  across either, disable it (`systemctl disable vrtg-agent.service`). This
+  needs systemd 254 or later, the first with soft reboot. On systemd 252
+  (Rocky Linux 9) there is no soft reboot and no `soft-reboot.target`:
+  `systemctl show` reports 0 for it, and the command behaves as once per
+  boot. A host must also support a soft reboot at all: on an immutable host
+  whose persistent mounts are made by its initramfs, a soft reboot unmounts
+  them and nothing mounts them again; in our tests one such host stopped in
+  emergency mode, without the system extension or the agent's state
+  directory. Use a full reboot there.
+
+  The unit runs once per boot and stays active, so `Upholds=` does not run it
   again: an agent stopped for maintenance stays stopped through restarts of
-  the shutdown unit, `systemctl daemon-reload` and `systemd-sysext refresh`.
-  The agent's `Wants=` and `Requires=` bring the signer and the setup unit up with it.
-  Stopping, restarting or try-restarting `vrtg-agent-boot-start.service`
-  (by hand, or by a package's upgrade scripts, which restart every unit the
-  package ships) starts nothing either: the marker of this boot is still
-  there. A reboot is what re-arms it.
+  the shutdown unit, `systemctl daemon-reload`, `systemctl daemon-reexec`
+  and `systemd-sysext refresh`. The agent's `Wants=` and `Requires=` bring
+  the signer and the setup unit up with it. Stopping, restarting or
+  try-restarting `vrtg-agent-boot-start.service` (by hand, or by a package's
+  upgrade scripts, which restart every unit the package ships) starts
+  nothing either: the marker of this boot is still there. A reboot or a soft
+  reboot is what re-arms it.
 
 Enablement: the agent starts at boot only while `vrtg-agent.service` is
 enabled, on both kinds of host. On a host with a system extension, enable it
@@ -1337,12 +1373,18 @@ the agent could not be started, and a reboot skipped the graceful VM stop,
 leaving every VM running. For the boot-start unit, the host reported itself
 degraded although nothing had failed. A start limit cannot bound `Upholds=`
 retries anyway. The boot-start unit acts at most once per boot, so its
-restarts do nothing. When its action does fail before this boot's decision
-is made (`systemctl` unusable, say), `Upholds=` runs it again with a warning
-each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
-the cause is fixed. On systemd 252 the lab saw only a first burst of 16 runs
-and no further run within 2 minutes, so start the agent by hand there once
-the cause is fixed. The agent and the signer
+restarts do nothing. Its action can still fail (`systemctl` unusable, say),
+even after this boot's marker exists: it reads the time of the last soft
+reboot before it looks for the marker, and that keeps the fail-safe order.
+A failure before the decision logs a warning that it could not tell
+whether the agent was started this boot, and to check `systemctl status
+vrtg-agent`; a failure after the marker was made (the start itself was
+refused) says the agent was not started and to start it by hand. Either
+way `Upholds=` runs the unit again with a warning each time: on systemd 255
+at its own pace (16 runs every 10 seconds) until the cause is fixed. On
+systemd 252 the lab saw only a first burst of 16 runs and no further run
+within 2 minutes, so check the agent there once the cause is fixed and
+start it by hand if it is not running. The agent and the signer
 keep a start limit: they restart themselves (`Restart=always`), and the
 limit ends a crash loop. Restarting the setup unit restarts them too
 (`Requires=`), so restarting it many times in quick succession (about 10

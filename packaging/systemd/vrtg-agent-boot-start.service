@@ -14,24 +14,30 @@
 # It has no dependency on the agent's unit: stopping or restarting the agent
 # never involves it.
 #
-# Its action is "vrtg-agent boot-start", which acts at most once per boot:
-# it first creates the marker /run/vrtg-agent-boot-start/started
-# (exclusively), and does nothing when the marker already exists. The
-# runtime directory is kept when the unit stops (RuntimeDirectoryPreserve=)
-# and goes with the reboot, so a restart or try-restart of this unit, by
-# hand or by a package's upgrade scripts, never starts an agent stopped for
-# maintenance; a reboot re-arms it. The marker is made before the start, so
-# an interruption can only miss a start (start the agent by hand), never
-# start it twice.
+# Its action is "vrtg-agent boot-start", which acts at most once per boot,
+# a soft reboot counting as a boot: it first creates this boot's marker
+# (exclusively), and does nothing when the marker already exists. The marker
+# is /run/vrtg-agent-boot-start/started until the first soft reboot, and
+# started.<time> after one, the time being soft-reboot.target's
+# ActiveEnterTimestampMonotonic, which changes at each soft reboot and not
+# at a daemon-reexec or daemon-reload (0 on systemd without soft reboot,
+# before 254). The runtime directory is kept when the unit stops
+# (RuntimeDirectoryPreserve=) and goes with the reboot (a soft reboot keeps
+# it, and the new userspace's marker has another name), so a restart or
+# try-restart of this unit, by hand or by a package's upgrade scripts, never
+# starts an agent stopped for maintenance; a reboot or a soft reboot re-arms
+# it. The marker is made before the start, so an interruption can only miss
+# a start (start the agent by hand), never start it twice.
 #
 # It runs after vrtg-agent-setup.service (it wants it and is ordered after
 # it), and creates its marker only once the setup unit is active: when setup
 # failed, it logs a warning, leaves no marker and starts nothing, so a later
 # start of this unit (after the cause is fixed) still acts once. Any start
 # of the agent earlier in the boot (by hand, say, after setup was fixed) is
-# the boot's decision: it then makes its marker and starts nothing. It does not
-# require the setup unit: it is upheld, and Upholds= would start it again,
-# without end, while setup failed.
+# the boot's decision (the agent's InactiveExitTimestampMonotonic is after
+# the boot's or the soft reboot's start): it then makes its marker and
+# starts nothing. It does not require the setup unit: it is upheld, and
+# Upholds= would start it again, without end, while setup failed.
 #
 # Then it starts the agent only while vrtg-agent.service is enabled
 # (systemctl is-enabled: enabled, enabled-runtime, static, ...), so that
@@ -56,9 +62,12 @@ After=vrtg-agent-setup.service
 # fail (systemctl unusable, say), Upholds= runs it again, with a warning
 # each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
 # the cause is fixed; on systemd 252 the lab saw only a first burst of 16
-# runs and no further run within 2 minutes, so start the agent by hand there
-# once the cause is fixed. Once the marker
-# exists, a run never fails again in this boot.
+# runs and no further run within 2 minutes, so check the agent there once
+# the cause is fixed and start it by hand if it is not running. A run can
+# fail even after this boot's marker exists: it reads the time of the last
+# soft reboot (systemctl show) before it looks for the marker. Such a
+# failure starts nothing, and its warning says that it could not tell
+# whether the agent was started this boot.
 StartLimitIntervalSec=0
 
 [Service]
