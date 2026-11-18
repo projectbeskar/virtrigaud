@@ -329,7 +329,7 @@ experimental:
     # able to read the host-agent subordinate CA's key. The development
     # manager refuses to run enrolment while it may get, list, watch,
     # update, patch, delete or deletecollection Secrets in all namespaces,
-    # or impersonate, create tokens or bind roles (see
+    # or impersonate, create tokens or change role bindings (see
     # docs/host-agent-enrolment.md), whatever renders its RBAC.
     enabled: false
     # Must be set to true together with enabled: an explicit statement that
@@ -345,17 +345,19 @@ experimental:
     # cert-manager/host-agent-ca for a ClusterIssuer whose key lives in
     # cert-manager's cluster resource namespace. Required when signerNames
     # lists a cert-manager signer (issuers.cert-manager.io/... or
-    # clusterissuers.cert-manager.io/...). Rendering fails when the Secret is
+    # clusterissuers.cert-manager.io/...). The chart cannot tell where an
+    # external signer keeps its key: if that key is in this cluster, you must
+    # declare it here too. Rendering fails when the Secret is
     # in the enrolment namespace or its namespace is listed in
     # rbac.secrets.providerNamespaces or workloadNamespaces. The chart does
     # not start the enrolment manager: pass the same value to it as
     # --dev-host-enrolment-ca-key-secret. The manager then refuses to run
-    # enrolment while it may get, list, watch, update, patch or delete that
-    # Secret, list, watch, update, patch, delete or deletecollection Secrets
-    # in its namespace, or create ServiceAccount tokens or RoleBindings, or
-    # bind or escalate roles, in its namespace or in all namespaces. It
-    # warns, without refusing, while it may create Deployments or Pods in
-    # that namespace.
+    # enrolment while any of its RBAC rules, even one limited to named
+    # objects, covers Secrets in that namespace, exec, attach or ephemeral
+    # containers on pods there, impersonation, ServiceAccount tokens,
+    # changes to role bindings, or bind or escalate on roles. It warns,
+    # without refusing, while it may create or change Deployments or create
+    # Pods in that namespace.
     caKeySecret: ""
     # Exact cert-manager signer names the manager may approve for, e.g.
     # issuers.cert-manager.io/<namespace>.<name> or

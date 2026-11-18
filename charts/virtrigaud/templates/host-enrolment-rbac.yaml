@@ -22,9 +22,12 @@ scope the manager can read every Secret, including the host-agent
 subordinate CA's key Secret (in cert-manager's cluster resource namespace for
 the recommended ClusterIssuer), and could sign CA-valid host-agent
 certificates with no approval at all. No rbac.additionalRules entry may cover
-core-group Secrets. experimental.hostEnrolment.caKeySecret is required with a
-cert-manager signer (issuers.cert-manager.io or clusterissuers.cert-manager.io;
-an external PKI's key is outside the cluster). Neither the enrolment namespace
+core-group Secrets, and each entry's apiGroups and resources must be lists of
+strings so that this can be checked. experimental.hostEnrolment.caKeySecret is
+required with a cert-manager signer (a signer in the cert-manager.io group).
+The chart cannot tell where an external signer keeps its key: declaring
+caKeySecret when that key is in the cluster is the operator's responsibility.
+Neither the enrolment namespace
 nor the namespace of the sub-CA key Secret may be listed in
 rbac.secrets.providerNamespaces or workloadNamespaces:
 
@@ -61,15 +64,26 @@ rule is added for them.
 {{- fail (printf "experimental.hostEnrolment.namespace %q must not be listed in rbac.secrets.providerNamespaces or workloadNamespaces: only the manager may write Secrets in the enrolment namespace, and its Secret access there comes from the enrolment Role alone; keep Provider objects and workloads in other namespaces" $ns) }}
 {{- end }}
 {{- range $i, $rule := (.Values.rbac.additionalRules | default list) }}
+{{- if not (kindIs "map" $rule) }}
+{{- fail (printf "rbac.additionalRules[%d] must be a rule; it cannot be checked for Secret access, which experimental.hostEnrolment.enabled requires" $i) }}
+{{- end }}
 {{- $groups := $rule.apiGroups | default list }}
 {{- $resources := $rule.resources | default list }}
+{{- if not (and (kindIs "slice" $groups) (kindIs "slice" $resources)) }}
+{{- fail (printf "rbac.additionalRules[%d]: apiGroups and resources must be lists of strings; they cannot be checked for Secret access, which experimental.hostEnrolment.enabled requires" $i) }}
+{{- end }}
+{{- range (concat $groups $resources) }}
+{{- if not (kindIs "string" .) }}
+{{- fail (printf "rbac.additionalRules[%d]: apiGroups and resources must hold only strings (found %v); they cannot be checked for Secret access, which experimental.hostEnrolment.enabled requires" $i .) }}
+{{- end }}
+{{- end }}
 {{- if and (or (has "" $groups) (has "*" $groups)) (or (has "secrets" $resources) (has "*" $resources)) }}
 {{- fail (printf "rbac.additionalRules[%d] grants Secret access in the core API group; it cannot be used with experimental.hostEnrolment.enabled: the sub-CA key must not be readable by the manager" $i) }}
 {{- end }}
 {{- end }}
 {{- $certManagerSigner := false }}
 {{- range $he.signerNames }}
-{{- if or (hasPrefix "issuers.cert-manager.io/" .) (hasPrefix "clusterissuers.cert-manager.io/" .) }}
+{{- if hasSuffix ".cert-manager.io" (first (splitList "/" .)) }}
 {{- $certManagerSigner = true }}
 {{- end }}
 {{- end }}
@@ -95,6 +109,9 @@ rule is added for them.
 {{- range $he.signerNames }}
 {{- if or (contains "*" .) (not (contains "/" .)) }}
 {{- fail (printf "experimental.hostEnrolment.signerNames: %q must be one exact signer name (<resource>.<group>/<namespace>.<name>), never a wildcard" .) }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$" (first (splitList "/" .))) }}
+{{- fail (printf "experimental.hostEnrolment.signerNames: %q must start with a lowercase <resource>.<group> with no trailing dot" .) }}
 {{- end }}
 {{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
