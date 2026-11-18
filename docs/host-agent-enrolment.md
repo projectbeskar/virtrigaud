@@ -14,6 +14,16 @@ into any inventory, and leaves the new Host fields unused. The agent side
 (generating the key and the CSR on the host, installing the certificate) is
 in [`per-host-agent-development.md`](per-host-agent-development.md#enrolment).
 
+Both agent-side steps refuse to run where the result would be lost at the next
+reboot, checking before they write anything: `vrtg-agent enroll csr` that the
+directory of the host key is on persistent storage, and `enroll install` that
+the agent's state directory and its `pki/` directory are (not tmpfs, ramfs,
+overlay, a loop device or a network file system). The signer refuses to start
+(exit 1; systemd retries it within the unit's start limit, then the unit stays
+failed) with the key directory on non-persistent storage. On an immutable host
+that falls back to an in-memory `/var`, provision a persistent volume for
+`/var/lib/virtrigaud-agent` and `/var/lib/virtrigaud-signer` first.
+
 ## Host fields
 
 | Field | Meaning |

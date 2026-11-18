@@ -31,6 +31,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
+	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck/hostchecktest"
 )
 
 // notes records systemd notifications.
@@ -65,7 +68,7 @@ func TestRun(t *testing.T) {
 	n := &notes{}
 	signals := make(chan os.Signal, 4)
 	o := RunOptions{SocketPath: filepath.Join(dir, "signer.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(),
-		Notifier: n, Log: l.logger()}
+		Notifier: n, Log: l.logger(), Probe: persistentProbe()}
 	done := make(chan error, 1)
 	go func() { done <- Run(context.Background(), o, signals) }()
 
@@ -110,6 +113,12 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// persistentProbe is a fake host on which every directory is on a persistent
+// ext4 file system, whatever the test machine's temporary directory is on.
+func persistentProbe() *hostchecktest.Fake {
+	return hostchecktest.Healthy(hostcheck.Config{TrustDir: "/trust"}, "spiffe://example.test/virtrigaud/host/ns/h")
+}
+
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
 
 // TestRunRemovesStrayKeyTemps: at start, the signer removes the temporary
@@ -130,7 +139,7 @@ func TestRunRemovesStrayKeyTemps(t *testing.T) {
 		l := &logs{}
 		signals := make(chan os.Signal, 1)
 		o := RunOptions{SocketPath: filepath.Join(dir, "signer.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(),
-			Notifier: &notes{}, Log: l.logger(), RemoveStrayTemps: sweep}
+			Notifier: &notes{}, Log: l.logger(), RemoveStrayTemps: sweep, Probe: persistentProbe()}
 		done := make(chan error, 1)
 		go func() { done <- Run(context.Background(), o, signals) }()
 		require.Eventually(t, func() bool { return contains(l.text(), "signer serving") }, 5*time.Second, 10*time.Millisecond)
@@ -158,7 +167,7 @@ func TestRunRefusals(t *testing.T) {
 	good := func(t *testing.T) RunOptions {
 		dir := shortTempDir(t)
 		keyFile := writeKeyFile(t, shortTempDir(t), newKey(t), 0o600)
-		return RunOptions{SocketPath: filepath.Join(dir, "s.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(), Log: (&logs{}).logger()}
+		return RunOptions{SocketPath: filepath.Join(dir, "s.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(), Log: (&logs{}).logger(), Probe: persistentProbe()}
 	}
 	for name, edit := range map[string]func(*RunOptions){
 		"socket dir owned by another user": func(o *RunOptions) { o.OwnerUID = EUID() + 1 },
@@ -176,4 +185,72 @@ func TestRunRefusals(t *testing.T) {
 			assert.True(t, os.IsNotExist(err), "no socket was created")
 		})
 	}
+}
+
+// TestRunRefusesNonPersistentKeyDir: a key directory on tmpfs, a loop device
+// or a network file system refuses the start before anything is served, with
+// the reason and the directory named; a persistent one starts.
+func TestRunRefusesNonPersistentKeyDir(t *testing.T) {
+	tests := []struct {
+		name  string
+		mount hostcheck.Mount
+	}{
+		{"tmpfs", hostcheck.Mount{FSType: "tmpfs", Source: "tmpfs"}},
+		{"overlay", hostcheck.Mount{FSType: "overlay", Source: "overlay"}},
+		{"loop device", hostcheck.Mount{FSType: "ext4", Source: "/dev/loop3"}},
+		{"network", hostcheck.Mount{FSType: "nfs4", Source: "server:/export"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := shortTempDir(t)
+			require.NoError(t, os.Chmod(dir, 0o750))
+			keyDir := shortTempDir(t)
+			keyFile := writeKeyFile(t, keyDir, newKey(t), 0o600)
+			probe := persistentProbe()
+			probe.Edit(func(f *hostchecktest.Fake) {
+				m := tc.mount
+				m.MountPoint = keyDir
+				f.Mounts = append(f.Mounts, m)
+			})
+			l := &logs{}
+			o := RunOptions{SocketPath: filepath.Join(dir, "signer.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(),
+				Log: l.logger(), Probe: probe}
+			// A bounded context: were the check missing, the signer would
+			// serve, and the test must fail at once, not hang.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := Run(ctx, o, make(chan os.Signal))
+			require.Error(t, err, "the signer must refuse to start")
+			f, ok := hostcheck.AsFailure(err)
+			require.True(t, ok, "the refusal is a host check failure")
+			assert.Equal(t, hostcheck.ReasonSignerKeyNotPersistent, f.Reason)
+			assert.Contains(t, err.Error(), keyDir, "the directory is named")
+			assert.Contains(t, l.text(), "start refused")
+			assert.Contains(t, l.text(), hostcheck.ReasonSignerKeyNotPersistent)
+			_, statErr := os.Lstat(o.SocketPath)
+			assert.True(t, os.IsNotExist(statErr), "nothing is served")
+		})
+	}
+}
+
+// TestRunRefusesKeyFileOnItsOwnMount: a key file bind-mounted from memory
+// refuses the start although its directory is persistent.
+func TestRunRefusesKeyFileOnItsOwnMount(t *testing.T) {
+	dir := shortTempDir(t)
+	require.NoError(t, os.Chmod(dir, 0o750))
+	keyFile := writeKeyFile(t, shortTempDir(t), newKey(t), 0o600)
+	probe := persistentProbe()
+	probe.Edit(func(f *hostchecktest.Fake) {
+		f.Files[keyFile] = hostcheck.FileInfo{Mode: 0o600}
+		f.Mounts = append(f.Mounts, hostcheck.Mount{MountPoint: keyFile, FSType: "tmpfs", Source: "tmpfs"})
+	})
+	o := RunOptions{SocketPath: filepath.Join(dir, "signer.sock"), KeyFile: keyFile, OwnerUID: EUID(), AgentUID: EUID(),
+		Log: (&logs{}).logger(), Probe: probe}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := Run(ctx, o, make(chan os.Signal))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), keyFile)
+	_, statErr := os.Lstat(o.SocketPath)
+	assert.True(t, os.IsNotExist(statErr), "nothing is served")
 }

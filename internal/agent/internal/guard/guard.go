@@ -218,6 +218,13 @@ const (
 	// RenewalOnlyWhenAsked: a pending renewal request is put only in the
 	// answer of a GetHostInfo that asked for it.
 	RenewalOnlyWhenAsked Name = "renewal-only-when-asked"
+	// EnrolStatePersistent: every enrolment step refuses, before it writes
+	// anything, when the agent's state directory is not on persistent
+	// storage.
+	EnrolStatePersistent Name = "enrol-state-persistent"
+	// SignerKeyDirPersistent: the host key is created, and the signer starts,
+	// only when the key file's directory is on persistent storage.
+	SignerKeyDirPersistent Name = "signer-key-dir-persistent"
 )
 
 // All lists every guard, in a fixed order.
@@ -235,5 +242,6 @@ func All() []Name {
 		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired,
 		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
+		EnrolStatePersistent, SignerKeyDirPersistent,
 	}
 }

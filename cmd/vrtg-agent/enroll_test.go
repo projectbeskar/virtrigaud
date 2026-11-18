@@ -377,3 +377,79 @@ func boolInt(b bool) int {
 	}
 	return 0
 }
+
+// notPersistent mounts a file system that does not survive a reboot (or is
+// not a disk) over dir on the fake host.
+func (e *enrollEnv) notPersistent(dir string, m hostcheck.Mount) {
+	e.probe.Edit(func(f *hostchecktest.Fake) {
+		m.MountPoint = dir
+		f.Mounts = append(f.Mounts, m)
+	})
+}
+
+var nonPersistentMounts = []struct {
+	name  string
+	mount hostcheck.Mount
+}{
+	{"tmpfs", hostcheck.Mount{FSType: "tmpfs", Source: "tmpfs"}},
+	{"overlay", hostcheck.Mount{FSType: "overlay", Source: "overlay"}},
+	{"loop device", hostcheck.Mount{FSType: "ext4", Source: "/dev/loop0"}},
+	{"network file system", hostcheck.Mount{FSType: "nfs4", Source: "server:/export"}},
+}
+
+// TestEnrollCSRRefusesNonPersistentKeyDirectory: the csr step writes neither
+// a key nor a request when the key file's directory is not on persistent
+// storage, and the refusal names the directory. It writes nothing to the
+// agent's state directory, so that directory does not matter to it.
+func TestEnrollCSRRefusesNonPersistentKeyDirectory(t *testing.T) {
+	for _, mt := range nonPersistentMounts {
+		t.Run(mt.name, func(t *testing.T) {
+			e := newEnrollEnv(t)
+			e.notPersistent(e.keyDir, mt.mount)
+			out := filepath.Join(e.workDir, "host.csr")
+			code, msg := e.run(e.csrArgs(out))
+			assert.Equal(t, 1, code, msg)
+			_, err := os.Lstat(e.keyFile)
+			assert.True(t, os.IsNotExist(err), "a refused step makes no key")
+			_, err = os.Lstat(out)
+			assert.True(t, os.IsNotExist(err), "a refused step writes no request")
+		})
+	}
+}
+
+// TestEnrollCSRIgnoresTheStateDirectory: a state directory in memory does not
+// stop the csr step, which does not write there (the agent's start and the
+// install step check it).
+func TestEnrollCSRIgnoresTheStateDirectory(t *testing.T) {
+	e := newEnrollEnv(t)
+	e.notPersistent(e.stateDir, hostcheck.Mount{FSType: "tmpfs", Source: "tmpfs"})
+	code, msg := e.run(e.csrArgs(filepath.Join(e.workDir, "host.csr")))
+	assert.Equal(t, 0, code, msg)
+}
+
+// TestEnrollInstallRefusesNonPersistentState: the install step writes nothing
+// when the agent's state directory is not on persistent storage, even for a
+// certificate that would otherwise be installed.
+func TestEnrollInstallRefusesNonPersistentState(t *testing.T) {
+	for _, mt := range nonPersistentMounts {
+		for _, which := range []string{"state", "pki"} {
+			t.Run(mt.name+"/"+which, func(t *testing.T) {
+				e := newEnrollEnv(t)
+				csr := filepath.Join(e.workDir, "host.csr")
+				code, msg := e.run(e.csrArgs(csr))
+				require.Equal(t, 0, code, msg)
+				e.serveSigner(t)
+				cert := e.issue(t, csr, hostidentitytest.IssueOptions{})
+				dir := e.stateDir
+				if which == "pki" {
+					dir = filepath.Join(e.stateDir, config.PKIDirName)
+				}
+				e.notPersistent(dir, mt.mount)
+				code, msg = e.run(e.installArgs(csr, cert))
+				assert.Equal(t, 1, code, msg)
+				_, err := os.Lstat(filepath.Join(e.stateDir, config.PKIDirName, "host.crt"))
+				assert.True(t, os.IsNotExist(err), "nothing is installed")
+			})
+		}
+	}
+}

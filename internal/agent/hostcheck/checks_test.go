@@ -21,6 +21,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck/hostchecktest"
 )
@@ -231,5 +234,155 @@ func TestZFSDatasetIsPersistent(t *testing.T) {
 	})
 	if err := hostcheck.CheckPersistent(p, testCfg.StateDir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// persistenceMounts are mounts that are not persistent storage.
+var persistenceMounts = []struct {
+	name  string
+	mount hostcheck.Mount
+}{
+	{"tmpfs", hostcheck.Mount{FSType: "tmpfs", Source: "tmpfs"}},
+	{"overlay", hostcheck.Mount{FSType: "overlay", Source: "overlay"}},
+	{"network file system", hostcheck.Mount{FSType: "nfs4", Source: "server:/export"}},
+	{"loop device", hostcheck.Mount{FSType: "ext4", Source: "/dev/loop3"}},
+	{"not a block device", hostcheck.Mount{FSType: "ext4", Source: "rootfs"}},
+}
+
+// TestEnrolStatePersistent: the enrolment steps' check refuses a state
+// directory that is not on persistent storage, naming the directory, and
+// passes one that is (including ZFS, whose source is a dataset).
+func TestEnrolStatePersistent(t *testing.T) {
+	require.NoError(t, hostcheck.CheckEnrolStatePersistent(healthy(), testCfg.StateDir, testCfg.PKIDir))
+	for _, tc := range persistenceMounts {
+		t.Run(tc.name, func(t *testing.T) {
+			p := healthy()
+			p.Edit(func(f *hostchecktest.Fake) {
+				m := tc.mount
+				m.MountPoint = testCfg.StateDir
+				f.Mounts = append(f.Mounts, m)
+			})
+			err := hostcheck.CheckEnrolStatePersistent(p, testCfg.StateDir, testCfg.PKIDir)
+			require.Error(t, err)
+			f, ok := hostcheck.AsFailure(err)
+			require.True(t, ok)
+			assert.Equal(t, hostcheck.ReasonStateNotPersistent, f.Reason)
+			assert.Contains(t, err.Error(), testCfg.StateDir)
+		})
+	}
+	// A persistent state directory with a pki/ mount of its own that is in
+	// memory: the certificate would land in memory.
+	p := healthy()
+	p.Edit(func(f *hostchecktest.Fake) {
+		f.Mounts = append(f.Mounts, hostcheck.Mount{MountPoint: testCfg.PKIDir, FSType: "tmpfs", Source: "tmpfs"})
+	})
+	err := hostcheck.CheckEnrolStatePersistent(p, testCfg.StateDir, testCfg.PKIDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), testCfg.PKIDir)
+	// The agent's start refuses it too, with the same reason.
+	err = hostcheck.Run(p, testCfg)
+	require.Error(t, err)
+	f, ok := hostcheck.AsFailure(err)
+	require.True(t, ok)
+	assert.Equal(t, hostcheck.ReasonStateNotPersistent, f.Reason)
+	assert.Contains(t, err.Error(), testCfg.PKIDir)
+	zfs := healthy()
+	zfs.Edit(func(f *hostchecktest.Fake) {
+		f.Mounts = append(f.Mounts, hostcheck.Mount{MountPoint: testCfg.StateDir, FSType: "zfs", Source: "rpool/agent"})
+	})
+	require.NoError(t, hostcheck.CheckEnrolStatePersistent(zfs, testCfg.StateDir, testCfg.PKIDir))
+}
+
+// TestSignerKeyDirPersistent: the signer's check looks at the directory of
+// the key file, with its own reason, and an unreadable mount refuses.
+func TestSignerKeyDirPersistent(t *testing.T) {
+	keyFile := "/var/lib/virtrigaud-signer/host.key"
+	keyDir := "/var/lib/virtrigaud-signer"
+	require.NoError(t, hostcheck.CheckSignerKeyDirPersistent(healthy(), keyFile))
+	for _, tc := range persistenceMounts {
+		t.Run(tc.name, func(t *testing.T) {
+			p := healthy()
+			p.Edit(func(f *hostchecktest.Fake) {
+				m := tc.mount
+				m.MountPoint = keyDir
+				f.Mounts = append(f.Mounts, m)
+			})
+			err := hostcheck.CheckSignerKeyDirPersistent(p, keyFile)
+			require.Error(t, err)
+			f, ok := hostcheck.AsFailure(err)
+			require.True(t, ok)
+			assert.Equal(t, hostcheck.ReasonSignerKeyNotPersistent, f.Reason)
+			assert.Contains(t, err.Error(), keyDir)
+		})
+	}
+	// Only the key's own directory counts: a non-persistent state directory
+	// does not refuse the signer.
+	p := healthy()
+	p.Edit(func(f *hostchecktest.Fake) {
+		f.Mounts = append(f.Mounts, hostcheck.Mount{MountPoint: testCfg.StateDir, FSType: "tmpfs", Source: "tmpfs"})
+	})
+	require.NoError(t, hostcheck.CheckSignerKeyDirPersistent(p, keyFile))
+}
+
+// TestSignerKeyFileOwnMount: a key file that exists and is mounted on its own
+// from memory (a bind mount over the file) is refused although its
+// directory is persistent; a missing key file is not looked at.
+func TestSignerKeyFileOwnMount(t *testing.T) {
+	keyFile := "/var/lib/virtrigaud-signer/host.key"
+	p := healthy()
+	p.Edit(func(f *hostchecktest.Fake) {
+		f.Files[keyFile] = hostcheck.FileInfo{Mode: 0o600, UID: testSignerUID}
+		f.Mounts = append(f.Mounts, hostcheck.Mount{MountPoint: keyFile, FSType: "tmpfs", Source: "tmpfs"})
+	})
+	err := hostcheck.CheckSignerKeyDirPersistent(p, keyFile)
+	require.Error(t, err)
+	f, ok := hostcheck.AsFailure(err)
+	require.True(t, ok)
+	assert.Equal(t, hostcheck.ReasonSignerKeyNotPersistent, f.Reason)
+	assert.Contains(t, err.Error(), keyFile)
+
+	// The same mount with no key file there yet is not an error.
+	p.Edit(func(f *hostchecktest.Fake) { delete(f.Files, keyFile) })
+	require.NoError(t, hostcheck.CheckSignerKeyDirPersistent(p, keyFile))
+}
+
+// lstatErrProbe fails every Lstat with a permission error.
+type lstatErrProbe struct{ *hostchecktest.Fake }
+
+func (lstatErrProbe) Lstat(path string) (hostcheck.FileInfo, error) {
+	return hostcheck.FileInfo{}, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrPermission}
+}
+
+// TestSignerKeyFileLstatError: an error other than "does not exist" when
+// looking at the key file refuses; only a missing key skips its mount check.
+func TestSignerKeyFileLstatError(t *testing.T) {
+	keyFile := "/var/lib/virtrigaud-signer/host.key"
+	err := hostcheck.CheckSignerKeyDirPersistent(lstatErrProbe{healthy()}, keyFile)
+	require.Error(t, err)
+	f, ok := hostcheck.AsFailure(err)
+	require.True(t, ok)
+	assert.Equal(t, hostcheck.ReasonSignerKeyNotPersistent, f.Reason)
+	assert.Contains(t, err.Error(), keyFile)
+}
+
+// notExistProbe reports every path as missing.
+type notExistProbe struct{ *hostchecktest.Fake }
+
+func (notExistProbe) MountOf(path string) (hostcheck.Mount, error) {
+	return hostcheck.Mount{}, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrNotExist}
+}
+
+// TestPersistentMissingDirectory: a directory that does not exist is refused
+// with a message that says so, not as an unreadable mount.
+func TestPersistentMissingDirectory(t *testing.T) {
+	p := notExistProbe{healthy()}
+	for _, err := range []error{
+		hostcheck.CheckPersistent(p, testCfg.StateDir),
+		hostcheck.CheckEnrolStatePersistent(p, testCfg.StateDir, testCfg.PKIDir),
+		hostcheck.CheckSignerKeyDirPersistent(p, testCfg.SignerKeyFile),
+	} {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not exist")
+		assert.NotContains(t, err.Error(), "cannot read the mount")
 	}
 }
