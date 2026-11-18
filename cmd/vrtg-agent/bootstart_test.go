@@ -77,8 +77,8 @@ func (s *startRecorder) StartNoBlock(_ context.Context, unit string) error {
 
 // TestBootStartCommand: with no marker the command creates it and then
 // queues the agent's start; with the marker present (a restart of the unit
-// in the same boot) it starts nothing; a soft reboot re-arms it once; the runtime directory comes from
-// systemd's $RUNTIME_DIRECTORY.
+// in the same boot) it starts nothing; a soft reboot re-arms it once; the
+// runtime directory comes from systemd's $RUNTIME_DIRECTORY.
 func TestBootStartCommand(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("RUNTIME_DIRECTORY", dir)
