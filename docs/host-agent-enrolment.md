@@ -583,9 +583,11 @@ They refuse Secret access and the escalation paths listed below when those are
 granted cluster-wide or in the declared key namespace. They do not review any
 other namespace: a Role in a third namespace is not seen, for example in the
 namespace where the signer controller runs, if that differs from the key
-namespace. Keep the sub-CA key in the namespace where cert-manager itself runs,
-which is the default for its cluster resource namespace. The key namespace and
-the controller's namespace are then the same one, and it is reviewed.
+namespace. Keep the sub-CA key in the namespace where cert-manager itself runs.
+cert-manager's Helm chart sets its cluster resource namespace to that namespace,
+but the controller's own default is `kube-system`, so confirm the value of
+`--cluster-resource-namespace`. The key namespace and the controller's namespace
+are then the same one, and it is reviewed.
 
 The two checks are:
 
@@ -666,8 +668,9 @@ The two checks are:
   webhook authorizer in its authorization chain always reports incomplete
   rules, so enrolment refuses to run there. This commonly includes managed
   Kubernetes services.** There is no override. A dangling role binding also
-  refuses: one that refers to a missing role and applies to the manager
-  directly or through any group it belongs to, such as `system:authenticated`.
+  refuses: one that refers to a missing role, is cluster-wide or in the reviewed
+  namespace, and applies to the manager directly or through any group it belongs
+  to, such as `system:authenticated`.
   The reviews ask the API server's authorizers, so
   they cover the manager's RBAC whatever renders it (the chart, Kustomize or
   hand-written roles). They do not see admission policies. They need `create`
