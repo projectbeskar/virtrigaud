@@ -39,27 +39,36 @@ type startRecorder struct {
 	starts        int
 	markerAtStart bool
 	setupFailed   bool
+	// softReboot is soft-reboot.target's ActiveEnterTimestampMonotonic.
+	softReboot uint64
+	// agentStarted is the agent's InactiveExitTimestampMonotonic.
+	agentStarted uint64
 }
 
 func (s *startRecorder) Enabled(context.Context, string) (bool, error) { return s.enabled, nil }
 
 func (s *startRecorder) Active(context.Context, string) (bool, error) { return !s.setupFailed, nil }
 
-func (s *startRecorder) StartedThisBoot(context.Context, string) (bool, error) { return false, nil }
+func (s *startRecorder) LastSoftReboot(context.Context) (uint64, error) { return s.softReboot, nil }
+
+func (s *startRecorder) StartedSince(_ context.Context, _ string, since uint64) (bool, error) {
+	return s.agentStarted > since, nil
+}
 
 func (s *startRecorder) StartNoBlock(_ context.Context, unit string) error {
 	if unit != systemd.AgentUnit {
 		panic("unexpected unit " + unit)
 	}
 	s.starts++
-	_, err := os.Stat(filepath.Join(s.dir, systemd.BootStartMarker))
+	_, err := os.Stat(filepath.Join(s.dir, systemd.BootStartMarkerName(s.softReboot)))
 	s.markerAtStart = err == nil
+	s.agentStarted = s.softReboot + 1
 	return nil
 }
 
 // TestBootStartCommand: with no marker the command creates it and then
 // queues the agent's start; with the marker present (a restart of the unit
-// in the same boot) it starts nothing; the runtime directory comes from
+// in the same boot) it starts nothing; a soft reboot re-arms it once; the runtime directory comes from
 // systemd's $RUNTIME_DIRECTORY.
 func TestBootStartCommand(t *testing.T) {
 	dir := t.TempDir()
@@ -71,6 +80,14 @@ func TestBootStartCommand(t *testing.T) {
 	}
 	if code := bootStart(nil, logr.Discard(), &stderr, s); code != 0 || s.starts != 1 {
 		t.Fatalf("restart: exit %d, starts %d", code, s.starts)
+	}
+	// A soft reboot keeps the runtime directory and re-arms the start, once.
+	s.softReboot = 5000
+	if code := bootStart(nil, logr.Discard(), &stderr, s); code != 0 || s.starts != 2 || !s.markerAtStart {
+		t.Fatalf("soft reboot: exit %d, starts %d, marker before the start %v", code, s.starts, s.markerAtStart)
+	}
+	if code := bootStart(nil, logr.Discard(), &stderr, s); code != 0 || s.starts != 2 {
+		t.Fatalf("restart after the soft reboot: exit %d, starts %d", code, s.starts)
 	}
 	other := t.TempDir()
 	s2 := &startRecorder{dir: other}

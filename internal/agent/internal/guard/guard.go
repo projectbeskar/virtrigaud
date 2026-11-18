@@ -225,6 +225,13 @@ const (
 	// SignerKeyDirPersistent: the host key is created, and the signer starts,
 	// only when the key file's directory is on persistent storage.
 	SignerKeyDirPersistent Name = "signer-key-dir-persistent"
+	// BootStartMarker: boot-start starts nothing when the marker of the
+	// current boot (the userspace the boot or the last soft reboot started)
+	// exists, or when another run created it first.
+	BootStartMarker Name = "boot-start-marker"
+	// BootStartStartedSince: boot-start starts nothing when the agent was
+	// already started since the current boot (or soft reboot) began.
+	BootStartStartedSince Name = "boot-start-started-since"
 )
 
 // All lists every guard, in a fixed order.
@@ -242,6 +249,6 @@ func All() []Name {
 		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired,
 		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
-		EnrolStatePersistent, SignerKeyDirPersistent,
+		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartStartedSince,
 	}
 }
