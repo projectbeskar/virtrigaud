@@ -198,21 +198,28 @@ key and sign host-agent certificates with no approval.
 
 - With `experimental.hostEnrolment.enabled`, rendering fails unless `scope`
   is `namespaced`, and when an `rbac.additionalRules` entry covers core-group
-  Secrets. `experimental.hostEnrolment.caKeySecret` (the sub-CA key Secret)
-  is required with a cert-manager signer. Rendering also fails when the
+  Secrets or cannot be checked. `experimental.hostEnrolment.caKeySecret` (the
+  sub-CA key Secret) is required with a cert-manager signer; if an external
+  signer keeps its key in this cluster, declaring it is your responsibility. Rendering also fails when the
   enrolment namespace or the key Secret's namespace is listed in
   `providerNamespaces` or `workloadNamespaces`, or when the key Secret is in
   the enrolment namespace.
-- The development manager refuses to run enrolment while SelfSubjectAccess
-  reviews show that it may read Secrets in all namespaces, read the key
-  Secret or Secrets in its namespace (any verb that returns Secret data), or
-  impersonate, mint ServiceAccount tokens or bind roles. It repeats the
-  reviews every three minutes and suspends approvals while they fail. A
-  failed review counts as a refusal. The reviews also apply when the chart
-  does not render the manager's RBAC (`rbac.create: false`, or Kustomize).
-- It warns, without refusing, while it may create Deployments or Pods in the
-  key Secret's namespace, which it may with the default `rbac.scope: cluster`
-  (see [What remains](#what-remains)).
+- The development manager refuses to run enrolment while its access reviews
+  or its listed RBAC rules show that it may use Secrets in all namespaces, the
+  key Secret or Secrets in its namespace, enter pods in that namespace (exec,
+  attach, ephemeral containers), impersonate, mint ServiceAccount tokens,
+  change role bindings, or bind or escalate roles. Rules limited by
+  `resourceNames` count. It repeats the reviews once when its controllers start
+  and then every three minutes, and suspends approvals while they fail. A failed review
+  counts as a refusal, and so do rules that cannot be listed completely: an
+  authorizer that cannot enumerate rules makes enrolment refuse. The reviews
+  also apply when the chart does not render the manager's RBAC
+  (`rbac.create: false`, or Kustomize).
+- It warns, without refusing, while it may create, update or patch Deployments
+  or create Pods in the key Secret's namespace, which it may with the default
+  `rbac.scope: cluster` (see [What remains](#what-remains)). An admission
+  policy that closes this path must cover `CREATE` and `UPDATE`, because
+  changing a workload that already runs there is also a path to the key.
 
 Details, and what these checks do not cover, are in
 [host-agent-enrolment.md](host-agent-enrolment.md#the-manager-must-not-read-the-sub-ca-key).

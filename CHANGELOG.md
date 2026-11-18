@@ -11,38 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - `charts/virtrigaud/templates/host-enrolment-rbac.yaml`: `experimental.hostEnrolment.enabled` now fails the render in these cases:
   - `rbac.secrets.scope` is not `namespaced`. With the default cluster scope the manager can read every Secret, including the host-agent subordinate CA's key Secret, so a compromised manager could sign CA-valid host-agent certificates with no approval.
-  - An `rbac.additionalRules` entry covers `secrets` (or `*`) in the core API group (`""` or `*`).
-  - `signerNames` lists a cert-manager signer and the new `experimental.hostEnrolment.caKeySecret` (`<namespace>/<name>` of the sub-CA key Secret) is empty.
+  - An `rbac.additionalRules` entry covers `secrets` (or `*`) in the core API group (`""` or `*`), is not a rule, or has `apiGroups` or `resources` that are not lists of strings (it could not be checked).
+  - A `signerNames` entry does not start with a lowercase `<resource>.<group>` without a trailing dot.
+  - `signerNames` lists a signer in the `cert-manager.io` group and the new `experimental.hostEnrolment.caKeySecret` (`<namespace>/<name>` of the sub-CA key Secret) is empty.
   - The key Secret is in the enrolment namespace.
   - The enrolment namespace or the key Secret's namespace is listed in `rbac.secrets.providerNamespaces` or `workloadNamespaces`. For the enrolment namespace, listing it adds no Secret verb, but it declares the namespace a home for Provider objects or workloads, and only the manager may write Secrets there.
 
   The template's comment says why no `selfsubjectaccessreviews` rule is added (`system:basic-user` grants it to every authenticated user).
 - `internal/controller/host_enrolment_secret_access.go`: new `CheckHostEnrolmentSecretAccess`. It refuses enrolment while SelfSubjectAccessReviews show that the manager may:
-  - `get`, `list`, `watch`, `update`, `patch`, `delete` or `deletecollection` Secrets in all namespaces (each of these returns Secret data);
+  - `get`, `list`, `watch`, `update`, `patch`, `delete` or `deletecollection` Secrets in all namespaces;
   - `get`, `list`, `watch`, `update`, `patch` or `delete` the key Secret by name (a `resourceNames` rule allows a list or watch with a field selector);
   - `list`, `watch`, `update`, `patch`, `delete` or `deletecollection` Secrets in the key namespace;
-  - `impersonate` users, groups or ServiceAccounts;
-  - `create` `serviceaccounts/token` or RoleBindings in all namespaces or in the key namespace, or ClusterRoleBindings;
+  - `get` or `create` `pods/exec` or `pods/attach`, or `update` or `patch` `pods/ephemeralcontainers`, in the key namespace;
+  - `impersonate` users or groups, or ServiceAccounts in all namespaces or in the key namespace;
+  - `create` `serviceaccounts/token`, or `create`, `update` or `patch` RoleBindings, in all namespaces or in the key namespace; `create`, `update` or `patch` ClusterRoleBindings;
   - `bind` or `escalate` Roles or ClusterRoles in all namespaces or in the key namespace.
 
-  It fails closed: a review error, or an authorizer evaluation error, refuses too. A refusal names only verbs, resources, namespaces and the declared Secret name. The chart's manager and enrolment RBAC grant none of these accesses.
-- `internal/controller/host_enrolment_secret_access.go`: new `HostEnrolmentWorkloadAccess` reports whether the manager may create Deployments or Pods in the key namespace.
-- `cmd/manager/main.go`: a manager with the `--dev-host-enrolment-*` flags runs the check at startup, before the cert-manager admission check, and exits on refusal. It logs a `WARNING` while it may create Deployments or Pods in the key namespace; that cannot be refused, because admission policies are invisible to the reviews, and it fires with the chart's default `rbac.scope: cluster`. If the client for the startup checks cannot be built, the manager exits; before, certificate renewal was only switched off.
-- `internal/controller/host_enrolment_admission.go`: `AdmissionGate` gains `SecretAccess`. The manager passes the Secret access check, so it is re-run with the admission check every three minutes. While either fails, no CertificateRequest is decided and the gate logs that approvals are suspended, as for the admission check.
+  A plain `delete` returns no Secret data; it is reviewed because deleting the key is destructive.
+
+  A review with no object name does not match a rule limited by `resourceNames`, so the check also lists the manager's rules with a SelfSubjectRulesReview (in the key namespace, or in the enrolment namespace with no key declared). Any rule that grants impersonation (users, groups, ServiceAccounts, uids, user extras), `serviceaccounts/token`, a write to role bindings, or `bind` or `escalate` on roles refuses, whatever its `resourceNames` and including wildcards. With a declared key, so does any rule on Secrets or on entering pods.
+
+  It fails closed: a review error, an authorizer evaluation error, or rules that cannot be listed completely refuse too, so an authorizer that cannot enumerate rules makes enrolment refuse. A refusal names only verbs, resources, namespaces and object names. The chart's manager and enrolment RBAC grant none of these accesses, with `rbac.scope` `cluster` or `namespace`.
+- `internal/controller/host_enrolment_secret_access.go`: new `HostEnrolmentWorkloadAccess` reports whether the manager may create, update or patch Deployments or create Pods in the key namespace.
+- `cmd/manager/main.go`: a manager with the `--dev-host-enrolment-*` flags runs the check at startup, before the cert-manager admission check, and exits on refusal. It logs a `WARNING` while it may create or change those workloads; that cannot be refused, because admission policies are invisible to the reviews, and it fires with the chart's default `rbac.scope: cluster`. If the client for the startup checks cannot be built, the manager exits; before, certificate renewal was only switched off.
+- `internal/controller/host_enrolment_admission.go`: `AdmissionGate` gains `SecretAccess`. The manager passes the Secret access check, so it runs with the admission check when the gate starts and then every three minutes; a change is noticed within the interval plus the duration of a check. While either fails, no CertificateRequest is decided and the gate logs that approvals are suspended. Only a real recovery is logged as resumed.
+- `internal/controller/host_enrolment.go`: the external-PKI issuer group is compared with `cert-manager.io` case-insensitively.
 
 ### Added
-- `internal/controller/host_enrolment.go`, `cmd/manager/host_enrolment_flags_dev.go`, `cmd/manager/host_enrolment_flags_release.go`: flag `--dev-host-enrolment-ca-key-secret=<namespace>/<name>`. It is required with `--dev-host-enrolment-issuer` (optional with an external PKI alone, whose key is outside the cluster). A key Secret in the enrolment namespace, or a malformed value, is refused. Only a `virtrigaud_dev` build defines the flag, so a release manager started with it stops at flag parsing.
+- `internal/controller/host_enrolment.go`, `cmd/manager/host_enrolment_flags_dev.go`, `cmd/manager/host_enrolment_flags_release.go`: flag `--dev-host-enrolment-ca-key-secret=<namespace>/<name>`. It is required with `--dev-host-enrolment-issuer`. With an external PKI alone it is optional, and declaring it is the operator's responsibility whenever that signer keeps its key in this cluster. A key Secret in the enrolment namespace, or a malformed value, is refused. Only a `virtrigaud_dev` build defines the flag, so a release manager started with it stops at flag parsing.
 - `charts/virtrigaud/values.yaml`: `experimental.hostEnrolment.caKeySecret` (default empty), plus the requirements in the comments. The chart does not start the enrolment manager, so it uses the value for render checks only; the same value goes to the manager as the flag.
 - Tests:
-  - `internal/controller/host_enrolment_secret_access_test.go`: every review allowed on its own refuses; a review error on each review and an evaluation error refuse; everything denied passes; enrolment-namespace access is accepted; the workload warning; the gate re-check; and the flag's parsing, including the requirement.
-  - `internal/controller/host_enrolment_secret_access_envtest_test.go`: runs the check as the manager's ServiceAccount against a real API server with the chart's RBAC. Grants of the key by name (get, field-selected list), update in the key namespace, token minting and impersonation each refuse, and pass again once removed. The chart's default grant refuses.
+  - `internal/controller/host_enrolment_secret_access_test.go`: every review allowed on its own refuses; name-limited and wildcard rules refuse through the rules review; a review error on each review, an evaluation error and incomplete rules refuse; everything denied passes; enrolment-namespace access is accepted; the workload warning; the gate's first check, re-check and recovery log; and the flag's parsing, including the requirement.
+  - `internal/controller/host_enrolment_secret_access_envtest_test.go`: runs the check as the manager's ServiceAccount against a real API server with the chart's RBAC. The chart's RBAC passes with `rbac.scope` `cluster` and `namespace`. Grants of the key by name, update in the key namespace, token minting, impersonation (also namespaced), four kinds of name-limited escalation, and pod entry each refuse, and pass again once removed. The chart's default grant refuses.
   - `internal/controller/rbac_host_enrolment_test.go`: the new render refusals.
   - `cmd/manager/host_enrolment_flags_{dev,release}_test.go`: flag registration in both builds, and a development manager that refuses enrolment against a real API server where it may read every Secret.
 
 ### Changed
 - `docs/host-agent-enrolment.md`: the stale residual ("the manager's existing cluster-wide Secret permission … Narrowing that grant is separate work") is replaced by a section on the checks, the periodic re-check and the workload warning. It also states what remains:
-  - A Deployment in the key namespace that mounts the key or runs under an existing ServiceAccount there. The remedy is an admission policy that restricts the manager's Deployments to the Provider namespaces and their pods to the ServiceAccounts the manager creates.
+  - A Deployment in the key namespace that mounts the key or runs under an existing ServiceAccount there, or a change to a workload that already runs there. The remedy is an admission policy on `CREATE` and `UPDATE` that restricts the manager's Deployments to the Provider namespaces and their pods to the ServiceAccounts the manager creates.
   - Grants added between re-checks.
+  - An external signer that keeps its key in this cluster and is not declared.
   - The API approval path, bounded by key pinning and the admission or approver policies.
 
   The flag table, RBAC and Deployment sections are updated: the generated `config/rbac/role.yaml` must be narrowed first.
