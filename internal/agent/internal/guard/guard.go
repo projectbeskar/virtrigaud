@@ -227,8 +227,12 @@ const (
 	SignerKeyDirPersistent Name = "signer-key-dir-persistent"
 	// BootStartMarker: boot-start starts nothing when the marker of the
 	// current boot (the userspace the boot or the last soft reboot started)
-	// exists, or when another run created it first.
+	// exists.
 	BootStartMarker Name = "boot-start-marker"
+	// BootStartMarkerExcl: boot-start starts nothing when its exclusive
+	// create of the current boot's marker finds that another run created it
+	// first (after this run's existence check).
+	BootStartMarkerExcl Name = "boot-start-marker-excl"
 	// BootStartStartedSince: boot-start starts nothing when the agent was
 	// already started since the current boot (or soft reboot) began.
 	BootStartStartedSince Name = "boot-start-started-since"
@@ -249,6 +253,7 @@ func All() []Name {
 		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired,
 		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
-		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartStartedSince,
+		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartMarkerExcl,
+		BootStartStartedSince,
 	}
 }

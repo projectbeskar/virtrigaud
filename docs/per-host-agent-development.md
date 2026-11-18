@@ -1279,7 +1279,10 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   changes at each soft reboot and only then. If it ever read 0 after a soft
   reboot, the command would treat the userspace as the boot's own and every
   agent started since the boot as already started: it could miss a start,
-  never make a second one. This boot's marker is
+  never make a second one. A soft reboot that reaches `soft-reboot.target`
+  and then fails still counts as a new generation. That is safe: the soft
+  reboot's transaction already stopped the agent, so a start in the new
+  generation is not a second start. This boot's marker is
   `/run/vrtg-agent-boot-start/started` while the value is 0 and
   `/run/vrtg-agent-boot-start/started.<value>` after a soft reboot. The
   command does nothing when this boot's marker already exists. A marker of
@@ -1293,7 +1296,8 @@ unit that `multi-user.target` upholds is started even so. The drop-in
   started this boot when that time is after the time this boot began (a
   non-zero value alone is not enough: the value from before a soft reboot is
   kept while the unit stays loaded; a disabled agent that nothing references
-  may be unloaded and read 0, and a disabled agent is never started). Then it makes the marker and starts nothing, so an agent started by
+  may be unloaded and read 0, and a disabled agent is never started).
+  Then it makes the marker and starts nothing, so an agent started by
   hand after a failed setup and stopped for maintenance is not started again
   by a package's restart of the unit, and neither is an agent its own
   `[Install]` links started after a soft reboot. Otherwise it runs after the
@@ -1369,12 +1373,18 @@ the agent could not be started, and a reboot skipped the graceful VM stop,
 leaving every VM running. For the boot-start unit, the host reported itself
 degraded although nothing had failed. A start limit cannot bound `Upholds=`
 retries anyway. The boot-start unit acts at most once per boot, so its
-restarts do nothing. When its action does fail before this boot's decision
-is made (`systemctl` unusable, say), `Upholds=` runs it again with a warning
-each time: on systemd 255 at its own pace (16 runs every 10 seconds) until
-the cause is fixed. On systemd 252 the lab saw only a first burst of 16 runs
-and no further run within 2 minutes, so start the agent by hand there once
-the cause is fixed. The agent and the signer
+restarts do nothing. Its action can still fail (`systemctl` unusable, say),
+even after this boot's marker exists: it reads the time of the last soft
+reboot before it looks for the marker, and that keeps the fail-safe order.
+A failure before the decision logs a warning that it could not tell
+whether the agent was started this boot, and to check `systemctl status
+vrtg-agent`; a failure after the marker was made (the start itself was
+refused) says the agent was not started and to start it by hand. Either
+way `Upholds=` runs the unit again with a warning each time: on systemd 255
+at its own pace (16 runs every 10 seconds) until the cause is fixed. On
+systemd 252 the lab saw only a first burst of 16 runs and no further run
+within 2 minutes, so check the agent there once the cause is fixed and
+start it by hand if it is not running. The agent and the signer
 keep a start limit: they restart themselves (`Restart=always`), and the
 limit ends a crash loop. Restarting the setup unit restarts them too
 (`Requires=`), so restarting it many times in quick succession (about 10

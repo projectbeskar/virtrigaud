@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"io"
 	"log/slog"
@@ -37,17 +38,24 @@ import (
 // keeps it too).
 const defaultBootStartDir = "/run/vrtg-agent-boot-start"
 
-// bootStartFailedMessage is logged when boot-start did not start the agent.
+// bootStartFailedMessage is logged when boot-start failed after this boot's
+// decision was made: it did not start the agent, and no later run will.
 const bootStartFailedMessage = "the agent was not started at boot; start it by hand: systemctl start " + systemd.AgentUnit
+
+// bootStartUndecidedMessage is logged when boot-start failed before this
+// boot's decision: it started nothing, and cannot tell whether the agent was
+// already started this boot.
+const bootStartUndecidedMessage = "boot-start failed before deciding: it started nothing and could not determine whether the agent was started this boot; check it: systemctl status " + systemd.AgentUnit
 
 // bootStartTimeout bounds the two systemctl calls.
 const bootStartTimeout = 30 * time.Second
 
 // bootStartCommand is the action of vrtg-agent-boot-start.service: start the
 // agent at most once per boot, a soft reboot counting as a boot, only while
-// its unit is enabled (see systemd.BootStart). Exit status 0 when it started the agent or correctly
-// did nothing, 1 when it failed (the agent is then not started), 2 for bad
-// flags.
+// its unit is enabled (see systemd.BootStart). Exit status 0 when it started
+// the agent or correctly did nothing, 1 when it failed (this run started
+// nothing; the warning says whether this boot's start was missed or could
+// not be determined), 2 for bad flags.
 func bootStartCommand(args []string, log logr.Logger, stderr io.Writer) int {
 	return bootStart(args, log, stderr, systemd.Systemctl{})
 }
@@ -65,10 +73,17 @@ func bootStart(args []string, log logr.Logger, stderr io.Writer, s systemd.UnitS
 	got, err := systemd.BootStart(ctx, *dir, systemd.AgentUnit, s)
 	switch {
 	case err != nil:
-		// A warning, not an error: the host is fine, the agent is merely not
-		// started yet (the unit fails, and Upholds= runs it again; the
-		// marker keeps a second start out).
-		slog.New(logr.ToSlogHandler(log)).Warn(bootStartFailedMessage, "error", err.Error())
+		// A warning, not an error: this run started nothing. The unit fails
+		// and Upholds= runs it again; the marker keeps a second start out.
+		// Before the decision, whether the agent was started this boot is
+		// unknown (the time of the last soft reboot is read before the
+		// marker, so this can happen after a start); after it, this boot's
+		// start was missed.
+		msg := bootStartFailedMessage
+		if errors.Is(err, systemd.ErrBootStartUndecided) {
+			msg = bootStartUndecidedMessage
+		}
+		slog.New(logr.ToSlogHandler(log)).Warn(msg, "error", err.Error())
 		return 1
 	case got == systemd.BootStartAlreadyDecided:
 		log.Info("the agent's start at boot was already decided in this boot; nothing is done (a reboot or a soft reboot re-arms it)")

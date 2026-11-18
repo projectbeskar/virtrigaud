@@ -66,6 +66,19 @@ func BootStartMarkerName(softReboot uint64) string {
 	return BootStartMarker + "." + strconv.FormatUint(softReboot, 10)
 }
 
+// ErrBootStartUndecided marks a BootStart error returned before this boot's
+// decision was made: nothing was started by this run, and whether the agent
+// was already started this boot is unknown to it (an earlier run, an
+// operator or the agent's own links may have started it). An error without
+// it came after this boot's marker was made: the agent was not started by
+// boot-start in this boot.
+var ErrBootStartUndecided = errors.New("nothing was decided")
+
+// undecided wraps err as a failure before this boot's decision.
+func undecided(err error) error {
+	return fmt.Errorf("boot-start: %w (%w)", err, ErrBootStartUndecided)
+}
+
 // UnitStarter asks the service manager about a unit and starts it.
 type UnitStarter interface {
 	// Enabled reports whether unit is enabled (systemctl is-enabled
@@ -234,14 +247,17 @@ const (
 // created before the start, so an interruption between the two can only
 // miss a start (the fail-safe direction: an operator can start the agent),
 // never start it twice. Then, only while unit is enabled, it queues its start
-// without waiting for it. Any error leaves the agent unstarted.
+// without waiting for it. Any error leaves the agent unstarted by this run;
+// an error before this boot's marker was made wraps ErrBootStartUndecided
+// (the time of the last soft reboot is read first, so a run can fail that
+// way even when the marker exists).
 func BootStart(ctx context.Context, runtimeDir, unit string, s UnitStarter) (BootStartOutcome, error) {
 	if runtimeDir == "" || !filepath.IsAbs(runtimeDir) {
-		return 0, fmt.Errorf("boot-start: runtime directory %q is not an absolute path", runtimeDir)
+		return 0, undecided(fmt.Errorf("runtime directory %q is not an absolute path", runtimeDir))
 	}
 	softReboot, err := s.LastSoftReboot(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("boot-start: %w", err)
+		return 0, undecided(err)
 	}
 	marker := filepath.Join(runtimeDir, BootStartMarkerName(softReboot))
 	if _, err := os.Lstat(marker); err == nil && !guard.Off(guard.BootStartMarker) {
@@ -249,26 +265,30 @@ func BootStart(ctx context.Context, runtimeDir, unit string, s UnitStarter) (Boo
 	}
 	// Any start of the agent during this boot is the boot's decision.
 	if started, err := s.StartedSince(ctx, unit, softReboot); err != nil {
-		return 0, fmt.Errorf("boot-start: %w", err)
+		return 0, undecided(err)
 	} else if started && !guard.Off(guard.BootStartStartedSince) {
 		if err := createMarker(marker); err != nil && !errors.Is(err, fs.ErrExist) {
-			return 0, err
+			return 0, undecided(err)
 		}
 		return BootStartStartedByOther, nil
 	}
 	if ok, err := s.Active(ctx, SetupUnit); err != nil {
-		return 0, fmt.Errorf("boot-start: %w", err)
+		return 0, undecided(err)
 	} else if !ok {
 		return BootStartSetupNotActive, nil
 	}
+	// Another run may have made the marker since the check above: the
+	// exclusive create decides which run acts.
 	switch err := createMarker(marker); {
 	case errors.Is(err, fs.ErrExist):
-		if !guard.Off(guard.BootStartMarker) {
+		if !guard.Off(guard.BootStartMarkerExcl) {
 			return BootStartAlreadyDecided, nil
 		}
 	case err != nil:
-		return 0, err
+		return 0, undecided(err)
 	}
+	// This boot's marker exists: from here, a failure misses this boot's
+	// start (no later run starts the agent).
 	enabled, err := s.Enabled(ctx, unit)
 	if err != nil {
 		return 0, fmt.Errorf("boot-start: %w", err)
@@ -290,10 +310,10 @@ func createMarker(path string) error {
 		return err
 	}
 	if err != nil {
-		return fmt.Errorf("boot-start: create the marker: %w", err)
+		return fmt.Errorf("create the marker: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("boot-start: close the marker: %w", err)
+		return fmt.Errorf("close the marker: %w", err)
 	}
 	return nil
 }

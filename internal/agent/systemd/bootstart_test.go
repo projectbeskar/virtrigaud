@@ -33,11 +33,16 @@ import (
 // ActiveEnterTimestampMonotonic set at each soft reboot. It records calls and
 // whether this boot's marker existed at each start.
 type fakeStarter struct {
-	dir            string
-	enabled        bool
-	enabledErr     error
-	startErr       error
-	softRebootErr  error
+	dir           string
+	enabled       bool
+	enabledErr    error
+	startErr      error
+	softRebootErr error
+	// startedSinceErr makes StartedSince fail.
+	startedSinceErr error
+	// onActive runs inside Active, after the marker check: a concurrent run
+	// that creates the marker in between.
+	onActive       func()
 	starts         int
 	markerAtStart  bool
 	enabledChecked int
@@ -81,12 +86,18 @@ func (f *fakeStarter) StartedSince(_ context.Context, unit string, since uint64)
 	if unit != systemd.AgentUnit {
 		panic("unexpected unit " + unit)
 	}
+	if f.startedSinceErr != nil {
+		return false, f.startedSinceErr
+	}
 	return f.agentStarted > since, nil
 }
 
 func (f *fakeStarter) Active(_ context.Context, unit string) (bool, error) {
 	if unit != systemd.SetupUnit {
 		panic("unexpected unit " + unit)
+	}
+	if f.onActive != nil {
+		f.onActive()
 	}
 	return !f.setupFailed, nil
 }
@@ -444,5 +455,79 @@ func TestBootStartWithSystemctl(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, systemd.BootStartMarkerName(252678181))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestBootStartStartedSinceFails: an error reading the agent's start time
+// is returned, marked as before the decision; nothing is started and no
+// marker of the current boot is made (StartedSince runs before the marker
+// is created), so a later run still decides once.
+func TestBootStartStartedSinceFails(t *testing.T) {
+	for _, soft := range []bool{false, true} {
+		f := newFake(t)
+		if soft {
+			if got, _ := f.run(); got != systemd.BootStartStarted {
+				t.Fatalf("boot: %v", got)
+			}
+			f.doSoftReboot()
+		}
+		before := f.starts
+		f.startedSinceErr = errors.New("systemctl show failed")
+		_, err := f.run()
+		if err == nil || !errors.Is(err, systemd.ErrBootStartUndecided) || f.starts != before {
+			t.Fatalf("soft %v: %v, starts %d", soft, err, f.starts)
+		}
+		if _, err := os.Stat(f.markerPath()); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("soft %v: the current boot's marker exists after a failed run: %v", soft, err)
+		}
+		f.startedSinceErr = nil
+		if got, err := f.run(); err != nil || got != systemd.BootStartStarted || f.starts != before+1 {
+			t.Fatalf("soft %v, next run: %v %v, starts %d", soft, got, err, f.starts)
+		}
+	}
+}
+
+// TestBootStartMarkerRace: another run creates the current boot's marker
+// after this run found none; the exclusive create sees it and this run
+// starts nothing.
+func TestBootStartMarkerRace(t *testing.T) {
+	for _, soft := range []bool{false, true} {
+		f := newFake(t)
+		if soft {
+			f.doSoftReboot()
+		}
+		f.onActive = func() {
+			if err := os.WriteFile(f.markerPath(), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := f.run()
+		if err != nil || got != systemd.BootStartAlreadyDecided || f.starts != 0 || f.enabledChecked != 0 {
+			t.Fatalf("soft %v: %v %v, starts %d, enablement checks %d", soft, got, err, f.starts, f.enabledChecked)
+		}
+	}
+}
+
+// TestBootStartErrorsSayWhetherDecided: failures before this boot's marker
+// was made wrap ErrBootStartUndecided, including a failed soft-reboot read
+// while the marker exists; a failure after it (the start refused) does not.
+func TestBootStartErrorsSayWhetherDecided(t *testing.T) {
+	f := newFake(t)
+	if got, _ := f.run(); got != systemd.BootStartStarted {
+		t.Fatalf("boot: %v", got)
+	}
+	f.softRebootErr = errors.New("no systemctl")
+	if _, err := f.run(); !errors.Is(err, systemd.ErrBootStartUndecided) || f.starts != 1 {
+		t.Fatalf("soft reboot time unknown with the marker present: %v, starts %d", err, f.starts)
+	}
+	g := newFake(t)
+	g.startErr = errors.New("refused")
+	if _, err := g.run(); err == nil || errors.Is(err, systemd.ErrBootStartUndecided) {
+		t.Fatalf("a refused start: %v", err)
+	}
+	h := newFake(t)
+	h.enabledErr = errors.New("no systemctl")
+	if _, err := h.run(); err == nil || errors.Is(err, systemd.ErrBootStartUndecided) {
+		t.Fatalf("enablement unknown after the marker: %v", err)
 	}
 }
