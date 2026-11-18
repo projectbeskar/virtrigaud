@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-18 03:00] - Per-host agent: boot-start re-arms at a soft reboot (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/agent/systemd/bootstart.go`: after a soft reboot (`systemctl soft-reboot`, systemd 254 and later) the agent stayed stopped until an operator started it, although the shutdown unit had stopped every VM. A soft reboot keeps `/run` and the boot id, so the once-per-boot marker `/run/vrtg-agent-boot-start/started` survived it. Also, systemd keeps unit timestamps across a soft reboot, so the agent's non-zero `InactiveExitTimestampMonotonic` from before still read as "started this boot". The marker is now per userspace: `started` until the first soft reboot, and `started.<time>` after one, where the time is `soft-reboot.target`'s `ActiveEnterTimestampMonotonic`. That value changes at each soft reboot and not at a `daemon-reexec` or `daemon-reload`. On systemd 252, which has no soft reboot, it reads 0. The agent counts as started this boot only when its `InactiveExitTimestampMonotonic` is after that time. Each marker is still created exclusively and before the start. A soft reboot now starts the agent once, as a reboot does. A maintenance stop still survives restarts of the unit, `daemon-reload`, `daemon-reexec` and `systemd-sysext refresh`. `UnitStarter.StartedThisBoot` is replaced by `LastSoftReboot` and `StartedSince`.
+- `cmd/vrtg-agent/bootstart.go`: log messages say that a reboot or a soft reboot re-arms the start.
+
+### Added
+- `internal/agent/internal/guard/guard.go`: mutation guards `boot-start-marker` (an existing marker of the current boot, or one another run created first, means nothing is started) and `boot-start-started-since` (an agent started since the current boot or soft reboot began is not started again). Behavioural tests in `internal/agent/systemd/bootstart_test.go` kill both.
+- `internal/agent/systemd/bootstart_test.go`, `cmd/vrtg-agent/bootstart_test.go`: tests with a fake manager whose clock and unit timestamps go on across soft reboots. They cover the same generation, a new generation, two soft reboots in a row, a maintenance stop before a soft reboot, a systemd without soft reboot, an earlier version's marker, the agent already started after a soft reboot, and a crash between marker and start.
+
+### Changed
+- `packaging/systemd/vrtg-agent-boot-start.service`: comment only; the unit's settings are unchanged.
+- `docs/per-host-agent-development.md`: replaces the soft-reboot residual with the new behaviour and notes the systemd 254 dependency. Also notes hosts that cannot soft reboot: on an immutable host whose persistent mounts come from the initramfs, the lab host stopped in emergency mode.
+
+### Why
+Maintainer item MD-37 O-4 accepted the soft-reboot residual for development builds only, to be fixed before the type leaves them. Lab results on systemd 255, 259 and 262 showed which values change at a soft reboot and which survive a `daemon-reexec`; the design uses them.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Development builds only: no release artefact ships the agent or its units.
+
 ## [2026-11-18 00:30] - Per-host agent mutation test: count only behavioural kills (development builds only)
 **Author:** @wrkode (William Rizzo)
 
