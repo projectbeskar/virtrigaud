@@ -233,6 +233,7 @@ func All() []Name {
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
 		EnrolLoaderCheck, EnrolEpochAhead, ReenrolEpochAhead, ConfirmForActive, ConfirmOnlyFrozen,
 		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired,
-		RenewMinLifetime,
+		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
+		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
 	}
 }
