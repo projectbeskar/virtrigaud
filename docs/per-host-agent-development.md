@@ -289,7 +289,8 @@ has retired; a discard marker naming any other quarantines the store
 | The agent runs in the host's initial PID, cgroup, user and time namespaces (a kernel without time namespaces passes that one). | `UnsupportedHost` |
 | `/sys/fs/cgroup` is a unified cgroup v2 hierarchy. | `UnsupportedHost` |
 | The state directory is a directory (not a symbolic link), owned by the agent's user, with no permission for group or others. | `StateDirInsecure` |
-| The state directory is on ext4, ext3, XFS, Btrfs, F2FS (mounted from a `/dev/` device that is not a loop device) or ZFS; never tmpfs, ramfs, overlay, a loop device or a network file system. | `StateNotPersistent` |
+| The state directory, and `pki/` in it (which may be a mount of its own), are on ext4, ext3, XFS, Btrfs, F2FS (mounted from a `/dev/` device that is not a loop device) or ZFS; never tmpfs, ramfs, overlay, a loop device or a network file system. A directory that does not exist is refused too, saying so. | `StateNotPersistent` |
+| The signer's key directory (the directory of `--key-file`, `/var/lib/virtrigaud-signer/` by default) is on persistent storage by the same rule as the state directory. This is checked by the signer, which refuses to start, and by `enroll csr` before it makes a key; it is not a check of the agent, which never sees that directory. The key file's own mount is checked too when the file exists. The signer logs `start refused` with this reason and exits 1; systemd restarts it within the unit's start limit, after which the unit stays failed until the directory is fixed. | `SignerKeyNotPersistent` |
 | `host-id` exists, is a regular file owned by the agent's user that group and others cannot write, and names the host of the certificate. | `StateNotPersistent` |
 | `pki/` and every file in it are owned by the agent's user, grant nothing to group or others, and are not symbolic links. | `PKIInsecure` |
 | The agent is shown not to be able to read the host private key: an attempt to open `--signer-key-file` for reading (never read from) is refused by permission (`EACCES`). A file that opens, and also a missing path, a symbolic link or any other error, refuses the start, so a misspelled key path cannot pass for a protected one. `pki/` holds no file named `host.key` at all, readable or not. | `HostKeyReadable` |
@@ -1421,7 +1422,14 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
    written as PKCS #8 PEM with mode `0600` through a private temporary file and
    a no-replace link into `--key-file` (default
    `/var/lib/virtrigaud-signer/host.key`), in a directory that must be owned by
-   the signer's user with nothing for group or others. An existing key is
+   the signer's user with nothing for group or others. Before it writes
+   anything (the key or the request), the step checks, with the same rule as
+   the agent's start-up check, that the key file's directory is on persistent
+   storage (and the key file's own mount, when the file exists): a tmpfs,
+   ramfs, overlay, loop device or network file system refuses the step
+   (exit 1), naming the directory, because a key kept in memory is lost at the
+   next reboot. The step writes nothing to the agent's state directory, so it
+   does not look at it. An existing key is
    never replaced: running the step again re-signs a new request with the same
    key (a lost request file, a new enrolment record). To enrol with a new key,
    remove the key file yourself first and restart the signer. The step refuses
@@ -1458,6 +1466,12 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
    publishes them now. The request file must carry exactly these, so a request
    made before the manager drew another enrolment record is refused instead of
    being installed for a record the manager no longer expects.
+
+   Before anything is written the step checks that the agent's state
+   directory (`--state-dir`) and its `pki/` directory (which may be a mount
+   of its own) are on persistent storage, and refuses otherwise
+   (`StateNotPersistent`, exit 1), naming the directory: a certificate
+   installed into memory would be gone at the next reboot.
 
    It takes the run flags that name places (`--state-dir`, `--signer-socket`,
    `--signer-user`, `--signer-key-file`, `--dev-trust-dir`). It refuses to run

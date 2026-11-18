@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-17 23:00] - Per-host agent: enrolment and the signer refuse non-persistent storage (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `cmd/vrtg-agent/enroll.go`: `enroll install` did not check that the agent's state directory is on persistent storage, and `enroll csr` did not check the key's, so on a host whose storage is in memory (an immutable host with no persistent volume, where `/var` falls back to tmpfs) enrolment succeeded and the identity or key was lost at the next reboot. Before anything is written, `enroll install` now refuses when the state directory or its `pki/` directory (which may be a mount of its own) is not persistent, and `enroll csr` refuses when the directory of `--key-file` is not (it writes nothing to the state directory, so it has no `--state-dir`). The refusals name the directory and its file system, using `CheckPersistent`'s rule.
+- `internal/agent/signer/run.go`: the signer refuses to start (`start refused`, reason `SignerKeyNotPersistent`, exit 1; systemd retries within the unit's start limit) when the directory of its key file, or the key file's own mount when it exists, is not on persistent storage.
+- `internal/agent/hostcheck/checks.go`: the agent's start-up check also covers `pki/`; a directory that does not exist is refused with a message that says so. A missing `pki/` is now refused with reason `StateNotPersistent` (it was `PKIInsecure`), since the persistence check runs first. An error other than "does not exist" when looking at the key file refuses rather than skipping its mount check.
+
+### Added
+- `internal/agent/hostcheck/`: `CheckEnrolStatePersistent`, `CheckSignerKeyDirPersistent` and the `SignerKeyNotPersistent` reason; `CheckPersistent` is unchanged. `signer.RunOptions.Probe` (nil is the real host).
+- `internal/agent/internal/guard/guard.go`: mutation guards `enrol-state-persistent` and `signer-key-dir-persistent`, each killed by a test.
+- Tests in `internal/agent/hostcheck/checks_test.go`, `internal/agent/signer/run_test.go` and `cmd/vrtg-agent/enroll_test.go` for each refusal and the persistent case.
+
+### Changed
+- `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`: the host checks table, the enrolment steps and the enrolment page describe the checks.
+
+### Why
+Maintainer decision MD-37 (item O-10): the agent already refused to start on non-persistent state, but enrolment and the signer's key directory were not covered, so a host could enrol and lose its identity or key at reboot.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Development builds only: release builds ship neither the agent nor the signer. No public CRD or protobuf change. A development host whose signer key directory is on tmpfs now fails to start the signer until the directory is on persistent storage.
+
 ## [2026-11-17 22:00] - Host agent: refuse an issued certificate shorter than the minimum lifetime (development builds only)
 **Author:** @wrkode (William Rizzo)
 

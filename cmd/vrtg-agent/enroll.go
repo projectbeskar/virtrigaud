@@ -49,6 +49,11 @@ steps:
            status.agent.requestURIs)
   install  run as the agent's user: install the certificate that was issued
            for the request, after checking it
+
+Each step refuses, before it writes anything, when what it writes would not
+survive a reboot: enroll csr when the directory of the host key file
+(--key-file) is not on persistent storage; enroll install when the agent's
+state directory (--state-dir) or its pki directory is not.
 `
 
 // signerConnectTimeout bounds how long enroll install waits for the signer.
@@ -94,7 +99,7 @@ func enrollWith(args []string, log logr.Logger, stdout, stderr io.Writer, deps e
 	}
 	switch args[0] {
 	case "csr":
-		return enrollCSR(args[1:], log, stdout, stderr)
+		return enrollCSR(args[1:], log, stdout, stderr, deps)
 	case "install":
 		return enrollInstall(args[1:], log, stdout, stderr, deps)
 	case "help", "-h", "--help":
@@ -138,8 +143,9 @@ func readLines(path string, read func(string) ([]byte, error)) ([]string, error)
 // enrollCSR creates the host key when there is none and writes the
 // certificate signing request. It must run as the signer's own user, the only
 // user that owns the key file; it refuses to run as root or as the agent's
-// user.
-func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer) int {
+// user. Before anything is written it checks that the directory of the key
+// file, the one directory this step writes, is on persistent storage.
+func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer, deps enrollDeps) int {
 	fs := flag.NewFlagSet("enroll csr", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	keyFile := fs.String("key-file", config.DefaultSignerKeyFile, "the host private key file: created when absent (mode 0600, in a directory private to the signer's user), never replaced")
@@ -187,6 +193,12 @@ func enrollCSR(args []string, log logr.Logger, stdout, stderr io.Writer) int {
 	if _, _, err := enrol.ParseURIs(uris); err != nil {
 		log.Error(err, "the request URIs")
 		return 2
+	}
+	// Nothing is written before the key's directory is shown to keep what it
+	// is given across a reboot: neither a key nor a request.
+	if err := hostcheck.CheckSignerKeyDirPersistent(deps.probe, *keyFile); err != nil {
+		log.Error(fmt.Errorf("signer key directory: %w", err), "refused; the host key needs persistent storage")
+		return 1
 	}
 	key, created, err := signer.CreateKey(*keyFile, own)
 	if err != nil {
@@ -287,6 +299,11 @@ func installCertificate(cfg *config.Config, csrFile, certFile string, uris []str
 	uid := probe.EUID()
 	if err := hostcheck.CheckNotRoot(probe); err != nil {
 		return enrol.Result{}, err
+	}
+	// Before anything is written: an identity installed on state that a
+	// reboot loses is lost with it.
+	if err := hostcheck.CheckEnrolStatePersistent(probe, cfg.StateDir, cfg.PKIDir()); err != nil {
+		return enrol.Result{}, fmt.Errorf("agent state: %w", err)
 	}
 	signerUID, err := signer.ResolveUID(cfg.SignerUser)
 	if err != nil {

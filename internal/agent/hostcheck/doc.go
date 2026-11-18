@@ -56,6 +56,10 @@ const (
 	// block-device-backed file system, or it does not carry the host's
 	// provisioning marker.
 	ReasonStateNotPersistent = "StateNotPersistent"
+	// ReasonSignerKeyNotPersistent: the directory of the signer's host key
+	// file is not on a persistent, block-device-backed file system, so the
+	// key would be lost at the next reboot.
+	ReasonSignerKeyNotPersistent = "SignerKeyNotPersistent"
 	// ReasonPKIInsecure: the key material directory or a file in it is not
 	// private to the agent's user, or is a symbolic link.
 	ReasonPKIInsecure = "PKIInsecure"
