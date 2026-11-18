@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-18 07:30] - Per-host agent enrolment requires the namespaced Secret grant (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `charts/virtrigaud/templates/host-enrolment-rbac.yaml`: `experimental.hostEnrolment.enabled` now fails the render unless `rbac.secrets.scope` is `namespaced`. With the default cluster scope, the manager can read every Secret, including the key Secret of the host-agent subordinate CA, so a compromised manager could sign CA-valid host-agent certificates with no approval. Rendering also fails when the enrolment namespace is listed in `rbac.secrets.providerNamespaces` or `workloadNamespaces`. Listing it adds no Secret verb, but it declares the namespace a home for Provider objects or workloads, and only the manager may write Secrets there. When the optional `experimental.hostEnrolment.caKeySecret` (`<namespace>/<name>` of the sub-CA key Secret) is set, rendering fails if the Secret is in the enrolment namespace or its namespace is in either list. The template's comment says why no `selfsubjectaccessreviews` rule is added (`system:basic-user` grants it to every authenticated user).
+- `internal/controller/host_enrolment_secret_access.go`: new `CheckHostEnrolmentSecretAccess`. With SelfSubjectAccessReviews, it refuses enrolment while the manager may `get`, `list` or `watch` Secrets in all namespaces. When the sub-CA key Secret is declared, it also refuses while the manager may `get` that Secret, or `list` or `watch` Secrets in its namespace. It fails closed: a review error, or an authorizer evaluation error, refuses too. A refusal names only verbs, namespaces and the declared Secret name.
+- `cmd/manager/main.go`: a manager with the `--dev-host-enrolment-*` flags runs that check at startup, before the cert-manager admission check, and exits on refusal. If the client for the startup checks cannot be built, the manager exits; before, certificate renewal was only switched off.
+
+### Added
+- `internal/controller/host_enrolment.go`, `cmd/manager/host_enrolment_flags_dev.go`, `cmd/manager/host_enrolment_flags_release.go`: optional flag `--dev-host-enrolment-ca-key-secret=<namespace>/<name>`. Only a `virtrigaud_dev` build defines it, so a release manager started with it stops at flag parsing. It counts as an enrolment flag. A key Secret in the enrolment namespace, or a malformed value, is refused.
+- `charts/virtrigaud/values.yaml`: `experimental.hostEnrolment.caKeySecret` (default empty), plus the new requirements in the comments. The chart does not start the enrolment manager, so it uses the value for render checks only; the same value goes to the manager as the flag.
+- Tests: `internal/controller/host_enrolment_secret_access_test.go` covers the check (cluster-wide get, list and watch allowed, the exact key Secret allowed, list in its namespace allowed, everything denied, enrolment-namespace access accepted, a review error on each review, an evaluation error) and the flag's parsing. `internal/controller/host_enrolment_secret_access_envtest_test.go` runs the check as the manager's ServiceAccount against a real API server with the chart's RBAC. `internal/controller/rbac_host_enrolment_test.go` covers the new render refusals. `cmd/manager/host_enrolment_flags_{dev,release}_test.go` cover flag registration in both builds.
+
+### Changed
+- `docs/host-agent-enrolment.md`: the stale residual ("the manager's existing cluster-wide Secret permission … Narrowing that grant is separate work") is replaced by a section on the two checks and on what they do not cover: the manager's Deployment grant (a pod can mount a Secret), RBAC added after startup, and the API approval path for whoever holds the manager's ServiceAccount or can grant it RBAC. Key pinning and the admission or approver policies bound that path. The flag table, RBAC and Deployment sections are updated: the generated `config/rbac/role.yaml` must be narrowed first.
+- `docs/manager-secret-access.md`, `config/rbac/host-enrolment/README.md`: the enrolment requirement, the startup check, a `kubectl auth can-i` line for the key Secret, and the new tests.
+
+### Why
+The recommended issuer is a cert-manager ClusterIssuer, whose sub-CA key Secret lives in cert-manager's cluster resource namespace. The manager's default cluster-wide Secret grant reached that key, so enrolment is now tied to the namespaced grant added earlier.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
+Development builds only; release builds are unchanged, and release managers neither define nor accept the new flag. Development enrolment users must switch to `rbac.secrets.scope: namespaced` (or narrow a Kustomize or hand-written Secret grant the same way). Otherwise the chart refuses to render and the manager refuses to start enrolment.
+
 ## [2026-11-18 03:00] - Per-host agent: boot-start re-arms at a soft reboot (development builds only)
 **Author:** @wrkode (William Rizzo)
 

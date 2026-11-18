@@ -186,8 +186,30 @@ namespace if it knows the name. So:
 - The per-host agent enrolment feature's own Role grants the manager full
   Secret access in its namespace. Keep the cert-manager signing CA's key out of that namespace (for
   example, a ClusterIssuer whose key lives in cert-manager's cluster resource
-  namespace).
+  namespace). See [Per-host agent enrolment](#per-host-agent-enrolment) for
+  the checks that hold enrolment to this mode.
 - Enable encryption at rest for Secrets in etcd.
+
+### Per-host agent enrolment
+
+Per-host agent enrolment (development builds only) requires this mode: a
+manager that can read every Secret can read the host-agent subordinate CA's
+key and sign host-agent certificates with no approval.
+
+- With `experimental.hostEnrolment.enabled`, rendering fails unless
+  `scope` is `namespaced`. It also fails when the enrolment namespace, or the
+  namespace of the sub-CA key Secret named by
+  `experimental.hostEnrolment.caKeySecret`, is listed in `providerNamespaces`
+  or `workloadNamespaces`, or when that Secret is in the enrolment namespace.
+- At startup, the development manager refuses to run enrolment while it may
+  `get`, `list` or `watch` Secrets in all namespaces, or, with
+  `--dev-host-enrolment-ca-key-secret`, `get` that Secret or `list` or
+  `watch` Secrets in its namespace. A failed review refuses too. This check
+  also applies when the chart does not render the manager's RBAC
+  (`rbac.create: false`, or Kustomize).
+
+Details, and what these checks do not cover, are in
+[host-agent-enrolment.md](host-agent-enrolment.md#the-manager-must-not-read-the-sub-ca-key).
 
 ### Performance
 
@@ -223,12 +245,15 @@ kubectl auth can-i create secrets -n virtrigaud-providers --as "$SA"       # yes
 kubectl auth can-i get secrets -n team-a --as "$SA"                        # yes
 kubectl auth can-i list secrets -n team-a --as "$SA"                       # namespaced: no
 kubectl auth can-i get secrets -n kube-system --as "$SA"                   # namespaced: no
+kubectl auth can-i get secrets/host-agent-ca -n cert-manager --as "$SA"    # enrolment: must be no
 ```
 
 Replace the namespace and ServiceAccount name with your release's. The
 ServiceAccount is `manager.serviceAccount.name` when set. Otherwise it is
 `<release>-virtrigaud`, or just `<release>` when the release name already
-contains `virtrigaud`.
+contains `virtrigaud`. The last line applies only with per-host agent
+enrolment: replace `cert-manager/host-agent-ca` with the namespace and name of
+your sub-CA key Secret.
 
 ## Tests
 
@@ -239,3 +264,10 @@ contains `virtrigaud`.
   namespaced RBAC to a real API server. It then runs each access above as the
   manager's ServiceAccount through a manager with the restricted informer, and
   checks that Secrets elsewhere are refused.
+- `internal/controller/rbac_host_enrolment_test.go` pins the enrolment
+  chart's refusals: the cluster scope, and the enrolment or sub-CA key
+  namespace among the granted namespaces.
+- `internal/controller/host_enrolment_secret_access_test.go` and
+  `internal/controller/host_enrolment_secret_access_envtest_test.go` test the
+  enrolment startup check, the latter as the manager's ServiceAccount against
+  a real API server with the chart's RBAC.
