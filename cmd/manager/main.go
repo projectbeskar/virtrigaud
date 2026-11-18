@@ -251,6 +251,7 @@ func main() {
 		devOnly+"Trust domain of host URI identities (spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>).")
 	flag.StringVar(&hostEnrolmentFlags.CABundleFile, controller.DevHostEnrolmentCABundleFileFlagName, "",
 		devOnly+"PEM file of the host-agent subordinate CA that issued agent certificates must chain to.")
+	registerDevHostEnrolmentCAKeySecretFlag(flag.CommandLine, &hostEnrolmentFlags)
 	var hostInventoryFlags controller.HostInventoryFlags
 	flag.StringVar(&hostInventoryFlags.AllowListFile, controller.ComponentAllowListFileFlagName, "",
 		devOnly+"Component allow-list file (JSON) that host inventories are compared with, read once at start. "+
@@ -768,12 +769,49 @@ func main() {
 	// enrolment flags): draws enrolment records, decides enrolment
 	// CertificateRequests and pins validated agent keys.
 	if hostEnrolment != nil {
+		// A client that asks the API server directly: the Secret access
+		// check below and the manager's identity.
+		direct, derr := client.New(restConfig, client.Options{Scheme: scheme})
+		if derr != nil {
+			setupLog.Error(derr, "refusing to run per-host agent enrolment: no client for its startup checks")
+			os.Exit(1)
+		}
+		// Fail closed: the manager must not be able to read the host-agent
+		// sub-CA key, so enrolment needs the namespaced Secret grant and no
+		// Secret access where the key lives.
+		checkCtx, checkCancel := context.WithTimeout(ctrl.LoggerInto(context.Background(), setupLog), 30*time.Second)
+		err = controller.CheckHostEnrolmentSecretAccess(checkCtx, direct, hostEnrolment)
+		checkCancel()
+		if err != nil {
+			setupLog.Error(err, "refusing to run per-host agent enrolment")
+			os.Exit(1)
+		}
+		setupLog.Info("Per-host agent enrolment: the manager may not read Secrets in all namespaces or the sub-CA key Secret",
+			"caKeySecretChecked", hostEnrolment.CAKeySecret != nil)
+		// A new or changed workload in the key Secret's namespace could mount
+		// it with no Secret RBAC; warn only, since admission policies may
+		// forbid it.
+		checkCtx, checkCancel = context.WithTimeout(ctrl.LoggerInto(context.Background(), setupLog), 30*time.Second)
+		workload, werr := controller.HostEnrolmentWorkloadAccess(checkCtx, direct, hostEnrolment)
+		checkCancel()
+		switch {
+		case werr != nil:
+			setupLog.Error(werr, "WARNING: could not check whether the manager may create or change workloads in the sub-CA key Secret's namespace")
+		case len(workload) > 0:
+			setupLog.Info("WARNING: the manager may create or change workloads in the sub-CA key Secret's namespace; a pod there could mount the "+
+				"key Secret or run under an existing ServiceAccount. Use an admission policy on CREATE and UPDATE that keeps the manager's "+
+				"Deployments in the Provider namespaces and their pods on the ServiceAccounts it creates (see docs/host-agent-enrolment.md)",
+				"allowed", workload)
+		}
 		// Fail closed: the requester fields of a CertificateRequest are
 		// trustworthy only behind cert-manager's admission webhooks.
-		// The check is re-run periodically; while it fails, no request is
-		// decided.
-		admissionGate := &controller.AdmissionGate{Reader: mgr.GetAPIReader(), Namespace: hostEnrolment.Namespace}
-		checkCtx, checkCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// The check, and the Secret access check above, are re-run
+		// periodically; while either fails, no request is decided.
+		admissionGate := &controller.AdmissionGate{Reader: mgr.GetAPIReader(), Namespace: hostEnrolment.Namespace,
+			SecretAccess: func(ctx context.Context) error {
+				return controller.CheckHostEnrolmentSecretAccess(ctx, direct, hostEnrolment)
+			}}
+		checkCtx, checkCancel = context.WithTimeout(context.Background(), 30*time.Second)
 		err = admissionGate.Check(checkCtx)
 		checkCancel()
 		if err != nil {
@@ -788,23 +826,19 @@ func main() {
 		// identity, and only those are approved as renewals: read it from the
 		// API server, now and, while it cannot be read, every minute. Until
 		// then renewal stays off; enrolment still works.
-		if direct, cerr := client.New(restConfig, client.Options{Scheme: scheme}); cerr != nil {
-			setupLog.Error(cerr, "certificate renewal is off: no client to read the manager's identity")
-		} else {
-			idCtx, idCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			id, ierr := controller.ResolveManagerIdentity(idCtx, direct)
-			idCancel()
-			if ierr != nil {
-				setupLog.Error(ierr, "certificate renewal is off until the manager's identity can be read; it is tried again every minute")
-				if err = mgr.Add(&controller.ManagerIdentityResolver{Client: direct, Config: hostEnrolment}); err != nil {
-					setupLog.Error(err, "unable to add the manager identity resolver")
-					os.Exit(1)
-				}
-			} else {
-				hostEnrolment.SetManagerIdentity(id)
-				setupLog.Info("Per-host agent certificate renewal requests are created and approved under the manager's identity",
-					"username", id.Username)
+		idCtx, idCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		id, ierr := controller.ResolveManagerIdentity(idCtx, direct)
+		idCancel()
+		if ierr != nil {
+			setupLog.Error(ierr, "certificate renewal is off until the manager's identity can be read; it is tried again every minute")
+			if err = mgr.Add(&controller.ManagerIdentityResolver{Client: direct, Config: hostEnrolment}); err != nil {
+				setupLog.Error(err, "unable to add the manager identity resolver")
+				os.Exit(1)
 			}
+		} else {
+			hostEnrolment.SetManagerIdentity(id)
+			setupLog.Info("Per-host agent certificate renewal requests are created and approved under the manager's identity",
+				"username", id.Username)
 		}
 		if err = (&controller.HostEnrolmentReconciler{
 			Client:     mgr.GetClient(),

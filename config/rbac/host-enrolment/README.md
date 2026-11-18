@@ -22,6 +22,21 @@ Edit the placeholders before applying:
 - `virtrigaud-system` / `virtrigaud-controller-manager`: the manager's
   ServiceAccount.
 
+The manager must not be able to read Secrets in all namespaces or the sub-CA
+key Secret, enter pods in the key Secret's namespace, or grant itself that
+access (impersonation, token minting, role binding), even through a rule
+limited to named objects. It refuses to run enrolment otherwise, and suspends
+approvals if a re-check fails later (see `docs/host-agent-enrolment.md`, "The
+manager must not read the sub-CA key"). The checks cover grants cluster-wide
+and in the key Secret's namespace only, and are defence in depth, not proof. A
+cluster with a webhook authorizer in its chain, which commonly includes managed
+Kubernetes, always reports incomplete rules, so enrolment refuses there. `config/rbac/role.yaml`
+grants Secret access in all namespaces, so replace that grant with
+per-namespace Roles first (`docs/manager-secret-access.md`, "Kustomize"). Pass
+`--dev-host-enrolment-ca-key-secret=<namespace>/<name>`: it is required with a
+cert-manager issuer, and with an external signer that keeps its key in this
+cluster it is your responsibility to set it.
+
 What is granted, and nothing more:
 
 - `approve` on the `signers` resource of `cert-manager.io`, for the named

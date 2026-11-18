@@ -547,11 +547,6 @@ where the manager can write Secrets. A namespaced `Issuer` keeps its key
 Secret in its own namespace, which is the enrolment namespace; that layout
 is not supported, because it puts the sub-CA key where the manager writes.
 
-Residual: the manager's existing cluster-wide Secret permission (used for
-provider credentials and the host inventories) still reaches every Secret,
-including the sub-CA key wherever it lives. Narrowing that grant is separate
-work.
-
 The Secret is named `virtrigaud-agent-pins-<hash>` (a hash of the Host's
 namespace and name, so the name is bounded), labelled
 `app.kubernetes.io/component: host-agent-pins` and
@@ -574,6 +569,166 @@ pins, overwritten or deleted.
 The Secret is authoritative; `Host.status.agent` only mirrors it. A lost or
 edited status is rewritten from it, and the inventory render reads it, never
 the status.
+
+### The manager must not read the sub-CA key
+
+Whoever reads the sub-CA key can sign CA-valid host-agent certificates with
+no approval at all. Enrolment therefore requires the manager's namespaced
+Secret grant ([manager-secret-access.md](manager-secret-access.md#opt-in-namespaced-scope)),
+and the chart and the manager check for it.
+
+**What the checks guarantee.** These checks are defence in depth against
+misconfigured RBAC. They do not prove that the manager cannot reach the key.
+They refuse Secret access and the escalation paths listed below when those are
+granted cluster-wide or in the declared key namespace. They do not review any
+other namespace: a Role in a third namespace is not seen, for example in the
+namespace where the signer controller runs, if that differs from the key
+namespace. Keep the sub-CA key in the namespace where cert-manager itself runs.
+cert-manager's Helm chart sets its cluster resource namespace to that namespace,
+but the controller's own default is `kube-system`, so confirm the value of
+`--cluster-resource-namespace`. The key namespace and the controller's namespace
+are then the same one, and it is reviewed.
+
+The two checks are:
+
+- **Helm.** With `experimental.hostEnrolment.enabled`, rendering fails:
+  - unless `rbac.secrets.scope` is `namespaced`;
+  - when an `rbac.additionalRules` entry covers `secrets` (or `*`) in the
+    core API group (`""` or `*`);
+  - when an `rbac.additionalRules` entry is not a rule, or its `apiGroups` or
+    `resources` are not lists of strings, so that it cannot be checked;
+  - when a `signerNames` entry does not start with a lowercase
+    `<resource>.<group>` without a trailing dot, or names `cert-manager.io`
+    with no resource;
+  - when `experimental.hostEnrolment.caKeySecret` is empty and
+    `signerNames` lists a signer in the `cert-manager.io` group itself, such as
+    `issuers.cert-manager.io/...` or `clusterissuers.cert-manager.io/...`. It
+    names the sub-CA key Secret as `<namespace>/<name>`. A sub-group, such as
+    `awspcaclusterissuers.awspca.cert-manager.io/...`, is an external issuer.
+    The chart cannot tell where an external signer keeps its key, so declare
+    it there too if that key is in this cluster;
+  - when the enrolment namespace is listed in
+    `rbac.secrets.providerNamespaces` or `workloadNamespaces`: only the
+    manager may write Secrets there, and listing it would declare it a
+    namespace for Provider objects or workloads;
+  - when the sub-CA key Secret is in the enrolment namespace, or its
+    namespace is listed in either list.
+
+  The chart does not start the enrolment manager, so pass the same value to
+  it as `--dev-host-enrolment-ca-key-secret`.
+- **Manager.** `--dev-host-enrolment-ca-key-secret=<namespace>/<name>` is
+  required with `--dev-host-enrolment-issuer`, and refused in the enrolment
+  namespace. With an external PKI alone the flag is optional, because the
+  manager cannot tell where that signer keeps its key. **If an external signer
+  keeps its key in this cluster, declaring the flag is your responsibility:**
+  without it, the checks on the key Secret and its namespace do not run.
+
+  Before it starts enrolment, the development manager asks the API server,
+  with SelfSubjectAccessReviews, whether it may:
+  - `get`, `list`, `watch`, `update`, `patch`, `delete` or
+    `deletecollection` Secrets in all namespaces;
+  - `get`, `list`, `watch`, `update`, `patch` or `delete` the sub-CA key
+    Secret by name (a `resourceNames` rule allows a list or watch with a
+    name field selector);
+  - `list`, `watch`, `update`, `patch`, `delete` or `deletecollection`
+    Secrets in the key Secret's namespace;
+  - `get` or `create` `pods/exec` or `pods/attach`, or `update` or `patch`
+    `pods/ephemeralcontainers` or `pods`, in the key Secret's namespace (`get`
+    authorizes a WebSocket connection on API servers before Kubernetes 1.31);
+  - `get` or `create` `nodes/proxy`;
+  - `impersonate` users or groups, or ServiceAccounts in all namespaces or in
+    the key namespace;
+  - `create` ServiceAccount tokens (`serviceaccounts/token`), or `create`,
+    `update` or `patch` RoleBindings, in all namespaces or in the key
+    namespace; `create`, `update` or `patch` ClusterRoleBindings;
+  - `bind` or `escalate` Roles or ClusterRoles in all namespaces or in the
+    key namespace.
+
+  All of these verbs except a plain `delete` return Secret data or lead to it.
+  A plain `delete` returns no Secret data, but deleting the key is destructive.
+
+  An access review with no object name does not match a rule limited by
+  `resourceNames`. The manager therefore also lists its rules with a
+  SelfSubjectRulesReview, in the key Secret's namespace (or, with no key
+  declared, in the enrolment namespace; cluster-wide rules appear in either).
+  It refuses on any rule, whatever its `resourceNames` and including wildcards,
+  that grants:
+  - `impersonate` on users, groups, ServiceAccounts, uids or user extras;
+  - `create` on `serviceaccounts/token`;
+  - `create`, `update` or `patch` on RoleBindings or ClusterRoleBindings;
+  - `bind` or `escalate` on Roles or ClusterRoles;
+  - `get` or `create` on `nodes/proxy`;
+  - with a declared key: any read or write verb on Secrets, `get` or `create`
+    on `pods/exec` or `pods/attach`, or `update` or `patch` on `pods` or
+    `pods/ephemeralcontainers`.
+
+  If any access is allowed, the manager logs the allowed accesses and exits.
+  It also exits if a review fails, if the authorizer reports an evaluation
+  error, or if the rules cannot be listed completely. **A cluster with a
+  webhook authorizer in its authorization chain always reports incomplete
+  rules, so enrolment refuses to run there. This commonly includes managed
+  Kubernetes services.** There is no override. A dangling role binding also
+  refuses: one that refers to a missing role, is cluster-wide or in the reviewed
+  namespace, and applies to the manager directly or through any group it belongs
+  to, such as `system:authenticated`.
+  The reviews ask the API server's authorizers, so
+  they cover the manager's RBAC whatever renders it (the chart, Kustomize or
+  hand-written roles). They do not see admission policies. They need `create`
+  on `selfsubjectaccessreviews` and `selfsubjectrulesreviews`, which Kubernetes
+  grants every authenticated user through the default `system:basic-user`
+  ClusterRole, so no grant is added for them. The chart's manager and enrolment
+  RBAC grant none of the reviewed accesses, with `rbac.scope: cluster` and with
+  `rbac.scope: namespace`.
+
+The manager repeats the reviews with the cert-manager admission check: once
+when its controllers start, and then every three minutes. While either fails, it decides
+no enrolment or renewal request and logs that approvals are suspended, as
+described in [Manager flags](#manager-flags). A Secret grant added after
+startup therefore suspends approvals within the interval plus the time one
+check takes.
+
+At startup the manager also asks whether it may `create`, `update` or `patch`
+Deployments, DaemonSets, StatefulSets, ReplicaSets or CronJobs, or `create`
+Jobs or Pods, in the key Secret's namespace, and logs a `WARNING` naming them
+if it may. It does not refuse, because an admission
+policy, which the reviews cannot see, may forbid them. With the chart's default
+`rbac.scope: cluster`, the manager's ClusterRole may create, update and patch
+Deployments in every namespace, so the warning fires.
+
+The checks do not cover these paths:
+
+- **Other namespaces.** Grants in a namespace other than the key namespace are
+  not reviewed (see [What the checks guarantee](#the-manager-must-not-read-the-sub-ca-key)).
+- **Workloads.** A compromised manager with a cluster-wide Deployment grant
+  can create a Deployment in the key Secret's namespace that mounts the key
+  Secret, or that runs under an existing ServiceAccount there, such as
+  cert-manager's own. It can also patch a Deployment that already runs there:
+  changing cert-manager's own Deployment is a path to the key. The kubelet
+  mounts the Secret, and the pod gets that ServiceAccount's token, with no
+  Secret RBAC of the manager involved (see also
+  [What remains](manager-secret-access.md#what-remains)). To close this path,
+  use an admission policy (a ValidatingAdmissionPolicy, Kyverno or Gatekeeper)
+  on the manager's ServiceAccount that covers both `CREATE` and `UPDATE`, for
+  every workload kind the manager may write. It
+  must let the manager write workloads only in the Provider namespaces, allow
+  their pods only the ServiceAccounts the manager creates for providers, and
+  so block any change to existing workloads in the key Secret's namespace.
+- **Between re-checks.** A grant added after the last review works until the
+  next one finishes: at most the interval plus the time one check takes. Whoever
+  can create Roles and RoleBindings can grant the manager Secret access at any
+  time, within what Kubernetes RBAC lets them grant.
+- **An undeclared key.** With an external PKI alone and no declared key
+  Secret, nothing checks the namespace where that signer keeps its key.
+- **Paths RBAC review cannot list.** The reviews cover the listed accesses
+  only. Other routes to the key, such as access to a node, to etcd or to a
+  backup, are outside them.
+- **The API approval path.** Whoever holds the manager's ServiceAccount, or
+  can create Roles that grant it more, can still use the approval path
+  described in [RBAC](#rbac): `create` on `certificaterequests`, `update` on
+  their status and `approve` on the signer. A certificate obtained that way
+  is pinned for no Host, so the Provider and the manager do not accept it.
+  The deny-only admission policy and approver-policy narrow what such a
+  holder can request.
 
 ## CLI
 
@@ -617,10 +772,14 @@ requester fields are always left to cert-manager's webhook.
 | `--dev-host-enrolment-admin-group` | Group whose members may request an enrolment. |
 | `--dev-host-enrolment-trust-domain` | Trust domain of host URI identities. |
 | `--dev-host-enrolment-ca-bundle-file` | PEM file of the subordinate CA issued certificates must chain to. |
+| `--dev-host-enrolment-ca-key-secret` | `<namespace>/<name>` of the Secret that holds the subordinate CA's key. Required with `--dev-host-enrolment-issuer`. With an external PKI alone it is optional, and you must set it whenever that signer keeps its key in this cluster. Enrolment refuses to run while the manager may read that Secret ([details](#the-manager-must-not-read-the-sub-ca-key)). It must not be in the enrolment namespace. Only a development build defines this flag. A release build stops at flag parsing when it is set. |
 
 At least one issuer is required, and the development operation signer
 (`--dev-operation-signer-key-file`) must be loaded: its install id goes into
-every record.
+every record. The manager must not be able to read Secrets in all namespaces
+or the sub-CA key Secret, or grant itself that access; it refuses to run
+enrolment if it can, and suspends approvals if that changes later
+([details](#the-manager-must-not-read-the-sub-ca-key)).
 
 cert-manager must be installed with its admission webhooks. The requester
 fields of a `CertificateRequest` can be trusted only because cert-manager's
@@ -630,9 +789,10 @@ At startup the manager therefore refuses to run enrolment unless it finds a
 mutating webhook (on create) and a validating webhook (on create and update)
 that cover `cert-manager.io/v1` `certificaterequests` in the enrolment
 namespace with `failurePolicy: Fail` and no `matchConditions` (which could
-skip a request). It repeats the check every three minutes; while it fails, the
-manager decides no request (it retries each minute) and logs that approvals
-are suspended. This is a registration check: it cannot prove the registered
+skip a request). It repeats the check once when its controllers start and then every three minutes, together with the
+Secret access reviews ([details](#the-manager-must-not-read-the-sub-ca-key));
+while either fails, the manager decides no request (it retries each minute)
+and logs that approvals are suspended. This is a registration check: it cannot prove the registered
 webhook is cert-manager's. A registered webhook that is down makes creates
 fail, which is closed.
 
@@ -643,7 +803,12 @@ The default RBAC grants nothing for enrolment. Apply
 `experimental.hostEnrolment.enabled`, `experimental.hostEnrolment.developmentBuild`
 (an explicit statement that the manager is a development build; rendering
 fails without it), `experimental.hostEnrolment.namespace` and
-`experimental.hostEnrolment.signerNames`. They grant exactly:
+`experimental.hostEnrolment.signerNames`, with `rbac.secrets.scope: namespaced`
+(rendering fails without it, see
+[The manager must not read the sub-CA key](#the-manager-must-not-read-the-sub-ca-key)).
+`experimental.hostEnrolment.caKeySecret` is required with a cert-manager
+signer and is only used for render checks.
+They grant exactly:
 
 - `approve` on `signers.cert-manager.io` for the named signer names only
   (`resourceNames`, for example `clusterissuers.cert-manager.io/<name>` for
@@ -738,6 +903,12 @@ the sub-CA bundle and the operation signer key, and it ships no development
 build of the manager. Run a development build of the manager with those
 flags and files by other means (with its own ServiceAccount, so that the API
 server authorises it by `config/rbac/` and `config/rbac/host-enrolment/`).
+`config/rbac/role.yaml` grants Secret access in all namespaces, so the
+manager refuses to start enrolment with it as generated. Remove that grant
+and grant Secrets per namespace instead, as described in
+[manager-secret-access.md](manager-secret-access.md#kustomize). Pass
+`--dev-host-enrolment-ca-key-secret` too; it is required with a cert-manager
+issuer.
 
 The manager's connection to a clustered Provider for per-host agents must be
 TLS: the manager sends that Provider's mutating calls as signed operations,

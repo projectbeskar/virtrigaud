@@ -51,11 +51,11 @@ func TestParseHostEnrolmentConfig(t *testing.T) {
 	require.NoError(t, os.WriteFile(caFile, ca.PEM, 0o600))
 	clusterIssuer := HostEnrolmentFlags{
 		Namespace: "host-agent-pki", Issuer: "ClusterIssuer/host-agent-ca", AdminGroup: "enrolment-admins",
-		TrustDomain: "cluster.test",
+		TrustDomain: "cluster.test", CAKeySecret: "cert-manager/host-agent-ca",
 	}
 	full := HostEnrolmentFlags{
 		Namespace: "host-agent-pki", Issuer: "Issuer/host-agent-ca", AdminGroup: "enrolment-admins",
-		TrustDomain: "cluster.test", CABundleFile: caFile,
+		TrustDomain: "cluster.test", CABundleFile: caFile, CAKeySecret: "cert-manager/host-agent-ca",
 	}
 	installID := bytes.Repeat([]byte{1}, 16)
 
@@ -82,11 +82,12 @@ func TestParseHostEnrolmentConfig(t *testing.T) {
 		"no issuer":                              func(f *HostEnrolmentFlags) { f.Issuer = "" },
 		"bad issuer":                             func(f *HostEnrolmentFlags) { f.Issuer = "just-a-name" },
 		"external PKI in the cert-manager group": func(f *HostEnrolmentFlags) { f.ExternalPKIIssuer = "cert-manager.io/Issuer/external" },
-		"external PKI without a group":           func(f *HostEnrolmentFlags) { f.ExternalPKIIssuer = "Issuer/external" },
-		"no CA bundle":                           func(f *HostEnrolmentFlags) { f.CABundleFile = "" },
-		"missing CA bundle":                      func(f *HostEnrolmentFlags) { f.CABundleFile = filepath.Join(t.TempDir(), "none") },
-		"leaf as CA bundle":                      func(f *HostEnrolmentFlags) { f.CABundleFile = writeLeaf(t, ca) },
-		"external PKI alone":                     nil,
+		"external PKI in the cert-manager group, other case": func(f *HostEnrolmentFlags) { f.ExternalPKIIssuer = "Cert-Manager.IO/Issuer/external" },
+		"external PKI without a group":                       func(f *HostEnrolmentFlags) { f.ExternalPKIIssuer = "Issuer/external" },
+		"no CA bundle":                                       func(f *HostEnrolmentFlags) { f.CABundleFile = "" },
+		"missing CA bundle":                                  func(f *HostEnrolmentFlags) { f.CABundleFile = filepath.Join(t.TempDir(), "none") },
+		"leaf as CA bundle":                                  func(f *HostEnrolmentFlags) { f.CABundleFile = writeLeaf(t, ca) },
+		"external PKI alone":                                 nil,
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := full

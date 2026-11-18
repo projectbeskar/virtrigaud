@@ -250,7 +250,8 @@ func TestRBAC_ChartSecretGrantNamespacedEnrolmentNamespaceIsCacheOnly(t *testing
 	// nothing there: the enrolment feature's own Role is the only one.
 	enrolment := []string{"--set", "experimental.hostEnrolment.enabled=true",
 		"--set", "experimental.hostEnrolment.developmentBuild=true",
-		"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/agent-pki.host-ca}"}
+		"--set", "experimental.hostEnrolment.signerNames={issuers.cert-manager.io/agent-pki.host-ca}",
+		"--set", "experimental.hostEnrolment.caKeySecret=cert-manager/host-agent-ca"}
 	out, err := secretRBACRender(t, append([]string{"--set", "rbac.secrets.scope=namespaced",
 		"--set", "rbac.secrets.providerNamespaces={virt-a}",
 		"--set", "experimental.hostEnrolment.namespace=agent-pki"}, enrolment...)...)

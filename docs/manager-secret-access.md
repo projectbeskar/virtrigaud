@@ -186,8 +186,50 @@ namespace if it knows the name. So:
 - The per-host agent enrolment feature's own Role grants the manager full
   Secret access in its namespace. Keep the cert-manager signing CA's key out of that namespace (for
   example, a ClusterIssuer whose key lives in cert-manager's cluster resource
-  namespace).
+  namespace). See [Per-host agent enrolment](#per-host-agent-enrolment) for
+  the checks that hold enrolment to this mode.
 - Enable encryption at rest for Secrets in etcd.
+
+### Per-host agent enrolment
+
+Per-host agent enrolment (development builds only) requires this mode: a
+manager that can read every Secret can read the host-agent subordinate CA's
+key and sign host-agent certificates with no approval.
+
+- With `experimental.hostEnrolment.enabled`, rendering fails unless `scope`
+  is `namespaced`, and when an `rbac.additionalRules` entry covers core-group
+  Secrets or cannot be checked. `experimental.hostEnrolment.caKeySecret` (the
+  sub-CA key Secret) is required with a cert-manager signer; if an external
+  signer keeps its key in this cluster, declaring it is your responsibility. Rendering also fails when the
+  enrolment namespace or the key Secret's namespace is listed in
+  `providerNamespaces` or `workloadNamespaces`, or when the key Secret is in
+  the enrolment namespace.
+- The development manager refuses to run enrolment while its access reviews
+  or its listed RBAC rules show that it may use Secrets in all namespaces, the
+  key Secret or Secrets in its namespace, change or enter pods in that
+  namespace (update, patch, exec, attach, ephemeral containers), use
+  `nodes/proxy`, impersonate, mint ServiceAccount tokens, change role bindings,
+  or bind or escalate roles. Rules limited by
+  `resourceNames` count. It repeats the reviews once when its controllers start
+  and then every three minutes, and suspends approvals while they fail. A failed review
+  counts as a refusal, and so do rules that cannot be listed completely: a
+  cluster with a webhook authorizer in its chain, which commonly includes
+  managed Kubernetes, always reports incomplete rules, so enrolment refuses
+  there. The reviews
+  also apply when the chart does not render the manager's RBAC
+  (`rbac.create: false`, or Kustomize).
+- It warns, without refusing, while it may create or change workloads
+  (Deployments, DaemonSets, StatefulSets, ReplicaSets, CronJobs, Jobs, Pods) in
+  the key Secret's namespace, which it may for Deployments with the default
+  `rbac.scope: cluster` (see [What remains](#what-remains)). An admission
+  policy that closes this path must cover `CREATE` and `UPDATE`, because
+  changing a workload that already runs there is also a path to the key.
+
+These checks are defence in depth against misconfigured RBAC and do not prove
+that the manager cannot reach the key. They review grants cluster-wide and in
+the key namespace only, not in other namespaces. Details, and what they do not
+cover, are in
+[host-agent-enrolment.md](host-agent-enrolment.md#the-manager-must-not-read-the-sub-ca-key).
 
 ### Performance
 
@@ -223,12 +265,15 @@ kubectl auth can-i create secrets -n virtrigaud-providers --as "$SA"       # yes
 kubectl auth can-i get secrets -n team-a --as "$SA"                        # yes
 kubectl auth can-i list secrets -n team-a --as "$SA"                       # namespaced: no
 kubectl auth can-i get secrets -n kube-system --as "$SA"                   # namespaced: no
+kubectl auth can-i get secrets/host-agent-ca -n cert-manager --as "$SA"    # enrolment: must be no
 ```
 
 Replace the namespace and ServiceAccount name with your release's. The
 ServiceAccount is `manager.serviceAccount.name` when set. Otherwise it is
 `<release>-virtrigaud`, or just `<release>` when the release name already
-contains `virtrigaud`.
+contains `virtrigaud`. The last line applies only with per-host agent
+enrolment: replace `cert-manager/host-agent-ca` with the namespace and name of
+your sub-CA key Secret.
 
 ## Tests
 
@@ -239,3 +284,13 @@ contains `virtrigaud`.
   namespaced RBAC to a real API server. It then runs each access above as the
   manager's ServiceAccount through a manager with the restricted informer, and
   checks that Secrets elsewhere are refused.
+- `internal/controller/rbac_host_enrolment_test.go` pins the enrolment
+  chart's refusals: the cluster scope, and the enrolment or sub-CA key
+  namespace among the granted namespaces.
+- `internal/controller/host_enrolment_secret_access_test.go` and
+  `internal/controller/host_enrolment_secret_access_envtest_test.go` test the
+  enrolment startup check, the latter as the manager's ServiceAccount against
+  a real API server with the chart's RBAC.
+- `cmd/manager/host_enrolment_flags_dev_test.go` starts a development manager
+  with the enrolment flags against a real API server, as a user who may read
+  every Secret, and checks that it refuses to run enrolment.
