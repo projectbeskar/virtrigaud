@@ -76,6 +76,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -118,6 +119,12 @@ const (
 	// DevHostEnrolmentCABundleFileFlagName names the PEM file of the
 	// host-agent subordinate CA an issued certificate must chain to.
 	DevHostEnrolmentCABundleFileFlagName = "dev-host-enrolment-ca-bundle-file"
+	// DevHostEnrolmentCAKeySecretFlagName names, as <namespace>/<name>, the
+	// Secret holding the host-agent subordinate CA's private key (optional).
+	// With it, the manager also refuses to run enrolment while it may read
+	// that Secret (CheckHostEnrolmentSecretAccess). Only a development build
+	// registers it.
+	DevHostEnrolmentCAKeySecretFlagName = "dev-host-enrolment-ca-key-secret" // #nosec G101 -- a flag name, not a credential
 )
 
 // hostEnrolmentStateKey is the pins Secret's data key holding the
@@ -209,12 +216,14 @@ type HostEnrolmentFlags struct {
 	TrustDomain string
 	// CABundleFile is --dev-host-enrolment-ca-bundle-file.
 	CABundleFile string
+	// CAKeySecret is --dev-host-enrolment-ca-key-secret.
+	CAKeySecret string
 }
 
 // isSet reports whether any flag is set.
 func (f HostEnrolmentFlags) isSet() bool {
 	return f.Namespace != "" || f.Issuer != "" || f.ExternalPKIIssuer != "" || f.AdminGroup != "" ||
-		f.TrustDomain != "" || f.CABundleFile != ""
+		f.TrustDomain != "" || f.CABundleFile != "" || f.CAKeySecret != ""
 }
 
 // HostEnrolmentConfig configures host-agent enrolment.
@@ -236,6 +245,10 @@ type HostEnrolmentConfig struct {
 	// CABundle is the PEM bundle of the subordinate CA. It is the only CA
 	// bundle ever rendered into an inventory.
 	CABundle []byte
+	// CAKeySecret is the Secret holding the subordinate CA's private key,
+	// or nil when the operator did not declare it. The manager must not be
+	// able to read it; it is never read here.
+	CAKeySecret *types.NamespacedName
 	// InstallID is the 16-byte install identifier (from the development
 	// operation signer).
 	InstallID []byte
@@ -312,7 +325,34 @@ func ParseHostEnrolmentConfig(f HostEnrolmentFlags, installID []byte) (*HostEnro
 		return nil, fmt.Errorf("--%s: %w", DevHostEnrolmentCABundleFileFlagName, err)
 	}
 	cfg.CABundle = data
+	if f.CAKeySecret != "" {
+		key, err := parseCAKeySecret(f.CAKeySecret)
+		if err != nil {
+			return nil, fmt.Errorf("--%s: %w", DevHostEnrolmentCAKeySecretFlagName, err)
+		}
+		if key.Namespace == cfg.Namespace {
+			return nil, fmt.Errorf("--%s: the sub-CA key Secret must not be in the enrolment namespace %s, where the manager reads and writes Secrets; "+
+				"use a ClusterIssuer, whose key Secret lives in cert-manager's cluster resource namespace", DevHostEnrolmentCAKeySecretFlagName, cfg.Namespace)
+		}
+		cfg.CAKeySecret = &key
+	}
 	return cfg, nil
+}
+
+// parseCAKeySecret parses <namespace>/<name> of a Secret: a namespace name
+// and a Secret name (a DNS subdomain).
+func parseCAKeySecret(value string) (types.NamespacedName, error) {
+	ns, name, ok := strings.Cut(value, "/")
+	if !ok || strings.Contains(name, "/") {
+		return types.NamespacedName{}, fmt.Errorf("%q must be <namespace>/<name>", value)
+	}
+	if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+		return types.NamespacedName{}, fmt.Errorf("namespace %q: %s", ns, strings.Join(errs, "; "))
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return types.NamespacedName{}, fmt.Errorf("the Secret name %q: %s", name, strings.Join(errs, "; "))
+	}
+	return types.NamespacedName{Namespace: ns, Name: name}, nil
 }
 
 // HostEnrolmentCacheOptions restricts the manager's CertificateRequest cache
