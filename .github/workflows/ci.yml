@@ -75,9 +75,10 @@ jobs:
           name: codecov-umbrella
 
   # The per-host agent, its enrolment and the clustered Cloud Hypervisor paths
-  # exist only in development builds (-tags virtrigaud_dev). `make test` above
-  # builds without the tag, so their tests run only here. Helm is installed
-  # explicitly because the chart render tests skip without it.
+  # exist only in development builds. `make test` above builds a release
+  # build, so their tests run only here (hack/test-dev.sh names the build tag;
+  # this file must not). Helm is installed explicitly because the chart render
+  # tests skip without it.
   test-dev:
     name: Test (development build)
     runs-on: ubuntu-22.04
@@ -100,10 +101,7 @@ jobs:
       - name: Download dependencies
         run: ./hack/retry.sh go mod download
 
-      - name: Run go vet (development build)
-        run: go list -tags virtrigaud_dev ./... | grep -v '/test/integration' | xargs go vet -tags virtrigaud_dev
-
-      - name: Run tests (development build)
+      - name: Vet and test (development build)
         run: make test-dev
 
   # ADR-0008 Tier 2: exercise go-libvirt against a REAL libvirtd via the built-in

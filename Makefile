@@ -158,11 +158,8 @@ test: gen-crds generate fmt vet setup-envtest ## Run tests.
 	xargs go test -timeout 20m -coverprofile cover.out
 
 .PHONY: test-dev
-test-dev: setup-envtest ## Run the tests of a development build (-tags virtrigaud_dev) with the race detector. Needs helm: the chart render tests skip without it.
-	@echo "Running development-build tests..."
-	@export KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)"; \
-	go list -tags virtrigaud_dev ./... | grep -v '/test/e2e' | grep -v '/test/integration' | \
-	xargs go test -tags virtrigaud_dev -race -count=1 -timeout 30m
+test-dev: setup-envtest ## Vet and test a development build with the race detector (hack/test-dev.sh). Needs helm.
+	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" ./hack/test-dev.sh
 
 .PHONY: test-agent-mutation
 test-agent-mutation: ## Mutation test of the per-host agent's operation store: every safety guard switched off in turn must fail a test; reports surviving mutants
