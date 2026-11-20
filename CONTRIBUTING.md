@@ -99,6 +99,10 @@ CI. **Upgrading CRDs on an existing release** requires a fresh chart release, or
 # Unit tests (downloads the envtest binaries on first run; writes cover.out)
 make test
 
+# Vet and test a development build (-tags virtrigaud_dev) with the race
+# detector (hack/test-dev.sh). Needs helm
+make test-dev
+
 # Integration tests under test/integration/ (no cluster needed)
 make test-integration
 

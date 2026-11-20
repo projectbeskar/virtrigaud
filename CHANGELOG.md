@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-18 11:49] - CI runs the development-build tests
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `.github/workflows/ci.yml`: new `test-dev` job, "Test (development build)". It runs `make test-dev`, installs Helm so the chart render tests do not skip, and counts towards the CI Summary result.
+- `hack/test-dev.sh`: vets and tests a development build with the race detector; it refuses to run without `KUBEBUILDER_ASSETS` or Helm. It is the only place that names the build tag: `internal/devgate.TestNoReleaseBuildUsesTheDevTag` refuses the tag in the Makefile and in the workflows.
+- `Makefile`: new `test-dev` target, which runs `hack/test-dev.sh` with the envtest binaries.
+- `CONTRIBUTING.md`: documents `make test-dev`.
+
+### Why
+The per-host agent, its enrolment and the clustered Cloud Hypervisor paths exist only in development builds. `make test` builds without the tag, so their tests ran only on developers' machines and a regression in that security-sensitive code could merge unnoticed.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-18 07:30] - Per-host agent enrolment requires the namespaced Secret grant (development builds only)
 **Author:** @wrkode (William Rizzo)
 
