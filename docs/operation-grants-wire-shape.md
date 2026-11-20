@@ -120,12 +120,14 @@ description of every field.
 | `AnswerContext` | message | What binds an answer to one request and to the host's state: `nonce` (1), `provider_uid`, `host_id`, `install_id`, `enrolment_id` (2–5), `chain_position` (6, store identifier, sequence number and chain head, 56 bytes), `agent_state` and `state_reason` (7, 8), `agent_time` (9, informational), and the continuity fields `continuity_head`, `checkpoint_seq`, `checkpoint_head` (10–12). Every answer body carries one. |
 | `OperationAnswer` | message | The answer about one operation: `context` (1), the `op_id` and `op_enrolment_id` asked about (2, 3), `state` (4), `tombstoned` (5), the recorded identity `kind`, `attempt`, `vm_uid`, `binding_id`, `intent_digest` (6–10) and `outcome_reason` (11). `kind` is the number of the recorded `OperationKind`, carried as an `int32` because `provider.proto` imports this file. |
 | `VMAnswer` | message | The answer about one VM placement: `context` (1), the `vm_uid` and `binding_id` asked about (2, 3), `presence` (4), and for a completed Delete `delete_op_id`, `delete_enrolment_id`, `delete_seq` (5–7). |
-| `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8), `inventory` (9, see [Host inventory](#host-inventory)), `pending_renewal` (10, see [Certificate renewal](#certificate-renewal)). |
+| `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8), `inventory` (9, see [Host inventory](#host-inventory)), `pending_renewal` (10, see [Certificate renewal](#certificate-renewal)), `store_capacity` (11, see [Store capacity](#store-capacity)). |
 | `RenewalRequest` | message | A host's request to renew its identity certificate for a new key, carried as a host-signed `SignedBlob` in `HostAnswer.pending_renewal`: `renewal_version` (1), `provider_uid`, `host_id`, `install_id`, `enrolment_id` (2–5), `current_certificate_sha256` (6), `certificate_request` (7, DER PKCS #10 for the new key). |
+| `StoreCapacity` | message | How full the host's operation store is, in `HostAnswer.store_capacity`: `live_bytes` (1), `threshold_bytes` (2), `level` (3). |
 | `AgentState` | enum | `UNATTESTED`, `READY`, `QUARANTINED` (values 0–3, 0 is `UNSPECIFIED`). `READY` means the store's continuity is established and the recovery of interrupted operations has run. |
 | `OperationRecordState` | enum | `ACCEPTED`, `EXECUTING`, `COMPLETED`, `FAILED_CLEAN`, `FAILED_DIRTY`, `OUTCOME_UNKNOWN`, `RETIRED` (1–7: what the store records for an operation it holds a record or tombstone of), `NO_RECORD` and `UNKNOWN_TO_AGENT` (8, 9: it holds neither; neither proves anything about the operation). |
 | `VMPresence` | enum | `CREATING`, `PRESENT`, `DELETED`, `OTHER_BINDING`, `NO_RECORD` (values 0–5, 0 is `UNSPECIFIED`). `NO_RECORD` never means that the VM was deleted. |
 | `AgentMode` | enum | `IDENTITY` (values 0–1, 0 is `UNSPECIFIED`). |
+| `StoreLevel` | enum | `OK`, `WARNING`, `FULL` (values 0–3, 0 is `UNSPECIFIED`): the level of a `StoreCapacity`. |
 
 ### Where each answer travels
 
@@ -146,7 +148,7 @@ status detail of type `type.googleapis.com/provider.v1.SignedBlob`, beside the
 
 ### Request and response fields
 
-Fifteen additive fields on six existing messages:
+Sixteen additive fields on six existing messages:
 
 | Message | Field | No. | Type |
 |---|---|---|---|
@@ -164,6 +166,7 @@ Fifteen additive fields on six existing messages:
 | | `continuity_seq` | 3 | uint64 |
 | | `inventory_version` | 4 | uint32 |
 | | `renewal_version` | 5 | uint32 |
+| | `store_capacity_version` | 6 | uint32 |
 | `HostInfo` | `host_answer` | 12 | `SignedBlob` |
 
 - `answer_nonce` is exactly 16 random bytes, fresh for each request. An agent signs an
@@ -185,6 +188,9 @@ Fifteen additive fields on six existing messages:
 - `renewal_version` asks the agent to put its pending certificate renewal request in
   the signed answer; see [Certificate renewal](#certificate-renewal). It is set only
   together with `answer_nonce`.
+- `store_capacity_version` asks the agent to put how full its operation store is in
+  the signed answer; see [Store capacity](#store-capacity). It is set only together
+  with `answer_nonce`.
 - The request fields are set only for a Provider whose type requires operation
   identity. They carry no meaning for other Providers: a `Describe` or `GetHostInfo`
   is answered as without them, and a `TaskStatus` is answered from `task` alone, so
@@ -411,6 +417,32 @@ host. It offers the renewal in the signed answer of a `GetHostInfo` that asked f
   `GetHostInfo` names, as staged, the certificate it had issued
   ([`host-agent-enrolment.md`](host-agent-enrolment.md#certificate-renewal)).
 
+### Store capacity
+
+A per-host agent refuses new operations while its operation store is above a size
+threshold. It reports how full the store is in the signed answer of a `GetHostInfo`
+that asks for it, so a manager can warn before that happens:
+
+- **Asking.** `GetHostInfoRequest.store_capacity_version` is the highest version of
+  `StoreCapacity` the caller implements (1), or 0 for none, set only together with
+  `answer_nonce`. `HostAnswer.store_capacity` is set only in the answer to such a
+  request; a verifier refuses an answer that carries one the request did not ask for.
+  A manager refuses unknown fields in a signed answer, so an agent never sends the
+  field to a manager that did not ask for it. An agent older than the field ignores
+  the request field and answers without it.
+- **Fields.** `live_bytes` is the bytes the store's live pages use (its size less its
+  free pages) as of its last committed transaction: the measure the agent's admission
+  compares with the threshold. `threshold_bytes` is the size above which the agent
+  refuses new operations (`RESOURCE_EXHAUSTED`, reason `STORE_FULL`); never 0.
+- **Level.** With `live = live_bytes` and `threshold = threshold_bytes`, in unsigned
+  integer arithmetic: `FULL` when `live > threshold`; otherwise `WARNING` when
+  `live >= threshold / 4 * 3`; otherwise `OK`. `FULL` is exactly when admission
+  refuses (a store at the threshold still accepts). A verifier refuses an answer whose
+  level breaks this rule.
+- **Signature.** `store_capacity` is a field of the `HostAnswer` body, so the answer's
+  signature covers it like every other field: altering, adding or stripping it after
+  signing fails verification. It adds no `body_type` and changes no framing.
+
 ### The per-host agent service
 
 [`proto/agent/v1/agent.proto`](../proto/agent/v1/agent.proto) (package `agent.v1`, Go
@@ -441,6 +473,9 @@ serves it and the Cloud Hypervisor Provider calls it.
   `HostAnswer.pending_renewal`, `RenewalRequest`) is additive in the same way. It adds
   one `body_type`, signed under the same domain separator; the framing and every
   existing field are unchanged.
+- The store capacity (`GetHostInfoRequest.store_capacity_version`,
+  `HostAnswer.store_capacity`, `StoreCapacity`, `StoreLevel`) is additive in the same
+  way. It adds no `body_type` and changes no framing or existing field.
 - A provider built against an older contract ignores the new fields; a manager built
   against an older contract never sends them.
 - The grant messages live in `provider.proto`. The contract's breaking-change check

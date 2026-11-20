@@ -380,6 +380,19 @@ allow-listed (`AgentInventoryVerified`, `ComponentsReady`; see
 [`host-inventory-manager.md`](host-inventory-manager.md)). An answer without the
 inventory is still used for this gate.
 
+**Store capacity.** The same heartbeat asks the agent how full its operation store is
+(`GetHostInfoRequest.store_capacity_version`). Each verified answer that reports it sets
+the Host condition `AgentStorePressure`: `False/StoreCapacityOK` below three quarters of
+the store's size threshold, `True/StoreNearlyFull` from there, `True/StoreFull` above the
+threshold (the agent then refuses new operations `STORE_FULL`), with the sizes and the
+recovery in the message and a `Warning` event on each move into `StoreNearlyFull` or
+`StoreFull`. An answer without the report (an older agent) leaves the condition absent, or
+`Unknown/StoreCapacityNotReported` once a report was seen; an answer that fails
+verification changes nothing. The condition does not gate anything: the agent's own
+admission refuses work when the store is full. See
+[`per-host-agent-development.md`](per-host-agent-development.md#store-size) for the levels,
+the recovery and an alert recipe.
+
 **What an answer about an attempt decides.** Only a verified answer from a `READY` agent
 that binds to the attempt's verified intent (its `op_id` and enrolment, and for an answer
 from a record its kind, attempt number, VM UID, binding and the digest of its exact request

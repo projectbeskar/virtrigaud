@@ -612,6 +612,47 @@ before and after, and `bucketBytes`, the page bytes each bucket holds), and
 logs once, as an error, when a compacted store stays above three quarters of
 the threshold. A release build runs no operation and does not compact.
 
+**The warning on the Host.** The agent log is not the only warning. A
+development build's agent reports how full its store is in the signed answer
+to each heartbeat of the manager (`HostAnswer.store_capacity`: the live size,
+the threshold and a level, see
+[Store capacity](operation-grants-wire-shape.md#store-capacity)). The live size
+is the one admission compares with the threshold, read from two counters the
+store keeps, as of its last committed transaction, so reporting it adds no scan
+of the store. The manager sets the Host condition `AgentStorePressure` from
+each verified answer:
+
+| Level | Condition | Meaning |
+|-------|-----------|---------|
+| `OK` | `False`, reason `StoreCapacityOK` | below three quarters of the threshold |
+| `WARNING` | `True`, reason `StoreNearlyFull` | at or above three quarters of the threshold (the point at which compaction also starts running early); new operations are still accepted |
+| `FULL` | `True`, reason `StoreFull` | above the threshold; new operations are refused `STORE_FULL` |
+
+The message gives the live size and the threshold (in MiB and bytes) and the
+recovery described in this section. The manager emits a `Warning` event, with
+the condition's reason, when the condition moves into `StoreNearlyFull` or
+`StoreFull` (not on every heartbeat). Only a verified answer changes the
+condition. An answer from an agent older than the report carries no capacity:
+the condition stays absent on a Host that never reported one, and goes to
+`Unknown` (reason `StoreCapacityNotReported`) on a Host that did. A release
+build's agent never reports it. To alert, watch for the condition or the events,
+for example:
+
+```sh
+# Hosts whose store is at WARNING or FULL.
+kubectl get hosts -A -o json | jq -r '.items[] | .metadata as $m
+  | .status.conditions[]? | select(.type == "AgentStorePressure" and .status == "True")
+  | "\($m.namespace)/\($m.name)\t\(.reason)\t\(.message)"'
+
+# The transitions, as events.
+kubectl get events -A --field-selector involvedObject.kind=Host,reason=StoreNearlyFull
+kubectl get events -A --field-selector involvedObject.kind=Host,reason=StoreFull
+```
+
+At `StoreNearlyFull`, act before the store reaches the threshold: resolve the
+operations that still hold their VMs, then re-key the Host (below); if the store
+is held mostly by VM tombstones, plan the fresh-store recovery described below.
+
 What the store keeps, measured with create, power and delete cycles through
 the store's real paths (`TestGrowthBreakdown` in `internal/agent/opstore`
 prints the table), in page bytes:
