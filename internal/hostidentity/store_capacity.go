@@ -51,18 +51,41 @@ func StoreLevelOf(live, threshold uint64) providerv1.StoreLevel {
 	return providerv1.StoreLevel_STORE_LEVEL_OK
 }
 
-// VerifyStoreCapacity checks the store capacity c of a HostAnswer against the
-// store_capacity_version the manager sent (requested): none is allowed when
-// it sent 0; a capacity names a threshold other than 0 and the level
-// StoreLevelOf gives for its sizes. A nil c is valid: an agent older than
-// the field never sets it, and the manager treats that as no report.
-func VerifyStoreCapacity(c *providerv1.StoreCapacity, requested uint32) error {
+// StoreCapacityAgentAPIVersion is the agent API version from which an agent
+// reports its store capacity in every answer to a request that asks for it.
+const StoreCapacityAgentAPIVersion uint32 = 4
+
+// VerifyStoreCapacity checks the store capacity c of a HostAnswer from an
+// agent of API version agentAPI against the store_capacity_version the
+// manager sent (requested):
+//   - none is allowed when it sent 0;
+//   - a capacity echoes requested byte for byte (requested_version), so an
+//     altered request is visible;
+//   - a capacity is NOT_MEASURED with both sizes 0, or names a threshold
+//     other than 0 and the level StoreLevelOf gives for its sizes;
+//   - when it sent at least 1, an agent of StoreCapacityAgentAPIVersion or
+//     later must have answered with one: its absence means the request lost
+//     its store_capacity_version in transit (or a faulty agent), never "not
+//     reported".
+//
+// A nil c from an older agent is valid: the manager treats it as no report.
+func VerifyStoreCapacity(c *providerv1.StoreCapacity, requested, agentAPI uint32) error {
 	if c == nil {
+		if requested != 0 && agentAPI >= StoreCapacityAgentAPIVersion {
+			return refuse("the request asked for the store capacity and an agent of API version %d answered without it "+
+				"(the request was altered in transit, or the agent is faulty)", agentAPI)
+		}
 		return nil
 	}
 	switch {
 	case requested == 0:
 		return refuse("a store capacity in the answer to a request that asked for none")
+	case c.GetRequestedVersion() != requested:
+		return refuse("the store capacity echoes version %d, but the request sent %d", c.GetRequestedVersion(), requested)
+	case c.GetLevel() == providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED:
+		if c.GetLiveBytes() != 0 || c.GetThresholdBytes() != 0 {
+			return refuse("a store capacity that is not measured carries sizes")
+		}
 	case c.GetThresholdBytes() == 0:
 		return refuse("a store capacity with a threshold of 0")
 	case c.GetLevel() != StoreLevelOf(c.GetLiveBytes(), c.GetThresholdBytes()):

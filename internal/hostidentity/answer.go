@@ -333,7 +333,7 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		if exp.StoreCapacityVersion > StoreCapacityVersion {
 			return VerifiedAnswer{}, refuse("the request asked for store capacity version %d, above %d", exp.StoreCapacityVersion, StoreCapacityVersion)
 		}
-		if err := VerifyStoreCapacity(out.Host.GetStoreCapacity(), exp.StoreCapacityVersion); err != nil {
+		if err := VerifyStoreCapacity(out.Host.GetStoreCapacity(), exp.StoreCapacityVersion, out.Host.GetAgentApiVersion()); err != nil {
 			return VerifiedAnswer{}, err
 		}
 		if pr := out.Host.GetPendingRenewal(); pr != nil {

@@ -35,7 +35,7 @@ const (
 )
 
 func fullStoreCapacity() *StoreCapacity {
-	return &StoreCapacity{LiveBytes: 200 << 20, ThresholdBytes: 256 << 20, Level: StoreLevel_STORE_LEVEL_WARNING}
+	return &StoreCapacity{LiveBytes: 200 << 20, ThresholdBytes: 256 << 20, Level: StoreLevel_STORE_LEVEL_WARNING, RequestedVersion: 1}
 }
 
 func TestStoreCapacity_RoundTrip(t *testing.T) {
@@ -63,6 +63,7 @@ func TestStoreCapacity_FieldNumbersPinned(t *testing.T) {
 		{"live_bytes", 1, protoreflect.Uint64Kind, "", false},
 		{"threshold_bytes", 2, protoreflect.Uint64Kind, "", false},
 		{"level", 3, protoreflect.EnumKind, storeLevelEnumName, false},
+		{"requested_version", 4, protoreflect.Uint32Kind, "", false},
 	}, true)
 	if got := string((&StoreCapacity{}).ProtoReflect().Descriptor().FullName()); got != storeCapacityMessageName {
 		t.Errorf("StoreCapacity full name = %q", got)
@@ -72,6 +73,7 @@ func TestStoreCapacity_FieldNumbersPinned(t *testing.T) {
 		"STORE_LEVEL_OK",
 		"STORE_LEVEL_WARNING",
 		"STORE_LEVEL_FULL",
+		"STORE_LEVEL_NOT_MEASURED",
 	})
 }
 
@@ -105,6 +107,7 @@ func TestStoreCapacity_InSignedBody(t *testing.T) {
 		func(c *StoreCapacity) { c.LiveBytes++ },
 		func(c *StoreCapacity) { c.ThresholdBytes-- },
 		func(c *StoreCapacity) { c.Level = StoreLevel_STORE_LEVEL_OK },
+		func(c *StoreCapacity) { c.RequestedVersion = 0 },
 	} {
 		m := proto.CloneOf(with)
 		mutate(m.StoreCapacity)
