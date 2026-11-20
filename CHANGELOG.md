@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-20 02:14] - Do not put a URI name constraint on the host-agent sub-CA (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `docs/host-agent-enrolment.md`, `config/rbac/host-enrolment/admission/manager-certificaterequests.yaml`: removed the advice to add a URI name constraint (permitted URI domain: the trust domain) to the host-agent subordinate CA, and now warn against it. Agent certificates carry host-less record URIs (`urn:virtrigaud:…`). RFC 5280 §4.2.1.10 requires a verifier to reject such a URI under any URI name constraint, and Go's `crypto/x509` does, so every agent certificate issued by a constrained sub-CA fails verification at the manager, the Provider and the agent.
+
+### Why
+An operator who followed the advice would get a host-agent PKI whose certificates never verify.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-11-18 11:49] - CI runs the development-build tests
 **Author:** @wrkode (William Rizzo)
 
