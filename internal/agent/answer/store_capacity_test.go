@@ -54,6 +54,7 @@ func TestHostAnswerStoreCapacity(t *testing.T) {
 		assert.EqualValues(t, 1024, c.GetThresholdBytes())
 		assert.Equal(t, tc.level, c.GetLevel(), "live %d", tc.live)
 		assert.EqualValues(t, 1, c.GetRequestedVersion(), "the request's version, echoed")
+		assert.EqualValues(t, 1, c.GetVersion())
 	}
 	t.Run("the echo is the request's version, byte for byte", func(t *testing.T) {
 		h := testHost(p)
@@ -61,6 +62,7 @@ func TestHostAnswerStoreCapacity(t *testing.T) {
 		a, err := answer.HostAnswer(h)
 		require.NoError(t, err)
 		assert.EqualValues(t, 7, a.GetStoreCapacity().GetRequestedVersion())
+		assert.EqualValues(t, 1, a.GetStoreCapacity().GetVersion(), "min(requested, supported)")
 	})
 	t.Run("not asked: never a capacity", func(t *testing.T) {
 		h := testHost(p)

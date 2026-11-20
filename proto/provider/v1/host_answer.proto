@@ -314,6 +314,12 @@ message StoreCapacity {
   // requested_version is the request's store_capacity_version, echoed. A
   // verifier refuses a capacity whose echo is not the version it sent.
   uint32 requested_version = 4;
+  // version is the version of this message's content the agent used: the
+  // lower of requested_version and the highest version the agent implements,
+  // at least 1. A field or level introduced in version n is used only when
+  // this is at least n. A verifier refuses a version above requested_version
+  // or above the highest version it implements.
+  uint32 version = 5;
 }
 
 // StoreLevel is how close a host's operation store is to its size

@@ -70,10 +70,10 @@ func (f *answerFixture) storeAnswer(c *providerv1.StoreCapacity) (*providerv1.Ho
 func TestVerifyAnswer_StoreCapacity(t *testing.T) {
 	f := newAnswerFixture(t)
 	for _, c := range []*providerv1.StoreCapacity{
-		{RequestedVersion: 1, LiveBytes: 10, ThresholdBytes: 1000, Level: levelOK},
-		{RequestedVersion: 1, LiveBytes: 800, ThresholdBytes: 1000, Level: levelWarning},
-		{RequestedVersion: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelFull},
-		{RequestedVersion: 1, Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED},
+		{RequestedVersion: 1, Version: 1, LiveBytes: 10, ThresholdBytes: 1000, Level: levelOK},
+		{RequestedVersion: 1, Version: 1, LiveBytes: 800, ThresholdBytes: 1000, Level: levelWarning},
+		{RequestedVersion: 1, Version: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelFull},
+		{RequestedVersion: 1, Version: 1, Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED},
 	} {
 		ha, exp := f.storeAnswer(c)
 		v, err := hostidentity.VerifyAnswer(f.sign(t, ha), exp)
@@ -100,20 +100,22 @@ func TestVerifyAnswer_StoreCapacityRules(t *testing.T) {
 		sent uint32
 		want string
 	}{
-		"not asked for":     {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 0, "asked for none"},
-		"threshold 0":       {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1, Level: levelOK}, 1, "threshold of 0"},
-		"level unspecified": {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1, ThresholdBytes: 1000}, 1, "does not match"},
-		"OK when near":      {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 750, ThresholdBytes: 1000, Level: levelOK}, 1, "does not match"},
-		"OK when full":      {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelOK}, 1, "does not match"},
-		"WARNING when full": {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelWarning}, 1, "does not match"},
-		"FULL at threshold": {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1000, ThresholdBytes: 1000, Level: levelFull}, 1, "does not match"},
-		"undefined level":   {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1, ThresholdBytes: 1000, Level: 9}, 1, "undefined value"},
+		"not asked for":     {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 0, "asked for none"},
+		"threshold 0":       {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1, Level: levelOK}, 1, "threshold of 0"},
+		"level unspecified": {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1, ThresholdBytes: 1000}, 1, "does not match"},
+		"OK when near":      {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 750, ThresholdBytes: 1000, Level: levelOK}, 1, "does not match"},
+		"OK when full":      {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelOK}, 1, "does not match"},
+		"WARNING when full": {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelWarning}, 1, "does not match"},
+		"FULL at threshold": {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1000, ThresholdBytes: 1000, Level: levelFull}, 1, "does not match"},
+		"undefined level":   {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1, ThresholdBytes: 1000, Level: 9}, 1, "undefined value"},
 		"version above":     {nil, hostidentity.StoreCapacityVersion + 1, "above"},
-		"echo 0":            {&providerv1.StoreCapacity{LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 1, "echoes version 0"},
-		"echo above":        {&providerv1.StoreCapacity{RequestedVersion: 2, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 1, "echoes version 2"},
-		"not measured, sizes": {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1, Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED}, 1,
+		"echo 0":            {&providerv1.StoreCapacity{Version: 1, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 1, "echoes version 0"},
+		"echo above":        {&providerv1.StoreCapacity{RequestedVersion: 2, Version: 1, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 1, "echoes version 2"},
+		"not measured, sizes": {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1, Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED}, 1,
 			"carries sizes"},
 		"missing from a current agent": {nil, 1, "answered without it"},
+		"version 0":                    {&providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 1, "uses version 0"},
+		"version above the request":    {&providerv1.StoreCapacity{RequestedVersion: 1, Version: 2, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}, 1, "uses version 2"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ha, exp := f.storeAnswer(tc.c)
@@ -130,7 +132,7 @@ func TestVerifyAnswer_StoreCapacityRules(t *testing.T) {
 // body; altering, adding or stripping it after signing fails verification.
 func TestVerifyAnswer_StoreCapacitySigned(t *testing.T) {
 	f := newAnswerFixture(t)
-	signedCap := &providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelFull}
+	signedCap := &providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1001, ThresholdBytes: 1000, Level: levelFull}
 	ha, exp := f.storeAnswer(signedCap)
 	blob := f.sign(t, ha)
 	if _, err := hostidentity.VerifyAnswer(blob, exp); err != nil {
@@ -138,12 +140,16 @@ func TestVerifyAnswer_StoreCapacitySigned(t *testing.T) {
 	}
 	for name, edit := range map[string]func(*providerv1.HostAnswer){
 		"lowered to OK": func(a *providerv1.HostAnswer) {
-			a.StoreCapacity = &providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 10, ThresholdBytes: 1000, Level: levelOK}
+			a.StoreCapacity = &providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 10, ThresholdBytes: 1000, Level: levelOK}
 		},
 		"threshold raised": func(a *providerv1.HostAnswer) {
-			a.StoreCapacity = &providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 1001, ThresholdBytes: 2000, Level: levelOK}
+			a.StoreCapacity = &providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 1001, ThresholdBytes: 2000, Level: levelOK}
 		},
 		"stripped": func(a *providerv1.HostAnswer) { a.StoreCapacity = nil },
+		"version changed": func(a *providerv1.HostAnswer) {
+			a.StoreCapacity = proto.CloneOf(a.StoreCapacity)
+			a.StoreCapacity.Version = 0
+		},
 		"echo changed": func(a *providerv1.HostAnswer) {
 			a.StoreCapacity = proto.CloneOf(a.StoreCapacity)
 			a.StoreCapacity.RequestedVersion = 0
@@ -171,7 +177,7 @@ func TestVerifyAnswer_StoreCapacitySigned(t *testing.T) {
 	plain, exp2 := f.storeAnswer(nil)
 	pblob := f.sign(t, plain)
 	added := proto.CloneOf(plain)
-	added.StoreCapacity = &providerv1.StoreCapacity{RequestedVersion: 1, LiveBytes: 10, ThresholdBytes: 1000, Level: levelOK}
+	added.StoreCapacity = &providerv1.StoreCapacity{RequestedVersion: 1, Version: 1, LiveBytes: 10, ThresholdBytes: 1000, Level: levelOK}
 	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(added)
 	if err != nil {
 		t.Fatal(err)
@@ -198,5 +204,28 @@ func TestVerifyAnswer_StoreCapacityRequestStripped(t *testing.T) {
 	exp.StoreCapacityVersion = 0 // the manager asked for none: nothing to miss
 	if _, err := hostidentity.VerifyAnswer(f.sign(t, ha), exp); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestVerifyStoreCapacity_Versions: a manager that asks for a version above
+// the agent's gets the agent's own version with the request echoed (forward
+// compatibility); a version above the request, above what the verifier
+// implements, or 0 is refused.
+func TestVerifyStoreCapacity_Versions(t *testing.T) {
+	c := func(requested, version uint32) *providerv1.StoreCapacity {
+		return &providerv1.StoreCapacity{RequestedVersion: requested, Version: version, LiveBytes: 1, ThresholdBytes: 1000, Level: levelOK}
+	}
+	if err := hostidentity.VerifyStoreCapacity(c(3, 1), 3, hostidentity.StoreCapacityAgentAPIVersion); err != nil {
+		t.Fatalf("a version 1 answer to a version 3 request: %v", err)
+	}
+	for name, tc := range map[string]struct{ requested, version, sent uint32 }{
+		"above the supported version": {3, hostidentity.StoreCapacityVersion + 1, 3},
+		"above the request":           {1, 2, 1},
+		"zero":                        {3, 0, 3},
+		"echo differs":                {2, 1, 3},
+	} {
+		if err := hostidentity.VerifyStoreCapacity(c(tc.requested, tc.version), tc.sent, hostidentity.StoreCapacityAgentAPIVersion); !errors.Is(err, hostidentity.ErrAnswer) {
+			t.Errorf("%s: VerifyStoreCapacity = %v, want a refusal", name, err)
+		}
 	}
 }

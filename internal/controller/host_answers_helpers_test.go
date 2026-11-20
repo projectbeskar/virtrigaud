@@ -421,7 +421,7 @@ func (s *signedHostStub) hostAnswer(q contracts.HostAnswerQuery) (contracts.Host
 	if s.storeCapacity != nil && (seen > 0 || s.capacityUnasked) {
 		a.StoreCapacity = s.storeCapacity()
 		if a.StoreCapacity != nil {
-			a.StoreCapacity.RequestedVersion = seen
+			a.StoreCapacity.RequestedVersion, a.StoreCapacity.Version = seen, max(min(seen, hostidentity.StoreCapacityVersion), 1)
 		}
 	}
 	switch {

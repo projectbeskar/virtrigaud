@@ -322,7 +322,8 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 }
 
 // storeCapacity is the StoreCapacity of an answer to a request that asked for
-// store capacity version requested, which it echoes: nil when it asked for
+// store capacity version requested, which it echoes, in content version
+// min(requested, hostidentity.StoreCapacityVersion): nil when it asked for
 // none (a manager that does not know the field refuses an answer that
 // carries it); NOT_MEASURED with no sizes when c was not measured; otherwise
 // c with the level the contract's rule gives (hostidentity.StoreLevelOf), so
@@ -331,12 +332,14 @@ func storeCapacity(requested uint32, c opstore.Capacity) *providerv1.StoreCapaci
 	if requested == 0 && !guard.Off(guard.StoreCapacityOnlyWhenAsked) {
 		return nil
 	}
+	version := max(min(requested, hostidentity.StoreCapacityVersion), 1)
 	if c.MaxBytes <= 0 || c.LiveBytes <= 0 {
-		return &providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED, RequestedVersion: requested}
+		return &providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED, RequestedVersion: requested,
+			Version: version}
 	}
 	live, limit := uint64(c.LiveBytes), uint64(c.MaxBytes)
 	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: limit, Level: hostidentity.StoreLevelOf(live, limit),
-		RequestedVersion: requested}
+		RequestedVersion: requested, Version: version}
 }
 
 // answerContext builds the AnswerContext of h, enforcing when an answer may

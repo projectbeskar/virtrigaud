@@ -96,7 +96,7 @@ func (h *renewingHost) answer(q contracts.HostAnswerQuery, nonce []byte) *contra
 	if q.StoreCapacityVersion > 0 {
 		// A current agent always answers the store capacity it is asked for.
 		ha.StoreCapacity = &providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED,
-			RequestedVersion: q.StoreCapacityVersion}
+			RequestedVersion: q.StoreCapacityVersion, Version: min(q.StoreCapacityVersion, hostidentity.StoreCapacityVersion)}
 	}
 	if len(h.staged) > 0 {
 		sum := sha256.Sum256(h.staged)

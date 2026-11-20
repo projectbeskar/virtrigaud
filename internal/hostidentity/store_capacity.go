@@ -60,7 +60,9 @@ const StoreCapacityAgentAPIVersion uint32 = 4
 // manager sent (requested):
 //   - none is allowed when it sent 0;
 //   - a capacity echoes requested byte for byte (requested_version), so an
-//     altered request is visible;
+//     altered request is visible, and names the content version it used
+//     (version): at least 1, at most requested and at most
+//     StoreCapacityVersion;
 //   - a capacity is NOT_MEASURED with both sizes 0, or names a threshold
 //     other than 0 and the level StoreLevelOf gives for its sizes;
 //   - when it sent at least 1, an agent of StoreCapacityAgentAPIVersion or
@@ -82,6 +84,9 @@ func VerifyStoreCapacity(c *providerv1.StoreCapacity, requested, agentAPI uint32
 		return refuse("a store capacity in the answer to a request that asked for none")
 	case c.GetRequestedVersion() != requested:
 		return refuse("the store capacity echoes version %d, but the request sent %d", c.GetRequestedVersion(), requested)
+	case c.GetVersion() == 0 || c.GetVersion() > requested || c.GetVersion() > StoreCapacityVersion:
+		return refuse("the store capacity uses version %d, not between 1 and the lower of the request's %d and %d",
+			c.GetVersion(), requested, StoreCapacityVersion)
 	case c.GetLevel() == providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED:
 		if c.GetLiveBytes() != 0 || c.GetThresholdBytes() != 0 {
 			return refuse("a store capacity that is not measured carries sizes")

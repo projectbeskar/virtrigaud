@@ -40,7 +40,7 @@ import (
 // capacityOf is a store capacity of live bytes against a 1000-byte threshold,
 // with the level the contract's rule gives.
 func capacityOf(live uint64) *providerv1.StoreCapacity {
-	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: 1000, Level: hostidentity.StoreLevelOf(live, 1000), RequestedVersion: 1}
+	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: 1000, Level: hostidentity.StoreLevelOf(live, 1000), RequestedVersion: 1, Version: 1}
 }
 
 // storeEvents returns the recorded events of the AgentStorePressure reasons.

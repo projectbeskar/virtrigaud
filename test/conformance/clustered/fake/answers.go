@@ -214,7 +214,8 @@ func (p *provider) signedHostInfo(req *providerv1.GetHostInfoRequest, hs *hostSt
 		// An agent of the current API version always answers the capacity
 		// it is asked for (a manager refuses its answer without it).
 		a.StoreCapacity = &providerv1.StoreCapacity{LiveBytes: FakeStoreLiveBytes, ThresholdBytes: FakeStoreThresholdBytes,
-			Level: hostidentity.StoreLevelOf(FakeStoreLiveBytes, FakeStoreThresholdBytes), RequestedVersion: v}
+			Level: hostidentity.StoreLevelOf(FakeStoreLiveBytes, FakeStoreThresholdBytes), RequestedVersion: v,
+			Version: min(v, hostidentity.StoreCapacityVersion)}
 	}
 	blob, err := p.sign(req.GetHostId(), a)
 	if err != nil {
