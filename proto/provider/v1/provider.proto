@@ -1048,6 +1048,12 @@ message GetHostInfoRequest {
   // caller implements, or 0 for none. Set only together with answer_nonce.
   // No built-in provider reads it. Additive and backward-compatible.
   uint32 renewal_version = 5;
+  // store_capacity_version asks the host's per-host agent to put how full
+  // its operation store is in the signed answer (HostAnswer.store_capacity):
+  // the highest version of StoreCapacity the caller implements (1), or 0 for
+  // none. Set only together with answer_nonce. No built-in provider reads
+  // it. Additive and backward-compatible.
+  uint32 store_capacity_version = 6;
 }
 
 // Capability check - what features does this provider support

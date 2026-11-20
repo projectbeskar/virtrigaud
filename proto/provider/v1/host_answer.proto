@@ -283,6 +283,50 @@ message HostAnswer {
   // GetHostInfoRequest whose renewal_version is at least 1, and only while
   // the host has a renewal pending; never in another answer. Additive.
   SignedBlob pending_renewal = 10;
+
+  // store_capacity is how full the host's operation store is, measured when
+  // the answer was made: set only in the answer to a GetHostInfoRequest
+  // whose store_capacity_version is at least 1, never in another answer.
+  // Like the rest of the answer it is covered by the answer's signature.
+  // Additive.
+  StoreCapacity store_capacity = 11;
+}
+
+// StoreCapacity is how full a host's operation store is, against the size
+// threshold above which the agent refuses new operations (it answers them
+// RESOURCE_EXHAUSTED, reason STORE_FULL, definitely not performed). The
+// sizes are those the agent's admission compares: the bytes of the store's
+// live pages (its size less its free pages), as of the store's last
+// committed transaction.
+message StoreCapacity {
+  // live_bytes is the bytes the store's live pages use.
+  uint64 live_bytes = 1;
+  // threshold_bytes is the store size above which the agent refuses new
+  // operations. Never 0.
+  uint64 threshold_bytes = 2;
+  // level is live_bytes against threshold_bytes, by the rule StoreLevel
+  // states. A verifier refuses an answer whose level breaks that rule.
+  StoreLevel level = 3;
+}
+
+// StoreLevel is how close a host's operation store is to its size
+// threshold. With live = StoreCapacity.live_bytes and threshold =
+// StoreCapacity.threshold_bytes, in unsigned integer arithmetic: FULL when
+// live > threshold; otherwise WARNING when live >= threshold / 4 * 3;
+// otherwise OK.
+enum StoreLevel {
+  // STORE_LEVEL_UNSPECIFIED is never valid in an answer.
+  STORE_LEVEL_UNSPECIFIED = 0;
+  // STORE_LEVEL_OK: below three quarters of the threshold.
+  STORE_LEVEL_OK = 1;
+  // STORE_LEVEL_WARNING: at or above three quarters of the threshold and
+  // not above it. New operations are still accepted; compaction cannot drop
+  // tombstones or the records of unresolved operations, so a store that
+  // stays here needs the recovery the operator documentation describes.
+  STORE_LEVEL_WARNING = 2;
+  // STORE_LEVEL_FULL: above the threshold. New operations are refused
+  // (STORE_FULL); operations already accepted still complete.
+  STORE_LEVEL_FULL = 3;
 }
 
 // RenewalRequest is a per-host agent's request to renew its identity

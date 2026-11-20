@@ -139,6 +139,7 @@ func fullHostAnswer() *HostAnswer {
 		StagedCertificateSha256: fill(0x0e, 32),
 		Inventory:               fullHostInventory(),
 		PendingRenewal:          fullRenewalBlob(),
+		StoreCapacity:           fullStoreCapacity(),
 	}
 }
 
@@ -344,10 +345,11 @@ func TestHostAnswer_FieldNumbersPinned(t *testing.T) {
 		{"staged_certificate_sha256", 8, protoreflect.BytesKind, "", false},
 		{"inventory", 9, protoreflect.MessageKind, hostInventoryMessageName, false},
 		{"pending_renewal", 10, protoreflect.MessageKind, signedBlobMessageName, false},
+		{"store_capacity", 11, protoreflect.MessageKind, storeCapacityMessageName, false},
 	}, true)
 }
 
-// TestHostAnswer_AdditiveRequestFieldsPinned pins the fifteen additive
+// TestHostAnswer_AdditiveRequestFieldsPinned pins the sixteen additive
 // fields on six existing messages, the field count of each message (so no
 // other field was added with them) and that each added field is the
 // highest number of its message.
@@ -381,7 +383,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			{"continuity_seq", 3, protoreflect.Uint64Kind, "", false},
 			{"inventory_version", 4, protoreflect.Uint32Kind, "", false},
 			{"renewal_version", 5, protoreflect.Uint32Kind, "", false},
-		}, 5, "renewal_version"},
+			{"store_capacity_version", 6, protoreflect.Uint32Kind, "", false},
+		}, 6, "store_capacity_version"},
 		{&HostInfo{}, []fieldSpec{
 			{"host_answer", 12, protoreflect.MessageKind, signedBlobMessageName, false},
 		}, 12, "host_answer"},
@@ -398,8 +401,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			t.Errorf("%s: %s is not the highest field number (%d)", md.FullName(), c.highest, highestFieldNumber(md))
 		}
 	}
-	if added != 15 {
-		t.Errorf("pinned %d additive fields, want 15", added)
+	if added != 16 {
+		t.Errorf("pinned %d additive fields, want 16", added)
 	}
 }
 
