@@ -180,6 +180,13 @@ type fakeAgent struct {
 	statusFails atomic.Bool
 	// statusCalls counts AgentStatus calls, answered or not.
 	statusCalls atomic.Int32
+	// statusOutcome is the outcome AgentStatus reports for every confirmed
+	// id: ACCEPTED when 0 (unset); statusNoResults answers without
+	// freeze_results, like an agent that predates them.
+	statusOutcome atomic.Int32
+	// confirmFunc, when set, answers AgentStatus's freeze results instead
+	// of statusOutcome (under mu).
+	confirmFunc func(*agentv1.AgentStatusRequest) []*agentv1.FreezeConfirmationResult
 	// installMode answers InstallRenewedCertificate: 0 records and
 	// succeeds, 1 is Unimplemented, 2 fails with Internal.
 	installMode atomic.Int32
@@ -338,8 +345,27 @@ func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusReq
 	if c, ok := proto.Clone(req).(*agentv1.AgentStatusRequest); ok {
 		h.f.statuses = append(h.f.statuses, c)
 	}
-	return &agentv1.AgentStatusResponse{}, nil
+	if h.f.confirmFunc != nil {
+		return &agentv1.AgentStatusResponse{FreezeResults: h.f.confirmFunc(req)}, nil
+	}
+	o := h.f.statusOutcome.Load()
+	if o == statusNoResults {
+		return &agentv1.AgentStatusResponse{}, nil
+	}
+	if o == 0 {
+		o = int32(agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_ACCEPTED)
+	}
+	resp := &agentv1.AgentStatusResponse{}
+	for _, id := range req.GetConfirmFrozenEnrolmentIds() {
+		resp.FreezeResults = append(resp.FreezeResults, &agentv1.FreezeConfirmationResult{EnrolmentId: id,
+			Outcome: agentv1.FreezeConfirmationOutcome(o)})
+	}
+	return resp, nil
 }
+
+// statusNoResults makes the fake agent answer AgentStatus without
+// freeze_results.
+const statusNoResults = -1
 
 // InstallRenewedCertificate records a renewed certificate the Provider
 // relays.

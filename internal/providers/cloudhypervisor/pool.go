@@ -112,10 +112,12 @@ type hostEntry struct {
 	// freezeUnsupportedGen is the connection whose agent answered
 	// AgentStatus Unimplemented: nothing is relayed on it again.
 	freezeUnsupportedGen uint64
-	// freezeFailures counts consecutive failed relays, and freezeNextTry is
-	// the earliest time of the next one (a backoff).
-	freezeFailures int
-	freezeNextTry  time.Time
+	// freezeFailures counts consecutive relays of the confirmation
+	// freezeFailedKey that failed or that the agent did not report applied,
+	// and freezeNextTry is the earliest time of the next one (a backoff).
+	freezeFailures  int
+	freezeNextTry   time.Time
+	freezeFailedKey string
 	// renewalDeliveredGen and renewalDeliveredKey name the renewed
 	// certificate and phase last delivered to the agent and the connection
 	// it went on.

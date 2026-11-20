@@ -123,7 +123,7 @@ func (s *Server) applyFreezeConfirmation(ctx context.Context, forEnrolment []byt
 		return nil
 	case trustReady(s.opts.Agent) != providerv1.AgentState_AGENT_STATE_READY:
 		s.opts.Log.Info("freeze confirmation deferred: the agent is not ready")
-		return freezeResults(ids, make([]opstore.FreezeOutcome, len(ids)))
+		return FreezeResults(ids, make([]opstore.FreezeOutcome, len(ids)))
 	}
 	outcomes, err := s.opts.Freezes.ConfirmFrozen(ctx, forEnrolment, ids)
 	if len(outcomes) != len(ids) {
@@ -143,12 +143,13 @@ func (s *Server) applyFreezeConfirmation(ctx context.Context, forEnrolment []byt
 	if err != nil {
 		s.opts.Log.Error(err, "freeze confirmation stopped", "for", hex.EncodeToString(forEnrolment))
 	}
-	return freezeResults(ids, outcomes)
+	return FreezeResults(ids, outcomes)
 }
 
-// freezeResults is the wire form of outcomes, one per id, each echoing its
-// id.
-func freezeResults(ids [][]byte, outcomes []opstore.FreezeOutcome) []*agentv1.FreezeConfirmationResult {
+// FreezeResults is the agent.v1 form of a freeze confirmation's outcomes:
+// one result for each id, in order, echoing it; outcomes has one entry for
+// each id. An outcome it does not know is DEFERRED, never applied.
+func FreezeResults(ids [][]byte, outcomes []opstore.FreezeOutcome) []*agentv1.FreezeConfirmationResult {
 	out := make([]*agentv1.FreezeConfirmationResult, len(ids))
 	for i, id := range ids {
 		out[i] = &agentv1.FreezeConfirmationResult{EnrolmentId: append([]byte(nil), id...), Outcome: wireFreezeOutcome(outcomes[i])}
