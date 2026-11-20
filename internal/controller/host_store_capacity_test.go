@@ -353,7 +353,7 @@ func TestHostStoreCapacity_StaleOK(t *testing.T) {
 		"answer not verified": func(f *invFixture) { f.signed.unsigned = true },
 		// setHostUnavailable: the heartbeat does not reach the host.
 		"Provider runtime not ready": func(f *invFixture) {
-			f.r.RemoteResolver.(*stubResolver).err = errors.New("no endpoint")
+			f.r.RemoteResolver = &stubResolver{provider: f.stub, err: errors.New("no endpoint")}
 		},
 		// The manager's trust state for the host could not be read.
 		"trust state unreadable": func(f *invFixture) {
@@ -370,7 +370,7 @@ func TestHostStoreCapacity_StaleOK(t *testing.T) {
 			h = f.reconcile(t)
 			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionUnknown, reasonStoreCapacityStale)
 			f.signed.hostErr, f.signed.unsigned = nil, false
-			f.r.RemoteResolver.(*stubResolver).err = nil
+			f.r.RemoteResolver = &stubResolver{provider: f.stub}
 			if u, ok := f.r.HostAnswers.Trust.(*unreadableTrustOf); ok {
 				f.r.HostAnswers.Trust = u.HostTrustSource
 			}
