@@ -40,7 +40,7 @@ import (
 // capacityOf is a store capacity of live bytes against a 1000-byte threshold,
 // with the level the contract's rule gives.
 func capacityOf(live uint64) *providerv1.StoreCapacity {
-	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: 1000, Level: hostidentity.StoreLevelOf(live, 1000)}
+	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: 1000, Level: hostidentity.StoreLevelOf(live, 1000), RequestedVersion: 1}
 }
 
 // storeEvents returns the recorded events of the AgentStorePressure reasons.
@@ -56,8 +56,9 @@ func storeEvents(r *record.FakeRecorder) []string {
 
 // The heartbeat asks for the store capacity, and each verified answer sets
 // AgentStorePressure: False at OK, True at WARNING and FULL, with the sizes
-// and the recovery in the message; a Warning event marks each transition
-// into WARNING or FULL, and none is emitted while the level holds.
+// and the recovery in the message. Once True it is False again only below the
+// 70% recovery bound. A Warning event marks each rise in severity, and none is
+// emitted while it holds or falls.
 func TestHostStoreCapacity_Transitions(t *testing.T) {
 	f := newInvFixture(t, testPolicy(t))
 	live := uint64(100)
@@ -80,10 +81,15 @@ func TestHostStoreCapacity_Transitions(t *testing.T) {
 		{900, metav1.ConditionTrue, reasonStoreNearlyFull, false}, // still WARNING: no event
 		{1000, metav1.ConditionTrue, reasonStoreNearlyFull, false},
 		{1001, metav1.ConditionTrue, reasonStoreFull, true},
-		{5000, metav1.ConditionTrue, reasonStoreFull, false}, // still FULL: no event
-		{800, metav1.ConditionTrue, reasonStoreNearlyFull, true},
-		{10, metav1.ConditionFalse, reasonStoreCapacityOK, false},
+		{5000, metav1.ConditionTrue, reasonStoreFull, false},       // still FULL: no event
+		{800, metav1.ConditionTrue, reasonStoreNearlyFull, false},  // severity falls: no event
+		{720, metav1.ConditionTrue, reasonStoreNearlyFull, false},  // agent OK, above the 70% bound: kept
+		{700, metav1.ConditionTrue, reasonStoreNearlyFull, false},  // at the bound: kept
+		{699, metav1.ConditionFalse, reasonStoreCapacityOK, false}, // below the bound
+		{720, metav1.ConditionFalse, reasonStoreCapacityOK, false}, // no hysteresis on the way up
 		{760, metav1.ConditionTrue, reasonStoreNearlyFull, true},
+		{10, metav1.ConditionFalse, reasonStoreCapacityOK, false},
+		{1001, metav1.ConditionTrue, reasonStoreFull, true}, // OK straight to FULL
 	}
 	for _, s := range steps {
 		live = s.live
@@ -100,7 +106,7 @@ func TestHostStoreCapacity_Transitions(t *testing.T) {
 			require.Len(t, ev, 1, "live %d: one event on the transition", s.live)
 			assert.True(t, strings.HasPrefix(ev[0], corev1.EventTypeWarning+" "+s.reason+" "), ev[0])
 		} else {
-			assert.Empty(t, ev, "live %d: no event without a transition into WARNING or FULL", s.live)
+			assert.Empty(t, ev, "live %d: no event without a rise in severity", s.live)
 		}
 	}
 }
@@ -131,7 +137,9 @@ func TestHostStoreCapacity_OlderAgent(t *testing.T) {
 
 // Only a verified answer drives the condition: an answer that fails
 // verification (unsigned, a capacity the request did not ask for, a level that
-// contradicts its sizes) leaves it as it was.
+// contradicts its sizes, an echo that differs from the request, or a current
+// agent's answer to a request stripped of store_capacity_version) leaves a
+// True as it was.
 func TestHostStoreCapacity_OnlyVerifiedAnswers(t *testing.T) {
 	f := newInvFixture(t, testPolicy(t))
 	f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(1001) }
@@ -146,6 +154,18 @@ func TestHostStoreCapacity_OnlyVerifiedAnswers(t *testing.T) {
 				return &providerv1.StoreCapacity{LiveBytes: 1001, ThresholdBytes: 1000, Level: providerv1.StoreLevel_STORE_LEVEL_OK}
 			}
 		},
+		// The host saw no store_capacity_version and still put a capacity in
+		// (echoing 0): a capacity the request, as the host got it, did not ask
+		// for. The manager, which asked for version 1, refuses the echo.
+		"capacity the request did not ask for": func() {
+			f.signed.stripCapacityRequest, f.signed.capacityUnasked = true, true
+		},
+		// A relay strips store_capacity_version: a current agent answers as
+		// asked for none; the manager, which asked, refuses the answer.
+		"request stripped, current agent": func() {
+			f.signed.stripCapacityRequest = true
+			f.signed.apiVersion = hostidentity.StoreCapacityAgentAPIVersion
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			edit()
@@ -154,7 +174,7 @@ func TestHostStoreCapacity_OnlyVerifiedAnswers(t *testing.T) {
 			requireCond(t, h, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing)
 			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
 			assert.Empty(t, storeEvents(f.events))
-			f.signed.unsigned = false
+			f.signed.unsigned, f.signed.stripCapacityRequest, f.signed.capacityUnasked, f.signed.apiVersion = false, false, false, 0
 			f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(1001) }
 		})
 	}
@@ -182,13 +202,26 @@ func TestStoreCapacityCondition(t *testing.T) {
 		{1000, metav1.ConditionTrue, reasonStoreNearlyFull},
 		{1001, metav1.ConditionTrue, reasonStoreFull},
 	} {
-		status, reason, msg := storeCapacityCondition(capacityOf(tc.live))
+		status, reason, msg := storeCapacityCondition(capacityOf(tc.live), "")
 		assert.Equal(t, tc.status, status, "live %d", tc.live)
 		assert.Equal(t, tc.reason, reason, "live %d", tc.live)
 		assert.NotEmpty(t, msg)
 	}
+	// The hysteresis: below three quarters, at or above 70%, after a True.
+	for prev, want := range map[string]string{
+		"": reasonStoreCapacityOK, reasonStoreCapacityOK: reasonStoreCapacityOK, reasonStoreCapacityStale: reasonStoreCapacityOK,
+		reasonStoreNearlyFull: reasonStoreNearlyFull, reasonStoreFull: reasonStoreNearlyFull,
+	} {
+		_, reason, _ := storeCapacityCondition(capacityOf(700), prev)
+		assert.Equal(t, want, reason, "700 after %q", prev)
+		_, reason, _ = storeCapacityCondition(capacityOf(699), prev)
+		assert.Equal(t, reasonStoreCapacityOK, reason, "699 after %q", prev)
+	}
+	status, reason, _ := storeCapacityCondition(&providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED}, reasonStoreFull)
+	assert.Equal(t, metav1.ConditionUnknown, status)
+	assert.Equal(t, reasonStoreCapacityNotMeasured, reason)
 	_, _, msg := storeCapacityCondition(&providerv1.StoreCapacity{LiveBytes: 200 << 20, ThresholdBytes: 256 << 20,
-		Level: providerv1.StoreLevel_STORE_LEVEL_WARNING})
+		Level: providerv1.StoreLevel_STORE_LEVEL_WARNING}, "")
 	assert.Contains(t, msg, "200.0 MiB")
 	assert.Contains(t, msg, "256.0 MiB")
 	assert.Contains(t, msg, "78%")
@@ -276,6 +309,90 @@ func TestHostStoreCapacity_ClearedWhenNotPolled(t *testing.T) {
 			require.NoError(t, err)
 			got := getHost(t, r.Client, hostName)
 			assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, HostConditionAgentStorePressure))
+		})
+	}
+}
+
+// A heartbeat that gets no verified answer from a host it still polls turns a
+// False AgentStorePressure into Unknown/StoreCapacityStale, without an event,
+// and keeps a True; the next verified answer sets it again.
+func TestHostStoreCapacity_StaleOK(t *testing.T) {
+	for name, fail := range map[string]func(f *invFixture){
+		"GetHostInfo failed": func(f *invFixture) {
+			f.signed.hostErr = contracts.NewRetryableError("getHostInfo: connection refused", nil)
+		},
+		"answer not verified": func(f *invFixture) { f.signed.unsigned = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newInvFixture(t, testPolicy(t))
+			f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(10) }
+			h := f.reconcile(t)
+			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionFalse, reasonStoreCapacityOK)
+			fail(f)
+			f.clock.advance(time.Second)
+			h = f.reconcile(t)
+			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionUnknown, reasonStoreCapacityStale)
+			f.signed.hostErr, f.signed.unsigned = nil, false
+			f.clock.advance(time.Second)
+			h = f.reconcile(t)
+			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionFalse, reasonStoreCapacityOK)
+			assert.Empty(t, storeEvents(f.events))
+		})
+	}
+}
+
+// An agent that cannot measure its store says so: Unknown/StoreCapacityNotMeasured,
+// without an event.
+func TestHostStoreCapacity_NotMeasured(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(1001) }
+	h := f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+	drainEvents(f.events)
+	f.signed.storeCapacity = func() *providerv1.StoreCapacity {
+		return &providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED}
+	}
+	f.clock.advance(time.Second)
+	h = f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionUnknown, reasonStoreCapacityNotMeasured)
+	assert.Empty(t, storeEvents(f.events))
+}
+
+// The heartbeat paths that cannot check the host with signed answers remove
+// AgentStorePressure: no host answer verification on the manager, a Provider
+// client that cannot ask for signed answers, no trust state for the host, a
+// regressed store, and a Provider that does not implement GetHostInfo.
+func TestHostStoreCapacity_ClearedWhenUnverifiable(t *testing.T) {
+	for name, edit := range map[string]func(t *testing.T, f *invFixture){
+		"no host answer verification": func(_ *testing.T, f *invFixture) { f.r.HostAnswers = nil },
+		"client cannot ask for signed answers": func(_ *testing.T, f *invFixture) {
+			f.r.RemoteResolver = &stubResolver{provider: &stubProvider{GetHostInfoFn: func(_ context.Context, id string) (contracts.HostInfo, error) {
+				return healthyHostInfo(id), nil
+			}}}
+		},
+		"no trust state": func(_ *testing.T, f *invFixture) {
+			f.r.HostAnswers.Trust = &staticTrust{hosts: map[string]*testHost{}}
+		},
+		"store regressed": func(t *testing.T, f *invFixture) {
+			for range 4 {
+				f.clock.advance(time.Second)
+				f.reconcile(t)
+			}
+			f.signed.host.rollBack(3)
+		},
+		"GetHostInfo not implemented": func(_ *testing.T, f *invFixture) {
+			f.signed.hostErr = contracts.NewNotSupportedError("getHostInfo: not a clustered provider")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newInvFixture(t, testPolicy(t))
+			f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(1001) }
+			h := f.reconcile(t)
+			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+			edit(t, f)
+			f.clock.advance(time.Second)
+			h = f.reconcile(t)
+			assert.Nil(t, meta.FindStatusCondition(h.Status.Conditions, HostConditionAgentStorePressure))
 		})
 	}
 }

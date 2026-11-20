@@ -233,6 +233,14 @@ type signedHostStub struct {
 	// that asks for one (an agent that reports it); unset, the host ignores
 	// the request's store capacity version, as an older agent does.
 	storeCapacity func() *providerv1.StoreCapacity
+	// stripCapacityRequest makes the host see every request without its
+	// store_capacity_version (a relay that strips it).
+	stripCapacityRequest bool
+	// capacityUnasked puts storeCapacity, echoing the version the host saw,
+	// in every host answer, asked for or not (an agent that breaks the rule).
+	capacityUnasked bool
+	// apiVersion overrides the host answers' agent API version (2).
+	apiVersion uint32
 	// rawSign signs host answers without the agent's own inventory checks,
 	// so a test can make the agent sign an invalid inventory.
 	rawSign bool
@@ -397,13 +405,24 @@ func (s *signedHostStub) hostAnswer(q contracts.HostAnswerQuery) (contracts.Host
 	if s.agentVersion != "" {
 		version = s.agentVersion
 	}
-	a := &providerv1.HostAnswer{Context: s.host.context(nonce, q.ContinuitySeq), AgentVersion: version, AgentApiVersion: 2, GrantVersions: []uint32{1},
+	api := uint32(2)
+	if s.apiVersion != 0 {
+		api = s.apiVersion
+	}
+	a := &providerv1.HostAnswer{Context: s.host.context(nonce, q.ContinuitySeq), AgentVersion: version, AgentApiVersion: api, GrantVersions: []uint32{1},
 		Mode: providerv1.AgentMode_AGENT_MODE_IDENTITY}
 	if s.inventory != nil && q.InventoryVersion > 0 {
 		a.Inventory = s.inventory(q)
 	}
-	if s.storeCapacity != nil && q.StoreCapacityVersion > 0 {
+	seen := q.StoreCapacityVersion
+	if s.stripCapacityRequest {
+		seen = 0
+	}
+	if s.storeCapacity != nil && (seen > 0 || s.capacityUnasked) {
 		a.StoreCapacity = s.storeCapacity()
+		if a.StoreCapacity != nil {
+			a.StoreCapacity.RequestedVersion = seen
+		}
 	}
 	switch {
 	case s.unsigned:

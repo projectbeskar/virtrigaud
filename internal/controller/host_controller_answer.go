@@ -66,12 +66,14 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 	}
 	obs := inventoryObservation{inScope: true}
 	if r.HostAnswers == nil {
+		clearStorePressure(host)
 		obs.noAnswer = "per-host agent enrolment is not configured on this manager, so the host's answers cannot be verified"
 		info, err := instance.GetHostInfo(ctx, host.Name)
 		return info, obs, err
 	}
 	reader, ok := instance.(contracts.HostAnswerReader)
 	if !ok {
+		clearStorePressure(host)
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing,
 			"the Provider's client cannot ask for signed host answers")
 		obs.noAnswer = "the Provider's client cannot ask for signed host answers"
@@ -82,18 +84,21 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 	switch {
 	case err != nil && errors.Is(err, errHostTrust):
 		log.FromContext(ctx).Info("No signed host answer can be verified for the host", "host", host.Name, "error", err.Error())
+		clearStorePressure(host)
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerNoTrust,
 			"the manager holds no enrolment, pins or CA for this host, so its answers cannot be verified; nothing new is signed for it")
 		obs.noAnswer = "the manager holds no enrolment, pins or CA for this host, so its answers cannot be verified"
 		info, gerr := instance.GetHostInfo(ctx, host.Name)
 		return info, obs, gerr
 	case err != nil:
+		markStorePressureStale(host)
 		return refresh.info, obs, err
 	}
 	obs.refresh = &refresh
 	v := refresh.answer
 	switch refresh.verdict {
 	case answerRegressed:
+		clearStorePressure(host)
 		setHostCondition(host, HostConditionAgentStoreRegressed, metav1.ConditionTrue, reasonHostStoreRegressed,
 			"the host's operation store was replaced, rolled back or forked since the manager last verified it; "+
 				"its VMs are held and nothing new is signed for it until it is re-enrolled")
@@ -121,6 +126,7 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 			}
 		}
 	default:
+		markStorePressureStale(host)
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing,
 			"the host's answer was missing or failed verification; nothing new is signed for it")
 	}

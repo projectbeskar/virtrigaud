@@ -642,6 +642,7 @@ func (r *HostReconciler) setHostUnavailable(ctx context.Context, host *infravirt
 	host.Status.Health = infravirtrigaudiov1beta1.HostHealthUnknown
 	setHostReady(host, metav1.ConditionFalse, reason, msg)
 	r.withdrawHostInventory(ctx, host, false, "the heartbeat did not reach the host, so there is no signed host answer")
+	markStorePressureStale(host)
 }
 
 // keepTransitionTimes gives every condition whose status is the same as when
