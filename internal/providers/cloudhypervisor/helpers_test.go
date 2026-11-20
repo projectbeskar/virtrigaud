@@ -184,6 +184,9 @@ type fakeAgent struct {
 	// id: ACCEPTED when 0 (unset); statusNoResults answers without
 	// freeze_results, like an agent that predates them.
 	statusOutcome atomic.Int32
+	// statusGate, when set, holds every AgentStatus (counted, before it is
+	// answered) until it is closed. It is set before the agent serves.
+	statusGate chan struct{}
 	// confirmFunc, when set, answers AgentStatus's freeze results instead
 	// of statusOutcome (under mu).
 	confirmFunc func(*agentv1.AgentStatusRequest) []*agentv1.FreezeConfirmationResult
@@ -339,6 +342,12 @@ func (h *helloServer) AgentStatus(_ context.Context, req *agentv1.AgentStatusReq
 	}
 	if h.f.statusFails.Load() {
 		return nil, status.Error(codes.Internal, "failed")
+	}
+	h.f.mu.Lock()
+	gate := h.f.statusGate
+	h.f.mu.Unlock()
+	if gate != nil {
+		<-gate
 	}
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()

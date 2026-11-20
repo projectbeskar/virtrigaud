@@ -21,10 +21,12 @@ package cloudhypervisor
 import (
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -171,6 +173,7 @@ type freezeClockEnv struct {
 	prov     *Provider
 	describe func()
 	try      func() error
+	logs     func() string
 	advance  func(time.Duration)
 	setIDs   func(ids ...string)
 }
@@ -183,8 +186,11 @@ func newFreezeClockEnv(t *testing.T, ids ...string) *freezeClockEnv {
 	now := time.Now()
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	env := &freezeClockEnv{a: a, advance: func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }}
+	buf := &syncBuffer{}
+	env.logs = buf.String
 	// Connections outlive the clock steps, so that only the backoff decides.
-	env.prov = newProvider(t, p, Options{Now: clock, MaxConnectionAge: 1000 * time.Hour})
+	env.prov = newProvider(t, p, Options{Now: clock, MaxConnectionAge: 1000 * time.Hour,
+		Logger: slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))})
 	env.setIDs = func(ids ...string) {
 		t.Helper()
 		h := a.entry()
@@ -202,6 +208,17 @@ func newFreezeClockEnv(t *testing.T, ids ...string) *freezeClockEnv {
 		require.NoError(t, env.try(), "a relay never fails the call")
 	}
 	return env
+}
+
+// countLines counts the log lines at level that carry msg.
+func countLines(logs, level, msg string) int {
+	n := 0
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, "level="+level) && strings.Contains(l, msg) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestFreezeConfirmationRefusedOverCapacityIsRedelivered: a confirmation the
@@ -252,6 +269,9 @@ func TestFreezeConfirmationToAnAgentWithoutResults(t *testing.T) {
 	env.advance(freezeRetryMax - time.Second)
 	env.describe()
 	assert.EqualValues(t, want, env.a.statusCalls.Load(), "the backoff stays at freezeRetryMax")
+	const msg = "freeze confirmation not applied by the host's agent"
+	assert.Equal(t, 1, countLines(env.logs(), "INFO", msg), "the first failure of the confirmation is logged at Info")
+	assert.Equal(t, int(want)-1, countLines(env.logs(), "DEBUG", msg), "the repeats at Debug")
 }
 
 // TestFreezeConfirmationChangeIsRelayedAtOnce: a changed confirmation does
@@ -328,4 +348,133 @@ func TestFreezeSettled(t *testing.T) {
 		assert.Equal(t, c.settled, settled, c.name)
 		assert.Equal(t, c.refused, refused, c.name)
 	}
+}
+
+// TestFreezeConfirmationConcurrentCallsRelayOnce: calls to a host that
+// arrive together once the backoff has passed send one AgentStatus between
+// them, and its failure doubles the backoff once.
+func TestFreezeConfirmationConcurrentCallsRelayOnce(t *testing.T) {
+	env := newFreezeClockEnv(t, strings.Repeat("b2", 16))
+	env.a.statusOutcome.Store(int32(agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_DEFERRED))
+	env.describe()
+	require.EqualValues(t, 1, env.a.statusCalls.Load())
+
+	gate := make(chan struct{})
+	env.a.mu.Lock()
+	env.a.statusGate = gate
+	env.a.mu.Unlock()
+	env.advance(freezeRetryMin + time.Second)
+	const callers = 8
+	var wg sync.WaitGroup
+	var finished atomic.Int32
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- env.try()
+			finished.Add(1)
+		}()
+	}
+	require.Eventually(t, func() bool { return env.a.statusCalls.Load() == 2 }, testTimeout, time.Millisecond,
+		"one caller relays")
+	require.Eventually(t, func() bool { return finished.Load() == callers-1 }, testTimeout, time.Millisecond,
+		"the other callers do not wait for the relay")
+	assert.EqualValues(t, 2, env.a.statusCalls.Load(), "the others relayed nothing")
+	close(gate)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	assert.EqualValues(t, 2, env.a.statusCalls.Load())
+
+	env.advance(freezeRetryMin + time.Second)
+	env.describe()
+	assert.EqualValues(t, 2, env.a.statusCalls.Load(), "the backoff doubled once, to 2 x freezeRetryMin")
+	env.advance(freezeRetryMin)
+	env.describe()
+	assert.EqualValues(t, 3, env.a.statusCalls.Load(), "and no more")
+}
+
+// TestFreezeConfirmationStaleKeyChangesNothing: the outcome of a relay of a
+// confirmation that the inventory has since replaced neither backs off nor
+// settles the current one.
+func TestFreezeConfirmationStaleKeyChangesNothing(t *testing.T) {
+	first, second := strings.Repeat("b2", 16), strings.Repeat("c3", 16)
+	cur := strings.Repeat("a1", 16)
+	env := newFreezeClockEnv(t, first)
+	env.a.statusOutcome.Store(int32(agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_DEFERRED))
+	env.setIDs(second)
+	env.describe()
+	require.EqualValues(t, 1, env.a.statusCalls.Load())
+	e, ok := env.prov.pool.get("host-a")
+	require.True(t, ok)
+	state := func() (string, int, time.Time, string) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return e.freezeFailedKey, e.freezeFailures, e.freezeNextTry, e.freezeDeliveredKey
+	}
+	key, failures, next, delivered := state()
+	require.Equal(t, freezeKey(cur, []string{second}), key)
+	require.Equal(t, 1, failures)
+
+	stale := freezeKey(cur, []string{first})
+	_, gen, err := e.connection()
+	require.NoError(t, err)
+	assert.False(t, e.freezeFailed(gen, stale, false))
+	e.freezeDelivered(gen, stale)
+	k2, f2, n2, d2 := state()
+	assert.Equal(t, key, k2, "a stale failure does not take over the backoff")
+	assert.Equal(t, failures, f2)
+	assert.Equal(t, next, n2)
+	assert.Equal(t, delivered, d2, "a stale delivery settles nothing")
+	env.describe()
+	assert.EqualValues(t, 1, env.a.statusCalls.Load(), "the current confirmation's backoff still holds")
+}
+
+// TestFreezeConfirmationHelloStaleIsNotAFailure: a relay that finds the
+// connection just replaced (it needs a new Hello) sends nothing and does not
+// back off: the call's own Hello is made and the confirmation is relayed in
+// the same call, and the backoff that follows is the next step of the
+// sequence, not a doubled one.
+func TestFreezeConfirmationHelloStaleIsNotAFailure(t *testing.T) {
+	p := newPKI(t)
+	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
+	a.statusOutcome.Store(int32(agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_DEFERRED))
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+	const age = time.Hour
+	prov := newProvider(t, p, Options{Now: clock, MaxConnectionAge: age})
+	h := a.entry()
+	h.FreezeConfirmation = &hostsecret.FreezeConfirmation{ForEnrolmentID: strings.Repeat("a1", 16), EnrolmentIDs: []string{strings.Repeat("b2", 16)}}
+	require.NoError(t, prov.Reconcile(hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion, Hosts: []hostsecret.Host{h}}))
+	client := providerv1.NewProviderClient(served(t, prov))
+	describe := func() {
+		t.Helper()
+		_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
+		require.NoError(t, err)
+	}
+	describe()
+	require.EqualValues(t, 1, a.statusCalls.Load())
+	hellos := a.hellos.Load()
+
+	// The connection is now past its maximum age: the relay replaces it and
+	// finds no Hello on the new transport.
+	advance(age + time.Second)
+	describe()
+	require.Greater(t, a.hellos.Load(), hellos, "a new Hello was made")
+	assert.EqualValues(t, 2, a.statusCalls.Load(), "relayed in the same call, after the Hello")
+
+	e, ok := prov.pool.get("host-a")
+	require.True(t, ok)
+	e.mu.Lock()
+	failures := e.freezeFailures
+	e.mu.Unlock()
+	assert.Equal(t, 2, failures, "two relays the agent did not apply; the missing Hello is not counted")
+	advance(2*freezeRetryMin + time.Second)
+	describe()
+	assert.EqualValues(t, 3, a.statusCalls.Load(), "the backoff is 2 x freezeRetryMin, not more")
 }

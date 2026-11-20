@@ -118,6 +118,9 @@ type hostEntry struct {
 	freezeFailures  int
 	freezeNextTry   time.Time
 	freezeFailedKey string
+	// freezeInFlight is set while one relay of the host's confirmation is
+	// being sent: concurrent calls do not relay it again.
+	freezeInFlight bool
 	// renewalDeliveredGen and renewalDeliveredKey name the renewed
 	// certificate and phase last delivered to the agent and the connection
 	// it went on.

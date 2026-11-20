@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 
@@ -38,15 +39,28 @@ func freezeKey(forEnrolment string, ids []string) string {
 	return forEnrolment + "/" + strings.Join(ids, ",")
 }
 
+// currentFreezeKey is the key of the host's freeze confirmation, "" when it
+// has none. The caller holds e.mu.
+func (e *hostEntry) currentFreezeKey() string {
+	f := e.spec.FreezeConfirmation
+	if f == nil {
+		return ""
+	}
+	return freezeKey(f.ForEnrolmentID, f.EnrolmentIDs)
+}
+
 // pendingFreeze returns the host's freeze confirmation as the agent.v1
 // request fields, and its key, when it has not been delivered on connection
-// gen yet; ok is false otherwise. The confirmation comes from the host
-// inventory (the manager's), already validated with the entry.
+// gen yet and no other relay of the host is in flight; ok is false
+// otherwise. When ok, the relay is in flight until freezeRelayEnded, so that
+// concurrent calls to the host send one AgentStatus between them, not one
+// each. The confirmation comes from the host inventory (the manager's),
+// already validated with the entry.
 func (e *hostEntry) pendingFreeze(gen uint64) (forEnrolment []byte, ids [][]byte, key string, ok bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	f := e.spec.FreezeConfirmation
-	if f == nil {
+	if f == nil || e.freezeInFlight {
 		return nil, nil, "", false
 	}
 	key = freezeKey(f.ForEnrolmentID, f.EnrolmentIDs)
@@ -65,15 +79,27 @@ func (e *hostEntry) pendingFreeze(gen uint64) (forEnrolment []byte, ids [][]byte
 		}
 		ids = append(ids, id)
 	}
+	e.freezeInFlight = true
 	return forEnrolment, ids, key, true
+}
+
+// freezeRelayEnded ends the relay pendingFreeze put in flight.
+func (e *hostEntry) freezeRelayEnded() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.freezeInFlight = false
 }
 
 // freezeDelivered records that confirmation key was settled on connection
 // gen: the agent reported every id applied, already applied or not
-// applicable.
+// applicable. A key that is no longer the host's confirmation changes
+// nothing, so that it never resets the backoff of the current one.
 func (e *hostEntry) freezeDelivered(gen uint64, key string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if key != e.currentFreezeKey() {
+		return
+	}
 	e.freezeDeliveredGen, e.freezeDeliveredKey = gen, key
 	e.freezeFailures, e.freezeNextTry, e.freezeFailedKey = 0, time.Time{}, ""
 }
@@ -83,13 +109,19 @@ func (e *hostEntry) freezeDelivered(gen uint64, key string) {
 // connection; any other failure, and an answer that does not report every
 // id applied, backs off, from freezeRetryMin doubling up to freezeRetryMax.
 // The backoff belongs to key: a changed confirmation is relayed with the
-// next call, and its own failures start from freezeRetryMin.
-func (e *hostEntry) freezeFailed(gen uint64, key string, unsupported bool) {
+// next call, and its own failures start from freezeRetryMin. A failure of a
+// key that is no longer the host's confirmation (the inventory changed
+// while it was relayed) is ignored. first reports the first failure of key
+// in a row, which the caller logs at Info (later ones at Debug).
+func (e *hostEntry) freezeFailed(gen uint64, key string, unsupported bool) (first bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if key != e.currentFreezeKey() {
+		return false
+	}
 	if unsupported {
 		e.freezeUnsupportedGen = gen
-		return
+		return true
 	}
 	if e.freezeFailedKey != key {
 		e.freezeFailedKey, e.freezeFailures = key, 0
@@ -100,6 +132,7 @@ func (e *hostEntry) freezeFailed(gen uint64, key string, unsupported bool) {
 	}
 	e.freezeFailures++
 	e.freezeNextTry = e.opts.Now().Add(wait)
+	return e.freezeFailures == 1
 }
 
 // freezeSettled reads the agent's freeze_results for the confirmation of
@@ -158,6 +191,7 @@ func (p *Provider) relayFreeze(ctx context.Context, e *hostEntry) {
 	if !ok {
 		return
 	}
+	defer e.freezeRelayEnded()
 	nonce := make([]byte, nonceLen)
 	if _, err := rand.Read(nonce); err != nil {
 		return
@@ -165,23 +199,42 @@ func (p *Provider) relayFreeze(ctx context.Context, e *hostEntry) {
 	req := &agentv1.AgentStatusRequest{AnswerNonce: nonce, ConfirmForEnrolmentId: forEnrolment, ConfirmFrozenEnrolmentIds: ids}
 	resp := &agentv1.AgentStatusResponse{}
 	cs, err := p.pool.invokeChecked(ctx, e, agentv1.AgentService_AgentStatus_FullMethodName, req, resp, nil, true)
+	if errors.Is(err, errHelloStale) {
+		// Nothing was sent: the connection moved to a transport without a
+		// Hello (it was just replaced). The caller makes the Hello and the
+		// relay is tried again then; it is not a failure of the agent.
+		p.log.Debug("freeze confirmation not relayed yet: the connection needs a new Hello", "host", e.id)
+		return
+	}
 	if err != nil {
 		unsupported := status.Code(err) == codes.Unimplemented
-		e.freezeFailed(gen, key, unsupported)
+		first := e.freezeFailed(gen, key, unsupported)
 		if unsupported {
 			p.log.Info("the host's agent does not take freeze confirmations; none is relayed on this connection", "host", e.id)
 			return
 		}
-		p.log.Info("freeze confirmation not relayed; it is sent again later", "host", e.id, "error", err.Error())
+		p.freezeLog(first, "freeze confirmation not relayed; it is sent again later", "host", e.id, "error", err.Error())
 		return
 	}
 	settled, refused := freezeSettled(ids, resp.GetFreezeResults())
 	if !settled {
-		e.freezeFailed(cs.gen, key, false)
-		p.log.Info("freeze confirmation not applied by the host's agent; it is sent again later", "host", e.id,
+		first := e.freezeFailed(cs.gen, key, false)
+		p.freezeLog(first, "freeze confirmation not applied by the host's agent; it is sent again later", "host", e.id,
 			"enrolments", len(ids), "results", len(resp.GetFreezeResults()), "refusedOverCapacity", refused)
 		return
 	}
 	e.freezeDelivered(cs.gen, key)
 	p.log.Info("freeze confirmation relayed to the host's agent", "host", e.id, "enrolments", len(ids))
+}
+
+// freezeLog logs a relay that is to be repeated: at Info for the first
+// failure of a confirmation in a row, at Debug for the repeats, so that an
+// agent that never reports results (one that predates them) does not log at
+// Info every ten minutes.
+func (p *Provider) freezeLog(first bool, msg string, args ...any) {
+	if first {
+		p.log.Info(msg, args...)
+		return
+	}
+	p.log.Debug(msg, args...)
 }
