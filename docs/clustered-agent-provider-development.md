@@ -362,10 +362,18 @@ enrolment id and up to 16 predecessor enrolment ids whose freeze the manager
 confirmed. Before the next call to that host, the Provider relays it
 unchanged with `agent.v1 AgentStatus` on the host's verified connection,
 once per connection and again when it changes; a relay never fails the call
-itself. A failed relay is logged and tried again with a later call, waiting
-10 seconds after the first failure and doubling up to 10 minutes per host. An
-agent that answers `Unimplemented` (it predates confirmations) is not asked
-again on that connection. A malformed confirmation (a bad id, more than 16,
+itself. The relay counts as delivered only when the answer's
+`freeze_results` has exactly one result per confirmed id, in order, echoing
+it, and each is `ACCEPTED`, `ALREADY_APPLIED` or `NOT_APPLICABLE`
+([outcomes](per-host-agent-development.md#freeze-confirmation)). A failed
+relay, and one the agent did not report applied (`REFUSED_OVER_CAPACITY`,
+`DEFERRED`, an outcome the Provider does not know, a missing or mismatched
+list, or no results at all, as from an agent that predates them), is logged
+and tried again with a later call, waiting 10 seconds after the first
+failure and doubling up to 10 minutes per host; a changed confirmation does
+not wait for the previous one's backoff. A redelivery is safe: the agent
+applies a confirmation idempotently. An agent that answers `Unimplemented`
+(it predates confirmations) is not asked again on that connection. A malformed confirmation (a bad id, more than 16,
 or the current enrolment among them) is dropped with a log line; the entry
 stays routable and nothing is relayed. The Provider does
 not judge the confirmation: the agent applies it only to its own frozen

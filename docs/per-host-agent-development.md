@@ -250,11 +250,35 @@ build applies it only while the agent is `READY`, only when
 16 ids of 16 bytes, and only to enrolments the store holds as frozen
 predecessors; the active enrolment, unknown, already discarded, repeated and
 malformed ids are skipped, and a confirmation made for another enrolment (a
-stale relay) changes nothing. It is idempotent. Each discard is logged with
+stale relay) changes nothing. It is idempotent: confirming a predecessor
+that is already retired, whether its records are still being removed or
+already gone, changes no record. Each discard is logged with
 the enrolment id. After it, an operation of the discarded enrolment is
 answered `UNKNOWN_TO_AGENT` (never a definite not-performed), and a re-sent
 grant of it is refused without running anything. A false confirmation
 therefore costs only liveness. A release build ignores the field.
+
+The answer reports what the agent did with each confirmed id
+(`AgentStatusResponse.freeze_results`, one result per id, in the order of
+the request, each echoing its id):
+
+| Outcome | Meaning | The Provider |
+|---------|---------|--------------|
+| `ACCEPTED` | This request retired the frozen predecessor in a committed transaction. | Settled. |
+| `ALREADY_APPLIED` | The predecessor was retired before; nothing changed. | Settled. |
+| `NOT_APPLICABLE` | Not an enrolment the store holds or retired (unknown), malformed, repeated in the request, or the active enrolment. | Settled. |
+| `REFUSED_OVER_CAPACITY` | 32 discards are pending (see below); the predecessor stays frozen and nothing changed. | Relays it again. |
+| `DEFERRED` | Not applied now: the agent is not `READY`, the confirmation was made for an enrolment that is not the active one, a freeze is in progress, or the store could not be read or written in time. | Relays it again. |
+
+A request with no ids or more than 16 gets no results, and so does every
+request to an agent that applies no confirmation (a release build). The
+results are not part of the signed `HostAnswer`: only the Provider reads
+them, from the mutually authenticated connection the request went on, to
+decide whether to relay the confirmation again. The manager decides only on
+its own signed probe (see
+[Confirming a predecessor's freeze](host-agent-enrolment.md#confirming-a-predecessors-freeze)),
+so a result that is wrong costs at most one more relay, or a predecessor
+that stays listed until the next connection relays it.
 
 Applying a confirmation commits one transaction and returns, so the call
 that relayed it is not held up. That transaction retires the enrolment
@@ -275,9 +299,11 @@ reads every VM record of the host once, so its cost grows with the host's
 VMs, not with the predecessor's records. Compaction holds the discard lock
 for one transaction at a time, so a confirmation relayed meanwhile waits for
 one chunk at most. At most 32 discards can be pending at once; a further
-confirmation is refused, with an error in the agent's log, until compaction
-has finished one, and the predecessor stays frozen until the confirmation is
-relayed again. Compaction removes records only of an enrolment the store
+confirmation is refused until compaction has finished one: the agent logs
+the refusal with the enrolment id and answers `REFUSED_OVER_CAPACITY`, the
+predecessor stays frozen and nothing is written. The Provider does not count
+a refused confirmation as delivered: it relays it again, with a backoff,
+until the agent answers `ACCEPTED` or `ALREADY_APPLIED`. Compaction removes records only of an enrolment the store
 has retired; a discard marker naming any other quarantines the store
 (`inconsistent_store`).
 
@@ -373,7 +399,7 @@ and a client may not send keepalive pings more often than every 15 seconds
 |--------|--------|
 | `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)); with `renewal_version` of at least 1, a development build puts its pending renewal request in it (see [Certificate renewal](#certificate-renewal)). `host_id` naming another host, a nonce that is not 16 bytes, or `continuity_seq`, `inventory_version` or `renewal_version` without a nonce: `InvalidArgument`. |
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
-| `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. A freeze confirmation it carries is applied first (see [Freeze confirmation](#freeze-confirmation)). |
+| `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. A freeze confirmation it carries is applied first, and the outcome for each confirmed id is returned in `freeze_results` (see [Freeze confirmation](#freeze-confirmation)). |
 | `agent.v1.AgentService/InstallRenewedCertificate` | Development builds: stages a renewed certificate (`activate` false) or puts the staged one in use (`activate` true), and answers with a signed `HostAnswer` (see [Certificate renewal](#certificate-renewal)). The nonce and a certificate are required. Release builds: `Unimplemented`. |
 | Every mutating Provider method (the operation kind table) | `Unavailable` with `UNATTESTED` before the agent is ready; `FailedPrecondition` with `QUARANTINED` while the store is quarantined. Once ready: a release build answers `Unimplemented`; a development build runs the operation path (see [Operations](#operations)). |
 | `provider.v1.Provider/TaskStatus` | Development builds: the operation's state from its record or tombstone, by task reference, or by `op_id` with a signed `OperationAnswer` (see [Operations](#operations)). Release builds: `Unimplemented`. |

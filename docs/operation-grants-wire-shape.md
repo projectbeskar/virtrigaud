@@ -419,7 +419,10 @@ package `github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1`) defines
 `Hello` (the first call on each connection, an API version check),
 `InstallRenewedCertificate` (two-phase: stage a renewed certificate, then put the
 byte-identical certificate in use) and `AgentStatus`. Every response carries a
-`HostAnswer` that echoes the caller's nonce. The service is internal to VirtRigaud: it
+`HostAnswer` that echoes the caller's nonce. `AgentStatusResponse.freeze_results`
+reports, outside the signed answer, what the agent did with each enrolment id
+of a relayed freeze confirmation
+([details](per-host-agent-development.md#freeze-confirmation)). The service is internal to VirtRigaud: it
 is not part of the provider contract, external Provider implementations neither serve
 nor call it, and the manager never calls it. A development build of the per-host agent
 serves it and the Cloud Hypervisor Provider calls it.
