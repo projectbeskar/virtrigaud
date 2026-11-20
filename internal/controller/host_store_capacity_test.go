@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -253,6 +254,34 @@ func TestHostStoreCapacity_ClearedWhenProviderStopsRequiringIdentity(t *testing.
 	assert.Nil(t, meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified))
 }
 
+// unreadableTrustOf is a trust source whose HostTrust fails as a Secret read
+// that failed would: not ErrNoEnrolment.
+type unreadableTrustOf struct{ HostTrustSource }
+
+func (unreadableTrustOf) HostTrust(context.Context, *infravirtrigaudiov1beta1.Provider, string) (HostTrust, error) {
+	return HostTrust{}, errors.New("get Secret: the server is currently unable to handle the request")
+}
+
+// A trust state that cannot be read for a moment is not an absent one: a True
+// AgentStorePressure is kept, with no new event when the read succeeds again.
+func TestHostStoreCapacity_KeptWhenTrustUnreadable(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(1001) }
+	h := f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+	require.Len(t, storeEvents(f.events), 1)
+	trust := f.r.HostAnswers.Trust
+	f.r.HostAnswers.Trust = &unreadableTrustOf{HostTrustSource: trust}
+	f.clock.advance(time.Second)
+	h = f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+	f.r.HostAnswers.Trust = trust
+	f.clock.advance(time.Second)
+	h = f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+	assert.Empty(t, storeEvents(f.events), "the warning is not raised again")
+}
+
 // A heartbeat that fails to reach a host still polled keeps its last verdict
 // (AgentAnswerVerified and the inventory conditions say the answer is
 // missing); it is not a reason to drop the warning.
@@ -322,6 +351,14 @@ func TestHostStoreCapacity_StaleOK(t *testing.T) {
 			f.signed.hostErr = contracts.NewRetryableError("getHostInfo: connection refused", nil)
 		},
 		"answer not verified": func(f *invFixture) { f.signed.unsigned = true },
+		// setHostUnavailable: the heartbeat does not reach the host.
+		"Provider runtime not ready": func(f *invFixture) {
+			f.r.RemoteResolver.(*stubResolver).err = errors.New("no endpoint")
+		},
+		// The manager's trust state for the host could not be read.
+		"trust state unreadable": func(f *invFixture) {
+			f.r.HostAnswers.Trust = &unreadableTrustOf{HostTrustSource: f.r.HostAnswers.Trust}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newInvFixture(t, testPolicy(t))
@@ -333,6 +370,10 @@ func TestHostStoreCapacity_StaleOK(t *testing.T) {
 			h = f.reconcile(t)
 			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionUnknown, reasonStoreCapacityStale)
 			f.signed.hostErr, f.signed.unsigned = nil, false
+			f.r.RemoteResolver.(*stubResolver).err = nil
+			if u, ok := f.r.HostAnswers.Trust.(*unreadableTrustOf); ok {
+				f.r.HostAnswers.Trust = u.HostTrustSource
+			}
 			f.clock.advance(time.Second)
 			h = f.reconcile(t)
 			requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionFalse, reasonStoreCapacityOK)
@@ -370,6 +411,7 @@ func TestHostStoreCapacity_ClearedWhenUnverifiable(t *testing.T) {
 				return healthyHostInfo(id), nil
 			}}}
 		},
+		// The trust source reports no enrolment (ErrNoEnrolment): absent.
 		"no trust state": func(_ *testing.T, f *invFixture) {
 			f.r.HostAnswers.Trust = &staticTrust{hosts: map[string]*testHost{}}
 		},

@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -84,7 +85,15 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 	switch {
 	case err != nil && errors.Is(err, errHostTrust):
 		log.FromContext(ctx).Info("No signed host answer can be verified for the host", "host", host.Name, "error", err.Error())
-		clearStorePressure(host)
+		if errors.Is(err, operation.ErrNoEnrolment) {
+			// The trust state is absent (no Host, no current enrolment):
+			// nothing can check the host.
+			clearStorePressure(host)
+		} else {
+			// The trust state could not be read (a Secret read failed, say):
+			// the host is still checked once it can be.
+			markStorePressureStale(host)
+		}
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerNoTrust,
 			"the manager holds no enrolment, pins or CA for this host, so its answers cannot be verified; nothing new is signed for it")
 		obs.noAnswer = "the manager holds no enrolment, pins or CA for this host, so its answers cannot be verified"

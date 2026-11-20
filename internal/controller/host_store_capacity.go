@@ -48,8 +48,11 @@ import (
 // longer requires operation identity), is gone, is not clustered or does not
 // implement GetHostInfo; the manager has no host answer verification or the
 // Provider's client cannot ask for signed answers; the manager holds no trust
-// state for the host; the host's store regressed; the Host is revoked or its
-// agent certificate expired.
+// state for the host (no Host or no current enrolment: ErrNoEnrolment; a trust
+// state that cannot be read is a failed heartbeat, markStorePressureStale);
+// the host's store regressed; the Host is revoked or its agent certificate
+// expired. An Unknown or absent condition resets the hysteresis: the next
+// report is judged by the agent's level alone.
 const HostConditionAgentStorePressure = "AgentStorePressure"
 
 // Reasons of the AgentStorePressure condition. The two True reasons are also
