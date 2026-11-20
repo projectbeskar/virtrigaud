@@ -94,4 +94,55 @@ message AgentStatusRequest {
 message AgentStatusResponse {
   // host_answer is a SignedBlob of a HostAnswer.
   provider.v1.SignedBlob host_answer = 1;
+  // freeze_results answers the request's confirm_frozen_enrolment_ids: one
+  // result for each id, in the order of the request. It is empty when the
+  // request carried no confirmation, when it named more ids than the agent
+  // takes, and from an agent that applies no confirmation (a release build,
+  // or one that predates this field). It is not signed: only the Provider
+  // reads it, from the mutually authenticated connection the request went
+  // on, to decide whether to relay the confirmation again; the manager acts
+  // only on its own signed reads. A caller treats a missing, short or
+  // mismatched list, and any outcome it does not know, as not applied and
+  // relays the confirmation again later (applying it again is a no-op).
+  repeated FreezeConfirmationResult freeze_results = 2;
+}
+
+// FreezeConfirmationResult is the agent's outcome for one enrolment id of a
+// freeze confirmation.
+message FreezeConfirmationResult {
+  // enrolment_id echoes the confirmed enrolment id it answers.
+  bytes enrolment_id = 1;
+  // outcome is what the agent did with it.
+  FreezeConfirmationOutcome outcome = 2;
+}
+
+// FreezeConfirmationOutcome is what an agent did with one confirmed
+// enrolment id. ACCEPTED, ALREADY_APPLIED and NOT_APPLICABLE settle the
+// confirmation for that id; every other value asks for it to be relayed
+// again later.
+enum FreezeConfirmationOutcome {
+  // FREEZE_CONFIRMATION_OUTCOME_UNSPECIFIED is never sent; read as not
+  // applied.
+  FREEZE_CONFIRMATION_OUTCOME_UNSPECIFIED = 0;
+  // FREEZE_CONFIRMATION_OUTCOME_ACCEPTED: this request retired the frozen
+  // predecessor, durably; its remaining records are removed in chunks.
+  FREEZE_CONFIRMATION_OUTCOME_ACCEPTED = 1;
+  // FREEZE_CONFIRMATION_OUTCOME_ALREADY_APPLIED: the predecessor was retired
+  // before (its records are being removed, or are gone); nothing changed.
+  FREEZE_CONFIRMATION_OUTCOME_ALREADY_APPLIED = 2;
+  // FREEZE_CONFIRMATION_OUTCOME_REFUSED_OVER_CAPACITY: the agent already
+  // removes as many retired predecessors as it takes at once; the
+  // predecessor stays frozen and nothing changed. Relay it again later.
+  FREEZE_CONFIRMATION_OUTCOME_REFUSED_OVER_CAPACITY = 3;
+  // FREEZE_CONFIRMATION_OUTCOME_NOT_APPLICABLE: the id is not a frozen
+  // predecessor the agent holds or retired (unknown, malformed, repeated in
+  // the request, or the active enrolment itself); relaying the same
+  // confirmation again changes nothing.
+  FREEZE_CONFIRMATION_OUTCOME_NOT_APPLICABLE = 4;
+  // FREEZE_CONFIRMATION_OUTCOME_DEFERRED: not applied now, for a reason
+  // that can pass (the agent is not ready, the confirmation was made for an
+  // enrolment that is not the active one, a freeze is in progress, the
+  // store could not be written in time); nothing changed. Relay it again
+  // later.
+  FREEZE_CONFIRMATION_OUTCOME_DEFERRED = 5;
 }

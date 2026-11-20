@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-20 12:00] - A freeze confirmation the agent refused is redelivered, not marked delivered (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/agent/v1/agent.proto`: `AgentStatusResponse.freeze_results` (field 2), new message `FreezeConfirmationResult` and enum `FreezeConfirmationOutcome` (`ACCEPTED`, `ALREADY_APPLIED`, `REFUSED_OVER_CAPACITY`, `NOT_APPLICABLE`, `DEFERRED`). Additive: an older Provider ignores the field, and a Provider that gets no results (an older agent) treats the confirmation as not applied. The results are outside the signed `HostAnswer`: only the Provider reads them, from the mutually authenticated connection, to decide on a redelivery. Regenerated `proto/rpc/agent/v1/agent.pb.go`; `agent_test.go` pins the new field, message and enum values.
+- `internal/agent/internal/guard/guard.go`: new mutation guard `freeze-refusal-reported`, listed in `guard.All()` and killed by `TestConfirmFrozen_OutcomesOverCapacity` and `TestConfirmFreeze_TooManyPending`.
+
+### Fixed
+- `internal/agent/opstore/reenrol.go`: `ConfirmFrozen` returns one `FreezeOutcome` per confirmed id instead of the ids it discarded. A confirmation refused because 32 discards are pending (`ErrTooManyDiscards`) is `FreezeRefusedOverCapacity`, never reported as applied. A predecessor retired earlier, whether its records are still being removed or already gone, is `FreezeAlreadyApplied`, and no record changes. A confirmation made for an enrolment that is not active is `FreezeDeferred`. The ids after a capacity refusal are still classified rather than dropped.
+- `internal/agent/server/services.go`, `server.go`: `AgentStatus` returns the outcomes in `freeze_results`, each echoing its id. Every id is `DEFERRED` while the agent is not ready. A refusal over capacity is logged with the enrolment id. An agent without a confirmer (a release build) answers as before, with no results.
+- `internal/providers/cloudhypervisor/freeze.go`, `pool.go`: the Provider used to mark a confirmation delivered as soon as `AgentStatus` returned, even when the agent had refused it over capacity. The predecessor then stayed frozen, and its store space unreclaimed, until the confirmed set changed or the connection was replaced. The Provider now marks it delivered only when every id is `ACCEPTED`, `ALREADY_APPLIED` or `NOT_APPLICABLE`, with exactly one result per id, in order. In every other case it relays the confirmation again with a later call, after the existing backoff (10 seconds doubling up to 10 minutes): refused, deferred, an unknown outcome, a missing or mismatched list, or no results at all. A changed confirmation no longer waits for the previous one's backoff. Only one relay per host is in flight, so concurrent calls send one `AgentStatus` and one failure doubles the backoff once. The outcome of a relay whose confirmation the inventory has since replaced is ignored. A relay that finds its connection just replaced (no Hello yet) is not counted as a failure, and is tried again in the same call after the Hello. The first unsettled relay of a confirmation is logged at Info, repeats at Debug; an agent that never reports results (an older or release-build agent) is sent the confirmation every 10 minutes for as long as it stays in the inventory.
+- Tests: store outcomes over capacity (two predecessors beyond the cap, each refused), during a freeze in progress (deferred), after compaction (accepted once, then already applied) and for a stale confirmation; `AgentStatus` result mapping, the not-ready and malformed cases; Provider redelivery after a refusal, to an agent without results, on a changed confirmation, and the settle rule; concurrent calls, stale outcomes, a missing Hello and the log levels; an end-to-end relay against a real operation store at capacity, redelivered until accepted.
+- `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`, `docs/clustered-agent-provider-development.md`, `docs/operation-grants-wire-shape.md`: document the outcomes and the redelivery. A refused confirmation is no longer described as only logged.
+
+### Why
+The agent accepts at most 32 pending discards. A confirmation over that cap was only logged, yet the Provider counted it as delivered, so the predecessor could stay frozen and hold its store space indefinitely on an idle connection.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-20 02:14] - Do not put a URI name constraint on the host-agent sub-CA (development builds only)
 **Author:** @wrkode (William Rizzo)
 

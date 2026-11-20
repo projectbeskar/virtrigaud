@@ -61,7 +61,9 @@ func fullMessages() []proto.Message {
 		&InstallRenewedCertificateResponse{HostAnswer: blob()},
 		&AgentStatusRequest{AnswerNonce: fill(0x04, 16), ConfirmFrozenEnrolmentIds: [][]byte{fill(0x05, 16)},
 			ConfirmForEnrolmentId: fill(0x06, 16)},
-		&AgentStatusResponse{HostAnswer: blob()},
+		&AgentStatusResponse{HostAnswer: blob(), FreezeResults: []*FreezeConfirmationResult{
+			{EnrolmentId: fill(0x05, 16), Outcome: FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_REFUSED_OVER_CAPACITY}}},
+		&FreezeConfirmationResult{EnrolmentId: fill(0x07, 16), Outcome: FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_ACCEPTED},
 	}
 }
 
@@ -116,6 +118,7 @@ type fieldSpec struct {
 // repeatedFields are the only repeated fields of the package.
 var repeatedFields = map[protoreflect.FullName]bool{
 	"agent.v1.AgentStatusRequest.confirm_frozen_enrolment_ids": true,
+	"agent.v1.AgentStatusResponse.freeze_results":              true,
 }
 
 func checkExactFields(t *testing.T, md protoreflect.MessageDescriptor, want []fieldSpec) {
@@ -162,12 +165,46 @@ func TestAgent_FieldNumbersPinned(t *testing.T) {
 		{"confirm_frozen_enrolment_ids", 2, protoreflect.BytesKind, ""},
 		{"confirm_for_enrolment_id", 3, protoreflect.BytesKind, ""},
 	})
-	checkExactFields(t, (&AgentStatusResponse{}).ProtoReflect().Descriptor(), answer)
-	if n := File_agent_v1_agent_proto.Messages().Len(); n != 6 {
-		t.Errorf("agent/v1/agent.proto declares %d messages, want 6", n)
+	checkExactFields(t, (&AgentStatusResponse{}).ProtoReflect().Descriptor(), []fieldSpec{
+		{"host_answer", 1, protoreflect.MessageKind, signedBlobMessageName},
+		{"freeze_results", 2, protoreflect.MessageKind, "agent.v1.FreezeConfirmationResult"},
+	})
+	checkExactFields(t, (&FreezeConfirmationResult{}).ProtoReflect().Descriptor(), []fieldSpec{
+		{"enrolment_id", 1, protoreflect.BytesKind, ""},
+		{"outcome", 2, protoreflect.EnumKind, ""},
+	})
+	if n := File_agent_v1_agent_proto.Messages().Len(); n != 7 {
+		t.Errorf("agent/v1/agent.proto declares %d messages, want 7", n)
 	}
-	if n := File_agent_v1_agent_proto.Enums().Len(); n != 0 {
-		t.Errorf("agent/v1/agent.proto declares %d enums, want 0", n)
+	if n := File_agent_v1_agent_proto.Enums().Len(); n != 1 {
+		t.Errorf("agent/v1/agent.proto declares %d enums, want 1", n)
+	}
+}
+
+// TestAgent_FreezeOutcomesPinned pins the freeze confirmation outcomes: a
+// value's number and meaning never change, and a new one is read as not
+// applied by every caller that predates it.
+func TestAgent_FreezeOutcomesPinned(t *testing.T) {
+	ed := FreezeConfirmationOutcome(0).Descriptor()
+	want := []struct {
+		name   protoreflect.Name
+		number protoreflect.EnumNumber
+	}{
+		{"FREEZE_CONFIRMATION_OUTCOME_UNSPECIFIED", 0},
+		{"FREEZE_CONFIRMATION_OUTCOME_ACCEPTED", 1},
+		{"FREEZE_CONFIRMATION_OUTCOME_ALREADY_APPLIED", 2},
+		{"FREEZE_CONFIRMATION_OUTCOME_REFUSED_OVER_CAPACITY", 3},
+		{"FREEZE_CONFIRMATION_OUTCOME_NOT_APPLICABLE", 4},
+		{"FREEZE_CONFIRMATION_OUTCOME_DEFERRED", 5},
+	}
+	if ed.Values().Len() != len(want) {
+		t.Errorf("%s has %d values, want %d", ed.FullName(), ed.Values().Len(), len(want))
+	}
+	for _, w := range want {
+		v := ed.Values().ByName(w.name)
+		if v == nil || v.Number() != w.number {
+			t.Errorf("%s: %s missing or renumbered", ed.FullName(), w.name)
+		}
 	}
 }
 

@@ -142,3 +142,8 @@ func PutRawAuditCursor(ctx context.Context, s *Store, value []byte) error {
 	_, err := s.j.Update(ctx, func(tx *journal.Tx) error { return tx.Put(bucketMeta, keyAuditEmitted, value) })
 	return err
 }
+
+// SetFreezing sets the store's freeze-in-progress flag (test only): it
+// stands in for a re-enrolment that begins its freeze between a
+// confirmation's read of the active enrolment and its discard.
+func SetFreezing(s *Store, v bool) { s.freezing.Store(v) }

@@ -308,9 +308,9 @@ type Renewals interface {
 // FreezeConfirmer applies a relayed freeze confirmation (the operation store,
 // opstore.Store.ConfirmFrozen): it discards the frozen predecessor
 // enrolments among ids, when the confirmation was made for the active
-// enrolment forEnrolment, and returns those it discarded.
+// enrolment forEnrolment, and returns one outcome for each id, in order.
 type FreezeConfirmer interface {
-	ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([][]byte, error)
+	ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([]opstore.FreezeOutcome, error)
 }
 
 // InventorySource gives the host inventory a signed answer carries.

@@ -162,13 +162,45 @@ func TestReenrolment_OldEnrolmentAnsweredUntilFreezeConfirmed(t *testing.T) {
 	}
 }
 
-// confirm sends AgentStatus carrying a freeze confirmation; the call
-// succeeds whatever the confirmation says.
-func (e *opsEnv) confirm(forEnrolment []byte, ids ...[]byte) {
+// confirm sends AgentStatus carrying a freeze confirmation and returns the
+// outcome of each id; the call succeeds whatever the confirmation says, and
+// each result echoes its id.
+func (e *opsEnv) confirm(forEnrolment []byte, ids ...[]byte) []agentv1.FreezeConfirmationOutcome {
 	e.t.Helper()
-	if _, err := agentv1.NewAgentServiceClient(e.cc()).AgentStatus(ctx(e.t), &agentv1.AgentStatusRequest{
-		AnswerNonce: nonce(0x33), ConfirmForEnrolmentId: forEnrolment, ConfirmFrozenEnrolmentIds: ids}); err != nil {
+	resp, err := agentv1.NewAgentServiceClient(e.cc()).AgentStatus(ctx(e.t), &agentv1.AgentStatusRequest{
+		AnswerNonce: nonce(0x33), ConfirmForEnrolmentId: forEnrolment, ConfirmFrozenEnrolmentIds: ids})
+	if err != nil {
 		e.t.Fatalf("AgentStatus with a confirmation: %v", err)
+	}
+	var out []agentv1.FreezeConfirmationOutcome
+	for i, r := range resp.GetFreezeResults() {
+		if i >= len(ids) || !bytes.Equal(r.GetEnrolmentId(), ids[i]) {
+			e.t.Fatalf("freeze result %d does not echo its id", i)
+		}
+		out = append(out, r.GetOutcome())
+	}
+	return out
+}
+
+// Freeze confirmation outcomes, for brevity.
+const (
+	fcAccepted      = agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_ACCEPTED
+	fcAlready       = agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_ALREADY_APPLIED
+	fcOverCapacity  = agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_REFUSED_OVER_CAPACITY
+	fcNotApplicable = agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_NOT_APPLICABLE
+	fcDeferred      = agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_DEFERRED
+)
+
+// wantOutcomes fails the test unless got is want.
+func wantOutcomes(t *testing.T, why string, got []agentv1.FreezeConfirmationOutcome, want ...agentv1.FreezeConfirmationOutcome) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: outcomes %v, want %v", why, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s: outcomes %v, want %v", why, got, want)
+		}
 	}
 }
 
@@ -198,11 +230,13 @@ func TestReenrolment_RelayedFreezeConfirmation(t *testing.T) {
 		}
 	}
 
-	e.confirm(old, old) // made for the predecessor, not the active enrolment
+	// made for the predecessor, not the active enrolment
+	wantOutcomes(t, "a stale confirmation", e.confirm(old, old), fcDeferred)
 	stillHeld("a stale confirmation")
-	e.confirm(randID(), old)
+	wantOutcomes(t, "a confirmation for an enrolment the host never had", e.confirm(randID(), old), fcDeferred)
 	stillHeld("a confirmation for an enrolment the host never had")
-	e.confirm(next, next, randID(), []byte{1, 2, 3})
+	wantOutcomes(t, "the active, an unknown and a malformed id", e.confirm(next, next, randID(), []byte{1, 2, 3}),
+		fcNotApplicable, fcNotApplicable, fcNotApplicable)
 	stillHeld("the active, an unknown and a malformed id")
 	if hv, err := e.store.HostView(ctx(t), 0); err != nil || hv.Enrolment == nil || !bytes.Equal(hv.Enrolment.ID, next) {
 		t.Fatalf("the active enrolment after confirming it: %+v %v", hv, err)
@@ -211,16 +245,16 @@ func TestReenrolment_RelayedFreezeConfirmation(t *testing.T) {
 	for i := range many {
 		many[i] = old
 	}
-	e.confirm(next, many...)
+	wantOutcomes(t, "too many ids", e.confirm(next, many...))
 	stillHeld("too many ids")
 
-	e.confirm(next, old)
+	wantOutcomes(t, "the confirmation", e.confirm(next, old), fcAccepted)
 	_, a, err := e.signedStatus(done, nonce(2))
 	if status.Code(err) != codes.NotFound || reasonOf(err) != contracts.UnknownToAgentReason ||
 		a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNKNOWN_TO_AGENT {
 		t.Fatalf("the discarded predecessor's op: %v %v", a, err)
 	}
-	e.confirm(next, old) // idempotent
+	wantOutcomes(t, "a repeated confirmation", e.confirm(next, old), fcAlready) // idempotent
 	if _, err := e.send(done); err == nil || contracts.IsDefiniteNotPerformedReason(reasonOf(err)) {
 		t.Fatalf("a replay after the discard: %v, want a refusal that is not definite", err)
 	}
@@ -251,7 +285,7 @@ func TestReenrolment_FreezeConfirmationIgnoredWithoutAConfirmer(t *testing.T) {
 	}
 	e.waitDone(task)
 	next := e.reenrol()
-	e.confirm(next, old)
+	wantOutcomes(t, "an agent that applies no confirmation", e.confirm(next, old))
 	if _, a, err := e.signedStatus(done, nonce(1)); err != nil ||
 		a.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED {
 		t.Fatalf("the predecessor's record after an ignored confirmation: %v %v", a, err)

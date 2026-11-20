@@ -247,8 +247,13 @@ three steps:
    60 seconds), which the Provider follows; it relays them to the agent with
    the next call to the host (`agent.v1 AgentStatus`), once per connection
    and again when they change. The agent discards the records of the
-   predecessors it holds as frozen predecessors of that current enrolment
-   and ignores everything else
+   predecessors it holds as frozen predecessors of that current enrolment,
+   ignores everything else, and reports an outcome for each id. A
+   confirmation the agent did not apply (refused because 32 discards are
+   still pending, or deferred, for example while the agent is not ready)
+   is not counted as delivered: the Provider relays it again with a later
+   call, after a backoff of 10 seconds doubling up to 10 minutes, until the
+   agent reports it applied, already applied or not applicable
    ([details](per-host-agent-development.md#freeze-confirmation),
    [Provider side](clustered-agent-provider-development.md#freeze-confirmations)).
 3. **Removal.** The manager's heartbeat asks the host, with a signed request,

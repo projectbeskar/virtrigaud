@@ -326,49 +326,165 @@ func anyIntent(rec *pb.OpRecord) bool {
 // confirmation may name.
 const MaxFreezeConfirmations = 16
 
+// FreezeOutcome is what ConfirmFrozen did with one confirmed enrolment id.
+// Its zero value is FreezeDeferred: an outcome that was not decided is
+// never read as applied.
+type FreezeOutcome int
+
+const (
+	// FreezeDeferred: not applied now, for a reason that can pass (the
+	// confirmation was made for an enrolment that is not active, a freeze is
+	// in progress, the predecessor is not frozen yet, the store could not be
+	// read or written in time). Nothing changed; the confirmation is to be
+	// relayed again.
+	FreezeDeferred FreezeOutcome = iota
+	// FreezeAccepted: this call retired the frozen predecessor, in a
+	// committed transaction; compaction removes what remains of its records.
+	FreezeAccepted
+	// FreezeAlreadyApplied: the predecessor was retired before (its records
+	// are being removed, or are gone). Nothing changed.
+	FreezeAlreadyApplied
+	// FreezeRefusedOverCapacity: MaxPendingDiscards discards are pending
+	// (ErrTooManyDiscards). The predecessor stays frozen and nothing
+	// changed; the confirmation is to be relayed again.
+	FreezeRefusedOverCapacity
+	// FreezeNotApplicable: the id is not an enrolment the store holds or
+	// retired (unknown), is malformed, repeats an earlier id of the same
+	// confirmation, or is the active enrolment. Relaying the same
+	// confirmation again changes nothing.
+	FreezeNotApplicable
+)
+
+// Settled reports whether the confirmation of the id needs no further
+// relay: it was applied, or applying it again cannot change anything.
+func (o FreezeOutcome) Settled() bool {
+	return o == FreezeAccepted || o == FreezeAlreadyApplied || o == FreezeNotApplicable
+}
+
+// String names the outcome for logs.
+func (o FreezeOutcome) String() string {
+	switch o {
+	case FreezeAccepted:
+		return "accepted"
+	case FreezeAlreadyApplied:
+		return "already_applied"
+	case FreezeRefusedOverCapacity:
+		return "refused_over_capacity"
+	case FreezeNotApplicable:
+		return "not_applicable"
+	default:
+		return "deferred"
+	}
+}
+
 // ConfirmFrozen applies a relayed confirmation that the manager holds no
 // open operation under the frozen enrolments ids: each id the store holds as
-// a frozen predecessor is discarded (ConfirmFreeze), and its id returned.
-// The confirmation is unsigned, so it is applied only when it was made for
-// the store's active enrolment (forEnrolment), names at most
-// MaxFreezeConfirmations ids, and only to ids that are frozen; the active
-// enrolment, unknown, discarded, repeated and malformed ids are skipped. A
-// false confirmation costs only liveness: a discarded enrolment's operations
-// are answered UNKNOWN_TO_AGENT, never run again (a new operation under a
-// frozen enrolment is refused by its mint epoch). It is idempotent.
-func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([][]byte, error) {
+// a frozen predecessor is discarded (ConfirmFreeze). It returns one outcome
+// for each id, in order (nil when ids is empty or names more than
+// MaxFreezeConfirmations ids, which applies nothing). The confirmation is
+// unsigned, so it is applied only when it was made for the store's active
+// enrolment (forEnrolment; otherwise every id is FreezeDeferred) and only to
+// ids that are frozen; the active enrolment, unknown, repeated and
+// malformed ids are FreezeNotApplicable, and an id retired before is
+// FreezeAlreadyApplied. An id refused because MaxPendingDiscards discards
+// are pending is FreezeRefusedOverCapacity, never reported as applied: the
+// caller relays it again. A false confirmation costs only liveness: a
+// discarded enrolment's operations are answered UNKNOWN_TO_AGENT, never run
+// again (a new operation under a frozen enrolment is refused by its mint
+// epoch). It is idempotent: confirming a retired enrolment again changes no
+// record. The error, when not nil, is the store failure that stopped it; the
+// ids it did not reach are FreezeDeferred. That includes an id whose
+// discard committed but whose call then failed (the witness directory
+// could not be removed): it is reported FreezeDeferred, though retired, and
+// the next relay of it gets FreezeAlreadyApplied.
+func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([]FreezeOutcome, error) {
 	if len(ids) == 0 || len(ids) > MaxFreezeConfirmations {
 		return nil, nil
 	}
+	out := make([]FreezeOutcome, len(ids))
 	v, err := s.HostView(ctx, 0)
 	if err != nil {
-		return nil, fmt.Errorf("confirm frozen: %w", err)
+		return out, fmt.Errorf("confirm frozen: %w", err)
 	}
 	if v.Enrolment == nil || (!sameBytes(v.Enrolment.ID, forEnrolment) && !guard.Off(guard.ConfirmForActive)) {
-		return nil, nil
+		return out, nil
 	}
-	var done [][]byte
 	seen := map[string]bool{}
-	for _, id := range ids {
+	full := false
+	for i, id := range ids {
 		if len(id) != idLen || seen[string(id)] || sameBytes(id, v.Enrolment.ID) {
+			out[i] = FreezeNotApplicable
 			continue
 		}
 		seen[string(id)] = true
-		switch err := s.ConfirmFreeze(ctx, id); {
+		if full {
+			// Each further new discard would be refused the same way; one
+			// read tells a retired or unknown id from a refused one.
+			if guard.Off(guard.FreezeRefusalReported) {
+				out[i] = FreezeAccepted
+				continue
+			}
+			if out[i], err = s.unappliedOutcome(ctx, id, FreezeRefusedOverCapacity); err != nil {
+				return out, err
+			}
+			continue
+		}
+		applied, err := s.confirmFreeze(ctx, id)
+		switch {
+		case err == nil && applied:
+			out[i] = FreezeAccepted
 		case err == nil:
-			done = append(done, append([]byte(nil), id...))
+			out[i] = FreezeAlreadyApplied
 		case errors.Is(err, ErrTooManyDiscards):
-			// The rest of the ids are not tried either: each would be
-			// refused the same way, or is already pending (a no-op).
-			return done, err
+			full = true
+			if guard.Off(guard.FreezeRefusalReported) {
+				out[i] = FreezeAccepted
+				continue
+			}
+			if out[i], err = s.unappliedOutcome(ctx, id, FreezeRefusedOverCapacity); err != nil {
+				return out, err
+			}
 		case errors.Is(err, ErrEnrolment):
-			// Not a frozen predecessor (unknown, already discarded, or a
-			// freeze still in progress): nothing to do.
+			// Not a frozen predecessor now: retired before, unknown, or not
+			// frozen yet (a freeze still in progress).
+			if out[i], err = s.unappliedOutcome(ctx, id, FreezeDeferred); err != nil {
+				return out, err
+			}
 		default:
-			return done, err
+			return out, err
 		}
 	}
-	return done, nil
+	return out, nil
+}
+
+// unappliedOutcome is the outcome of a confirmed id that was not applied
+// for the reason refused: FreezeAlreadyApplied when the store retired it
+// before, FreezeNotApplicable when the store holds no enrolment record of
+// it (it never knew it), refused otherwise. It reads the store once.
+func (s *Store) unappliedOutcome(ctx context.Context, id []byte, refused FreezeOutcome) (FreezeOutcome, error) {
+	out := refused
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		retired, err := isRetired(tx, id)
+		if err != nil {
+			return err
+		}
+		if retired {
+			out = FreezeAlreadyApplied
+			return nil
+		}
+		known, err := has(tx, bucketEnrolments, id)
+		if err != nil {
+			return err
+		}
+		if !known {
+			out = FreezeNotApplicable
+		}
+		return nil
+	})
+	if err != nil {
+		return FreezeDeferred, fmt.Errorf("confirm frozen: read enrolment: %w", err)
+	}
+	return out, nil
 }
 
 // DefaultDiscardChunk is the most records one transaction of a confirmed
@@ -441,10 +557,11 @@ func writeDiscard(tx *journal.Tx, ids [][]byte) error {
 
 // MaxPendingDiscards bounds the confirmed discards whose records are still
 // being removed. A confirmation beyond it is refused (ErrTooManyDiscards,
-// logged) until compaction has finished one; the predecessor then stays
-// frozen until the confirmation is relayed again (the next connection or
-// change of the confirmed set). Reaching it needs that many re-keys of one
-// Host within one sweep, a few minutes.
+// reported by ConfirmFrozen as FreezeRefusedOverCapacity) until compaction
+// has finished one; the predecessor stays frozen until the confirmation is
+// relayed again, which the Provider does, with a backoff, until the agent
+// reports it applied. Reaching it needs that many re-keys of one Host within
+// one sweep, a few minutes.
 const MaxPendingDiscards = 2 * MaxFreezeConfirmations
 
 func containsID(ids [][]byte, id []byte) bool {
@@ -478,24 +595,33 @@ func containsID(ids [][]byte, id []byte) bool {
 // It waits for another discard transaction (one chunk) only as long as ctx
 // allows.
 func (s *Store) ConfirmFreeze(ctx context.Context, prev []byte) error {
+	_, err := s.confirmFreeze(ctx, prev)
+	return err
+}
+
+// confirmFreeze is ConfirmFreeze; applied is true when this call retired
+// prev (its first discard transaction committed), false when prev was
+// already being removed. An error after the commit (the witness directory,
+// a crash point) is returned with applied true.
+func (s *Store) confirmFreeze(ctx context.Context, prev []byte) (applied bool, err error) {
 	if err := s.lockDiscard(ctx); err != nil {
-		return fmt.Errorf("confirm freeze: %w", err)
+		return false, fmt.Errorf("confirm freeze: %w", err)
 	}
 	defer s.unlockDiscard()
 	done, _, err := s.discardStep(ctx, prev, true)
 	if errors.Is(err, errAlreadyDiscarding) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("confirm freeze: %w", err)
+		return false, fmt.Errorf("confirm freeze: %w", err)
 	}
 	if err := s.fsys.RemoveAll(s.witnessDir(prev)); err != nil {
-		return fmt.Errorf("confirm freeze: remove witnesses: %w", err)
+		return true, fmt.Errorf("confirm freeze: remove witnesses: %w", err)
 	}
 	if !done {
-		return s.j.CrashPoint(PointMidDiscard)
+		return true, s.j.CrashPoint(PointMidDiscard)
 	}
-	return nil
+	return true, nil
 }
 
 // ErrTooManyDiscards is returned when MaxPendingDiscards confirmed
