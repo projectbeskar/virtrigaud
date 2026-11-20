@@ -23,6 +23,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 )
 
 // Compaction of the operation store (development builds only: a release
@@ -34,8 +35,9 @@ const (
 	// threshold between two scheduled compactions.
 	compactCheckEvery = time.Minute
 	// compactNearCapNum / compactNearCapDen is the share of the store size
-	// threshold at which a compaction runs before its time.
-	compactNearCapNum, compactNearCapDen = 3, 4
+	// threshold at which a compaction runs before its time: the share from
+	// which a signed host answer reports the store at WARNING.
+	compactNearCapNum, compactNearCapDen = hostidentity.StoreWarningNum, hostidentity.StoreWarningDen
 	// compactGrowthDen: near the threshold, after a compaction that dropped
 	// nothing, the wait before the next early one doubles (from
 	// compactCheckEvery up to the period) until the live size has grown by

@@ -260,6 +260,13 @@ type Host struct {
 	// (SignRenewalRequest); it is put in the answer only when
 	// RenewalRequested is at least 1.
 	PendingRenewal *providerv1.SignedBlob
+	// StoreCapacityRequested is the request's store_capacity_version; 0 when
+	// it asked for none.
+	StoreCapacityRequested uint32
+	// StoreCapacity is how full the store is (opstore.Store.Capacity); it is
+	// put in the answer only when StoreCapacityRequested is at least 1 and
+	// it was measured (MaxBytes above 0), whatever the caller passed.
+	StoreCapacity opstore.Capacity
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no
@@ -306,7 +313,22 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 	if h.PendingRenewal != nil && (h.RenewalRequested != 0 || guard.Off(guard.RenewalOnlyWhenAsked)) {
 		a.PendingRenewal = proto.CloneOf(h.PendingRenewal)
 	}
+	a.StoreCapacity = storeCapacity(h.StoreCapacityRequested, h.StoreCapacity)
 	return a, nil
+}
+
+// storeCapacity is the StoreCapacity of an answer to a request that asked for
+// store capacity version requested: nil when it asked for none (a manager
+// that does not know the field refuses an answer that carries it) or when c
+// was not measured; otherwise c with the level the contract's rule gives
+// (hostidentity.StoreLevelOf), so a verifier never sees a level that
+// contradicts the sizes.
+func storeCapacity(requested uint32, c opstore.Capacity) *providerv1.StoreCapacity {
+	if (requested == 0 && !guard.Off(guard.StoreCapacityOnlyWhenAsked)) || c.MaxBytes <= 0 || c.LiveBytes < 0 {
+		return nil
+	}
+	live, limit := uint64(c.LiveBytes), uint64(c.MaxBytes)
+	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: limit, Level: hostidentity.StoreLevelOf(live, limit)}
 }
 
 // answerContext builds the AnswerContext of h, enforcing when an answer may

@@ -19,6 +19,9 @@ package daemon
 import (
 	"testing"
 	"time"
+
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // TestCompactDue: a compaction runs at once, then every period, and earlier
@@ -56,6 +59,19 @@ func TestNearCap(t *testing.T) {
 	} {
 		if got := nearCap(c.live, c.max); got != c.want {
 			t.Errorf("nearCap(%d, %d) = %v, want %v", c.live, c.max, got, c.want)
+		}
+	}
+}
+
+// TestNearCapIsTheAnswerWarning: compaction is early exactly when a signed
+// host answer reports the store at WARNING or FULL, so the operator sees the
+// warning no later than the agent starts compacting early.
+func TestNearCapIsTheAnswerWarning(t *testing.T) {
+	const limit = 1003
+	for live := int64(0); live <= 2*limit; live++ {
+		level := hostidentity.StoreLevelOf(uint64(live), limit)
+		if got, want := nearCap(live, limit), level != providerv1.StoreLevel_STORE_LEVEL_OK; got != want {
+			t.Fatalf("live %d: nearCap = %v, answer level %s", live, got, level)
 		}
 	}
 }

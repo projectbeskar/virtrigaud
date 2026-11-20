@@ -200,6 +200,11 @@ type Agent interface {
 	// UnattestedCause names why a ready store still refuses operations (one
 	// of the Cause constants), or "" when nothing does.
 	UnattestedCause() string
+	// StoreCapacity returns how full the store is (opstore.Store.Capacity);
+	// the zero Capacity (not measured) when the agent does not report it, as
+	// in a release build. It must be cheap: it is read for every host answer
+	// that asks for it.
+	StoreCapacity() opstore.Capacity
 }
 
 // The causes of an UNATTESTED refusal besides the store's own continuity. A
@@ -571,7 +576,7 @@ func (s *Server) streamGate(srv any, ss grpc.ServerStream, info *grpc.StreamServ
 // made (no nonce, no matching enrolment, a store that cannot be read). It
 // carries no inventory and no renewal request.
 func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uint64) *providerv1.SignedBlob {
-	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0, 0)
+	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0, 0, 0)
 }
 
 // helloAnswer is hostAnswer for Hello, under the separate Hello answer limit.
@@ -587,16 +592,21 @@ func (s *Server) helloAnswer(ctx context.Context, nonce []byte) *providerv1.Sign
 }
 
 // hostAnswerWithInventory is hostAnswer for a request that asked for the host
-// inventory in version inventoryVersion and for the pending renewal request
-// in version renewalVersion (0: it asked for none). See signWith for what
-// happens when the inventory cannot be signed.
-func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, continuitySeq uint64, inventoryVersion, renewalVersion uint32) *providerv1.SignedBlob {
+// inventory in version inventoryVersion, for the pending renewal request in
+// version renewalVersion and for the store's capacity in version
+// storeCapacityVersion (0: it asked for none). See signWith for what happens
+// when the inventory cannot be signed. The capacity is read just after the
+// store's view (Agent.StoreCapacity: two counters, not a scan); the answer
+// carries it only when the request asked for it (answer.HostAnswer).
+func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, continuitySeq uint64,
+	inventoryVersion, renewalVersion, storeCapacityVersion uint32) *providerv1.SignedBlob {
 	return s.signAnswerUnder(ctx, s.answers, nonce, inventoryVersion, renewalVersion, func(h answer.Host) (proto.Message, error) {
 		view, err := s.opts.Agent.HostView(ctx, continuitySeq)
 		if err != nil {
 			return nil, fmt.Errorf("the store cannot be read: %w", err)
 		}
 		h.View = view
+		h.StoreCapacityRequested, h.StoreCapacity = storeCapacityVersion, s.opts.Agent.StoreCapacity()
 		return answer.HostAnswer(h)
 	})
 }

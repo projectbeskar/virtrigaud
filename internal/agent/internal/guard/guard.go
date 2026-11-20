@@ -240,6 +240,10 @@ const (
 	// BootStartStartedSince: boot-start starts nothing when the agent was
 	// already started since the current boot (or soft reboot) began.
 	BootStartStartedSince Name = "boot-start-started-since"
+	// StoreCapacityOnlyWhenAsked: the store capacity is put only in the
+	// answer of a GetHostInfo that asked for it (an older manager refuses an
+	// answer that carries a field it does not know).
+	StoreCapacityOnlyWhenAsked Name = "store-capacity-only-when-asked"
 )
 
 // All lists every guard, in a fixed order.
@@ -258,6 +262,6 @@ func All() []Name {
 		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
 		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartMarkerExcl,
-		BootStartStartedSince,
+		BootStartStartedSince, StoreCapacityOnlyWhenAsked,
 	}
 }
