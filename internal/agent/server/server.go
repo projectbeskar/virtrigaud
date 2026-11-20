@@ -202,8 +202,8 @@ type Agent interface {
 	UnattestedCause() string
 	// StoreCapacity returns how full the store is (opstore.Store.Capacity);
 	// the zero Capacity (not measured) when the agent does not report it, as
-	// in a release build. It must be cheap: it is read for every host answer
-	// that asks for it.
+	// in a release build or for a store it cannot measure. It must be cheap:
+	// it is read for every signed HostAnswer but Hello's, asked for or not.
 	StoreCapacity() opstore.Capacity
 }
 

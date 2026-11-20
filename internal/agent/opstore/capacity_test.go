@@ -17,9 +17,13 @@ limitations under the License.
 package opstore_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 )
 
@@ -62,5 +66,34 @@ func TestCapacity_MatchesAdmission(t *testing.T) {
 
 	if (opstore.Capacity{LiveBytes: 10}).Full() {
 		t.Error("an unmeasured capacity (MaxBytes 0) reports full")
+	}
+}
+
+// TestCapacity_LostStoreNotMeasured: a store that lost its persistence
+// guarantee reports no capacity (the zero Capacity), never a size, and a
+// closed one reports no live size of 0 that would read as empty.
+func TestCapacity_LostStoreNotMeasured(t *testing.T) {
+	h := newHarness(t)
+	h.fresh()
+	h.do(h.req("vm", rid(), kCreate, 1))
+	h.mem.Put(filepath.Join(h.dir, "witness", fmt.Sprintf("%x", h.enrol), fmt.Sprintf("%x.1", rid())), nil)
+	_ = h.s.Close()
+	s := h.open()
+	defer func() { _ = s.Close() }()
+	if c := s.Capacity(); c.MaxBytes == 0 || c.LiveBytes <= 0 {
+		t.Fatalf("an open store before recovery: Capacity = %+v", c)
+	}
+	if err := s.EstablishContinuity(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Recover(context.Background()); !errors.Is(err, journal.ErrLost) {
+		t.Fatalf("recover: %v", err)
+	}
+	if c := s.Capacity(); c != (opstore.Capacity{}) {
+		t.Fatalf("a lost store: Capacity = %+v, want not measured", c)
+	}
+	_ = s.Close()
+	if c := s.Capacity(); c != (opstore.Capacity{}) {
+		t.Fatalf("a closed store: Capacity = %+v, want not measured", c)
 	}
 }

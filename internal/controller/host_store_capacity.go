@@ -33,7 +33,8 @@ import (
 // refuses new operations), False below three quarters (reason
 // StoreCapacityOK). It is absent until an agent reports its store capacity
 // (an agent older than the report never does), and Unknown (reason
-// StoreCapacityNotReported) when a later verified answer carries no report.
+// StoreCapacityNotReported) when a later verified answer carries no report
+// (an older agent, or a store the agent cannot measure, such as a lost one).
 // Only a verified answer changes it (development builds).
 const HostConditionAgentStorePressure = "AgentStorePressure"
 
@@ -95,8 +96,8 @@ func (r *HostReconciler) applyStoreCapacity(host *infravirtrigaudiov1beta1.Host,
 	if c == nil {
 		if prev != nil {
 			setHostCondition(host, HostConditionAgentStorePressure, metav1.ConditionUnknown, reasonStoreCapacityNotReported,
-				"the host's last verified answer reports no store capacity (its agent is older than the report); "+
-					"the store's size is not known")
+				"the host's last verified answer reports no store capacity (its agent is older than the report, or "+
+					"cannot measure its store); the store's size is not known")
 		}
 		return
 	}
