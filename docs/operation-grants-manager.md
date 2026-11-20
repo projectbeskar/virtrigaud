@@ -385,14 +385,15 @@ inventory is still used for this gate.
 the Host condition `AgentStorePressure`: `False/StoreCapacityOK` below three quarters of
 the store's size threshold, `True/StoreNearlyFull` from there, `True/StoreFull` above the
 threshold (the agent then refuses new operations `STORE_FULL`), with the sizes and the
-recovery in the message. Once `True`, it is `False` again only below 70% of the threshold.
+recovery in the message. Once `True`, it is `False` again only below 70% of the threshold; an
+`Unknown` or absent condition resets this.
 A `Warning` event is emitted only when the severity rises. `NOT_MEASURED` gives
 `Unknown/StoreCapacityNotMeasured`. An answer without the report from an agent older than
 API version 4 leaves the condition absent, or `Unknown/StoreCapacityNotReported` once a
 report was seen; a current agent's answer without it, or with an echo that differs from the
 request, fails verification. A heartbeat without a verified answer keeps a `True` and turns
 a `False` into `Unknown/StoreCapacityStale`. The condition is removed when the Host is no
-longer polled for, or cannot be checked with, signed answers (its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`; the manager has no host answer verification configured, or the Provider's client cannot ask for signed answers; the manager holds no trust state (enrolment, pins, CA) for the Host; the Host's store regressed; or the Host is revoked or its agent certificate expired). The condition does not gate anything: the agent's own
+longer polled for, or cannot be checked with, signed answers (its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`; the manager has no host answer verification configured, or the Provider's client cannot ask for signed answers; the manager holds no trust state for the Host (no Host or no current enrolment; a trust state that cannot be read for a moment counts as a failed heartbeat); the Host's store regressed; or the Host is revoked or its agent certificate expired). The condition does not gate anything: the agent's own
 admission refuses work when the store is full. See
 [`per-host-agent-development.md`](per-host-agent-development.md#store-size) for the levels,
 the recovery and an alert recipe.

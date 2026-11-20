@@ -122,7 +122,7 @@ description of every field.
 | `VMAnswer` | message | The answer about one VM placement: `context` (1), the `vm_uid` and `binding_id` asked about (2, 3), `presence` (4), and for a completed Delete `delete_op_id`, `delete_enrolment_id`, `delete_seq` (5–7). |
 | `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8), `inventory` (9, see [Host inventory](#host-inventory)), `pending_renewal` (10, see [Certificate renewal](#certificate-renewal)), `store_capacity` (11, see [Store capacity](#store-capacity)). |
 | `RenewalRequest` | message | A host's request to renew its identity certificate for a new key, carried as a host-signed `SignedBlob` in `HostAnswer.pending_renewal`: `renewal_version` (1), `provider_uid`, `host_id`, `install_id`, `enrolment_id` (2–5), `current_certificate_sha256` (6), `certificate_request` (7, DER PKCS #10 for the new key). |
-| `StoreCapacity` | message | How full the host's operation store is, in `HostAnswer.store_capacity`: `live_bytes` (1), `threshold_bytes` (2), `level` (3), `requested_version` (4, the request's `store_capacity_version`, echoed). |
+| `StoreCapacity` | message | How full the host's operation store is, in `HostAnswer.store_capacity`: `live_bytes` (1), `threshold_bytes` (2), `level` (3), `requested_version` (4, the request's `store_capacity_version`, echoed), `version` (5, the content version the agent used). |
 | `AgentState` | enum | `UNATTESTED`, `READY`, `QUARANTINED` (values 0–3, 0 is `UNSPECIFIED`). `READY` means the store's continuity is established and the recovery of interrupted operations has run. |
 | `OperationRecordState` | enum | `ACCEPTED`, `EXECUTING`, `COMPLETED`, `FAILED_CLEAN`, `FAILED_DIRTY`, `OUTCOME_UNKNOWN`, `RETIRED` (1–7: what the store records for an operation it holds a record or tombstone of), `NO_RECORD` and `UNKNOWN_TO_AGENT` (8, 9: it holds neither; neither proves anything about the operation). |
 | `VMPresence` | enum | `CREATING`, `PRESENT`, `DELETED`, `OTHER_BINDING`, `NO_RECORD` (values 0–5, 0 is `UNSPECIFIED`). `NO_RECORD` never means that the VM was deleted. |
@@ -432,8 +432,12 @@ that asks for it, so a manager can warn before that happens:
   the request field and answers without it. A per-host agent refuses a request that
   sets `store_capacity_version` without `answer_nonce` (`InvalidArgument`), as it
   does for `inventory_version` and `renewal_version`; release builds included.
-- **Echo and presence.** `requested_version` is the request's `store_capacity_version`,
-  echoed; a verifier refuses a capacity whose echo is not the version it sent. An
+- **Echo, version and presence.** `requested_version` is the request's
+  `store_capacity_version`, echoed; a verifier refuses a capacity whose echo is not the
+  version it sent. `version` is the content version the agent used, the lower of the
+  request's and the highest it implements (as `HostInventory.inventory_version`); a
+  verifier refuses 0, a version above the request or above the highest it implements, so
+  a manager that asks for a later version still accepts an older agent's answer. An
   agent whose `agent_api_version` is 4 or later answers a capacity in every answer to
   a request that asks for one (`NOT_MEASURED` when it cannot measure its store, and in
   a release build), so a verifier that asked refuses such an agent's answer without

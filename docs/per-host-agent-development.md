@@ -631,7 +631,9 @@ each verified answer:
 | `NOT_MEASURED` | `Unknown`, reason `StoreCapacityNotMeasured` | the agent cannot measure its store (it lost its persistence guarantee, or the agent is a release build) |
 
 The agent's signed levels use the bounds 3/4 and the threshold; the 70%
-recovery bound is applied by the manager, to the condition only. The message
+recovery bound is applied by the manager, to the condition only. An `Unknown`
+or absent condition resets the hysteresis: the next report is judged by the
+agent's level alone. The message
 gives the live size and the threshold (in MiB and bytes) and the recovery
 described in this section. The manager emits a `Warning` event, with the
 condition's reason, only when the severity rises: from `StoreCapacityOK`, an
@@ -649,7 +651,7 @@ gets no verified answer from a host it still polls keeps a `True` (beside
 `AgentAnswerVerified=False`) and turns a `False` into `Unknown` (reason
 `StoreCapacityStale`), so an old "OK" is never shown as current. The condition
 is removed when the Host is no longer polled for, or cannot be checked with,
-signed answers: its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`; the manager has no host answer verification configured, or the Provider's client cannot ask for signed answers; the manager holds no trust state (enrolment, pins, CA) for the Host; the Host's store regressed; or the Host is revoked or its agent certificate expired. To alert, watch for the condition or
+signed answers: its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`; the manager has no host answer verification configured, or the Provider's client cannot ask for signed answers; the manager holds no trust state for the Host (no Host or no current enrolment; a trust state that cannot be read for a moment counts as a failed heartbeat); the Host's store regressed; or the Host is revoked or its agent certificate expired. To alert, watch for the condition or
 the events, for example:
 
 ```sh

@@ -11,14 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `proto/provider/v1/host_answer.proto`:
   - `HostAnswer.store_capacity` (11).
-  - A new `StoreCapacity` message: `live_bytes`, `threshold_bytes`, `level`, and `requested_version`, the request's version echoed.
+  - A new `StoreCapacity` message: `live_bytes`, `threshold_bytes`, `level`, `requested_version` (the request's version, echoed) and `version` (the content version the agent used, the lower of the request's and its own).
   - A `StoreLevel` enum: `OK`, `WARNING` from three quarters of the threshold, `FULL` above it, `NOT_MEASURED` for a store the agent cannot measure.
 
   Additive; `buf breaking` passes. The bindings in `proto/rpc/provider/v1` are regenerated.
 - `proto/provider/v1/provider.proto`: `GetHostInfoRequest.store_capacity_version` (6). An agent puts the capacity only in the answer to a request that asks for it, because a manager refuses a signed answer that carries a field it does not know. An older agent ignores the request field.
 - `internal/hostidentity/store_capacity.go`: `StoreLevelOf` (the level rule) and `VerifyStoreCapacity`. `VerifyAnswer` refuses:
   - a capacity the request did not ask for;
-  - an echo that differs from the request;
+  - an echo that differs from the request, or a content version of 0, above the request or above its own;
   - a threshold of 0, or a level that contradicts the sizes;
   - when it asked, an answer without a capacity from an agent of API version 4 or later.
 
@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `True`/`StoreNearlyFull` from three quarters of the threshold;
   - `True`/`StoreFull` above the threshold.
 
-  Once `True`, it is `False` again only below 70% of the threshold. This hysteresis is applied by the manager to the reason; the signed level rule is unchanged. The message gives the sizes and the documented recovery. A `Warning` event is emitted only when the severity rises.
+  Once `True`, it is `False` again only below 70% of the threshold. This hysteresis is applied by the manager to the reason; the signed level rule is unchanged. An `Unknown` or absent condition resets it. The message gives the sizes and the documented recovery. A `Warning` event is emitted only when the severity rises.
 - The condition goes `Unknown` in three cases:
   - `StoreCapacityNotMeasured`: the agent cannot measure its store.
   - `StoreCapacityNotReported`: an older agent stops reporting.
@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The condition is removed when the Host is no longer polled for, or cannot be checked with, signed answers (`internal/controller/host_controller.go`, `host_controller_answer.go`, `host_inventory.go`):
   - its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`;
   - the manager has no host answer verification, or the Provider's client cannot ask for signed answers;
-  - the manager has no trust state for the Host;
+  - the manager has no trust state for the Host (no Host or no current enrolment). A trust state that cannot be read for a moment counts as a failed heartbeat;
   - the Host's store regressed;
   - the Host is revoked or its agent certificate expired.
 - `internal/controller/host_answers.go`, `internal/providers/contracts/host_answer.go`, `internal/transport/grpc/client_answer.go`: the heartbeat asks every per-host agent for its store capacity.
