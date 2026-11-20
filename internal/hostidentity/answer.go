@@ -151,6 +151,11 @@ type AnswerExpectation struct {
 	// it: a pending renewal request is allowed only when it is at least 1,
 	// and must pass VerifyRenewal.
 	RenewalVersion uint32
+	// StoreCapacityVersion is the store capacity version the manager sent in
+	// a GetHostInfo request (0: it asked for none). Only a HostAnswer uses
+	// it: a store capacity is allowed only when it is at least 1, and must
+	// pass VerifyStoreCapacity.
+	StoreCapacityVersion uint32
 	// Now is the manager's clock.
 	Now time.Time
 }
@@ -215,7 +220,9 @@ func refuse(format string, args ...any) error {
 // exp's and the certificate's record's; last, a HostAnswer's inventory passes
 // VerifyInventory for exp.InventoryVersion, and its pending renewal request,
 // allowed only when exp.RenewalVersion is at least 1, passes VerifyRenewal
-// with the answer's own signer certificate. Nothing is decoded before the
+// with the answer's own signer certificate, and its store capacity, allowed
+// only when exp.StoreCapacityVersion is at least 1, passes
+// VerifyStoreCapacity. Nothing is decoded before the
 // signature verifies, and no inventory is judged before everything else
 // passed.
 func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedAnswer, error) {
@@ -321,6 +328,12 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 			return VerifiedAnswer{}, refuse("the request asked for inventory version %d, above %d", exp.InventoryVersion, InventoryVersion)
 		}
 		if err := VerifyInventory(out.Host.GetInventory(), exp.InventoryVersion); err != nil {
+			return VerifiedAnswer{}, err
+		}
+		if exp.StoreCapacityVersion > StoreCapacityVersion {
+			return VerifiedAnswer{}, refuse("the request asked for store capacity version %d, above %d", exp.StoreCapacityVersion, StoreCapacityVersion)
+		}
+		if err := VerifyStoreCapacity(out.Host.GetStoreCapacity(), exp.StoreCapacityVersion); err != nil {
 			return VerifiedAnswer{}, err
 		}
 		if pr := out.Host.GetPendingRenewal(); pr != nil {
