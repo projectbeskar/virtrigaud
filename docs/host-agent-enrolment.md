@@ -847,9 +847,13 @@ they do different things:
   days. It approves nothing, so the manager's approval rules stay the only
   approval decision. It cannot check the names inside the PKCS #10 request
   (`spec.request` is DER, which admission expressions cannot parse); the
-  manager checks those itself, and a URI name constraint on the host-agent
-  sub-CA (permitted URI domain: the trust domain) narrows them at the CA. An
-  envtest spec applies the sample to a real API server.
+  manager checks those itself. Do not add a URI name constraint to the
+  host-agent sub-CA: agent certificates also carry record URIs of the form
+  `urn:virtrigaud:…`, which have no host, and RFC 5280 §4.2.1.10 requires a
+  verifier to reject such a URI under any URI name constraint, so every agent
+  certificate would fail verification (Go's `crypto/x509`, which the manager,
+  the Provider and the agent use, rejects it). An envtest spec applies the
+  sample to a real API server.
 - **approver-policy (only if you accept what it does).**
   `config/rbac/host-enrolment/admission/approver-policy.yaml` is a
   cert-manager approver-policy `CertificateRequestPolicy` bound (`use`) to the
