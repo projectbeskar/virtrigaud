@@ -253,7 +253,7 @@ three steps:
    still pending, or deferred, for example while the agent is not ready)
    is not counted as delivered: the Provider relays it again with a later
    call, after a backoff of 10 seconds doubling up to 10 minutes, until the
-   agent reports it applied or already applied
+   agent reports it applied, already applied or not applicable
    ([details](per-host-agent-development.md#freeze-confirmation),
    [Provider side](clustered-agent-provider-development.md#freeze-confirmations)).
 3. **Removal.** The manager's heartbeat asks the host, with a signed request,

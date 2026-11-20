@@ -368,12 +368,25 @@ it, and each is `ACCEPTED`, `ALREADY_APPLIED` or `NOT_APPLICABLE`
 ([outcomes](per-host-agent-development.md#freeze-confirmation)). A failed
 relay, and one the agent did not report applied (`REFUSED_OVER_CAPACITY`,
 `DEFERRED`, an outcome the Provider does not know, a missing or mismatched
-list, or no results at all, as from an agent that predates them), is logged
-and tried again with a later call, waiting 10 seconds after the first
-failure and doubling up to 10 minutes per host; a changed confirmation does
-not wait for the previous one's backoff. A redelivery is safe: the agent
-applies a confirmation idempotently. An agent that answers `Unimplemented`
-(it predates confirmations) is not asked again on that connection. A malformed confirmation (a bad id, more than 16,
+list, or no results at all, as from an agent that predates them), is
+tried again with a later call, waiting 10 seconds after the first failure
+and doubling up to 10 minutes per host; a changed confirmation does not
+wait for the previous one's backoff. The first such relay of a
+confirmation is logged at Info, the repeats at Debug. Only one relay per
+host is in flight: calls that arrive together send one `AgentStatus`
+between them. A relay that finds the connection just replaced, before its
+new Hello, sends nothing and is not counted as a failure. A redelivery is
+safe: the agent applies a confirmation idempotently.
+
+An agent that can never report the confirmation applied is sent it again
+every 10 minutes for as long as the confirmation stays in the inventory:
+an agent that predates `freeze_results` (it answers without them), a
+release-build agent (it applies no confirmation), and a confirmation made
+for an enrolment that is not the agent's active one (`DEFERRED` until the
+manager renders a new confirmation). Each re-send is one `AgentStatus`
+before a call the Provider forwards anyway, so the cost stays bounded. An
+agent that answers `Unimplemented` (it predates confirmations) is not asked
+again on that connection. A malformed confirmation (a bad id, more than 16,
 or the current enrolment among them) is dropped with a log line; the entry
 stays routable and nothing is relayed. The Provider does
 not judge the confirmation: the agent applies it only to its own frozen

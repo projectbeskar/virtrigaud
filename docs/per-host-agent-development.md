@@ -303,7 +303,7 @@ confirmation is refused until compaction has finished one: the agent logs
 the refusal with the enrolment id and answers `REFUSED_OVER_CAPACITY`, the
 predecessor stays frozen and nothing is written. The Provider does not count
 a refused confirmation as delivered: it relays it again, with a backoff,
-until the agent answers `ACCEPTED` or `ALREADY_APPLIED`. Compaction removes records only of an enrolment the store
+until the agent answers `ACCEPTED`, `ALREADY_APPLIED` or `NOT_APPLICABLE`. Compaction removes records only of an enrolment the store
 has retired; a discard marker naming any other quarantines the store
 (`inconsistent_store`).
 
