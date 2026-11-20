@@ -35,7 +35,12 @@ import (
 // (an agent older than the report never does), and Unknown (reason
 // StoreCapacityNotReported) when a later verified answer carries no report
 // (an older agent, or a store the agent cannot measure, such as a lost one).
-// Only a verified answer changes it (development builds).
+// Only a verified answer sets it (development builds). It is removed when the
+// Host is no longer polled for signed answers: its Provider does not run
+// per-host agents (or no longer requires operation identity), is gone or is
+// not clustered, or the Host is revoked or its agent certificate expired
+// (clearStorePressure). A heartbeat that only failed to reach a polled host
+// keeps it, beside AgentAnswerVerified=False.
 const HostConditionAgentStorePressure = "AgentStorePressure"
 
 // Reasons of the AgentStorePressure condition. The two True reasons are also
@@ -107,4 +112,12 @@ func (r *HostReconciler) applyStoreCapacity(host *infravirtrigaudiov1beta1.Host,
 		return
 	}
 	r.Recorder.Event(host, corev1.EventTypeWarning, reason, msg)
+}
+
+// clearStorePressure removes the AgentStorePressure condition of a Host that
+// is no longer polled for signed answers, so a stale verdict (StoreFull, say)
+// is never shown for a store nobody reads. A later verified report sets it
+// again, with its event.
+func clearStorePressure(host *infravirtrigaudiov1beta1.Host) {
+	meta.RemoveStatusCondition(&host.Status.Conditions, HostConditionAgentStorePressure)
 }

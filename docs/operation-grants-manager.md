@@ -388,7 +388,10 @@ threshold (the agent then refuses new operations `STORE_FULL`), with the sizes a
 recovery in the message and a `Warning` event on each move into `StoreNearlyFull` or
 `StoreFull`. An answer without the report (an older agent) leaves the condition absent, or
 `Unknown/StoreCapacityNotReported` once a report was seen; an answer that fails
-verification changes nothing. The condition does not gate anything: the agent's own
+verification, or a heartbeat that fails to reach the host, changes nothing. The condition
+is removed once the Host is no longer polled for signed answers (its Provider no longer
+requires operation identity, is gone or is not clustered, or the Host is revoked or its
+agent certificate expired). The condition does not gate anything: the agent's own
 admission refuses work when the store is full. See
 [`per-host-agent-development.md`](per-host-agent-development.md#store-size) for the levels,
 the recovery and an alert recipe.

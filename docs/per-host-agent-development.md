@@ -634,8 +634,12 @@ the condition's reason, when the condition moves into `StoreNearlyFull` or
 `StoreFull` (not on every heartbeat). Only a verified answer changes the
 condition. An answer from an agent older than the report carries no capacity:
 the condition stays absent on a Host that never reported one, and goes to
-`Unknown` (reason `StoreCapacityNotReported`) on a Host that did. A release
-build's agent never reports it. To alert, watch for the condition or the events,
+`Unknown` (reason `StoreCapacityNotReported`) on a Host that did. A heartbeat
+that fails to reach the host keeps the last value (beside
+`AgentAnswerVerified=False`). The condition is removed when the Host is no
+longer polled for signed answers: its Provider no longer requires operation
+identity, is gone or is not clustered, or the Host is revoked or its agent
+certificate expired. A release build's agent never reports it. To alert, watch for the condition or the events,
 for example:
 
 ```sh

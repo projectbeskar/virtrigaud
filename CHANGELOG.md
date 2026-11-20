@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `True`/`StoreNearlyFull` from three quarters of the threshold;
   - `True`/`StoreFull` above the threshold.
 
-  The message gives the sizes and the documented recovery. A `Warning` event is emitted on each move into `StoreNearlyFull` or `StoreFull`, not on every heartbeat. An answer without the report (an older agent) leaves the condition absent, or sets `Unknown`/`StoreCapacityNotReported` once a report has been seen.
+  The message gives the sizes and the documented recovery. A `Warning` event is emitted on each move into `StoreNearlyFull` or `StoreFull`, not on every heartbeat. An answer without the report (an older agent) leaves the condition absent, or sets `Unknown`/`StoreCapacityNotReported` once a report has been seen. The condition is removed when the Host is no longer polled for signed answers: its Provider no longer requires operation identity, is gone or is not clustered, or the Host is revoked or its agent certificate expired (`internal/controller/host_controller.go`, `internal/controller/host_inventory.go`). A heartbeat that fails to reach the host keeps it.
 - `internal/controller/host_answers.go`, `internal/providers/contracts/host_answer.go`, `internal/transport/grpc/client_answer.go`: the heartbeat asks every per-host agent for its store capacity.
 - `docs/per-host-agent-development.md`, `docs/operation-grants-manager.md`, `docs/operation-grants-wire-shape.md`, `docs/host-agent-enrolment.md`, `docs/README.md`: the condition, the levels, the wire shape and an alert recipe.
 

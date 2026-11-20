@@ -346,6 +346,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	provider, err := r.resolveProvider(ctx, host)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
+			clearStorePressure(host) // nothing polls the host for signed answers
 			r.setHostUnavailable(ctx, host, reasonProviderUnavailable,
 				fmt.Sprintf("Provider %s not found", host.Spec.ProviderRef.Name))
 			return r.persist(ctx, host, base, hostSyncBackoffInterval)
@@ -360,6 +361,7 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 	//    single-host Provider cannot answer GetHostInfo — short-circuit before the
 	//    RPC and flag the misconfiguration rather than probing a doomed endpoint.
 	if !isClusterTopology(provider) {
+		clearStorePressure(host)
 		r.setHostUnavailable(ctx, host, reasonProviderNotClustered,
 			fmt.Sprintf("Provider %s is not clustered (spec.topology != cluster); a Host requires a clustered Provider", provider.Name))
 		return r.persist(ctx, host, base, hostHeartbeatInterval)
@@ -448,12 +450,13 @@ func (r *HostReconciler) syncHostStatus(ctx context.Context, host *infravirtriga
 // revoked agent identity, an expired agent certificate): Ready=False with
 // reason, and the signed-answer and inventory conditions say that the host
 // is not polled, not that the heartbeat failed to reach it (existing
-// reasons, accurate messages).
+// reasons, accurate messages); the store pressure condition is removed.
 func (r *HostReconciler) setHostNotPolled(ctx context.Context, host *infravirtrigaudiov1beta1.Host, reason, msg string) {
 	host.Status.Health = infravirtrigaudiov1beta1.HostHealthUnknown
 	setHostReady(host, metav1.ConditionFalse, reason, msg)
 	why := "the host is not polled (" + reason + "), so no signed host answer is asked for: " + msg
 	r.withdrawHostInventory(ctx, host, true, why)
+	clearStorePressure(host)
 	if meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentAnswer) != nil {
 		setHostCondition(host, HostConditionAgentAnswer, metav1.ConditionFalse, reasonHostAnswerMissing, why)
 	}
@@ -559,6 +562,7 @@ func (r *HostReconciler) handleGetHostInfoError(ctx context.Context, host, base 
 		// The Provider claims clustered topology but does not implement the
 		// inventory RPC (gRPC Unimplemented). Treat it like a non-clustered
 		// reference: a config error, requeued at heartbeat cadence, not a crash.
+		clearStorePressure(host)
 		r.setHostUnavailable(ctx, host, reasonProviderNotClustered,
 			fmt.Sprintf("Provider %s does not implement GetHostInfo (not a clustered provider)", provider.Name))
 		return r.persist(ctx, host, base, hostHeartbeatInterval)

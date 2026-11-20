@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -27,9 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/devgate"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -188,4 +192,90 @@ func TestStoreCapacityCondition(t *testing.T) {
 	assert.Contains(t, msg, "200.0 MiB")
 	assert.Contains(t, msg, "256.0 MiB")
 	assert.Contains(t, msg, "78%")
+}
+
+// storeFullCondition is a stale AgentStorePressure=True/StoreFull from an
+// earlier heartbeat.
+func storeFullCondition() metav1.Condition {
+	return metav1.Condition{Type: HostConditionAgentStorePressure, Status: metav1.ConditionTrue, Reason: reasonStoreFull,
+		Message: "an earlier answer", LastTransitionTime: metav1.Now()}
+}
+
+// A Host whose Provider stops requiring operation identity is no longer asked
+// for signed answers: its AgentStorePressure is removed with the inventory
+// conditions, not left at a stale StoreFull.
+func TestHostStoreCapacity_ClearedWhenProviderStopsRequiringIdentity(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(1001) }
+	h := f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+
+	p := &infravirtrigaudiov1beta1.Provider{}
+	require.NoError(t, f.r.Get(context.Background(), client.ObjectKeyFromObject(f.provider), p))
+	p.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeLibvirt
+	require.NoError(t, f.r.Update(context.Background(), p))
+	f.clock.advance(time.Second)
+	h = f.reconcile(t)
+	assert.Nil(t, meta.FindStatusCondition(h.Status.Conditions, HostConditionAgentStorePressure))
+	assert.Nil(t, meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified))
+}
+
+// A heartbeat that fails to reach a host still polled keeps its last verdict
+// (AgentAnswerVerified and the inventory conditions say the answer is
+// missing); it is not a reason to drop the warning.
+func TestHostStoreCapacity_KeptOnFailedHeartbeat(t *testing.T) {
+	f := newInvFixture(t, testPolicy(t))
+	f.signed.storeCapacity = func() *providerv1.StoreCapacity { return capacityOf(1001) }
+	h := f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+	f.signed.hostErr = contracts.NewRetryableError("getHostInfo: connection refused", nil)
+	f.clock.advance(time.Second)
+	h = f.reconcile(t)
+	requireCond(t, h, HostConditionAgentStorePressure, metav1.ConditionTrue, reasonStoreFull)
+}
+
+// A Host that is not polled (revoked, or its agent certificate expired), or
+// whose Provider is gone or not clustered, has no AgentStorePressure: nobody
+// reads its store.
+func TestHostStoreCapacity_ClearedWhenNotPolled(t *testing.T) {
+	cases := map[string]func(t *testing.T) (*HostReconciler, string){
+		"provider gone": func(t *testing.T) (*HostReconciler, string) {
+			host := hostCR("host-gone", "prov-missing", nil)
+			host.Status.Conditions = []metav1.Condition{storeFullCondition()}
+			return newHostReconciler(coverageTestScheme(t), &stubResolver{provider: &stubProvider{}}, host), "host-gone"
+		},
+		"provider not clustered": func(t *testing.T) (*HostReconciler, string) {
+			prov := clusterProvider("prov-a")
+			prov.Spec.Topology = ""
+			host := hostCR("host-single", "prov-a", nil)
+			host.Status.Conditions = []metav1.Condition{storeFullCondition()}
+			return newHostReconciler(coverageTestScheme(t), &stubResolver{provider: &stubProvider{}}, prov, host), "host-single"
+		},
+	}
+	if devgate.Compiled {
+		cases["revoked"] = func(t *testing.T) (*HostReconciler, string) {
+			prov := clusterProvider("prov-a")
+			prov.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
+			host := hostCR("host-rv", "prov-a", nil)
+			host.Spec.Revoked = true
+			host.Status.Conditions = []metav1.Condition{storeFullCondition()}
+			return newHostReconciler(coverageTestScheme(t), &stubResolver{provider: &stubProvider{}}, prov, host), "host-rv"
+		}
+		cases["certificate expired"] = func(t *testing.T) (*HostReconciler, string) {
+			prov := clusterProvider("prov-a")
+			prov.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
+			host := agentHostWithExpiry("host-np", time.Now().Add(-time.Minute))
+			host.Status.Conditions = []metav1.Condition{storeFullCondition()}
+			return newHostReconciler(coverageTestScheme(t), &stubResolver{provider: &stubProvider{}}, prov, host), "host-np"
+		}
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			r, hostName := setup(t)
+			_, err := r.Reconcile(context.Background(), hostReq(hostName))
+			require.NoError(t, err)
+			got := getHost(t, r.Client, hostName)
+			assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, HostConditionAgentStorePressure))
+		})
+	}
 }
