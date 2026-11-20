@@ -182,6 +182,23 @@ func TestClient_HostAnswerAsksForInventory(t *testing.T) {
 	assert.Equal(t, read.Nonce, r.GetAnswerNonce())
 }
 
+// A signed GetHostInfo that asks for the store capacity sends its version
+// beside the nonce; one that does not sends 0.
+func TestClient_HostAnswerAsksForStoreCapacity(t *testing.T) {
+	srv := &answerServer{blob: testBlob()}
+	dialer, cleanup := startBufconnServer(t, srv)
+	defer cleanup()
+	c := newTestClient(t, dialer, "cloudhypervisor")
+	_, read, err := c.HostAnswer(context.Background(), contracts.HostAnswerQuery{HostID: "host-a", StoreCapacityVersion: 1})
+	require.NoError(t, err)
+	_, _, err = c.HostAnswer(context.Background(), contracts.HostAnswerQuery{HostID: "host-a"})
+	require.NoError(t, err)
+	require.Len(t, srv.hosts, 2)
+	assert.EqualValues(t, 1, srv.hosts[0].GetStoreCapacityVersion())
+	assert.Equal(t, read.Nonce, srv.hosts[0].GetAnswerNonce())
+	assert.Zero(t, srv.hosts[1].GetStoreCapacityVersion())
+}
+
 // The signed Describe carries the owner, the binding and a nonce.
 func TestClient_VMAnswer(t *testing.T) {
 	srv := &answerServer{blob: testBlob()}

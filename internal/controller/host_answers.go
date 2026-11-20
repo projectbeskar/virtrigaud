@@ -661,6 +661,9 @@ type hostRead struct {
 	// renewalVersion is the renewal version a GetHostInfo read sent (0:
 	// none).
 	renewalVersion uint32
+	// storeCapacityVersion is the store capacity version a GetHostInfo read
+	// sent (0: none).
+	storeCapacityVersion uint32
 }
 
 // errHostTrust wraps begin's failures to read the manager's own trust or
@@ -725,6 +728,7 @@ func (h *HostAnswers) verify(ctx context.Context, provider *infravirtrigaudiov1b
 	exp := hr.trust.expectation(provider, hostID, bodyType, read.Nonce, h.now())
 	exp.InventoryVersion = hr.inventoryVersion
 	exp.RenewalVersion = hr.renewalVersion
+	exp.StoreCapacityVersion = hr.storeCapacityVersion
 	v, err := hostidentity.VerifyAnswer(blobOf(read.Answer), exp)
 	if err != nil {
 		log.FromContext(ctx).Info("No signed host answer; nothing is concluded", "host", hostID, "check", err.Error())
@@ -969,7 +973,8 @@ type hostRefresh struct {
 
 // refreshHost asks the host for a signed host answer with its host inventory
 // (the highest inventory version the manager implements, except while the
-// host's agent is in an inventory backoff) and, when it verifies, records it
+// host's agent is in an inventory backoff) and its store capacity, and, when
+// it verifies, records it
 // (what grantReady reads). An answer without the inventory asked for is still
 // a valid answer for everything else. An answer whose inventory does not echo
 // the request is no answer and changes nothing else: the next read asks
@@ -986,9 +991,10 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 	}
 	hr.inventoryVersion = h.inventoryAsk(provider, hostID)
 	hr.renewalVersion = h.renewalAsk(provider, hostID)
+	hr.storeCapacityVersion = hostidentity.StoreCapacityVersion
 	out := hostRefresh{asked: hr.inventoryVersion, inventoryBackoff: hr.inventoryVersion == 0}
 	info, read, rerr := reader.HostAnswer(ctx, contracts.HostAnswerQuery{HostID: hostID, ContinuitySeq: hr.snapshot.ContinuitySeq(),
-		InventoryVersion: hr.inventoryVersion, RenewalVersion: hr.renewalVersion})
+		InventoryVersion: hr.inventoryVersion, RenewalVersion: hr.renewalVersion, StoreCapacityVersion: hr.storeCapacityVersion})
 	out.info, out.read = info, read
 	if rerr != nil {
 		out.verdict = answerNone

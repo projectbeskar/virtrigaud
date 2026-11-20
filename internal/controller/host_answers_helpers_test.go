@@ -229,6 +229,10 @@ type signedHostStub struct {
 	// that asks for one (an agent that reports an inventory); unset, the
 	// host ignores the request's inventory version.
 	inventory func(q contracts.HostAnswerQuery) *providerv1.HostInventory
+	// storeCapacity, when set, is the store capacity of a signed GetHostInfo
+	// that asks for one (an agent that reports it); unset, the host ignores
+	// the request's store capacity version, as an older agent does.
+	storeCapacity func() *providerv1.StoreCapacity
 	// rawSign signs host answers without the agent's own inventory checks,
 	// so a test can make the agent sign an invalid inventory.
 	rawSign bool
@@ -397,6 +401,9 @@ func (s *signedHostStub) hostAnswer(q contracts.HostAnswerQuery) (contracts.Host
 		Mode: providerv1.AgentMode_AGENT_MODE_IDENTITY}
 	if s.inventory != nil && q.InventoryVersion > 0 {
 		a.Inventory = s.inventory(q)
+	}
+	if s.storeCapacity != nil && q.StoreCapacityVersion > 0 {
+		a.StoreCapacity = s.storeCapacity()
 	}
 	switch {
 	case s.unsigned:
