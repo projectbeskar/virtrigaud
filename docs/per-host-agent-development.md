@@ -624,23 +624,33 @@ each verified answer:
 
 | Level | Condition | Meaning |
 |-------|-----------|---------|
-| `OK` | `False`, reason `StoreCapacityOK` | below three quarters of the threshold |
+| `OK` | `False`, reason `StoreCapacityOK` | below three quarters of the threshold, or, after a `True`, below 70% of it |
+| `OK` | `True`, reason `StoreNearlyFull` | after a `True` only: below three quarters of the threshold but at or above 70% of it (the manager's hysteresis, so a store hovering at the bound does not flap) |
 | `WARNING` | `True`, reason `StoreNearlyFull` | at or above three quarters of the threshold (the point at which compaction also starts running early); new operations are still accepted |
 | `FULL` | `True`, reason `StoreFull` | above the threshold; new operations are refused `STORE_FULL` |
+| `NOT_MEASURED` | `Unknown`, reason `StoreCapacityNotMeasured` | the agent cannot measure its store (it lost its persistence guarantee, or the agent is a release build) |
 
-The message gives the live size and the threshold (in MiB and bytes) and the
-recovery described in this section. The manager emits a `Warning` event, with
-the condition's reason, when the condition moves into `StoreNearlyFull` or
-`StoreFull` (not on every heartbeat). Only a verified answer changes the
-condition. An answer from an agent older than the report carries no capacity:
-the condition stays absent on a Host that never reported one, and goes to
-`Unknown` (reason `StoreCapacityNotReported`) on a Host that did. A heartbeat
-that fails to reach the host keeps the last value (beside
-`AgentAnswerVerified=False`). The condition is removed when the Host is no
-longer polled for signed answers: its Provider no longer requires operation
-identity, is gone or is not clustered, or the Host is revoked or its agent
-certificate expired. A release build's agent never reports it. To alert, watch for the condition or the events,
-for example:
+The agent's signed levels use the bounds 3/4 and the threshold; the 70%
+recovery bound is applied by the manager, to the condition only. The message
+gives the live size and the threshold (in MiB and bytes) and the recovery
+described in this section. The manager emits a `Warning` event, with the
+condition's reason, only when the severity rises: from `StoreCapacityOK`, an
+`Unknown` or no condition to `StoreNearlyFull` or `StoreFull`, and from
+`StoreNearlyFull` to `StoreFull`. A fall in severity, or a heartbeat that
+leaves it unchanged, emits nothing. Only a verified answer sets the condition
+`True` or `False`. An answer from an agent older than the report (agent API
+version below 4) carries no capacity: the condition stays absent on a Host that
+never reported one, and goes to `Unknown` (reason `StoreCapacityNotReported`) on
+a Host that did. An agent of API version 4 or later always answers the capacity
+when asked, and echoes the version asked for in the signed report, so a request
+whose `store_capacity_version` was stripped or changed in transit makes the
+answer fail verification instead of reading as "not reported". A heartbeat that
+gets no verified answer from a host it still polls keeps a `True` (beside
+`AgentAnswerVerified=False`) and turns a `False` into `Unknown` (reason
+`StoreCapacityStale`), so an old "OK" is never shown as current. The condition
+is removed when the Host is no longer polled for, or cannot be checked with,
+signed answers: its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`; the manager has no host answer verification configured, or the Provider's client cannot ask for signed answers; the manager holds no trust state (enrolment, pins, CA) for the Host; the Host's store regressed; or the Host is revoked or its agent certificate expired. To alert, watch for the condition or
+the events, for example:
 
 ```sh
 # Hosts whose store is at WARNING or FULL.
@@ -648,12 +658,14 @@ kubectl get hosts -A -o json | jq -r '.items[] | .metadata as $m
   | .status.conditions[]? | select(.type == "AgentStorePressure" and .status == "True")
   | "\($m.namespace)/\($m.name)\t\(.reason)\t\(.message)"'
 
-# The transitions, as events.
+# Rises in severity, as events (one per rise, none while it holds or falls).
 kubectl get events -A --field-selector involvedObject.kind=Host,reason=StoreNearlyFull
 kubectl get events -A --field-selector involvedObject.kind=Host,reason=StoreFull
 ```
 
-At `StoreNearlyFull`, act before the store reaches the threshold: resolve the
+An `Unknown` condition means the store's state is not known (stale, not
+measured, or not reported); treat a long-lived `Unknown` like a missing
+heartbeat. At `StoreNearlyFull`, act before the store reaches the threshold: resolve the
 operations that still hold their VMs, then re-key the Host (below); if the store
 is held mostly by VM tombstones, plan the fresh-store recovery described below.
 

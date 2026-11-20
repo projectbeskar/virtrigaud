@@ -122,12 +122,12 @@ description of every field.
 | `VMAnswer` | message | The answer about one VM placement: `context` (1), the `vm_uid` and `binding_id` asked about (2, 3), `presence` (4), and for a completed Delete `delete_op_id`, `delete_enrolment_id`, `delete_seq` (5–7). |
 | `HostAnswer` | message | The answer about the host itself: `context` (1), `agent_version` (2, informational), `agent_api_version` (3), `grant_versions` (4, ascending), `mode` (5), `journal_schema_version` (6), `clock_floor` (7, informational), `staged_certificate_sha256` (8), `inventory` (9, see [Host inventory](#host-inventory)), `pending_renewal` (10, see [Certificate renewal](#certificate-renewal)), `store_capacity` (11, see [Store capacity](#store-capacity)). |
 | `RenewalRequest` | message | A host's request to renew its identity certificate for a new key, carried as a host-signed `SignedBlob` in `HostAnswer.pending_renewal`: `renewal_version` (1), `provider_uid`, `host_id`, `install_id`, `enrolment_id` (2–5), `current_certificate_sha256` (6), `certificate_request` (7, DER PKCS #10 for the new key). |
-| `StoreCapacity` | message | How full the host's operation store is, in `HostAnswer.store_capacity`: `live_bytes` (1), `threshold_bytes` (2), `level` (3). |
+| `StoreCapacity` | message | How full the host's operation store is, in `HostAnswer.store_capacity`: `live_bytes` (1), `threshold_bytes` (2), `level` (3), `requested_version` (4, the request's `store_capacity_version`, echoed). |
 | `AgentState` | enum | `UNATTESTED`, `READY`, `QUARANTINED` (values 0–3, 0 is `UNSPECIFIED`). `READY` means the store's continuity is established and the recovery of interrupted operations has run. |
 | `OperationRecordState` | enum | `ACCEPTED`, `EXECUTING`, `COMPLETED`, `FAILED_CLEAN`, `FAILED_DIRTY`, `OUTCOME_UNKNOWN`, `RETIRED` (1–7: what the store records for an operation it holds a record or tombstone of), `NO_RECORD` and `UNKNOWN_TO_AGENT` (8, 9: it holds neither; neither proves anything about the operation). |
 | `VMPresence` | enum | `CREATING`, `PRESENT`, `DELETED`, `OTHER_BINDING`, `NO_RECORD` (values 0–5, 0 is `UNSPECIFIED`). `NO_RECORD` never means that the VM was deleted. |
 | `AgentMode` | enum | `IDENTITY` (values 0–1, 0 is `UNSPECIFIED`). |
-| `StoreLevel` | enum | `OK`, `WARNING`, `FULL` (values 0–3, 0 is `UNSPECIFIED`): the level of a `StoreCapacity`. |
+| `StoreLevel` | enum | `OK`, `WARNING`, `FULL`, `NOT_MEASURED` (values 0–4, 0 is `UNSPECIFIED`): the level of a `StoreCapacity`. |
 
 ### Where each answer travels
 
@@ -429,16 +429,29 @@ that asks for it, so a manager can warn before that happens:
   request; a verifier refuses an answer that carries one the request did not ask for.
   A manager refuses unknown fields in a signed answer, so an agent never sends the
   field to a manager that did not ask for it. An agent older than the field ignores
-  the request field and answers without it.
+  the request field and answers without it. A per-host agent refuses a request that
+  sets `store_capacity_version` without `answer_nonce` (`InvalidArgument`), as it
+  does for `inventory_version` and `renewal_version`; release builds included.
+- **Echo and presence.** `requested_version` is the request's `store_capacity_version`,
+  echoed; a verifier refuses a capacity whose echo is not the version it sent. An
+  agent whose `agent_api_version` is 4 or later answers a capacity in every answer to
+  a request that asks for one (`NOT_MEASURED` when it cannot measure its store, and in
+  a release build), so a verifier that asked refuses such an agent's answer without
+  one: the request lost its `store_capacity_version` in transit. Both checks are over
+  signed content, so a relay that strips or changes the unsigned request field makes
+  the answer fail verification instead of reading as "not reported".
 - **Fields.** `live_bytes` is the bytes the store's live pages use (its size less its
   free pages) as of its last committed transaction: the measure the agent's admission
   compares with the threshold. `threshold_bytes` is the size above which the agent
-  refuses new operations (`RESOURCE_EXHAUSTED`, reason `STORE_FULL`); never 0.
+  refuses new operations (`RESOURCE_EXHAUSTED`, reason `STORE_FULL`); never 0. Both
+  are 0 when the level is `NOT_MEASURED`.
 - **Level.** With `live = live_bytes` and `threshold = threshold_bytes`, in unsigned
-  integer arithmetic: `FULL` when `live > threshold`; otherwise `WARNING` when
-  `live >= threshold / 4 * 3`; otherwise `OK`. `FULL` is exactly when admission
-  refuses (a store at the threshold still accepts). A verifier refuses an answer whose
-  level breaks this rule.
+  integer arithmetic: `NOT_MEASURED` exactly when both are 0; otherwise `FULL` when
+  `live > threshold`, otherwise `WARNING` when `live >= threshold / 4 * 3`, otherwise
+  `OK`. `FULL` is exactly when admission refuses (a store at the threshold still
+  accepts). A verifier refuses an answer whose level breaks this rule. A manager may
+  apply its own hysteresis when it reports the level (VirtRigaud's keeps a warning
+  until the store is below 70% of the threshold); the signed rule does not change.
 - **Signature.** `store_capacity` is a field of the `HostAnswer` body, so the answer's
   signature covers it like every other field: altering, adding or stripping it after
   signing fails verification. It adds no `body_type` and changes no framing.
@@ -475,7 +488,8 @@ serves it and the Cloud Hypervisor Provider calls it.
   existing field are unchanged.
 - The store capacity (`GetHostInfoRequest.store_capacity_version`,
   `HostAnswer.store_capacity`, `StoreCapacity`, `StoreLevel`) is additive in the same
-  way. It adds no `body_type` and changes no framing or existing field.
+  way. It adds no `body_type` and changes no framing or existing field. Agent API
+  version 4 marks an agent that always answers it when asked.
 - A provider built against an older contract ignores the new fields; a manager built
   against an older contract never sends them.
 - The grant messages live in `provider.proto`. The contract's breaking-change check

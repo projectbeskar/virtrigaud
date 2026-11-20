@@ -320,8 +320,8 @@ On every new connection the Provider first calls `agent.v1.AgentService/Hello`
 with a fresh nonce and its API version, and verifies the host-signed answer:
 a `HostAnswer` signed with the key of the certificate the handshake just
 verified (the signer certificate must be that certificate), echoing the nonce
-and naming the host. The Provider speaks API version 3 and routes to an agent
-of version 3 or 2. An agent outside that window, or one that does not serve
+and naming the host. The Provider speaks API version 4 and routes to an agent
+of version 4 or 3. An agent outside that window, or one that does not serve
 `Hello`, is not routed until its connection is replaced (cause
 `AgentIncompatible`); the Provider never adapts a request to an older agent.
 An answer that is missing or does not verify leaves the host unavailable

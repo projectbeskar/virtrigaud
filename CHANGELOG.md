@@ -9,22 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Author:** @wrkode (William Rizzo)
 
 ### Added
-- `proto/provider/v1/host_answer.proto`: `HostAnswer.store_capacity` (11), a new `StoreCapacity` message (`live_bytes`, `threshold_bytes`, `level`) and a `StoreLevel` enum (`OK`, `WARNING` from three quarters of the threshold, `FULL` above it). Additive; `buf breaking` passes. The bindings in `proto/rpc/provider/v1` are regenerated.
+- `proto/provider/v1/host_answer.proto`:
+  - `HostAnswer.store_capacity` (11).
+  - A new `StoreCapacity` message: `live_bytes`, `threshold_bytes`, `level`, and `requested_version`, the request's version echoed.
+  - A `StoreLevel` enum: `OK`, `WARNING` from three quarters of the threshold, `FULL` above it, `NOT_MEASURED` for a store the agent cannot measure.
+
+  Additive; `buf breaking` passes. The bindings in `proto/rpc/provider/v1` are regenerated.
 - `proto/provider/v1/provider.proto`: `GetHostInfoRequest.store_capacity_version` (6). An agent puts the capacity only in the answer to a request that asks for it, because a manager refuses a signed answer that carries a field it does not know. An older agent ignores the request field.
-- `internal/hostidentity/store_capacity.go`: `StoreLevelOf` (the level rule) and `VerifyStoreCapacity`. `VerifyAnswer` refuses a capacity the request did not ask for, a threshold of 0, or a level that contradicts the sizes. The capacity is part of the signed body, so changing, adding or stripping it fails the signature check (tested).
-- `internal/agent/opstore/capacity.go`: `Store.Capacity` reads the live size that admission compares with the threshold. It comes from two bbolt counters as of the last commit, with no scan. A test checks that `Capacity.Full` is true exactly when admission refuses `STORE_FULL`.
-- `internal/agent/server`, `internal/agent/answer`, `internal/agent/daemon/daemon.go`: a development build's agent reports the capacity in the signed answer of a `GetHostInfo` that asks for it. A release build's agent never reports it (tested). `server.Agent` gains `StoreCapacity`.
+- `internal/hostidentity/store_capacity.go`: `StoreLevelOf` (the level rule) and `VerifyStoreCapacity`. `VerifyAnswer` refuses:
+  - a capacity the request did not ask for;
+  - an echo that differs from the request;
+  - a threshold of 0, or a level that contradicts the sizes;
+  - when it asked, an answer without a capacity from an agent of API version 4 or later.
+
+  A relay that strips or changes `store_capacity_version` therefore makes the answer fail verification instead of reading as "not reported". The capacity is part of the signed body, so changing, adding or stripping it fails the signature check (tested).
+- `internal/agent/opstore/capacity.go`: `Store.Capacity` reads the live size that admission compares with the threshold, together with the store's state, under one hold of the journal lock (`journal.Store.LiveSizeUnlessLost`). It comes from two bbolt counters as of the last commit, with no scan. A test checks that `Capacity.Full` is true exactly when admission refuses `STORE_FULL`.
+- `internal/agent/server`, `internal/agent/answer`, `internal/agent/daemon/daemon.go`: asked for one, the agent always answers the capacity with the echo. A store it cannot measure (lost or closed), and every store in a release build, is answered `NOT_MEASURED`. `server.Agent` gains `StoreCapacity`.
 - `internal/agent/internal/guard/guard.go`: new mutation guard `store-capacity-only-when-asked`.
-- `internal/controller/host_store_capacity.go`: new Host condition `AgentStorePressure`, set only from verified answers:
+- `internal/controller/host_store_capacity.go`: new Host condition `AgentStorePressure`, set True or False only from verified answers:
   - `False`/`StoreCapacityOK` below three quarters of the threshold;
   - `True`/`StoreNearlyFull` from three quarters of the threshold;
   - `True`/`StoreFull` above the threshold.
 
-  The message gives the sizes and the documented recovery. A `Warning` event is emitted on each move into `StoreNearlyFull` or `StoreFull`, not on every heartbeat. An answer without the report (an older agent) leaves the condition absent, or sets `Unknown`/`StoreCapacityNotReported` once a report has been seen. The condition is removed when the Host is no longer polled for signed answers: its Provider no longer requires operation identity, is gone or is not clustered, or the Host is revoked or its agent certificate expired (`internal/controller/host_controller.go`, `internal/controller/host_inventory.go`). A heartbeat that fails to reach the host keeps it.
+  Once `True`, it is `False` again only below 70% of the threshold. This hysteresis is applied by the manager to the reason; the signed level rule is unchanged. The message gives the sizes and the documented recovery. A `Warning` event is emitted only when the severity rises.
+- The condition goes `Unknown` in three cases:
+  - `StoreCapacityNotMeasured`: the agent cannot measure its store.
+  - `StoreCapacityNotReported`: an older agent stops reporting.
+  - `StoreCapacityStale`: a heartbeat gets no verified answer while the condition is `False`. A `True` is kept.
+- The condition is removed when the Host is no longer polled for, or cannot be checked with, signed answers (`internal/controller/host_controller.go`, `host_controller_answer.go`, `host_inventory.go`):
+  - its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`;
+  - the manager has no host answer verification, or the Provider's client cannot ask for signed answers;
+  - the manager has no trust state for the Host;
+  - the Host's store regressed;
+  - the Host is revoked or its agent certificate expired.
 - `internal/controller/host_answers.go`, `internal/providers/contracts/host_answer.go`, `internal/transport/grpc/client_answer.go`: the heartbeat asks every per-host agent for its store capacity.
-- `docs/per-host-agent-development.md`, `docs/operation-grants-manager.md`, `docs/operation-grants-wire-shape.md`, `docs/host-agent-enrolment.md`, `docs/README.md`: the condition, the levels, the wire shape and an alert recipe.
+- `docs/per-host-agent-development.md`, `docs/operation-grants-manager.md`, `docs/operation-grants-wire-shape.md`, `docs/host-agent-enrolment.md`, `docs/clustered-agent-provider-development.md`, `docs/README.md`: the condition, the levels, the wire shape and an alert recipe.
 
 ### Changed
+- `internal/agent/answer/answer.go`, `internal/providers/cloudhypervisor/hello.go`: agent API version 4. A version 4 agent always answers the store capacity when asked. The clustered Provider speaks version 4 and accepts agents of version 4 and 3; a version 2 agent is no longer routed.
 - `internal/agent/daemon/compact.go`: the share of the threshold at which compaction runs early is now the WARNING share from `hostidentity`, so the two cannot drift (3/4 as before).
 
 ### Why
