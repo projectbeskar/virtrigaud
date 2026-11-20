@@ -60,7 +60,7 @@ func TestAgentReportsStoreCapacity(t *testing.T) {
 		t.Fatal("a development build's answer carries no store capacity")
 	}
 	if c.GetThresholdBytes() != opstore.DefaultMaxStoreBytes || c.GetLiveBytes() == 0 ||
-		c.GetLevel() != providerv1.StoreLevel_STORE_LEVEL_OK {
+		c.GetLevel() != providerv1.StoreLevel_STORE_LEVEL_OK || c.GetRequestedVersion() != hostidentity.StoreCapacityVersion {
 		t.Fatalf("default threshold: %v", c)
 	}
 	live := c.GetLiveBytes()

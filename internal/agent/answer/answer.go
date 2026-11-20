@@ -97,8 +97,11 @@ const (
 	// AgentAPIVersion is the version of the agent's RPC surface. Version 2
 	// adds the host inventory to the answer of GetHostInfo; version 3 adds
 	// the pending certificate renewal request to it and serves
-	// InstallRenewedCertificate (development builds).
-	AgentAPIVersion uint32 = 3
+	// InstallRenewedCertificate (development builds); version 4 puts the
+	// store capacity in every answer to a GetHostInfo that asks for it, so a
+	// manager that asked can tell a request stripped in transit from an
+	// older agent (hostidentity.StoreCapacityAgentAPIVersion).
+	AgentAPIVersion uint32 = 4
 	// GrantVersion is the operation grant version the agent implements.
 	GrantVersion uint32 = 1
 )
@@ -264,8 +267,9 @@ type Host struct {
 	// it asked for none.
 	StoreCapacityRequested uint32
 	// StoreCapacity is how full the store is (opstore.Store.Capacity); it is
-	// put in the answer only when StoreCapacityRequested is at least 1 and
-	// it was measured (MaxBytes above 0), whatever the caller passed.
+	// put in the answer only when StoreCapacityRequested is at least 1,
+	// whatever the caller passed, as NOT_MEASURED when it was not measured
+	// (MaxBytes 0).
 	StoreCapacity opstore.Capacity
 }
 
@@ -318,17 +322,21 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 }
 
 // storeCapacity is the StoreCapacity of an answer to a request that asked for
-// store capacity version requested: nil when it asked for none (a manager
-// that does not know the field refuses an answer that carries it) or when c
-// was not measured; otherwise c with the level the contract's rule gives
-// (hostidentity.StoreLevelOf), so a verifier never sees a level that
-// contradicts the sizes.
+// store capacity version requested, which it echoes: nil when it asked for
+// none (a manager that does not know the field refuses an answer that
+// carries it); NOT_MEASURED with no sizes when c was not measured; otherwise
+// c with the level the contract's rule gives (hostidentity.StoreLevelOf), so
+// a verifier never sees a level that contradicts the sizes.
 func storeCapacity(requested uint32, c opstore.Capacity) *providerv1.StoreCapacity {
-	if (requested == 0 && !guard.Off(guard.StoreCapacityOnlyWhenAsked)) || c.MaxBytes <= 0 || c.LiveBytes < 0 {
+	if requested == 0 && !guard.Off(guard.StoreCapacityOnlyWhenAsked) {
 		return nil
 	}
+	if c.MaxBytes <= 0 || c.LiveBytes <= 0 {
+		return &providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED, RequestedVersion: requested}
+	}
 	live, limit := uint64(c.LiveBytes), uint64(c.MaxBytes)
-	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: limit, Level: hostidentity.StoreLevelOf(live, limit)}
+	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: limit, Level: hostidentity.StoreLevelOf(live, limit),
+		RequestedVersion: requested}
 }
 
 // answerContext builds the AnswerContext of h, enforcing when an answer may

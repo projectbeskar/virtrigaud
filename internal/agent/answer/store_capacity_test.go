@@ -30,15 +30,15 @@ import (
 
 // TestHostAnswerStoreCapacity: the store capacity goes into the answer only of
 // a request that asked for it (store_capacity_version >= 1), whatever the
-// caller passed, and only when it was measured; its level follows the
-// contract's rule for the sizes.
+// caller passed, echoing the request's version; NOT_MEASURED when it was not
+// measured; its level follows the contract's rule for the sizes.
 func TestHostAnswerStoreCapacity(t *testing.T) {
 	p := trusttest.New(t)
 	for _, tc := range []struct {
 		live  int64
 		level providerv1.StoreLevel
 	}{
-		{0, providerv1.StoreLevel_STORE_LEVEL_OK},
+		{1, providerv1.StoreLevel_STORE_LEVEL_OK},
 		{767, providerv1.StoreLevel_STORE_LEVEL_OK},
 		{768, providerv1.StoreLevel_STORE_LEVEL_WARNING},
 		{1024, providerv1.StoreLevel_STORE_LEVEL_WARNING},
@@ -53,7 +53,15 @@ func TestHostAnswerStoreCapacity(t *testing.T) {
 		assert.EqualValues(t, tc.live, c.GetLiveBytes())
 		assert.EqualValues(t, 1024, c.GetThresholdBytes())
 		assert.Equal(t, tc.level, c.GetLevel(), "live %d", tc.live)
+		assert.EqualValues(t, 1, c.GetRequestedVersion(), "the request's version, echoed")
 	}
+	t.Run("the echo is the request's version, byte for byte", func(t *testing.T) {
+		h := testHost(p)
+		h.StoreCapacityRequested, h.StoreCapacity = 7, opstore.Capacity{LiveBytes: 10, MaxBytes: 1024}
+		a, err := answer.HostAnswer(h)
+		require.NoError(t, err)
+		assert.EqualValues(t, 7, a.GetStoreCapacity().GetRequestedVersion())
+	})
 	t.Run("not asked: never a capacity", func(t *testing.T) {
 		h := testHost(p)
 		h.StoreCapacity = opstore.Capacity{LiveBytes: 2000, MaxBytes: 1024}
@@ -61,11 +69,16 @@ func TestHostAnswerStoreCapacity(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, a.GetStoreCapacity())
 	})
-	t.Run("asked, not measured", func(t *testing.T) {
+	t.Run("asked, not measured: NOT_MEASURED, never left out", func(t *testing.T) {
 		h := testHost(p)
 		h.StoreCapacityRequested = 1
 		a, err := answer.HostAnswer(h)
 		require.NoError(t, err)
-		assert.Nil(t, a.GetStoreCapacity())
+		c := a.GetStoreCapacity()
+		require.NotNil(t, c)
+		assert.Equal(t, providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED, c.GetLevel())
+		assert.Zero(t, c.GetLiveBytes())
+		assert.Zero(t, c.GetThresholdBytes())
+		assert.EqualValues(t, 1, c.GetRequestedVersion())
 	})
 }

@@ -1594,9 +1594,28 @@ func (s *Store) VerifyChain(ctx context.Context) error {
 
 // LiveSize returns the bytes the store's live pages use: its size less its
 // free and pending pages. Unlike Size, it falls when records are deleted.
-func (s *Store) LiveSize() (n int64) {
+func (s *Store) LiveSize() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.liveSizeLocked()
+}
+
+// LiveSizeUnlessLost is LiveSize and whether the store was not lost, read
+// under one hold of the store's lock: ok is false, and n 0, when the store
+// lost its persistence guarantee or its database is closed.
+func (s *Store) LiveSizeUnlessLost() (n int64, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyPendingFaultLocked()
+	if s.state == StateLost || s.db == nil {
+		return 0, false
+	}
+	n = s.liveSizeLocked()
+	return n, n > 0 && s.state != StateLost
+}
+
+// liveSizeLocked is LiveSize under s.mu.
+func (s *Store) liveSizeLocked() (n int64) {
 	if s.db == nil {
 		return 0
 	}

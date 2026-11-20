@@ -16,8 +16,6 @@ limitations under the License.
 
 package opstore
 
-import "github.com/projectbeskar/virtrigaud/internal/agent/journal"
-
 // Capacity is how full the store is: the measure admission compares with the
 // threshold, and the threshold.
 type Capacity struct {
@@ -39,14 +37,12 @@ func (c Capacity) Full() bool { return c.MaxBytes > 0 && c.LiveBytes > c.MaxByte
 // page count as of its last committed transaction: two counters, not a scan
 // of the store, so it is cheap enough for every host answer and never older
 // than the last commit. A store that lost its persistence guarantee, or whose
-// database is closed (the live size reads 0), is not measured: the zero
-// Capacity, never a live size of 0 that would read as empty.
+// database is closed, is not measured: the zero Capacity, never a live size
+// of 0 that would read as empty. The state and the size are read under one
+// hold of the journal's lock (journal.Store.LiveSizeUnlessLost).
 func (s *Store) Capacity() Capacity {
-	if st, _ := s.j.State(); st == journal.StateLost {
-		return Capacity{}
-	}
-	live := s.j.LiveSize()
-	if live <= 0 {
+	live, ok := s.j.LiveSizeUnlessLost()
+	if !ok {
 		return Capacity{}
 	}
 	return Capacity{LiveBytes: live, MaxBytes: s.opts.MaxStoreBytes}

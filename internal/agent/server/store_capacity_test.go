@@ -58,15 +58,18 @@ func TestGetHostInfoStoreCapacity(t *testing.T) {
 		assert.EqualValues(t, tc.live, c.GetLiveBytes())
 		assert.EqualValues(t, 1000, c.GetThresholdBytes())
 		assert.Equal(t, tc.level, c.GetLevel(), "live %d", tc.live)
+		assert.EqualValues(t, 1, c.GetRequestedVersion())
 	}
 
 	t.Run("requested 0 gives none", func(t *testing.T) {
 		assert.Nil(t, ask(t, &providerv1.GetHostInfoRequest{AnswerNonce: nonce(4)}).GetStoreCapacity())
 		assert.Nil(t, ask(t, &providerv1.GetHostInfoRequest{AnswerNonce: nonce(4), InventoryVersion: 1, RenewalVersion: 1}).GetStoreCapacity())
 	})
-	t.Run("not measured gives none", func(t *testing.T) {
+	t.Run("not measured gives NOT_MEASURED", func(t *testing.T) {
 		e.agent.setCapacity(opstore.Capacity{})
-		assert.Nil(t, ask(t, &providerv1.GetHostInfoRequest{AnswerNonce: nonce(4), StoreCapacityVersion: 1}).GetStoreCapacity())
+		c := ask(t, &providerv1.GetHostInfoRequest{AnswerNonce: nonce(4), StoreCapacityVersion: 1}).GetStoreCapacity()
+		require.NotNil(t, c)
+		assert.Equal(t, providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED, c.GetLevel())
 		e.agent.setCapacity(opstore.Capacity{LiveBytes: 10, MaxBytes: 1000})
 	})
 	t.Run("a version without a nonce is refused", func(t *testing.T) {

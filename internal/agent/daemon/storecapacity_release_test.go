@@ -27,10 +27,10 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// TestReleaseBuildReportsNoStoreCapacity: a release build's signed host
-// answer never carries the store capacity, even to a request that asks for
-// it, so its answers stay as they were.
-func TestReleaseBuildReportsNoStoreCapacity(t *testing.T) {
+// TestReleaseBuildMeasuresNoStoreCapacity: a release build never measures
+// its store: to a request that asks for the capacity it answers NOT_MEASURED,
+// with no sizes, and to any other request nothing, as before.
+func TestReleaseBuildMeasuresNoStoreCapacity(t *testing.T) {
 	h := newHost(t)
 	r, _ := h.run()
 	info, err := providerv1.NewProviderClient(r.conn()).GetHostInfo(callCtx(t),
@@ -45,8 +45,22 @@ func TestReleaseBuildReportsNoStoreCapacity(t *testing.T) {
 	if err := proto.Unmarshal(info.GetHostAnswer().GetBody(), a); err != nil {
 		t.Fatal(err)
 	}
-	if a.GetStoreCapacity() != nil {
-		t.Fatalf("a release build's answer carries a store capacity: %v", a.GetStoreCapacity())
+	c := a.GetStoreCapacity()
+	if c.GetLevel() != providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED || c.GetLiveBytes() != 0 || c.GetThresholdBytes() != 0 ||
+		c.GetRequestedVersion() != 1 {
+		t.Fatalf("a release build's answer carries a measured store capacity: %v", c)
+	}
+	plain, err := providerv1.NewProviderClient(r.conn()).GetHostInfo(callCtx(t),
+		&providerv1.GetHostInfoRequest{AnswerNonce: bytes.Repeat([]byte{8}, 16)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &providerv1.HostAnswer{}
+	if err := proto.Unmarshal(plain.GetHostAnswer().GetBody(), b); err != nil {
+		t.Fatal(err)
+	}
+	if b.GetStoreCapacity() != nil {
+		t.Fatalf("an answer to a request that asked for none carries a store capacity: %v", b.GetStoreCapacity())
 	}
 	if err := r.stop(); err != nil {
 		t.Fatal(err)

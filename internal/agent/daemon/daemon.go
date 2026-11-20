@@ -312,8 +312,9 @@ func (a *agentState) TrustState() (providerv1.AgentState, string) {
 }
 
 // StoreCapacity implements server.Agent: how full the store is, in a
-// development build; not measured (the zero Capacity) in a release build,
-// whose answers stay as they were.
+// development build; not measured (the zero Capacity, answered NOT_MEASURED
+// to a request that asks for it) in a release build, which runs no
+// operation.
 func (a *agentState) StoreCapacity() opstore.Capacity {
 	if !config.DevBuild {
 		return opstore.Capacity{}
