@@ -330,8 +330,9 @@ func TestCompact_MarkerOfANonRetiredEnrolmentRemovesNothing(t *testing.T) {
 }
 
 // At most MaxPendingDiscards discards are pending; a further confirmation
-// is refused with ErrTooManyDiscards (reported by ConfirmFrozen, not
-// dropped) until compaction finishes them, and then succeeds.
+// is refused with ErrTooManyDiscards (reported by ConfirmFrozen as refused
+// over capacity, not dropped) until compaction finishes them, and then
+// succeeds.
 func TestConfirmFreeze_TooManyPending(t *testing.T) {
 	h := newHarness(t)
 	h.opts = func(o *opstore.Options) { o.DiscardChunk = testDiscardChunk }
@@ -347,10 +348,108 @@ func TestConfirmFreeze_TooManyPending(t *testing.T) {
 	}
 	err := h.s.ConfirmFreeze(ctx, last)
 	require.ErrorIs(t, err, opstore.ErrTooManyDiscards)
-	_, err = h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{last})
-	require.ErrorIs(t, err, opstore.ErrTooManyDiscards, "the relay reports the refusal")
+	got, err := h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{last})
+	require.NoError(t, err)
+	assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeRefusedOverCapacity}, got, "the relay reports the refusal")
 	_, err = h.s.Compact(ctx, opstore.DefaultCompactBatch)
 	require.NoError(t, err)
 	assert.False(t, h.s.Discarding())
 	require.NoError(t, h.s.ConfirmFreeze(ctx, last))
+}
+
+// TestConfirmFrozen_OutcomesOverCapacity: with MaxPendingDiscards discards
+// pending, a confirmation of a further frozen predecessor is reported
+// refused over capacity, never applied, and changes nothing: the
+// predecessor stays frozen and its records stay. In the same confirmation,
+// a predecessor retired earlier (fully removed, or still being removed) is
+// already applied, and an unknown, malformed or repeated id is not
+// applicable. Once compaction has freed capacity, the confirmation sent
+// again is accepted once, and every later one is already applied.
+func TestConfirmFrozen_OutcomesOverCapacity(t *testing.T) {
+	h := newHarness(t)
+	h.opts = func(o *opstore.Options) { o.DiscardChunk = testDiscardChunk }
+	h.fresh()
+	ctx := context.Background()
+
+	finishOps(t, h, "gone")
+	gone := reenrolNext(t, h)
+	require.NoError(t, h.s.ConfirmFreeze(ctx, gone))
+	_, err := h.s.Compact(ctx, opstore.DefaultCompactBatch)
+	require.NoError(t, err)
+	require.False(t, h.s.Discarding())
+	records, enrolment, _ := rawRecords(t, h, gone)
+	require.Zero(t, records)
+	require.False(t, enrolment, "the first predecessor is removed completely")
+
+	var pending, last []byte
+	for i := 0; i <= opstore.MaxPendingDiscards; i++ {
+		finishOps(t, h, fmt.Sprintf("vm%d", i))
+		last = reenrolNext(t, h)
+		if i < opstore.MaxPendingDiscards {
+			require.NoError(t, h.s.ConfirmFreeze(ctx, last))
+			if pending == nil {
+				pending = last
+			}
+		}
+	}
+	lastOps, lastEnrolment, _ := rawRecords(t, h, last)
+	require.NotZero(t, lastOps)
+	require.True(t, lastEnrolment)
+
+	ids := [][]byte{last, gone, pending, rid(), {1, 2, 3}, last}
+	want := []opstore.FreezeOutcome{opstore.FreezeRefusedOverCapacity, opstore.FreezeAlreadyApplied,
+		opstore.FreezeAlreadyApplied, opstore.FreezeNotApplicable, opstore.FreezeNotApplicable, opstore.FreezeNotApplicable}
+	for round := 0; round < 2; round++ {
+		got, err := h.s.ConfirmFrozen(ctx, h.enrol, ids)
+		require.NoError(t, err)
+		assert.Equal(t, want, got, "round %d", round)
+		records, enrolment, marked := rawRecords(t, h, last)
+		assert.Equal(t, lastOps, records, "a refused confirmation removes nothing")
+		assert.True(t, enrolment)
+		assert.False(t, marked, "a refused confirmation starts no discard")
+	}
+	for _, o := range want {
+		assert.Equal(t, o != opstore.FreezeRefusedOverCapacity, o.Settled(), "%v", o)
+	}
+
+	_, err = h.s.Compact(ctx, opstore.DefaultCompactBatch)
+	require.NoError(t, err)
+	require.False(t, h.s.Discarding())
+	got, err := h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{last})
+	require.NoError(t, err)
+	assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeAccepted}, got, "accepted once capacity is free")
+	for i := 0; i < 2; i++ {
+		got, err = h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{last})
+		require.NoError(t, err)
+		assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeAlreadyApplied}, got, "a redelivery is a no-op")
+		if i == 0 {
+			_, err = h.s.Compact(ctx, opstore.DefaultCompactBatch)
+			require.NoError(t, err)
+		}
+	}
+	records, enrolment, _ = rawRecords(t, h, last)
+	assert.Zero(t, records)
+	assert.False(t, enrolment)
+}
+
+// TestConfirmFrozen_OutcomesOfAStaleConfirmation: a confirmation made for an
+// enrolment that is not the active one applies nothing and defers every id;
+// the same confirmation made for the active enrolment is accepted.
+func TestConfirmFrozen_OutcomesOfAStaleConfirmation(t *testing.T) {
+	h, prev, _ := discardStore(t, testDiscardChunk)
+	ctx := context.Background()
+	for _, forEnrolment := range [][]byte{prev, rid(), nil} {
+		got, err := h.s.ConfirmFrozen(ctx, forEnrolment, [][]byte{prev})
+		require.NoError(t, err)
+		assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeDeferred}, got)
+		_, enrolment, marked := rawRecords(t, h, prev)
+		assert.True(t, enrolment)
+		assert.False(t, marked)
+	}
+	got, err := h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{prev, h.enrol})
+	require.NoError(t, err)
+	assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeAccepted, opstore.FreezeNotApplicable}, got)
+	got, err = h.s.ConfirmFrozen(ctx, h.enrol, make([][]byte, opstore.MaxFreezeConfirmations+1))
+	require.NoError(t, err)
+	assert.Nil(t, got, "too many ids: nothing applied, no outcome")
 }

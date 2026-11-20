@@ -162,7 +162,7 @@ func (o *opsProxy) AnswerVM(ctx context.Context, uid string, b []byte, seq uint6
 	return s.AnswerVM(ctx, uid, b, seq)
 }
 
-func (o *opsProxy) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([][]byte, error) {
+func (o *opsProxy) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([]opstore.FreezeOutcome, error) {
 	s, _ := o.get()
 	return s.ConfirmFrozen(ctx, forEnrolment, ids)
 }

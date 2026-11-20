@@ -89,45 +89,87 @@ func (a *agentService) Hello(ctx context.Context, req *agentv1.HelloRequest) (*a
 
 // AgentStatus answers with a signed HostAnswer. A freeze confirmation it
 // carries is applied first (applyFreezeConfirmation), so the answer reflects
-// it; the confirmation never changes the answer's success.
+// it, and its outcome for each confirmed id is returned in freeze_results;
+// the confirmation never changes the answer's success.
 func (a *agentService) AgentStatus(ctx context.Context, req *agentv1.AgentStatusRequest) (*agentv1.AgentStatusResponse, error) {
 	if err := checkNonce(req.GetAnswerNonce(), true); err != nil {
 		return nil, err
 	}
-	a.s.applyFreezeConfirmation(ctx, req.GetConfirmForEnrolmentId(), req.GetConfirmFrozenEnrolmentIds())
-	return &agentv1.AgentStatusResponse{HostAnswer: a.s.hostAnswer(ctx, req.GetAnswerNonce(), 0)}, nil
+	results := a.s.applyFreezeConfirmation(ctx, req.GetConfirmForEnrolmentId(), req.GetConfirmFrozenEnrolmentIds())
+	return &agentv1.AgentStatusResponse{HostAnswer: a.s.hostAnswer(ctx, req.GetAnswerNonce(), 0), FreezeResults: results}, nil
 }
 
 // applyFreezeConfirmation applies a relayed, unsigned freeze confirmation:
 // only while the agent is READY, only for at most
-// opstore.MaxFreezeConfirmations well-formed ids, and only to frozen
-// predecessors of the active enrolment named by forEnrolment (the store
-// checks). Each discard is logged with the enrolment ids, which are not
-// secret; anything else is ignored with a log line.
-func (s *Server) applyFreezeConfirmation(ctx context.Context, forEnrolment []byte, ids [][]byte) {
+// opstore.MaxFreezeConfirmations ids, and only to frozen predecessors of
+// the active enrolment named by forEnrolment (the store checks). It returns
+// one result for each id, in order: none when the request carries no ids,
+// names too many, or this agent applies no confirmation (a release build,
+// whose answer is then what it always was); every id DEFERRED while the
+// agent is not ready. Each discard, and each refusal over capacity, is
+// logged with the enrolment ids, which are not secret.
+func (s *Server) applyFreezeConfirmation(ctx context.Context, forEnrolment []byte, ids [][]byte) []*agentv1.FreezeConfirmationResult {
 	if len(ids) == 0 && len(forEnrolment) == 0 {
-		return
+		return nil
 	}
 	switch {
 	case s.opts.Freezes == nil:
 		s.opts.Log.Info("freeze confirmation ignored: this agent applies none")
-		return
-	case trustReady(s.opts.Agent) != providerv1.AgentState_AGENT_STATE_READY:
-		s.opts.Log.Info("freeze confirmation ignored: the agent is not ready")
-		return
+		return nil
+	case len(ids) == 0:
+		return nil
 	case len(ids) > opstore.MaxFreezeConfirmations:
 		s.opts.Log.Info("freeze confirmation ignored: it names too many enrolments", "count", len(ids))
-		return
+		return nil
+	case trustReady(s.opts.Agent) != providerv1.AgentState_AGENT_STATE_READY:
+		s.opts.Log.Info("freeze confirmation deferred: the agent is not ready")
+		return freezeResults(ids, make([]opstore.FreezeOutcome, len(ids)))
 	}
-	done, err := s.opts.Freezes.ConfirmFrozen(ctx, forEnrolment, ids)
-	for _, id := range done {
-		s.opts.Log.Info("freeze confirmed: a frozen predecessor enrolment is discarded (its records are removed in chunks; compaction finishes an interrupted removal)",
-			"enrolment", hex.EncodeToString(id), "for", hex.EncodeToString(forEnrolment))
+	outcomes, err := s.opts.Freezes.ConfirmFrozen(ctx, forEnrolment, ids)
+	if len(outcomes) != len(ids) {
+		// A store that answers otherwise applied nothing it can vouch for.
+		outcomes = make([]opstore.FreezeOutcome, len(ids))
+	}
+	for i, o := range outcomes {
+		switch o {
+		case opstore.FreezeAccepted:
+			s.opts.Log.Info("freeze confirmed: a frozen predecessor enrolment is discarded (its records are removed in chunks; compaction finishes an interrupted removal)",
+				"enrolment", hex.EncodeToString(ids[i]), "for", hex.EncodeToString(forEnrolment))
+		case opstore.FreezeRefusedOverCapacity:
+			s.opts.Log.Info("freeze confirmation refused: too many discards are pending; the Provider relays it again",
+				"enrolment", hex.EncodeToString(ids[i]), "for", hex.EncodeToString(forEnrolment))
+		}
 	}
 	if err != nil {
 		s.opts.Log.Error(err, "freeze confirmation stopped", "for", hex.EncodeToString(forEnrolment))
-	} else if len(done) == 0 {
-		s.opts.Log.V(1).Info("freeze confirmation: nothing to discard", "for", hex.EncodeToString(forEnrolment), "count", len(ids))
+	}
+	return freezeResults(ids, outcomes)
+}
+
+// freezeResults is the wire form of outcomes, one per id, each echoing its
+// id.
+func freezeResults(ids [][]byte, outcomes []opstore.FreezeOutcome) []*agentv1.FreezeConfirmationResult {
+	out := make([]*agentv1.FreezeConfirmationResult, len(ids))
+	for i, id := range ids {
+		out[i] = &agentv1.FreezeConfirmationResult{EnrolmentId: append([]byte(nil), id...), Outcome: wireFreezeOutcome(outcomes[i])}
+	}
+	return out
+}
+
+// wireFreezeOutcome maps a store outcome to agent.v1; an outcome it does not
+// know is DEFERRED, never applied.
+func wireFreezeOutcome(o opstore.FreezeOutcome) agentv1.FreezeConfirmationOutcome {
+	switch o {
+	case opstore.FreezeAccepted:
+		return agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_ACCEPTED
+	case opstore.FreezeAlreadyApplied:
+		return agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_ALREADY_APPLIED
+	case opstore.FreezeRefusedOverCapacity:
+		return agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_REFUSED_OVER_CAPACITY
+	case opstore.FreezeNotApplicable:
+		return agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_NOT_APPLICABLE
+	default:
+		return agentv1.FreezeConfirmationOutcome_FREEZE_CONFIRMATION_OUTCOME_DEFERRED
 	}
 }
 

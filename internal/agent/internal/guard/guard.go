@@ -190,6 +190,10 @@ const (
 	// DiscardOnlyRetired: compaction removes the records of an enrolment the
 	// discard marker names only when it is retired.
 	DiscardOnlyRetired Name = "discard-only-retired"
+	// FreezeRefusalReported: a freeze confirmation refused because too many
+	// discards are pending is reported as refused over capacity, never as
+	// applied, so that the Provider relays it again.
+	FreezeRefusalReported Name = "freeze-refusal-reported"
 	// SignerRenewalURIs: the signer builds a renewal certificate request only
 	// for a host URI identity and an enrolment record.
 	SignerRenewalURIs Name = "signer-renewal-uris"
@@ -250,7 +254,7 @@ func All() []Name {
 		DeletedOnlyFromVMTombstone, LookupBeforeEnrolment, RecoveredOpsRun, InventoryValidate, InventoryOnlyWhenAsked,
 		EnrolKeyNeverReplaced, EnrolCSRKeyType, EnrolCSRURIs, EnrolRequestKey, EnrolNoReplace, EnrolSameEnrolment,
 		EnrolLoaderCheck, EnrolEpochAhead, ReenrolEpochAhead, ConfirmForActive, ConfirmOnlyFrozen,
-		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired,
+		RetiredNotHeld, DiscardChunked, DiscardResume, DiscardPrompt, DiscardOnlyRetired, FreezeRefusalReported,
 		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
 		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartMarkerExcl,
