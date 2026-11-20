@@ -393,7 +393,10 @@ func (o FreezeOutcome) String() string {
 // again (a new operation under a frozen enrolment is refused by its mint
 // epoch). It is idempotent: confirming a retired enrolment again changes no
 // record. The error, when not nil, is the store failure that stopped it; the
-// ids it did not reach are FreezeDeferred.
+// ids it did not reach are FreezeDeferred. That includes an id whose
+// discard committed but whose call then failed (the witness directory
+// could not be removed): it is reported FreezeDeferred, though retired, and
+// the next relay of it gets FreezeAlreadyApplied.
 func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]byte) ([]FreezeOutcome, error) {
 	if len(ids) == 0 || len(ids) > MaxFreezeConfirmations {
 		return nil, nil
@@ -417,6 +420,10 @@ func (s *Store) ConfirmFrozen(ctx context.Context, forEnrolment []byte, ids [][]
 		if full {
 			// Each further new discard would be refused the same way; one
 			// read tells a retired or unknown id from a refused one.
+			if guard.Off(guard.FreezeRefusalReported) {
+				out[i] = FreezeAccepted
+				continue
+			}
 			if out[i], err = s.unappliedOutcome(ctx, id, FreezeRefusedOverCapacity); err != nil {
 				return out, err
 			}

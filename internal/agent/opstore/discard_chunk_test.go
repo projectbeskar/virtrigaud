@@ -381,33 +381,53 @@ func TestConfirmFrozen_OutcomesOverCapacity(t *testing.T) {
 	require.Zero(t, records)
 	require.False(t, enrolment, "the first predecessor is removed completely")
 
-	var pending, last []byte
-	for i := 0; i <= opstore.MaxPendingDiscards; i++ {
+	// Two frozen predecessors beyond the cap: the first is refused by the
+	// store's own check, the second without being tried (it would be
+	// refused the same way).
+	var pending, last, second []byte
+	for i := 0; i <= opstore.MaxPendingDiscards+1; i++ {
 		finishOps(t, h, fmt.Sprintf("vm%d", i))
-		last = reenrolNext(t, h)
-		if i < opstore.MaxPendingDiscards {
-			require.NoError(t, h.s.ConfirmFreeze(ctx, last))
+		prev := reenrolNext(t, h)
+		switch {
+		case i < opstore.MaxPendingDiscards:
+			require.NoError(t, h.s.ConfirmFreeze(ctx, prev))
 			if pending == nil {
-				pending = last
+				pending = prev
 			}
+		case i == opstore.MaxPendingDiscards:
+			last = prev
+		default:
+			second = prev
 		}
 	}
-	lastOps, lastEnrolment, _ := rawRecords(t, h, last)
-	require.NotZero(t, lastOps)
-	require.True(t, lastEnrolment)
+	held := map[string]int{}
+	for _, id := range [][]byte{last, second} {
+		records, enrolment, _ := rawRecords(t, h, id)
+		require.NotZero(t, records)
+		require.True(t, enrolment)
+		held[string(id)] = records
+	}
 
-	ids := [][]byte{last, gone, pending, rid(), {1, 2, 3}, last}
+	ids := [][]byte{last, gone, pending, rid(), {1, 2, 3}, last, second}
 	want := []opstore.FreezeOutcome{opstore.FreezeRefusedOverCapacity, opstore.FreezeAlreadyApplied,
-		opstore.FreezeAlreadyApplied, opstore.FreezeNotApplicable, opstore.FreezeNotApplicable, opstore.FreezeNotApplicable}
+		opstore.FreezeAlreadyApplied, opstore.FreezeNotApplicable, opstore.FreezeNotApplicable, opstore.FreezeNotApplicable,
+		opstore.FreezeRefusedOverCapacity}
 	for round := 0; round < 2; round++ {
 		got, err := h.s.ConfirmFrozen(ctx, h.enrol, ids)
 		require.NoError(t, err)
 		assert.Equal(t, want, got, "round %d", round)
-		records, enrolment, marked := rawRecords(t, h, last)
-		assert.Equal(t, lastOps, records, "a refused confirmation removes nothing")
-		assert.True(t, enrolment)
-		assert.False(t, marked, "a refused confirmation starts no discard")
+		for _, id := range [][]byte{last, second} {
+			records, enrolment, marked := rawRecords(t, h, id)
+			assert.Equal(t, held[string(id)], records, "a refused confirmation removes nothing")
+			assert.True(t, enrolment)
+			assert.False(t, marked, "a refused confirmation starts no discard")
+		}
 	}
+	// The second over the cap alone, first in its confirmation, is refused
+	// by the store's own check.
+	got, err := h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{second})
+	require.NoError(t, err)
+	assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeRefusedOverCapacity}, got)
 	for _, o := range want {
 		assert.Equal(t, o != opstore.FreezeRefusedOverCapacity, o.Settled(), "%v", o)
 	}
@@ -415,7 +435,7 @@ func TestConfirmFrozen_OutcomesOverCapacity(t *testing.T) {
 	_, err = h.s.Compact(ctx, opstore.DefaultCompactBatch)
 	require.NoError(t, err)
 	require.False(t, h.s.Discarding())
-	got, err := h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{last})
+	got, err = h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{last})
 	require.NoError(t, err)
 	assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeAccepted}, got, "accepted once capacity is free")
 	for i := 0; i < 2; i++ {
@@ -452,4 +472,28 @@ func TestConfirmFrozen_OutcomesOfAStaleConfirmation(t *testing.T) {
 	got, err = h.s.ConfirmFrozen(ctx, h.enrol, make([][]byte, opstore.MaxFreezeConfirmations+1))
 	require.NoError(t, err)
 	assert.Nil(t, got, "too many ids: nothing applied, no outcome")
+}
+
+// TestConfirmFrozen_DeferredWhileAFreezeIsInProgress: a confirmation of a
+// frozen predecessor the store holds, made for the active enrolment, that
+// meets a re-enrolment's freeze in progress (it began after the
+// confirmation read the active enrolment) is deferred and changes nothing;
+// once the freeze is over, the same confirmation is accepted. An unknown id
+// in the same confirmation is not applicable.
+func TestConfirmFrozen_DeferredWhileAFreezeIsInProgress(t *testing.T) {
+	h, prev, _ := discardStore(t, testDiscardChunk)
+	ctx := context.Background()
+	opstore.SetFreezing(h.s, true)
+	got, err := h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{prev, rid()})
+	require.NoError(t, err)
+	assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeDeferred, opstore.FreezeNotApplicable}, got,
+		"a known predecessor is deferred, not settled")
+	_, enrolment, marked := rawRecords(t, h, prev)
+	assert.True(t, enrolment)
+	assert.False(t, marked, "nothing was discarded")
+
+	opstore.SetFreezing(h.s, false)
+	got, err = h.s.ConfirmFrozen(ctx, h.enrol, [][]byte{prev})
+	require.NoError(t, err)
+	assert.Equal(t, []opstore.FreezeOutcome{opstore.FreezeAccepted}, got)
 }
