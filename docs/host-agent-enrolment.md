@@ -49,11 +49,18 @@ nothing else:
 
 ```
 spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>
-urn:virtrigaud:enrolment:<32 hex>
-urn:virtrigaud:provider:<Provider UID>
-urn:virtrigaud:install:<32 hex>
-urn:virtrigaud:mode:identity
+spiffe://<trust domain>/virtrigaud/record/enrolment/<32 hex>
+spiffe://<trust domain>/virtrigaud/record/provider/<Provider UID>
+spiffe://<trust domain>/virtrigaud/record/install/<32 hex>
+spiffe://<trust domain>/virtrigaud/record/mode/identity
 ```
+
+Every URI has the manager's trust domain as its host, so the subordinate CA
+can carry a URI name constraint for the trust domain (see
+[Constrain the sub-CA to the trust domain](#constrain-the-sub-ca-to-the-trust-domain)).
+A record URI under another trust domain, or in the former
+`urn:virtrigaud:…` form, is refused: a host enrolled by an earlier
+development build must enrol again.
 
 The subordinate CA signs these URIs into the agent certificate, so whoever
 holds the certificate can derive the enrolment record from it offline, and the
@@ -308,7 +315,8 @@ next check.
 ### Start epochs
 
 The manager chooses the start epoch of each enrolment and the subordinate CA
-signs it into the record (`urn:virtrigaud:epoch:<n>`, present from epoch 2;
+signs it into the record
+(`spiffe://<trust domain>/virtrigaud/record/epoch/<n>`, present from epoch 2;
 a record without it is epoch 1, so a first enrolment's names are unchanged).
 The agent starts the enrolment at exactly that epoch, and grants for it are
 minted at it. A host refuses a first delivery minted below its enrolment's
@@ -552,6 +560,51 @@ cert-manager's cluster resource namespace, not in the enrolment namespace
 where the manager can write Secrets. A namespaced `Issuer` keeps its key
 Secret in its own namespace, which is the enrolment namespace; that layout
 is not supported, because it puts the sub-CA key where the manager writes.
+
+### Constrain the sub-CA to the trust domain
+
+Give the host-agent sub-CA certificate a critical URI name constraint whose
+only permitted URI domain is the trust domain
+(`--dev-host-enrolment-trust-domain`). Every URI in an agent certificate has
+the trust domain as its host, so the constraint costs nothing, and it is the
+one control that still binds a **stolen** sub-CA key: the admission policy
+and approver-policy below act only at the API, while a verifier (the
+manager, the Provider and the agent all use Go's `crypto/x509`) refuses any
+certificate the sub-CA signs with a URI outside the trust domain. Inside the
+trust domain a stolen key can still mint any host's names; only key pinning
+stops those from being used.
+
+With cert-manager, set it on the `Certificate` that issues the sub-CA (the
+`NameConstraints` feature is beta and enabled by default from cert-manager
+v1.17; from v1.14 it is alpha and needs `--feature-gates=NameConstraints=true`
+on the controller and the webhook):
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: host-agent-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: host-agent sub-CA
+  secretName: host-agent-ca
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  nameConstraints:
+    critical: true
+    permitted:
+      uriDomains:
+      - cluster.example   # the trust domain, exactly
+  issuerRef:
+    kind: ClusterIssuer
+    name: your-root-or-intermediate
+```
+
+cert-manager's CA issuer does not check the names it signs against the CA's
+own constraints, so a mismatched request is still issued and only refused
+when verified. The manager does not check that the constraint is present.
 
 The Secret is named `virtrigaud-agent-pins-<hash>` (a hash of the Host's
 namespace and name, so the name is bounded), labelled
@@ -853,13 +906,10 @@ they do different things:
   days. It approves nothing, so the manager's approval rules stay the only
   approval decision. It cannot check the names inside the PKCS #10 request
   (`spec.request` is DER, which admission expressions cannot parse); the
-  manager checks those itself. Do not add a URI name constraint to the
-  host-agent sub-CA: agent certificates also carry record URIs of the form
-  `urn:virtrigaud:…`, which have no host, and RFC 5280 §4.2.1.10 requires a
-  verifier to reject such a URI under any URI name constraint, so every agent
-  certificate would fail verification (Go's `crypto/x509`, which the manager,
-  the Provider and the agent use, rejects it). An envtest spec applies the
-  sample to a real API server.
+  manager checks those itself, and the sub-CA's
+  [URI name constraint](#constrain-the-sub-ca-to-the-trust-domain) bounds
+  them to the trust domain. An envtest spec applies the sample to a real API
+  server.
 - **approver-policy (only if you accept what it does).**
   `config/rbac/host-enrolment/admission/approver-policy.yaml` is a
   cert-manager approver-policy `CertificateRequestPolicy` bound (`use`) to the
@@ -872,8 +922,9 @@ they do different things:
   it approves requests of the allowed shape that the manager would never
   approve, including a request for a Host that does not exist. What it adds
   is a check of the names inside the request: only
-  `spiffe://<trust domain>/virtrigaud/host/...` and `urn:virtrigaud:` URIs, no
-  DNS, IP or e-mail names; it cannot require exactly one host URI. The policy
+  `spiffe://<trust domain>/virtrigaud/host/...` and
+  `spiffe://<trust domain>/virtrigaud/record/...` URIs, no DNS, IP or e-mail
+  names; it cannot require exactly one host URI. The policy
   must allow a subject common name: every agent request, enrolment and
   renewal, carries the host's name as its common name, and a policy without
   `allowed.commonName` denies every renewal (the manager gives a key up after

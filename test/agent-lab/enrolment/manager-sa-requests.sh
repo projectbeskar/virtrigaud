@@ -23,7 +23,7 @@ MK="kubectl --kubeconfig $LAB/kube/manager.kubeconfig"
 K="kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
 d=$LAB/out/manager-sa-requests; mkdir -p "$d"; cd "$d" || exit 1
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out k.pem 2>/dev/null
-openssl req -new -key k.pem -subj /CN=ghost -out r.csr -addext "subjectAltName=URI:spiffe://$TRUST_DOMAIN/virtrigaud/host/infra/ghost,URI:urn:virtrigaud:enrolment:00112233445566778899aabbccddeeff,URI:urn:virtrigaud:provider:x,URI:urn:virtrigaud:install:00112233445566778899aabbccddeeff,URI:urn:virtrigaud:mode:identity"
+openssl req -new -key k.pem -subj /CN=ghost -out r.csr -addext "subjectAltName=URI:spiffe://$TRUST_DOMAIN/virtrigaud/host/infra/ghost,URI:spiffe://$TRUST_DOMAIN/virtrigaud/record/enrolment/00112233445566778899aabbccddeeff,URI:spiffe://$TRUST_DOMAIN/virtrigaud/record/provider/x,URI:spiffe://$TRUST_DOMAIN/virtrigaud/record/install/00112233445566778899aabbccddeeff,URI:spiffe://$TRUST_DOMAIN/virtrigaud/record/mode/identity"
 req=$(base64 -w0 r.csr)
 
 manifest() { # kind host isCA

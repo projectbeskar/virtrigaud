@@ -16,10 +16,10 @@
 # manager checks those itself, and an issued certificate is pinned for no
 # Host unless it carries the Host's names and a key the host co-signed; but
 # whoever controls the manager's ServiceAccount can still have the issuer
-# sign other names. Do not add a URI name constraint to the host-agent
-# sub-CA to narrow that: agent certificates carry host-less record URIs
-# (urn:virtrigaud:...), which RFC 5280 requires a verifier to reject under any
-# URI name constraint, so every agent certificate would fail verification.
+# sign other names. Give the host-agent sub-CA a URI name constraint for the
+# trust domain (docs/host-agent-enrolment.md, "Constrain the sub-CA to the
+# trust domain"): every URI in an agent certificate has the trust domain as
+# its host, and a verifier then refuses any name outside it.
 #
 # Placeholders: virtrigaud-system / virtrigaud-controller-manager (the
 # manager's ServiceAccount), host-agent-pki (the enrolment namespace),

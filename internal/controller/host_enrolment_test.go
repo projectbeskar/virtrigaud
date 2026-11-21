@@ -46,7 +46,7 @@ func TestParseHostEnrolmentConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, cfg, "no flag: enrolment disabled")
 
-	ca := hostidentitytest.NewCA(t)
+	ca := hostidentitytest.NewConstrainedCA(t, "cluster.test")
 	caFile := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(caFile, ca.PEM, 0o600))
 	clusterIssuer := HostEnrolmentFlags{
@@ -123,7 +123,7 @@ func TestHostInventory_AgentHostsRenderPinnedAgentTLS(t *testing.T) {
 	prov := clusterProvider("ch-cluster")
 	prov.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor
 
-	ca := hostidentitytest.NewCA(t)
+	ca := hostidentitytest.NewConstrainedCA(t, "cluster.test")
 	pin := strings.Repeat("ab", 32)
 	mkHost := func(name, identity string, revoked bool) *infravirtrigaudiov1beta1.Host {
 		h := hostCR(name, prov.Name, nil)

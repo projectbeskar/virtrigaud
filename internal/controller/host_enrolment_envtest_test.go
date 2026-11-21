@@ -89,7 +89,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		prov.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologyCluster
 		Expect(k8sClient.Create(ctx, prov)).To(Succeed())
 		e.provider = prov
-		e.ca = hostidentitytest.NewCA(GinkgoT())
+		e.ca = hostidentitytest.NewConstrainedCA(GinkgoT(), enrolTestTrustDomain)
 		cm, ext := enrolTestCMIssuer, enrolTestExtIssuer
 		e.cfg = &HostEnrolmentConfig{
 			Namespace: e.issuerNS, CertManagerIssuer: &cm, ExternalPKIIssuer: &ext,
@@ -458,7 +458,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		Expect(h.Status.Agent.PendingEnrolmentID).NotTo(Equal(first))
 		Expect(h.Status.Agent.EnrolmentID).To(Equal(first))
 		Expect(h.Status.Agent.RequestURIs).To(HaveLen(6))
-		Expect(h.Status.Agent.RequestURIs[5]).To(Equal(hostidentity.URIEpochPrefix+"2"), "the record carries the next start epoch")
+		Expect(h.Status.Agent.RequestURIs[5]).To(Equal(hostidentity.EpochURI(enrolTestTrustDomain, 2)), "the record carries the next start epoch")
 		cond := meta.FindStatusCondition(h.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled)
 		Expect(cond.Reason).To(Equal(infravirtrigaudiov1beta1.HostReasonAgentEnrolled))
 		Expect(cond.Message).To(ContainSubstring("re-key window is open"))
@@ -649,13 +649,13 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		h.Annotations[hostidentity.AnnotationStartEpochFloor] = "100"
 		Expect(k8sClient.Update(ctx, h)).To(Succeed())
 		h = requestRekey(e, "host-a")
-		Expect(h.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIEpochPrefix+"2"), "the floor is ignored once enrolled")
+		Expect(h.Status.Agent.RequestURIs).To(ContainElement(hostidentity.EpochURI(enrolTestTrustDomain, 2)), "the floor is ignored once enrolled")
 		// A fresh Host within the cap: applied, with an event.
 		hb := createHost(e, "host-b", "serial-0002", "ch")
 		hb.Annotations = map[string]string{hostidentity.AnnotationStartEpochFloor: "40"}
 		Expect(k8sClient.Update(ctx, hb)).To(Succeed())
 		hb = reconcileHost(e, "host-b")
-		Expect(hb.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIEpochPrefix + "40"))
+		Expect(hb.Status.Agent.RequestURIs).To(ContainElement(hostidentity.EpochURI(enrolTestTrustDomain, 40)))
 		var applied bool
 		for len(rec.Events) > 0 {
 			if ev := <-rec.Events; strings.Contains(ev, "starts at epoch 40") {
@@ -764,7 +764,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		_, err := src.HostTrust(ctx, e.provider, "host-a")
 		Expect(err).To(MatchError(operation.ErrNoEnrolment), "an enrolment of another installation is not trusted")
 		h := requestRekey(e, "host-a")
-		Expect(h.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIInstallPrefix + hex.EncodeToString(e.cfg.InstallID)))
+		Expect(h.Status.Agent.RequestURIs).To(ContainElement(hostidentity.InstallURI(enrolTestTrustDomain, e.cfg.InstallID)))
 		enrol(e, "host-a")
 		trust, err := src.HostTrust(ctx, e.provider, "host-a")
 		Expect(err).NotTo(HaveOccurred())
@@ -922,7 +922,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		h.Annotations = map[string]string{hostidentity.AnnotationStartEpochFloor: "3"}
 		Expect(k8sClient.Update(ctx, h)).To(Succeed())
 		h = reconcileHost(e, "host-a")
-		Expect(h.Status.Agent.RequestURIs).To(ContainElement(hostidentity.URIEpochPrefix+"3"), "the floor raises the record's epoch")
+		Expect(h.Status.Agent.RequestURIs).To(ContainElement(hostidentity.EpochURI(enrolTestTrustDomain, 3)), "the floor raises the record's epoch")
 		enrol(e, "host-a")
 		st, _ := loadState(e, "host-a")
 		Expect(st.Current.mintEpoch()).To(Equal(uint64(3)))

@@ -54,7 +54,7 @@ import (
 func TestPinsHostTrust(t *testing.T) {
 	ctx := context.Background()
 	sch := newProviderTLSScheme(t)
-	ca := hostidentitytest.NewCA(t)
+	ca := hostidentitytest.NewConstrainedCA(t, "cluster.test")
 	key := hostidentitytest.NewKey(t)
 	pin, err := hostidentity.SPKIPin(&key.PublicKey)
 	require.NoError(t, err)
@@ -399,7 +399,7 @@ func (s anchoredSigner) Anchor() *x509.Certificate { return s.anchor }
 // missing signer, or one that names no grant anchor, refuses to start, as
 // does an anchor that is the host-agent CA.
 func TestCheckHostAnswerTrust(t *testing.T) {
-	hostCA := hostidentitytest.NewCA(t)
+	hostCA := hostidentitytest.NewConstrainedCA(t, "cluster.test")
 	grant := hostidentitytest.NewCA(t)
 	cfg := &HostEnrolmentConfig{CABundle: hostCA.PEM}
 	require.NoError(t, CheckHostAnswerTrust(nil, nil), "nothing to check without enrolment")
