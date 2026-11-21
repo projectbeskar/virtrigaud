@@ -75,6 +75,11 @@ type HostAnswerQuery struct {
 	// in the signed answer: the highest renewal version the caller
 	// implements, or 0 for none.
 	RenewalVersion uint32
+	// StoreCapacityVersion asks for how full the host's operation store is in
+	// the signed answer: the highest store capacity version the caller
+	// implements, or 0 for none. An agent older than the field ignores it and
+	// answers without one.
+	StoreCapacityVersion uint32
 }
 
 // VMAnswerQuery names one VM placement for a Describe that asks for a signed
@@ -103,6 +108,7 @@ type HostAnswerReader interface {
 	// VMAnswer asks the host about one VM placement (Describe).
 	VMAnswer(ctx context.Context, q VMAnswerQuery) (DescribeResponse, SignedRead, error)
 	// HostAnswer asks the host about itself (GetHostInfo), with its host
-	// inventory when q.InventoryVersion is at least 1.
+	// inventory when q.InventoryVersion is at least 1 and its store capacity
+	// when q.StoreCapacityVersion is.
 	HostAnswer(ctx context.Context, q HostAnswerQuery) (HostInfo, SignedRead, error)
 }

@@ -39,7 +39,8 @@ type providerService struct {
 // GetHostInfo answers for this host only, with a signed HostAnswer when the
 // request carries answer_nonce. When the request also carries an
 // inventory_version of at least 1, the signed answer carries the host
-// inventory; the other RPCs of the agent never do.
+// inventory, and when it carries a store_capacity_version of at least 1, how
+// full the store is; the other RPCs of the agent never do.
 func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHostInfoRequest) (*providerv1.HostInfo, error) {
 	if err := checkNonce(req.GetAnswerNonce(), false); err != nil {
 		return nil, err
@@ -53,6 +54,9 @@ func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHo
 	if req.GetRenewalVersion() != 0 && len(req.GetAnswerNonce()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "renewal_version is set without answer_nonce")
 	}
+	if req.GetStoreCapacityVersion() != 0 && len(req.GetAnswerNonce()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "store_capacity_version is set without answer_nonce")
+	}
 	hostID := p.s.opts.Credentials.Load().Identity.HostID()
 	if req.GetHostId() != "" && req.GetHostId() != hostID {
 		return nil, status.Error(codes.InvalidArgument, "host_id names another host")
@@ -61,10 +65,12 @@ func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHo
 	if state, _ := p.s.opts.Agent.TrustState(); state == providerv1.AgentState_AGENT_STATE_READY {
 		health = providerv1.HostHealth_HOST_HEALTH_READY
 	}
+	blob := p.s.hostAnswerWithInventory(ctx, req.GetAnswerNonce(), req.GetContinuitySeq(), req.GetInventoryVersion(),
+		req.GetRenewalVersion(), req.GetStoreCapacityVersion())
 	return &providerv1.HostInfo{
 		Id:         hostID,
 		Health:     health,
-		HostAnswer: p.s.hostAnswerWithInventory(ctx, req.GetAnswerNonce(), req.GetContinuitySeq(), req.GetInventoryVersion(), req.GetRenewalVersion()),
+		HostAnswer: blob,
 	}, nil
 }
 

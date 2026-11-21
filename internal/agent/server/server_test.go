@@ -68,6 +68,20 @@ type fakeAgent struct {
 	floor      atomic.Int64
 	floorState clockfloor.StateKind
 	cause      string
+	capacity   opstore.Capacity
+}
+
+// StoreCapacity reports the capacity a test set; not measured by default.
+func (f *fakeAgent) StoreCapacity() opstore.Capacity {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.capacity
+}
+
+func (f *fakeAgent) setCapacity(c opstore.Capacity) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.capacity = c
 }
 
 func (f *fakeAgent) HostView(context.Context, uint64) (opstore.HostView, error) {

@@ -553,8 +553,10 @@ func (r *HostReconciler) withdrawHostInventory(ctx context.Context, host *infrav
 
 // clearHostInventory removes the inventory mirror and conditions of a host
 // whose Provider does not run a per-host agent (it moved to another
-// Provider), with its metric series and audit state.
+// Provider), with its metric series and audit state, and its store pressure
+// condition (clearStorePressure).
 func (r *HostReconciler) clearHostInventory(host *infravirtrigaudiov1beta1.Host) {
+	clearStorePressure(host)
 	host.Status.AgentInventory = nil
 	meta.RemoveStatusCondition(&host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified)
 	meta.RemoveStatusCondition(&host.Status.Conditions, infravirtrigaudiov1beta1.HostConditionComponentsReady)

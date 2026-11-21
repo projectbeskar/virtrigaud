@@ -210,6 +210,13 @@ func (p *provider) signedHostInfo(req *providerv1.GetHostInfoRequest, hs *hostSt
 	if p.inventory && req.GetInventoryVersion() >= 1 {
 		a.Inventory = FakeInventory(req.GetInventoryVersion())
 	}
+	if v := req.GetStoreCapacityVersion(); v >= 1 {
+		// An agent of the current API version always answers the capacity
+		// it is asked for (a manager refuses its answer without it).
+		a.StoreCapacity = &providerv1.StoreCapacity{LiveBytes: FakeStoreLiveBytes, ThresholdBytes: FakeStoreThresholdBytes,
+			Level: hostidentity.StoreLevelOf(FakeStoreLiveBytes, FakeStoreThresholdBytes), RequestedVersion: v,
+			Version: min(v, hostidentity.StoreCapacityVersion)}
+	}
 	blob, err := p.sign(req.GetHostId(), a)
 	if err != nil {
 		return status.Errorf(codes.Internal, "sign: %v", err)
@@ -217,6 +224,15 @@ func (p *provider) signedHostInfo(req *providerv1.GetHostInfoRequest, hs *hostSt
 	info.HostAnswer = blob
 	return nil
 }
+
+// FakeStoreLiveBytes and FakeStoreThresholdBytes are the store capacity the
+// fake's hosts report: well below three quarters of the threshold (OK).
+const (
+	// FakeStoreLiveBytes is the reported live size.
+	FakeStoreLiveBytes = 1 << 20
+	// FakeStoreThresholdBytes is the reported threshold.
+	FakeStoreThresholdBytes = 256 << 20
+)
 
 // FakeInventoryComponent, FakeInventoryVersion and the digests below name
 // the one component of FakeInventory, so a test can allow-list it.

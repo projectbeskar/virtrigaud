@@ -47,6 +47,7 @@ func (a *floorAgent) TrustState() (providerv1.AgentState, string) {
 func (a *floorAgent) ClockFloor() time.Time                 { return a.floor }
 func (a *floorAgent) ClockFloorState() clockfloor.StateKind { return a.state }
 func (a *floorAgent) UnattestedCause() string               { return "" }
+func (a *floorAgent) StoreCapacity() opstore.Capacity       { return opstore.Capacity{} }
 
 // TestGrantClockFailsClosed: grants are judged at the later of the host
 // clock and a healthy floor, read once per call; an unhealthy floor gives the

@@ -97,8 +97,11 @@ const (
 	// AgentAPIVersion is the version of the agent's RPC surface. Version 2
 	// adds the host inventory to the answer of GetHostInfo; version 3 adds
 	// the pending certificate renewal request to it and serves
-	// InstallRenewedCertificate (development builds).
-	AgentAPIVersion uint32 = 3
+	// InstallRenewedCertificate (development builds); version 4 puts the
+	// store capacity in every answer to a GetHostInfo that asks for it, so a
+	// manager that asked can tell a request stripped in transit from an
+	// older agent (hostidentity.StoreCapacityAgentAPIVersion).
+	AgentAPIVersion uint32 = 4
 	// GrantVersion is the operation grant version the agent implements.
 	GrantVersion uint32 = 1
 )
@@ -260,6 +263,14 @@ type Host struct {
 	// (SignRenewalRequest); it is put in the answer only when
 	// RenewalRequested is at least 1.
 	PendingRenewal *providerv1.SignedBlob
+	// StoreCapacityRequested is the request's store_capacity_version; 0 when
+	// it asked for none.
+	StoreCapacityRequested uint32
+	// StoreCapacity is how full the store is (opstore.Store.Capacity); it is
+	// put in the answer only when StoreCapacityRequested is at least 1,
+	// whatever the caller passed, as NOT_MEASURED when it was not measured
+	// (MaxBytes 0).
+	StoreCapacity opstore.Capacity
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no
@@ -306,7 +317,29 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 	if h.PendingRenewal != nil && (h.RenewalRequested != 0 || guard.Off(guard.RenewalOnlyWhenAsked)) {
 		a.PendingRenewal = proto.CloneOf(h.PendingRenewal)
 	}
+	a.StoreCapacity = storeCapacity(h.StoreCapacityRequested, h.StoreCapacity)
 	return a, nil
+}
+
+// storeCapacity is the StoreCapacity of an answer to a request that asked for
+// store capacity version requested, which it echoes, in content version
+// min(requested, hostidentity.StoreCapacityVersion): nil when it asked for
+// none (a manager that does not know the field refuses an answer that
+// carries it); NOT_MEASURED with no sizes when c was not measured; otherwise
+// c with the level the contract's rule gives (hostidentity.StoreLevelOf), so
+// a verifier never sees a level that contradicts the sizes.
+func storeCapacity(requested uint32, c opstore.Capacity) *providerv1.StoreCapacity {
+	if requested == 0 && !guard.Off(guard.StoreCapacityOnlyWhenAsked) {
+		return nil
+	}
+	version := max(min(requested, hostidentity.StoreCapacityVersion), 1)
+	if c.MaxBytes <= 0 || c.LiveBytes <= 0 {
+		return &providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED, RequestedVersion: requested,
+			Version: version}
+	}
+	live, limit := uint64(c.LiveBytes), uint64(c.MaxBytes)
+	return &providerv1.StoreCapacity{LiveBytes: live, ThresholdBytes: limit, Level: hostidentity.StoreLevelOf(live, limit),
+		RequestedVersion: requested, Version: version}
 }
 
 // answerContext builds the AnswerContext of h, enforcing when an answer may

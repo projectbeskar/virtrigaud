@@ -93,6 +93,11 @@ func (h *renewingHost) answer(q contracts.HostAnswerQuery, nonce []byte) *contra
 	if q.ContinuitySeq > 0 && q.ContinuitySeq <= h.seq {
 		ha.Context.ContinuityHead = bytes.Repeat([]byte{byte(q.ContinuitySeq)}, 32)
 	}
+	if q.StoreCapacityVersion > 0 {
+		// A current agent always answers the store capacity it is asked for.
+		ha.StoreCapacity = &providerv1.StoreCapacity{Level: providerv1.StoreLevel_STORE_LEVEL_NOT_MEASURED,
+			RequestedVersion: q.StoreCapacityVersion, Version: min(q.StoreCapacityVersion, hostidentity.StoreCapacityVersion)}
+	}
 	if len(h.staged) > 0 {
 		sum := sha256.Sum256(h.staged)
 		ha.StagedCertificateSha256 = sum[:]
