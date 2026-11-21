@@ -37,10 +37,10 @@ import (
 // renewalURIs are a host URI identity and an enrolment record.
 var renewalURIs = []string{
 	"spiffe://example.test/virtrigaud/host/hosts/host-a",
-	"urn:virtrigaud:enrolment:" + strings.Repeat("03", 16),
-	"urn:virtrigaud:provider:0b7a1c3e-1111-4222-8333-944455556666",
-	"urn:virtrigaud:install:" + strings.Repeat("02", 16),
-	"urn:virtrigaud:mode:identity",
+	"spiffe://example.test/virtrigaud/record/enrolment/" + strings.Repeat("03", 16),
+	"spiffe://example.test/virtrigaud/record/provider/0b7a1c3e-1111-4222-8333-944455556666",
+	"spiffe://example.test/virtrigaud/record/install/" + strings.Repeat("02", 16),
+	"spiffe://example.test/virtrigaud/record/mode/identity",
 }
 
 // renewalSigner writes a host key file in a private directory and serves it

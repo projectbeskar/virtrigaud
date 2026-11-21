@@ -45,7 +45,8 @@ const (
 
 // PKI is a test PKI.
 type PKI struct {
-	// HostCA issues host identity certificates.
+	// HostCA issues host identity certificates; its URI name constraint
+	// permits only TrustDomain, as the host-agent sub-CA must carry.
 	HostCA *hostidentitytest.CA
 	// ProviderCA issues Provider identity certificates.
 	ProviderCA *hostidentitytest.CA
@@ -68,7 +69,7 @@ type PKI struct {
 func New(t testing.TB) *PKI {
 	t.Helper()
 	p := &PKI{
-		HostCA:     hostidentitytest.NewCA(t),
+		HostCA:     hostidentitytest.NewConstrainedCA(t, TrustDomain),
 		ProviderCA: hostidentitytest.NewCA(t),
 		GrantCA:    hostidentitytest.NewCA(t),
 		HostKey:    hostidentitytest.NewKey(t),

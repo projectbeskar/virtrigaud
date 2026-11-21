@@ -24,7 +24,8 @@ cd "$PKI"
 
 ec_key() { openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$1"; }
 
-# Test root (path length 1) and host-agent sub-CA (path length 0).
+# Test root (path length 1) and host-agent sub-CA (path length 0, URI name
+# constraint for the trust domain).
 if [ ! -f root.crt ]; then
   ec_key root.key
   openssl req -x509 -new -key root.key -sha256 -days 30 -subj "/CN=Lab test root CA" -out root.crt \
@@ -32,7 +33,11 @@ if [ ! -f root.crt ]; then
     -addext "subjectKeyIdentifier=hash"
   ec_key subca.key
   openssl req -new -key subca.key -subj "/CN=Lab host-agent sub-CA" -out subca.csr
+  # The sub-CA's URI name constraint permits only the trust domain: every
+  # URI in an agent certificate has it as its host
+  # (docs/host-agent-enrolment.md, "Constrain the sub-CA to the trust domain").
   printf '%s\n' "basicConstraints=critical,CA:TRUE,pathlen:0" "keyUsage=critical,keyCertSign,cRLSign" \
+    "nameConstraints=critical,permitted;URI:$TRUST_DOMAIN" \
     "subjectKeyIdentifier=hash" "authorityKeyIdentifier=keyid" > subca.ext
   openssl x509 -req -in subca.csr -CA root.crt -CAkey root.key -CAcreateserial -days 29 -sha256 \
     -extfile subca.ext -out subca.crt

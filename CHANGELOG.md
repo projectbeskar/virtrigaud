@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-21 11:16] - Agent certificates carry their enrolment record under the trust domain, so the sub-CA can be name-constrained (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/hostidentity/record.go`, `internal/hostidentity/doc.go`: the enrolment-record URIs in an agent certificate change from `urn:virtrigaud:<kind>:<value>` to `spiffe://<trust domain>/virtrigaud/record/<kind>/<value>` (enrolment, provider, install, mode, epoch). The trust domain is the host URI's own. `RecordFromURIs` refuses a record URI under another trust domain, scheme or path, with a port, query or extra segment, and the former `urn:` form. There is no transition: a host enrolled by an earlier development build must enrol again. `Record.URIs` now takes the trust domain. New helpers `RecordURI`, `EnrolmentURI`, `InstallURI`, `EpochURI` and `TrustDomainOf` replace the `URI*Prefix` constants.
+- `cmd/vrtg/host.go`: `vrtg host` matches the enrolment URI by its record path.
+- `config/rbac/host-enrolment/admission/approver-policy.yaml`: the sample now allows only `spiffe://<trust domain>/virtrigaud/host/*` and `spiffe://<trust domain>/virtrigaud/record/*`. That is tighter than the former `urn:virtrigaud:*`, which allowed any trust domain for the record URIs.
+- `docs/host-agent-enrolment.md`, `docs/per-host-agent-development.md`, `config/rbac/host-enrolment/README.md`, `config/rbac/host-enrolment/admission/manager-certificaterequests.yaml`: new section "Constrain the sub-CA to the trust domain". It covers a critical URI name constraint permitting only the trust domain, with a cert-manager `Certificate` example (`nameConstraints.permitted.uriDomains`). This replaces the earlier warning against such a constraint, which was correct only while the record URIs had no host.
+- `test/agent-lab/enrolment/pki.sh`: the lab sub-CA carries the constraint (`nameConstraints=critical,permitted;URI:<trust domain>`). `test/agent-lab/enrolment/manager-sa-requests.sh` and `test/agent-lab/cmd/agent-labpki` use the new URIs and a constrained CA.
+
+### Added
+- `internal/hostidentity/hostidentitytest`: `NewConstrainedCA`, a test CA with a critical URI name constraint. The host-agent CA in every agent, manager, Provider and conformance test now uses it, so the whole stack is tested under the constraint.
+- `internal/hostidentity/name_constraint_test.go`: a constrained sub-CA issues agent certificates that verify, at the first and at a later epoch. A host or record URI under another trust domain, or a host-less `urn:` URI, fails verification with `CANotAuthorizedForThisName`.
+
+### Why
+A URI name constraint on the host-agent sub-CA is the one control that still binds a stolen sub-CA key. Under RFC 5280 section 4.2.1.10, however, a URI without a host fails every URI name constraint. With `urn:` record URIs, a constrained sub-CA could therefore issue no verifiable agent certificate. Carrying the record under the trust domain makes the constraint usable.
+
+### Impact
+- [ ] Breaking change (development builds only: agents enrolled by an earlier development build must enrol again)
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-20 02:28] - The Host warns before the per-host agent's store refuses work (development builds only)
 **Author:** @wrkode (William Rizzo)
 

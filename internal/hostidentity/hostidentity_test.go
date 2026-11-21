@@ -84,22 +84,33 @@ func TestRecordRoundTripsThroughURIs(t *testing.T) {
 	got, err := hostidentity.RecordFromURIs(hostidentitytest.ParseURIs(t, uris), testHostURI(t))
 	require.NoError(t, err)
 	assert.True(t, rec.Equal(got))
-	assert.Equal(t, "urn:virtrigaud:enrolment:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", uris[1])
-	assert.Equal(t, "urn:virtrigaud:mode:identity", uris[4])
+	assert.Equal(t, "spiffe://cluster.test/virtrigaud/record/enrolment/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", uris[1])
+	assert.Equal(t, "spiffe://cluster.test/virtrigaud/record/mode/identity", uris[4])
 }
 
 func TestRecordFromURIsRefusesAnythingButTheExactSet(t *testing.T) {
 	host := testHostURI(t)
 	base := hostidentity.RequestURIs(host, testRecord())
 	cases := map[string][]string{
-		"missing host URI":     append([]string{"urn:virtrigaud:other"}, base[1:]...),
+		"missing host URI":     append([]string{"spiffe://cluster.test/virtrigaud/record/other/x"}, base[1:]...),
 		"other host URI":       append([]string{strings.Replace(host, testHostName, "host-b", 1)}, base[1:]...),
-		"extra URI":            append(append([]string{}, base...), "urn:virtrigaud:extra"),
+		"extra URI":            append(append([]string{}, base...), "spiffe://cluster.test/virtrigaud/record/extra/x"),
 		"missing mode":         base[:4],
 		"repeated enrolment":   {host, base[1], base[1], base[2], base[3]},
 		"uppercase enrolment":  {host, strings.ToUpper(base[1]), base[2], base[3], base[4]},
-		"short enrolment id":   {host, "urn:virtrigaud:enrolment:abcd", base[2], base[3], base[4]},
-		"provider uid garbage": {host, base[1], "urn:virtrigaud:provider:nope", base[3], base[4]},
+		"short enrolment id":   {host, "spiffe://cluster.test/virtrigaud/record/enrolment/abcd", base[2], base[3], base[4]},
+		"provider uid garbage": {host, base[1], "spiffe://cluster.test/virtrigaud/record/provider/nope", base[3], base[4]},
+		"other mode":           {host, base[1], base[2], base[3], "spiffe://cluster.test/virtrigaud/record/mode/full"},
+		"record under another trust domain": {host, strings.Replace(base[1], "cluster.test", "other.test", 1), base[2], base[3],
+			base[4]},
+		"record with a port":           {host, strings.Replace(base[1], "cluster.test", "cluster.test:443", 1), base[2], base[3], base[4]},
+		"record with a query":          {host, base[1] + "?x=1", base[2], base[3], base[4]},
+		"record under another scheme":  {host, strings.Replace(base[1], "spiffe://", "https://", 1), base[2], base[3], base[4]},
+		"record with an extra segment": {host, base[1] + "/x", base[2], base[3], base[4]},
+		"record as a host URI":         {host, strings.Replace(base[1], "/record/", "/host/", 1), base[2], base[3], base[4]},
+		"former urn form": {host, "urn:virtrigaud:enrolment:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+			"urn:virtrigaud:provider:0b7a1c3e-1111-4222-8333-944455556666", "urn:virtrigaud:install:" + strings.Repeat("b2", 16),
+			"urn:virtrigaud:mode:identity"},
 	}
 	for name, uris := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -127,7 +138,7 @@ func TestRecordStartEpoch(t *testing.T) {
 	later.StartEpoch = 7
 	uris := hostidentity.RequestURIs(host, later)
 	require.Len(t, uris, 6)
-	assert.Equal(t, "urn:virtrigaud:epoch:7", uris[5])
+	assert.Equal(t, "spiffe://cluster.test/virtrigaud/record/epoch/7", uris[5])
 	got, err := hostidentity.RecordFromURIs(hostidentitytest.ParseURIs(t, uris), host)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(7), got.Epoch())
@@ -138,7 +149,7 @@ func TestRecordStartEpoch(t *testing.T) {
 	for name, epoch := range map[string]string{"epoch 1 spelled out": "1", "zero": "0", "leading zero": "07", "sign": "+7",
 		"not decimal": "x7", "empty": "", "above the bound": "4294967297", "overflow": "99999999999999999999999"} {
 		t.Run(name, func(t *testing.T) {
-			_, err := hostidentity.RecordFromURIs(hostidentitytest.ParseURIs(t, append(append([]string{}, base...), hostidentity.URIEpochPrefix+epoch)), host)
+			_, err := hostidentity.RecordFromURIs(hostidentitytest.ParseURIs(t, append(append([]string{}, base...), hostidentity.RecordURI("cluster.test", hostidentity.RecordKindEpoch, epoch))), host)
 			assert.ErrorIs(t, err, hostidentity.ErrRecord)
 		})
 	}

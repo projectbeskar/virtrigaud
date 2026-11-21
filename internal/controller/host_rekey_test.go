@@ -141,7 +141,7 @@ func TestStartEpochFloor(t *testing.T) {
 func TestPinsHostTrust_RekeyedEnrolment(t *testing.T) {
 	ctx := context.Background()
 	sch := newProviderTLSScheme(t)
-	ca := hostidentitytest.NewCA(t)
+	ca := hostidentitytest.NewConstrainedCA(t, "cluster.test")
 	prov := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "ch", Namespace: "default",
 		UID: identityProviderUID}, Spec: infravirtrigaudiov1beta1.ProviderSpec{Type: infravirtrigaudiov1beta1.ProviderTypeCloudHypervisor}}
 	h := hostCR("host-a", "ch", nil)

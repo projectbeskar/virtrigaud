@@ -68,7 +68,7 @@ type pki struct {
 
 func newPKI(t *testing.T) *pki {
 	t.Helper()
-	ca := hostidentitytest.NewCA(t)
+	ca := hostidentitytest.NewConstrainedCA(t, testTrustDomain)
 	other := hostidentitytest.NewCA(t)
 	key := hostidentitytest.NewKey(t)
 	csr := hostidentitytest.NewCSR(t, key, hostidentitytest.CSROptions{URIs: []string{"spiffe://" + testTrustDomain + "/virtrigaud/provider/infra/ch/" + testProviderUID}})

@@ -35,18 +35,26 @@ const (
 	// install identifier.
 	IDLen = 16
 
-	// URIEnrolmentPrefix prefixes the enrolment identifier URI.
-	URIEnrolmentPrefix = "urn:virtrigaud:enrolment:"
-	// URIProviderPrefix prefixes the Provider UID URI.
-	URIProviderPrefix = "urn:virtrigaud:provider:"
-	// URIInstallPrefix prefixes the install identifier URI.
-	URIInstallPrefix = "urn:virtrigaud:install:"
-	// URIModeIdentity is the mode URI of an identity-only enrolment.
-	URIModeIdentity = "urn:virtrigaud:mode:identity"
-	// URIEpochPrefix prefixes the start epoch URI: the decimal start epoch
-	// of the enrolment, from 2. A record without it starts at epoch 1, so a
+	// RecordPathPrefix is the path prefix of every record URI:
+	// spiffe://<trust domain>/virtrigaud/record/<kind>/<value>. The record
+	// URIs carry the host URI's trust domain as their host, so a sub-CA
+	// whose URI name constraint permits only the trust domain can issue
+	// them (a URI without a host fails every URI name constraint, RFC 5280
+	// section 4.2.1.10).
+	RecordPathPrefix = "/virtrigaud/record/"
+
+	// RecordKindEnrolment names the enrolment identifier URI.
+	RecordKindEnrolment = "enrolment"
+	// RecordKindProvider names the Provider UID URI.
+	RecordKindProvider = "provider"
+	// RecordKindInstall names the install identifier URI.
+	RecordKindInstall = "install"
+	// RecordKindMode names the mode URI.
+	RecordKindMode = "mode"
+	// RecordKindEpoch names the start epoch URI: the decimal start epoch of
+	// the enrolment, from 2. A record without it starts at epoch 1, so a
 	// first enrolment's names are unchanged.
-	URIEpochPrefix = "urn:virtrigaud:epoch:"
+	RecordKindEpoch = "epoch"
 
 	// AnnotationStartEpochFloor is the Host annotation that raises the start
 	// epoch of the first record the manager draws for a Host that holds no
@@ -64,7 +72,8 @@ const (
 	// ModeIdentity is the only enrolment mode.
 	ModeIdentity = "identity"
 
-	// hostURIScheme and hostURIPathPrefix shape a host URI identity.
+	// hostURIScheme and hostURIPathPrefix shape a host URI identity; the
+	// record URIs share the scheme.
 	hostURIScheme     = "spiffe"
 	hostURIPathPrefix = "/virtrigaud/host/"
 
@@ -178,25 +187,62 @@ func (r Record) Equal(o Record) bool {
 		r.ProviderUID == o.ProviderUID && r.Mode == o.Mode && r.Epoch() == o.Epoch()
 }
 
-// URIs returns the record's URIs, in a fixed order: four, and the epoch URI
-// last for a start epoch above FirstStartEpoch.
-func (r Record) URIs() []string {
+// RecordURI returns the record URI of kind with value under the trust
+// domain: spiffe://<trust domain>/virtrigaud/record/<kind>/<value>.
+func RecordURI(trustDomain, kind, value string) string {
+	return hostURIScheme + "://" + trustDomain + RecordPathPrefix + kind + "/" + value
+}
+
+// EnrolmentURI returns the enrolment identifier URI under the trust domain
+// for an identifier written as 32 lowercase hexadecimal characters.
+func EnrolmentURI(trustDomain, enrolmentIDHex string) string {
+	return RecordURI(trustDomain, RecordKindEnrolment, enrolmentIDHex)
+}
+
+// InstallURI returns the install identifier URI under the trust domain.
+func InstallURI(trustDomain string, installID []byte) string {
+	return RecordURI(trustDomain, RecordKindInstall, hex.EncodeToString(installID))
+}
+
+// EpochURI returns the start epoch URI under the trust domain.
+func EpochURI(trustDomain string, epoch uint64) string {
+	return RecordURI(trustDomain, RecordKindEpoch, strconv.FormatUint(epoch, 10))
+}
+
+// TrustDomainOf returns the trust domain of a host URI identity.
+func TrustDomainOf(hostURI string) (string, error) {
+	if err := ValidateHostURI(hostURI); err != nil {
+		return "", err
+	}
+	u, err := url.Parse(hostURI)
+	if err != nil {
+		return "", errors.New("not a host URI identity")
+	}
+	return u.Host, nil
+}
+
+// URIs returns the record's URIs under the trust domain, in a fixed order:
+// four, and the epoch URI last for a start epoch above FirstStartEpoch.
+func (r Record) URIs(trustDomain string) []string {
 	out := []string{
-		URIEnrolmentPrefix + hex.EncodeToString(r.EnrolmentID),
-		URIProviderPrefix + r.ProviderUID,
-		URIInstallPrefix + hex.EncodeToString(r.InstallID),
-		URIModeIdentity,
+		EnrolmentURI(trustDomain, hex.EncodeToString(r.EnrolmentID)),
+		RecordURI(trustDomain, RecordKindProvider, r.ProviderUID),
+		InstallURI(trustDomain, r.InstallID),
+		RecordURI(trustDomain, RecordKindMode, ModeIdentity),
 	}
 	if r.Epoch() > FirstStartEpoch {
-		out = append(out, URIEpochPrefix+strconv.FormatUint(r.Epoch(), 10))
+		out = append(out, EpochURI(trustDomain, r.Epoch()))
 	}
 	return out
 }
 
 // RequestURIs returns the exact URI subject alternative names a certificate
-// for the record must carry: the host URI, then the record's URIs.
+// for the record must carry: the host URI, then the record's URIs under the
+// host URI's trust domain. For a hostURI that is not a host URI identity
+// the record URIs have an empty trust domain, which RecordFromURIs refuses.
 func RequestURIs(hostURI string, r Record) []string {
-	return append([]string{hostURI}, r.URIs()...)
+	td, _ := TrustDomainOf(hostURI)
+	return append([]string{hostURI}, r.URIs(td)...)
 }
 
 // NewEnrolmentID draws a 16-byte enrolment identifier from rand.
@@ -210,14 +256,20 @@ func NewEnrolmentID(rand io.Reader) ([]byte, error) {
 
 // RecordFromURIs derives the enrolment record from the URI subject
 // alternative names of a certificate or request. The set must be exactly
-// hostURI plus one of each record URI, and at most one epoch URI, with no
-// other and no repeated URI. The epoch URI names an epoch from 2, in
-// decimal without leading zeros (one spelling per epoch).
+// hostURI plus one of each record URI under hostURI's trust domain, and at
+// most one epoch URI, with no other and no repeated URI. The epoch URI
+// names an epoch from 2, in decimal without leading zeros (one spelling per
+// epoch).
 func RecordFromURIs(uris []*url.URL, hostURI string) (Record, error) {
+	td, err := TrustDomainOf(hostURI)
+	if err != nil {
+		return Record{}, fmt.Errorf("%w: the expected host URI: %v", ErrRecord, err)
+	}
 	if len(uris) != recordURICount && len(uris) != recordURICount+1 {
 		return Record{}, fmt.Errorf("%w: %d URIs, want exactly %d, or %d with a start epoch", ErrRecord, len(uris), recordURICount,
 			recordURICount+1)
 	}
+	recordPrefix := hostURIScheme + "://" + td + RecordPathPrefix
 	var (
 		rec                                   Record
 		haveHost, haveEnrol, haveProv, haveIn bool
@@ -227,48 +279,61 @@ func RecordFromURIs(uris []*url.URL, hostURI string) (Record, error) {
 			return Record{}, fmt.Errorf("%w: empty URI", ErrRecord)
 		}
 		s := u.String()
-		switch {
-		case s == hostURI:
+		if s == hostURI {
 			if haveHost {
 				return Record{}, fmt.Errorf("%w: repeated host URI", ErrRecord)
 			}
 			haveHost = true
-		case s == URIModeIdentity:
+			continue
+		}
+		rest, ok := strings.CutPrefix(s, recordPrefix)
+		if !ok {
+			return Record{}, fmt.Errorf("%w: unexpected URI", ErrRecord)
+		}
+		kind, value, ok := strings.Cut(rest, "/")
+		if !ok || strings.Contains(value, "/") {
+			return Record{}, fmt.Errorf("%w: unexpected URI", ErrRecord)
+		}
+		switch kind {
+		case RecordKindMode:
 			if rec.Mode != "" {
 				return Record{}, fmt.Errorf("%w: repeated mode URI", ErrRecord)
 			}
+			if value != ModeIdentity {
+				return Record{}, fmt.Errorf("%w: mode is not %q", ErrRecord, ModeIdentity)
+			}
 			rec.Mode = ModeIdentity
-		case strings.HasPrefix(s, URIEnrolmentPrefix):
+		case RecordKindEnrolment:
 			if haveEnrol {
 				return Record{}, fmt.Errorf("%w: repeated enrolment URI", ErrRecord)
 			}
 			haveEnrol = true
-			id, err := decodeLowerHexID(strings.TrimPrefix(s, URIEnrolmentPrefix))
+			id, err := decodeLowerHexID(value)
 			if err != nil {
 				return Record{}, fmt.Errorf("%w: enrolment URI: %v", ErrRecord, err)
 			}
 			rec.EnrolmentID = id
-		case strings.HasPrefix(s, URIProviderPrefix):
+		case RecordKindProvider:
 			if haveProv {
 				return Record{}, fmt.Errorf("%w: repeated provider URI", ErrRecord)
 			}
 			haveProv = true
-			rec.ProviderUID = strings.TrimPrefix(s, URIProviderPrefix)
-		case strings.HasPrefix(s, URIEpochPrefix):
+			rec.ProviderUID = value
+		case RecordKindEpoch:
 			if rec.StartEpoch != 0 {
 				return Record{}, fmt.Errorf("%w: repeated epoch URI", ErrRecord)
 			}
-			e, err := parseEpoch(strings.TrimPrefix(s, URIEpochPrefix))
+			e, err := parseEpoch(value)
 			if err != nil {
 				return Record{}, fmt.Errorf("%w: epoch URI: %v", ErrRecord, err)
 			}
 			rec.StartEpoch = e
-		case strings.HasPrefix(s, URIInstallPrefix):
+		case RecordKindInstall:
 			if haveIn {
 				return Record{}, fmt.Errorf("%w: repeated install URI", ErrRecord)
 			}
 			haveIn = true
-			id, err := decodeLowerHexID(strings.TrimPrefix(s, URIInstallPrefix))
+			id, err := decodeLowerHexID(value)
 			if err != nil {
 				return Record{}, fmt.Errorf("%w: install URI: %v", ErrRecord, err)
 			}

@@ -52,6 +52,20 @@ type CA struct {
 // NewCA returns a self-signed test CA.
 func NewCA(t T) *CA {
 	t.Helper()
+	return newCA(t, nil)
+}
+
+// NewConstrainedCA returns a self-signed test host-agent CA whose URI name
+// constraint permits only the trust domain, as the host-agent sub-CA must
+// carry: every URI in a certificate it issues must have the trust domain
+// as its host, or chain verification fails.
+func NewConstrainedCA(t T, trustDomain string) *CA {
+	t.Helper()
+	return newCA(t, []string{trustDomain})
+}
+
+func newCA(t T, permittedURIDomains []string) *CA {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate CA key: %v", err)
@@ -64,6 +78,9 @@ func NewCA(t T) *CA {
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		PermittedURIDomains:   permittedURIDomains,
+		// A name constraint must be critical (RFC 5280 section 4.2.1.10).
+		PermittedDNSDomainsCritical: len(permittedURIDomains) > 0,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

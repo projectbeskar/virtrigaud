@@ -500,8 +500,11 @@ func pinnedOnHost(agent *infrav1beta1.HostAgentStatus, leaf *x509.Certificate) (
 	if !slices.Contains(agent.KeyPins, pin) {
 		return false, nil
 	}
+	// The enrolment URI's host is the trust domain, which the issuing CA
+	// already bounds; this check is about which enrolment the key is under.
+	want := hostidentity.RecordPathPrefix + hostidentity.RecordKindEnrolment + "/" + agent.EnrolmentID
 	for _, u := range leaf.URIs {
-		if u.String() == hostidentity.URIEnrolmentPrefix+agent.EnrolmentID {
+		if u.Scheme == "spiffe" && u.Opaque == "" && u.Path == want {
 			return true, nil
 		}
 	}

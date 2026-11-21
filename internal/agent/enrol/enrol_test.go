@@ -145,9 +145,9 @@ func TestBuildCSRRefusals(t *testing.T) {
 		{"no provider uri", drop(2), f.key},
 		{"no install uri", drop(3), f.key},
 		{"no mode uri", drop(4), f.key},
-		{"an extra uri", append(append([]string{}, good...), "urn:virtrigaud:extra"), f.key},
+		{"an extra uri", append(append([]string{}, good...), "spiffe://"+trusttest.TrustDomain+"/virtrigaud/record/extra/x"), f.key},
 		{"a repeated uri", append(append([]string{}, good...), good[1]), f.key},
-		{"uppercase enrolment id", []string{good[0], "urn:virtrigaud:enrolment:A0A1A2A3A4A5A6A7A8A9AAABACADAEAF", good[2], good[3], good[4]}, f.key},
+		{"uppercase enrolment id", []string{good[0], hostidentity.EnrolmentURI(trusttest.TrustDomain, "A0A1A2A3A4A5A6A7A8A9AAABACADAEAF"), good[2], good[3], good[4]}, f.key},
 		{"an Ed25519 key", good, edKey},
 		{"a P-384 key", good, p384},
 	}
@@ -227,7 +227,7 @@ func TestInstallRefusals(t *testing.T) {
 			return f.issue(t, hostidentitytest.IssueOptions{URIs: []string{f.pki.HostURI}})
 		}},
 		{name: "SANs: an extra URI", cert: func(t *testing.T, f *fixture) []byte {
-			return f.issue(t, hostidentitytest.IssueOptions{URIs: append(append([]string{}, f.uris...), "urn:virtrigaud:extra")})
+			return f.issue(t, hostidentitytest.IssueOptions{URIs: append(append([]string{}, f.uris...), "spiffe://"+trusttest.TrustDomain+"/virtrigaud/record/extra/x")})
 		}},
 		{name: "other key", cert: func(t *testing.T, f *fixture) []byte {
 			return f.issue(t, hostidentitytest.IssueOptions{PublicKey: &otherKey.PublicKey})
@@ -416,7 +416,7 @@ func TestHostNameAndParseURIs(t *testing.T) {
 	name, err := enrol.HostName(f.pki.HostURI)
 	require.NoError(t, err)
 	assert.Equal(t, trusttest.HostName, name)
-	_, err = enrol.HostName("urn:virtrigaud:mode:identity")
+	_, err = enrol.HostName(hostidentity.RecordURI(trusttest.TrustDomain, hostidentity.RecordKindMode, hostidentity.ModeIdentity))
 	require.ErrorIs(t, err, enrol.ErrRequest)
 	parsed, host, err := enrol.ParseURIs(f.uris)
 	require.NoError(t, err)
@@ -471,7 +471,7 @@ func TestInstallRefusesAStaleRequest(t *testing.T) {
 		"another record": current,
 		"a subset":       f.uris[:4],
 		"a repeated URI": append(append([]string{}, f.uris[:4]...), f.uris[0]),
-		"an extra URI":   append(append([]string{}, f.uris...), "urn:virtrigaud:extra"),
+		"an extra URI":   append(append([]string{}, f.uris...), "spiffe://"+trusttest.TrustDomain+"/virtrigaud/record/extra/x"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := enrol.Install(enrol.InstallOptions{
