@@ -156,7 +156,7 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		return nil, err
 	}
 	tg := &Target{t: t, byName: map[string]*Host{}, signer: sg, epoch: operation.Epoch{Counter: StartEpoch, Holder: holder},
-		hostCA: hostidentitytest.NewCA(ft), placements: clustered.NewPlacements(), deadline: cfg.StepDeadline,
+		hostCA: hostidentitytest.NewConstrainedCA(ft, trusttest.TrustDomain), placements: clustered.NewPlacements(), deadline: cfg.StepDeadline,
 		apiVersion: cfg.ProviderAPIVersion, inv: hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion},
 		proxies: map[string]*proxy{}, tasks: map[string][]string{}, scripts: map[string]fake.Script{}, seeded: map[string]string{}}
 	providerCA := hostidentitytest.NewCA(ft)

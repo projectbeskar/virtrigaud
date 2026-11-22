@@ -16,8 +16,8 @@
 # key. It also approves requests of this shape that the manager would never
 # approve (any spiffe host URI, for a Host that does not exist). What it
 # adds over the deny-only manager-certificaterequests.yaml is a check of the
-# names inside the request: only spiffe host URIs and urn:virtrigaud: URIs,
-# no DNS, IP or e-mail names. It cannot require exactly one spiffe URI.
+# names inside the request: only spiffe host and record URIs under the trust
+# domain, no DNS, IP or e-mail names. It cannot require exactly one host URI.
 #
 # The common name is allowed because every agent request (enrolment and
 # renewal) carries the host's name as its subject common name
@@ -38,7 +38,7 @@ spec:
     uris:
       values:
       - "spiffe://example.test/virtrigaud/host/*"
-      - "urn:virtrigaud:*"
+      - "spiffe://example.test/virtrigaud/record/*"
       required: true
     usages:
     - "digital signature"

@@ -163,7 +163,7 @@ func gen(args []string) error {
 		return errors.New("gen: -out is required")
 	}
 	t := fatalT{}
-	hostCA, providerCA, grantCA := hostidentitytest.NewCA(t), hostidentitytest.NewCA(t), hostidentitytest.NewCA(t)
+	hostCA, providerCA, grantCA := hostidentitytest.NewConstrainedCA(t, *td), hostidentitytest.NewCA(t), hostidentitytest.NewCA(t)
 	hostKey := hostidentitytest.NewKey(t)
 	hostURI, err := hostidentity.HostURI(*td, hostNamespace, *host)
 	if err != nil {

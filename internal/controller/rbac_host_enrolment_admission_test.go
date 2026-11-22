@@ -114,8 +114,8 @@ func wildcardMatch(pattern, s string) bool {
 // TestApproverPolicySampleAllowsAgentRequests: the approver-policy sample
 // allows exactly what an agent's certificate request carries: the subject
 // common name (the host's name, which every agent request sets), the host
-// URI and the urn:virtrigaud: record URIs, no DNS, IP or e-mail name; the
-// agent usages, no CA, ECDSA P-256, at most 30 days; and it is bound, for
+// URI and the record URIs, all under the trust domain, no DNS, IP or e-mail
+// name; the agent usages, no CA, ECDSA P-256, at most 30 days; and it is bound, for
 // "use", to the manager's ServiceAccount only, in the enrolment namespace.
 func TestApproverPolicySampleAllowsAgentRequests(t *testing.T) {
 	docs := readAdmissionSample(t, "approver-policy.yaml")

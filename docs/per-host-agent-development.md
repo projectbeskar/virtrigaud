@@ -121,9 +121,11 @@ public key the signer reports), carry
 the server-authentication usage, not be a CA, be valid now, and carry exactly
 these URI subject alternative names (see
 [`host-agent-enrolment.md`](host-agent-enrolment.md#the-enrolment-record)):
-the host's URI identity, `urn:virtrigaud:enrolment:<32 hex>`,
-`urn:virtrigaud:provider:<Provider UID>`, `urn:virtrigaud:install:<32 hex>`,
-`urn:virtrigaud:mode:identity`.
+the host's URI identity and, under the same trust domain,
+`spiffe://<td>/virtrigaud/record/enrolment/<32 hex>`,
+`spiffe://<td>/virtrigaud/record/provider/<Provider UID>`,
+`spiffe://<td>/virtrigaud/record/install/<32 hex>` and
+`spiffe://<td>/virtrigaud/record/mode/identity`.
 
 ## Start-up order
 
@@ -1536,9 +1538,11 @@ manager side (see [`host-agent-enrolment.md`](host-agent-enrolment.md)):
 
    ```
    sudo -u virtrigaud-signer vrtg-agent enroll csr \
-       --uri spiffe://<td>/virtrigaud/host/<ns>/<name> --uri urn:virtrigaud:enrolment:<hex> \
-       --uri urn:virtrigaud:provider:<uid> --uri urn:virtrigaud:install:<hex> \
-       --uri urn:virtrigaud:mode:identity --out - > host.csr
+       --uri spiffe://<td>/virtrigaud/host/<ns>/<name> \
+       --uri spiffe://<td>/virtrigaud/record/enrolment/<hex> \
+       --uri spiffe://<td>/virtrigaud/record/provider/<uid> \
+       --uri spiffe://<td>/virtrigaud/record/install/<hex> \
+       --uri spiffe://<td>/virtrigaud/record/mode/identity --out - > host.csr
    ```
 
    `--out -` writes the request to standard output, so the shell redirection

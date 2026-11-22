@@ -182,7 +182,7 @@ func TestLoadIdentityRefusals(t *testing.T) {
 			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, []string{p.HostURI}, hostidentitytest.IssueOptions{})))
 		}, time.Time{}},
 		{"no host identity", func(t *testing.T, dir string, p *trusttest.PKI) {
-			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, p.Record.URIs(), hostidentitytest.IssueOptions{})))
+			write(t, dir, trust.FileHostCert, string(p.IssueHost(t, p.HostKey, p.Record.URIs(trusttest.TrustDomain), hostidentitytest.IssueOptions{})))
 		}, time.Time{}},
 		{"two certificates", func(t *testing.T, dir string, p *trusttest.PKI) {
 			write(t, dir, trust.FileHostCert, string(p.HostCertPEM)+string(p.HostCA.PEM))

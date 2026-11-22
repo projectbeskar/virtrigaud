@@ -77,7 +77,7 @@ before applying them:
   request.
 - `admission/approver-policy.yaml`: a cert-manager approver-policy
   `CertificateRequestPolicy` bound to the manager's ServiceAccount, which
-  checks the names (spiffe host URIs and `urn:virtrigaud:` URIs only, the
+  checks the names (spiffe host and record URIs under the trust domain only, the
   host's name as common name, which every agent request carries). It is an
   approver, not a filter: approver-policy approves the requests it allows
   itself, which replaces the manager's approval decision for its renewal

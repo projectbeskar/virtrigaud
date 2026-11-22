@@ -29,11 +29,17 @@ limitations under the License.
 // certificate whose URI subject alternative names are exactly:
 //
 //	spiffe://<trust domain>/virtrigaud/host/<namespace>/<host>
-//	urn:virtrigaud:enrolment:<32 hex>
-//	urn:virtrigaud:provider:<Provider UID>
-//	urn:virtrigaud:install:<32 hex>
-//	urn:virtrigaud:mode:identity
-//	urn:virtrigaud:epoch:<decimal>   (only for a start epoch from 2)
+//	spiffe://<trust domain>/virtrigaud/record/enrolment/<32 hex>
+//	spiffe://<trust domain>/virtrigaud/record/provider/<Provider UID>
+//	spiffe://<trust domain>/virtrigaud/record/install/<32 hex>
+//	spiffe://<trust domain>/virtrigaud/record/mode/identity
+//	spiffe://<trust domain>/virtrigaud/record/epoch/<decimal>   (only for a start epoch from 2)
+//
+// Every URI has the trust domain as its host, so the subordinate CA can
+// carry a URI name constraint that permits only the trust domain: a stolen
+// sub-CA key then cannot mint a verifiable certificate for another trust
+// domain. (A URI without a host, such as a urn:, fails every URI name
+// constraint, RFC 5280 section 4.2.1.10.)
 //
 // The start epoch is the epoch the host starts the enrolment at; a record
 // without the epoch URI starts at epoch 1, so a first enrolment's names are

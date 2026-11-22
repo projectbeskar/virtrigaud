@@ -265,7 +265,7 @@ func TestHostEnrolAndRevokeAgainstAPIServer(t *testing.T) {
 	_, err = runVrtg(t, env.KubeconfigPath, "-n", "infra", "host", "rekey", "--host", "host-a")
 	require.NoError(t, err)
 	hostA = getHost("host-a")
-	require.Contains(t, hostA.Status.Agent.RequestURIs, hostidentity.URIEpochPrefix+"2")
+	require.Contains(t, hostA.Status.Agent.RequestURIs, hostidentity.EpochURI(testTrustDomain, 2))
 	keyA2 := hostidentitytest.NewKey(t)
 	csrA2 := hostidentitytest.NewCSR(t, keyA2, hostidentitytest.CSROptions{URIs: hostA.Status.Agent.RequestURIs})
 	csrFileA2 := filepath.Join(dir, "host-a2.csr")

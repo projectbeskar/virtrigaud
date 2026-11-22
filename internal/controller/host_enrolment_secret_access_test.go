@@ -478,7 +478,7 @@ func TestAdmissionGate_SecretAccess(t *testing.T) {
 }
 
 func TestParseHostEnrolmentConfig_CAKeySecret(t *testing.T) {
-	ca := hostidentitytest.NewCA(t)
+	ca := hostidentitytest.NewConstrainedCA(t, "cluster.test")
 	caFile := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(caFile, ca.PEM, 0o600))
 	base := HostEnrolmentFlags{
