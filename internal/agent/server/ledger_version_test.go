@@ -42,10 +42,13 @@ var ledgerVersions = []uint32{1, 2, 1 << 31}
 
 // sameAnswer fails unless a and b are equal apart from the context's
 // agent_time (the host's clock when each was made).
-func sameAnswer(t *testing.T, a, b proto.Message, ctxOf func(proto.Message) *providerv1.AnswerContext) {
+func sameAnswer[M interface {
+	proto.Message
+	GetContext() *providerv1.AnswerContext
+}](t *testing.T, a, b M) {
 	t.Helper()
-	a, b = proto.Clone(a), proto.Clone(b)
-	ctxOf(a).AgentTime, ctxOf(b).AgentTime = nil, nil
+	a, b = proto.CloneOf(a), proto.CloneOf(b)
+	a.GetContext().AgentTime, b.GetContext().AgentTime = nil, nil
 	if !proto.Equal(a, b) {
 		t.Fatalf("the answer to a request with ledger_version differs:\n got %v\nwant %v", b, a)
 	}
@@ -62,7 +65,6 @@ func TestLedgerVersion_GetHostInfoIgnored(t *testing.T) {
 		require.NoError(t, err)
 		return info, verifyAnswer(t, e, info.GetHostAnswer())
 	}
-	hostCtx := func(m proto.Message) *providerv1.AnswerContext { return m.(*providerv1.HostAnswer).GetContext() }
 	for _, v := range ledgerVersions {
 		_, plain := ask(t, &providerv1.GetHostInfoRequest{AnswerNonce: nonce(7), StoreCapacityVersion: 1})
 		_, with := ask(t, &providerv1.GetHostInfoRequest{AnswerNonce: nonce(7), StoreCapacityVersion: 1, LedgerVersion: v})
@@ -72,7 +74,7 @@ func TestLedgerVersion_GetHostInfoIgnored(t *testing.T) {
 		assert.Empty(t, with.GetContext().GetAttestationId())
 		assert.Equal(t, answer.AgentAPIVersion, with.GetAgentApiVersion())
 		assert.Equal(t, []uint32{answer.GrantVersion}, with.GetGrantVersions())
-		sameAnswer(t, plain, with, hostCtx)
+		sameAnswer(t, plain, with)
 
 		// Without a nonce it is not refused either (unlike the
 		// implemented versions): an agent that predates it never sees it.
@@ -115,8 +117,6 @@ func TestLedgerVersion_TaskStatusAndDescribeIgnored(t *testing.T) {
 	e.waitDone(task)
 
 	c := e.client()
-	opCtx := func(m proto.Message) *providerv1.AnswerContext { return m.(*providerv1.OperationAnswer).GetContext() }
-	vmCtx := func(m proto.Message) *providerv1.AnswerContext { return m.(*providerv1.VMAnswer).GetContext() }
 	for _, v := range ledgerVersions {
 		signed := func(lv uint32) *providerv1.OperationAnswer {
 			resp, err := c.TaskStatus(ctx(t), &providerv1.TaskStatusRequest{AnswerNonce: nonce(8), OpId: o.id.OpID,
@@ -131,7 +131,7 @@ func TestLedgerVersion_TaskStatusAndDescribeIgnored(t *testing.T) {
 		assert.Zero(t, withOp.GetAcceptedSeq())
 		assert.Empty(t, withOp.GetAcceptedHead())
 		assert.False(t, withOp.GetAwaitingRequest())
-		sameAnswer(t, plainOp, withOp, opCtx)
+		sameAnswer(t, plainOp, withOp)
 
 		plainStatus, err := c.TaskStatus(ctx(t), &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: task}})
 		require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestLedgerVersion_TaskStatusAndDescribeIgnored(t *testing.T) {
 		}
 		plainVM, withVM := describe(0), describe(v)
 		require.NoError(t, hostidentity.CheckNoLedgerFields(withVM))
-		sameAnswer(t, plainVM, withVM, vmCtx)
+		sameAnswer(t, plainVM, withVM)
 
 		plainD, err := c.Describe(ctx(t), &providerv1.DescribeRequest{Owner: ownerOf("vm-1")})
 		require.NoError(t, err)
