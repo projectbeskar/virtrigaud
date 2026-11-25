@@ -54,6 +54,46 @@ If an operator rolled the manager back, the older build silently deleted per-Hos
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-11-25 11:58] - Reserve the host ledger wire shape; every verifier refuses it when set (not yet implemented)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/host_answer.proto`, `proto/provider/v1/provider.proto`: fields at unused numbers, reserved for the host ledger protocol:
+  - `CreateResponse.operation_receipt` (3) and `TaskResponse.operation_receipt` (4).
+  - `ledger_version` (7) on `TaskStatusRequest`, `DescribeRequest` and `GetHostInfoRequest`.
+  - `GrantBody.ledger` (32), `ledger_checkpoint` (33) and `attestation_id` (34). `GrantBody` 19 stays unassigned and 27 reserved.
+  - `AnswerContext.attestation_id` (13) and `ledger_version_echo` (14).
+  - `OperationAnswer.accepted_seq` (12), `accepted_head` (13) and `awaiting_request` (14).
+  - `HostAnswer.ledger` (12).
+
+  New messages `LedgerPosition`, `HostLedgerState`, `OperationReceipt`, `ChallengeAnswer` and `AuthorityAnswer`, and new enums `LedgerSessionState`, `ChallengePurpose` and `AuthorityOutcome`. The body types `provider.v1.OperationReceipt`, `provider.v1.ChallengeAnswer` and `provider.v1.AuthorityAnswer` are reserved outside the closed set.
+- `proto/provider/v1/authority.proto`: a new, separate service `HostAuthority` with `Challenge`, `Attest`, `LedgerMark` and `RetireIfUnknown` and their request and response messages. It is not part of the `Provider` service. No bundled provider and no agent registers it, so gRPC answers each method `Unimplemented`. `GetCapabilitiesResponse` is unchanged.
+
+  Additive; `buf lint` and `buf breaking` (category `FILE`, against `main`) pass. The bindings in `proto/rpc/provider/v1` are regenerated. Descriptor tests in `proto/rpc/provider/v1/host_ledger_test.go` pin every new number, enum value and the service. They also check that each message without the reserved fields encodes exactly as before.
+- `internal/agent/internal/guard/guard.go`: new mutation guard `ledger-fields-never-signed`.
+
+### Changed
+- `internal/operation/grantverify/checks.go`: `CheckOperationBody` refuses a version 1 `GrantBody` that sets field 32, 33 or 34 (`placeholder_set`, `GRANT_MISMATCH`). The check is shared by the agent's verifier and the manager's minter. Generated code now knows these fields, so the unknown-field rule no longer catches them.
+- `internal/hostidentity/answer.go`: new `CheckNoLedgerFields`. `VerifyAnswer` uses it to refuse, as no answer, an answer that sets a reserved field of `AnswerContext`, `OperationAnswer` or `HostAnswer`. Constants `BodyTypeOperationReceipt`, `BodyTypeChallengeAnswer` and `BodyTypeAuthorityAnswer` and the list `ReservedBodyTypes` are added; these types stay outside the closed set and are refused.
+- `internal/agent/answer/answer.go`: the agent never signs an answer that sets a reserved ledger field.
+- Peers behave as they did before the fields existed:
+  - The agent answers a request with `ledger_version` exactly as one without it: no ledger field, no echo, and no refusal without a nonce.
+  - The agent's accept responses carry no receipt.
+  - The manager never sends `ledger_version` and ignores `operation_receipt`.
+  - The Cloud Hypervisor Provider forwards and relays the bytes unchanged.
+
+  Tests pin each of these in `internal/agent/server/ledger_version_test.go`, `internal/transport/grpc` and `internal/providers/cloudhypervisor/ledger_reserved_test.go`.
+- `docs/operation-grants-wire-shape.md`: new section "Host ledger protocol (reserved)".
+
+### Why
+A later protocol needs these numbers and names fixed in the contract first, so that it can add them without renumbering. Once the bindings are regenerated, every verifier knows the new fields and would silently accept them. Each verifier therefore refuses them explicitly when they are set, until a version that implements them.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-21 11:16] - Agent certificates carry their enrolment record under the trust domain, so the sub-CA can be name-constrained (development builds only)
 **Author:** @wrkode (William Rizzo)
 
