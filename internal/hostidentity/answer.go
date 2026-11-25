@@ -59,6 +59,26 @@ const (
 	BodyTypeHostAnswer = "provider.v1.HostAnswer"
 )
 
+// Body types reserved for the host ledger protocol. Reserved; not yet
+// implemented: they are outside the closed set, so VerifyAnswer refuses
+// them, and an agent never signs them.
+const (
+	// BodyTypeOperationReceipt is reserved for a host's receipt for an
+	// accepted operation (CreateResponse and TaskResponse
+	// operation_receipt).
+	BodyTypeOperationReceipt = "provider.v1.OperationReceipt"
+	// BodyTypeChallengeAnswer is reserved for a host's answer to an
+	// attestation challenge request (ChallengeResponse.host_answer).
+	BodyTypeChallengeAnswer = "provider.v1.ChallengeAnswer"
+	// BodyTypeAuthorityAnswer is reserved for a host's answer to an
+	// authority grant (AuthorityResponse.host_answer).
+	BodyTypeAuthorityAnswer = "provider.v1.AuthorityAnswer"
+)
+
+// ReservedBodyTypes are the body types reserved for the host ledger
+// protocol, none of which a verifier accepts yet.
+var ReservedBodyTypes = []string{BodyTypeOperationReceipt, BodyTypeChallengeAnswer, BodyTypeAuthorityAnswer}
+
 // Size limits of a signed host answer.
 const (
 	// MaxAnswerBodyBytes bounds the body.
@@ -215,7 +235,8 @@ func refuse(format string, args ...any) error {
 // server authentication at exp.Now; its key is one of exp.Pins; the
 // signature over AnswerSignatureInput is a low-S DER ECDSA signature that
 // verifies; the body decodes with no unknown field in it or any nested
-// message, no undefined enum value, and every field rule of its type; the
+// message, no undefined enum value, no field reserved for the host ledger
+// protocol (CheckNoLedgerFields), and every field rule of its type; the
 // nonce is exp.Nonce; the Provider UID, host, installation and enrolment are
 // exp's and the certificate's record's; last, a HostAnswer's inventory passes
 // VerifyInventory for exp.InventoryVersion, and its pending renewal request,
@@ -285,6 +306,11 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	// the logged answer.
 	if canon, err := (proto.MarshalOptions{Deterministic: true}).Marshal(body); err != nil || !bytes.Equal(canon, blob.GetBody()) {
 		return VerifiedAnswer{}, refuse("the body is not canonically encoded")
+	}
+	// The fields reserved for the host ledger protocol are known to the
+	// decoder but implemented by nobody: set means refused.
+	if err := CheckNoLedgerFields(body); err != nil {
+		return VerifiedAnswer{}, err
 	}
 	switch {
 	case out.Operation != nil:
@@ -434,6 +460,40 @@ func verifyAnswerSignature(pub *ecdsa.PublicKey, blob *providerv1.SignedBlob) er
 	d := sha256.Sum256(m)
 	if !ecdsa.VerifyASN1(pub, d[:], sig) {
 		return refuse("the signature does not verify")
+	}
+	return nil
+}
+
+// CheckNoLedgerFields refuses a host answer body (OperationAnswer, VMAnswer
+// or HostAnswer) that sets a field reserved for the host ledger protocol:
+// AnswerContext.attestation_id or ledger_version_echo,
+// OperationAnswer.accepted_seq, accepted_head or awaiting_request, or
+// HostAnswer.ledger. Presence counts, not content. Nothing implements these
+// fields yet: an agent never sets them (it answers a request that carries a
+// ledger_version exactly as one that does not), so an answer that sets one
+// was not made by an agent this verifier understands, and is "no answer".
+// The manager's verifier and the agent's signer both apply it. Any other
+// body type is refused.
+func CheckNoLedgerFields(body proto.Message) error {
+	var ctx *providerv1.AnswerContext
+	switch b := body.(type) {
+	case *providerv1.OperationAnswer:
+		if b.GetAcceptedSeq() != 0 || len(b.GetAcceptedHead()) != 0 || b.GetAwaitingRequest() {
+			return refuse("the operation answer sets a reserved ledger field (12-14)")
+		}
+		ctx = b.GetContext()
+	case *providerv1.VMAnswer:
+		ctx = b.GetContext()
+	case *providerv1.HostAnswer:
+		if b.GetLedger() != nil {
+			return refuse("the host answer sets the reserved ledger field (12)")
+		}
+		ctx = b.GetContext()
+	default:
+		return refuse("not a host answer body")
+	}
+	if len(ctx.GetAttestationId()) != 0 || ctx.GetLedgerVersionEcho() != 0 {
+		return refuse("the answer context sets a reserved ledger field (13, 14)")
 	}
 	return nil
 }
