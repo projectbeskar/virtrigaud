@@ -172,16 +172,19 @@ func TestSignedAnswerFields_ManagerSendsNone(t *testing.T) {
 		assert.Empty(t, r.GetOpEnrolmentId())
 		assert.Empty(t, r.GetTargetHostId())
 		assert.Zero(t, r.GetContinuitySeq())
+		assert.Zero(t, r.GetLedgerVersion(), "the manager never asks for the reserved ledger fields")
 		assert.NotNil(t, r.GetTask(), "the manager polls by task reference")
 	}
 	for _, r := range srv.descReqs {
 		assert.Empty(t, r.GetAnswerNonce())
 		assert.Empty(t, r.GetBindingId())
 		assert.Zero(t, r.GetContinuitySeq())
+		assert.Zero(t, r.GetLedgerVersion(), "the manager never asks for the reserved ledger fields")
 	}
 	for _, r := range srv.hostsReqs {
 		assert.Empty(t, r.GetAnswerNonce())
 		assert.Zero(t, r.GetContinuitySeq())
+		assert.Zero(t, r.GetLedgerVersion(), "the manager never asks for the reserved ledger fields")
 	}
 }
 
@@ -194,6 +197,50 @@ func TestSignedAnswerFields_ManagerIgnoresHostAnswer(t *testing.T) {
 	assert.True(t, plain.done)
 	assert.True(t, plain.describe.Exists)
 	assert.Equal(t, "host-a", plain.host.ID)
+}
+
+// receiptServer answers Create and Delete with a task, and with an
+// operation_receipt of arbitrary bytes when withReceipt is set.
+type receiptServer struct {
+	providerv1.UnimplementedProviderServer
+	withReceipt bool
+}
+
+func (s *receiptServer) receipt() *providerv1.SignedBlob {
+	if !s.withReceipt {
+		return nil
+	}
+	b := arbitrarySignedBlob()
+	b.BodyType = "provider.v1.OperationReceipt"
+	return b
+}
+
+func (s *receiptServer) Create(_ context.Context, r *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
+	return &providerv1.CreateResponse{Id: r.GetName(), Task: &providerv1.TaskRef{Id: "task-create"}, OperationReceipt: s.receipt()}, nil
+}
+
+func (s *receiptServer) Delete(_ context.Context, _ *providerv1.DeleteRequest) (*providerv1.TaskResponse, error) {
+	return &providerv1.TaskResponse{Task: &providerv1.TaskRef{Id: "task-delete"}, OperationReceipt: s.receipt()}, nil
+}
+
+// TestSignedAnswerFields_ManagerIgnoresOperationReceipt: the reserved
+// operation_receipt on an accept response changes nothing the client returns
+// (the manager predates the host ledger protocol and never reads it).
+func TestSignedAnswerFields_ManagerIgnoresOperationReceipt(t *testing.T) {
+	run := func(srv *receiptServer) (contracts.CreateResponse, string) {
+		c := newTestClientForVMOps(t, srv, "libvirt", "receipt-guard")
+		created, err := c.Create(context.Background(), contracts.CreateRequest{Name: "web", Owner: testOwner})
+		require.NoError(t, err)
+		deleted, err := c.Delete(context.Background(), contracts.VMRef{ID: "web", Owner: testOwner})
+		require.NoError(t, err)
+		return created, deleted
+	}
+	plainCreate, plainDelete := run(&receiptServer{})
+	withCreate, withDelete := run(&receiptServer{withReceipt: true})
+	assert.Equal(t, plainCreate, withCreate)
+	assert.Equal(t, plainDelete, withDelete)
+	assert.Equal(t, "task-create", withCreate.TaskRef)
+	assert.Equal(t, "task-delete", withDelete)
 }
 
 // TestSignedAnswerFields_ManagerIgnoresSignedBlobDetail: a NotFound
