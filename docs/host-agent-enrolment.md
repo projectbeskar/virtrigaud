@@ -629,6 +629,72 @@ The Secret is authoritative; `Host.status.agent` only mirrors it. A lost or
 edited status is rewritten from it, and the inventory render reads it, never
 the status.
 
+### State written by a newer manager
+
+A newer manager may store more per-Host state than this one knows about.
+That state can be new members in the `enrolment.json` and `store.json`
+documents, new data keys in the pins Secret, or Secrets of its own in the
+enrolment namespace. If you roll the manager back, the older manager must not
+destroy that state. Two rules make sure of this.
+
+**Preservation.** A manager keeps what it does not understand:
+
+- Every JSON member of `enrolment.json` and `store.json` that it does not
+  know is written back unchanged, at every nesting level. A member of a
+  record stays with that record when records move. For example, an
+  earlier store's record keeps its members when it moves from `current` to
+  `previous`.
+- Every data key of the pins Secret other than `enrolment.json` and
+  `store.json` is kept.
+- Labels and annotations it does not set are kept. It still sets its own
+  `app.kubernetes.io/component`, `app.kubernetes.io/managed-by` and
+  `enrolment.virtrigaud.io/host`.
+
+A document with no unknown members is written exactly as before. A document
+with unknown members is written with its members in sorted order, so the
+output is deterministic. The one exception is a state bound to another Host
+UID or identity. It is discarded with everything in it, as described above,
+because a replaced host inherits nothing.
+
+**Downgrade floor.** A newer manager can stop older ones from acting on a
+Host. To do so, it writes a top-level `minManagerVersion` member, a semantic
+version such as `"0.6.0"` (a leading `v` is accepted), in one of these places:
+
+- `enrolment.json`;
+- `store.json`;
+- any data value that is a JSON object, in a Secret of the enrolment
+  namespace labelled `virtrigaud.io/host-ledger` (any value). Such a Secret
+  applies to the Host named by its `enrolment.virtrigaud.io/host` annotation.
+  Without that annotation, it applies to every Host. No current manager
+  creates one.
+
+A manager refuses the Host when any of these is true:
+
+- the floor is above its own version;
+- the floor is not a string holding a semantic version;
+- its own version is not a semantic version. That is the case for a build
+  without release version information, such as `dev` or a bare commit hash.
+
+Versions compare by semantic-version precedence. So a pre-release (`0.6.0-rc.1`) and a
+build described from a tag (`v0.6.0-3-gabcdef0`) are both below the release
+`0.6.0`, and are refused by a floor of `0.6.0`. An unversioned build is not
+affected while no floor is present.
+
+A refused Host's state is left exactly as it is. In particular, the manager:
+
+- does not write or delete the pins Secret. A Host that is deleted or gone
+  keeps its pins Secret, and a newer manager removes it;
+- approves no certificate request for the Host;
+- verifies no signed answer of the Host, so it signs no new operation for it;
+- renders no agent credentials for it.
+
+It sets the `AgentEnrolled` condition to `False` with reason `ManagerTooOld`,
+emits a `ManagerTooOld` warning event when the condition was not already so,
+and logs the reason. The reason names the document and both versions; it
+never names key material. Run a manager at least as new as the floor to
+resume. The Host is checked again when its pins Secret, a host ledger Secret
+naming it, or the Host changes, and when the manager restarts.
+
 ### The manager must not read the sub-CA key
 
 Whoever reads the sub-CA key can sign CA-valid host-agent certificates with
@@ -879,7 +945,7 @@ They grant exactly:
   `list`, `watch` on `certificaterequests` (`create` and `delete` for the
   manager's own renewal requests, see [Certificate renewal](#certificate-renewal)), `update` on
   `certificaterequests/status`, and `create`, `delete`, `get`, `list`,
-  `update`, `watch` on Secrets (the pins Secrets).
+  `update`, `watch` on Secrets (the pins Secrets, and `list` of the host ledger Secrets, see [State written by a newer manager](#state-written-by-a-newer-manager)).
 
 The manager creates (and deletes) only renewal requests, under its own
 identity. Its identity is read with a `SelfSubjectReview`, which every
