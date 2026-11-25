@@ -43,16 +43,15 @@ func TestLedgerReserved_ReadsForwardedUnchanged(t *testing.T) {
 	client := providerv1.NewProviderClient(served(t, newProvider(t, p, Options{}, a)))
 	nonce := make([]byte, nonceLen)
 
-	reqs := []proto.Message{
-		&providerv1.TaskStatusRequest{AnswerNonce: nonce, OpId: make([]byte, 16), OpEnrolmentId: make([]byte, 16), TargetHostId: "host-a", LedgerVersion: 1},
-		&providerv1.DescribeRequest{Id: "vm-1", TargetHostId: "host-a", AnswerNonce: nonce, BindingId: make([]byte, 16), LedgerVersion: 1},
-		&providerv1.GetHostInfoRequest{HostId: "host-a", AnswerNonce: nonce, LedgerVersion: 1},
-	}
-	_, err := client.TaskStatus(ctx(t), reqs[0].(*providerv1.TaskStatusRequest))
+	ts := &providerv1.TaskStatusRequest{AnswerNonce: nonce, OpId: make([]byte, 16), OpEnrolmentId: make([]byte, 16), TargetHostId: "host-a", LedgerVersion: 1}
+	desc := &providerv1.DescribeRequest{Id: "vm-1", TargetHostId: "host-a", AnswerNonce: nonce, BindingId: make([]byte, 16), LedgerVersion: 1}
+	host := &providerv1.GetHostInfoRequest{HostId: "host-a", AnswerNonce: nonce, LedgerVersion: 1}
+	reqs := []proto.Message{ts, desc, host}
+	_, err := client.TaskStatus(ctx(t), ts)
 	require.NoError(t, err)
-	_, err = client.Describe(ctx(t), reqs[1].(*providerv1.DescribeRequest))
+	_, err = client.Describe(ctx(t), desc)
 	require.NoError(t, err)
-	_, err = client.GetHostInfo(ctx(t), reqs[2].(*providerv1.GetHostInfoRequest))
+	_, err = client.GetHostInfo(ctx(t), host)
 	require.NoError(t, err)
 
 	got := a.received()
