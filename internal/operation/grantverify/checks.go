@@ -158,6 +158,13 @@ func checkEpoch(e *providerv1.Epoch, what string) *Refusal {
 	return nil
 }
 
+// ledgerFieldSet reports whether b sets a GrantBody field reserved for the
+// host ledger protocol (ledger, ledger_checkpoint, attestation_id). Presence
+// counts, not content: an empty LedgerPosition is set.
+func ledgerFieldSet(b *providerv1.GrantBody) bool {
+	return b.GetLedger() != nil || b.GetLedgerCheckpoint() != nil || len(b.GetAttestationId()) > 0
+}
+
 // CheckOperationBody applies every rule that a version 1 OPERATION grant body
 // must satisfy on its own, independent of the call it arrives with and of the
 // verifier's clock and expectations. The minter runs it on every body it
@@ -187,6 +194,12 @@ func CheckOperationBody(b *providerv1.GrantBody) *Refusal {
 	// Fields 26, 28 and 29 are unset at version 1.
 	if b.GetEalSeq() != 0 || b.GetResetFloor() != nil || len(b.GetCeremonyRecordDigest()) > 0 {
 		return mismatch(RulePlaceholderSet, "a field set aside at grant_version 1 (26, 28, 29) is set")
+	}
+	// Fields 32 to 34 are reserved for the host ledger protocol and are
+	// unset at version 1: this verifier implements none of them, so a body
+	// that sets any is refused rather than read as if it did not.
+	if ledgerFieldSet(b) {
+		return mismatch(RulePlaceholderSet, "a field reserved at grant_version 1 (32, 33, 34) is set")
 	}
 	// Fields 20 to 25 belong to ADMIN and ENROL grants.
 	if b.GetTargetNamespace() != "" || b.GetRequestUid() != "" || b.GetAction() != "" ||

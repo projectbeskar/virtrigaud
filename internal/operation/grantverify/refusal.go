@@ -83,7 +83,8 @@ const (
 	// RuleGrantKind: a grant kind this verifier does not issue or accept (only
 	// GRANT_KIND_OPERATION is implemented).
 	RuleGrantKind Rule = "grant_kind"
-	// RulePlaceholderSet: a field set aside at version 1 (26, 28, 29) is set.
+	// RulePlaceholderSet: a field set aside or reserved at version 1 (26, 28,
+	// 29, 32, 33, 34) is set.
 	RulePlaceholderSet Rule = "placeholder_set"
 	// RuleFieldNotForKind: a field the grant kind does not use is set.
 	RuleFieldNotForKind Rule = "field_not_for_kind"
