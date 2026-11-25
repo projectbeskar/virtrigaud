@@ -64,8 +64,8 @@ func TestSign_RefusesReservedLedgerFields(t *testing.T) {
 		"reserved body AuthorityAnswer":    func() proto.Message { return &providerv1.AuthorityAnswer{Context: host().GetContext()} },
 	} {
 		t.Run(name, func(t *testing.T) {
-			if blob, err := answer.Sign(p.HostKey, leafDER(t, p), body()); !errors.Is(err, answer.ErrSign) {
-				t.Fatalf("Sign = %v, %v; want ErrSign", blob, err)
+			if _, err := answer.Sign(p.HostKey, leafDER(t, p), body()); !errors.Is(err, answer.ErrSign) {
+				t.Fatalf("Sign = %v, want ErrSign", err)
 			}
 		})
 	}

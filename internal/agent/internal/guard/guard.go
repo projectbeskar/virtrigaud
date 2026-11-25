@@ -244,6 +244,10 @@ const (
 	// answer of a GetHostInfo that asked for it (an older manager refuses an
 	// answer that carries a field it does not know).
 	StoreCapacityOnlyWhenAsked Name = "store-capacity-only-when-asked"
+	// LedgerFieldsNeverSigned: an answer that sets a field reserved for the
+	// host ledger protocol is never signed (the agent implements none of
+	// them, and a manager refuses an answer that sets one).
+	LedgerFieldsNeverSigned Name = "ledger-fields-never-signed"
 )
 
 // All lists every guard, in a fixed order.
@@ -262,6 +266,6 @@ func All() []Name {
 		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
 		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartMarkerExcl,
-		BootStartStartedSince, StoreCapacityOnlyWhenAsked,
+		BootStartStartedSince, StoreCapacityOnlyWhenAsked, LedgerFieldsNeverSigned,
 	}
 }
