@@ -48,6 +48,13 @@ message SignedBlob {
   // "provider.v1.HostAnswer", or "provider.v1.RenewalRequest" (only in
   // HostAnswer.pending_renewal). A verifier refuses any other value, and a
   // value other than the one the field it arrived in carries.
+  //
+  // Three more names are reserved for the host ledger protocol:
+  // "provider.v1.OperationReceipt" (only in CreateResponse.operation_receipt
+  // and TaskResponse.operation_receipt), "provider.v1.ChallengeAnswer" (only
+  // in ChallengeResponse.host_answer) and "provider.v1.AuthorityAnswer" (only
+  // in AuthorityResponse.host_answer). Reserved; not yet implemented: a
+  // verifier refuses them, and an agent never signs them.
   string body_type = 4;
 }
 
@@ -113,6 +120,22 @@ message AnswerContext {
   // checkpoint_head is the 32-byte chain head at checkpoint_seq; empty when
   // checkpoint_seq is 0.
   bytes checkpoint_head = 12;
+
+  // Fields 13 and 14 are reserved for the host ledger protocol. Reserved;
+  // not yet implemented: an agent never sets them, and a verifier refuses an
+  // answer that sets either.
+
+  // attestation_id is the 16-byte identifier of the agent's current
+  // attestation session: the challenge nonce of the last attestation it
+  // accepted since it started (a re-attestation included). To be set only
+  // when the request's ledger_version is at least 1 and the agent is
+  // attested; empty otherwise. Additive.
+  bytes attestation_id = 13;
+  // ledger_version_echo is the request's ledger_version, echoed; 0 when the
+  // request carried none. A verifier that sent a ledger_version to an agent
+  // that implements it refuses an answer whose echo differs (the field was
+  // stripped or altered in transit). Additive.
+  uint32 ledger_version_echo = 14;
 }
 
 // OperationRecordState is what a host's operation store records for one
@@ -185,6 +208,23 @@ message OperationAnswer {
   // provider_changed); empty when there is nothing to add. Lower-case words
   // joined by underscores; never a secret, a path or an address.
   string outcome_reason = 11;
+
+  // Fields 12 to 14 are reserved for the host ledger protocol. Reserved; not
+  // yet implemented: an agent never sets them, and a verifier refuses an
+  // answer that sets any.
+
+  // accepted_seq is the sequence number of the store transaction that
+  // accepted the operation: to be set, for states 1 to 7 read from a record,
+  // only in the answer to a request whose ledger_version is at least 1.
+  uint64 accepted_seq = 12;
+  // accepted_head is the 32-byte chain head at accepted_seq: to be set
+  // together with accepted_seq when the state is ACCEPTED and the store
+  // still holds that head.
+  bytes accepted_head = 13;
+  // awaiting_request is to be set for an ACCEPTED operation that the
+  // manager's ledger mark covers but whose request bytes the agent lost in a
+  // restart: the operation waits for the same request to be sent again.
+  bool awaiting_request = 14;
 }
 
 // VMPresence is what a host's operation store records about one VM
@@ -293,6 +333,14 @@ message HostAnswer {
   // without it: the request lost its store_capacity_version in transit. Like
   // the rest of the answer it is covered by the answer's signature. Additive.
   StoreCapacity store_capacity = 11;
+
+  // ledger is the host's ledger state: to be set in every answer to a
+  // GetHostInfoRequest whose ledger_version is at least 1, by an agent that
+  // implements the host ledger protocol, and never otherwise; a verifier
+  // that asked refuses such an agent's answer without it. Reserved; not yet
+  // implemented: an agent never sets it, and a verifier refuses an answer
+  // that sets it. Additive.
+  HostLedgerState ledger = 12;
 }
 
 // StoreCapacity is how full a host's operation store is, against the size
@@ -582,4 +630,200 @@ enum ExtensionKind {
   // EXTENSION_KIND_OVERLAYS_COMPONENT: an extension that overlays the files
   // of a declared component.
   EXTENSION_KIND_OVERLAYS_COMPONENT = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Host ledger protocol (reserved)
+//
+// The messages and enums below are reserved for the host ledger protocol: a
+// manager durably records each operation a host's agent accepted (from a
+// host-signed OperationReceipt) before the agent starts it, and attests the
+// agent's operation store against that record after every agent start.
+// Reserved; not yet implemented: no agent, Provider or manager sets, sends or
+// signs any of them, and a verifier refuses a message that carries one. Their
+// field numbers and names are fixed here so that a later version adds the
+// protocol without renumbering.
+// ---------------------------------------------------------------------------
+
+// LedgerPosition is a position in a host's operation store.
+message LedgerPosition {
+  // store_id is the random 16-byte identifier of the store.
+  bytes store_id = 1;
+  // seq is the sequence number of a commit in the store, at least 1.
+  uint64 seq = 2;
+  // head is the store's 32-byte chain head at seq.
+  bytes head = 3;
+}
+
+// LedgerSessionState is whether a host's agent holds an attestation session.
+enum LedgerSessionState {
+  // LEDGER_SESSION_STATE_UNSPECIFIED is never valid in an answer.
+  LEDGER_SESSION_STATE_UNSPECIFIED = 0;
+  // LEDGER_SESSION_STATE_AWAITING_ATTESTATION: the agent started and has not
+  // accepted an attestation since.
+  LEDGER_SESSION_STATE_AWAITING_ATTESTATION = 1;
+  // LEDGER_SESSION_STATE_ATTESTED: the agent accepted an attestation since it
+  // started and holds its session.
+  LEDGER_SESSION_STATE_ATTESTED = 2;
+}
+
+// HostLedgerState is a host's signed statement of its ledger state, in
+// HostAnswer.ledger and ChallengeAnswer.ledger. Reserved; not yet
+// implemented.
+message HostLedgerState {
+  // requested_version is the request's ledger_version, echoed.
+  uint32 requested_version = 1;
+  // version is the version of this message's content the agent used: the
+  // lower of requested_version and the highest version the agent
+  // implements, at least 1.
+  uint32 version = 2;
+  // state is whether the agent holds an attestation session.
+  LedgerSessionState state = 3;
+  // attestation_id is the 16-byte identifier of the agent's current
+  // attestation session (equal to AnswerContext.attestation_id); set exactly
+  // when state is ATTESTED.
+  bytes attestation_id = 4;
+  // mark is the highest ledger position the manager has confirmed to the
+  // agent; set exactly when state is ATTESTED.
+  LedgerPosition mark = 5;
+  // pending_receipts is the number of accepted operations above mark,
+  // capped at 65535.
+  uint32 pending_receipts = 6;
+  // store_origin_enrolment_id is the 16-byte enrolment under which this
+  // store was created (its first activated enrolment); empty when the store
+  // predates the record (it is never inferred).
+  bytes store_origin_enrolment_id = 7;
+  // store_enrolment_count is how many enrolments have ever been activated in
+  // this store (active, frozen and retired); 0 when the store predates the
+  // record.
+  uint32 store_enrolment_count = 8;
+  // parked_request_bytes is the request bytes the agent holds for accepted
+  // operations that wait for mark.
+  uint64 parked_request_bytes = 9;
+  // parked_request_budget_bytes is the agent's budget for
+  // parked_request_bytes; above it new operations are refused.
+  uint64 parked_request_budget_bytes = 10;
+}
+
+// OperationReceipt is a host's signed receipt for one operation it accepted,
+// the body of the SignedBlob in CreateResponse.operation_receipt and
+// TaskResponse.operation_receipt. Reserved; not yet implemented.
+message OperationReceipt {
+  // receipt_version is the version of this message's content, at least 1.
+  uint32 receipt_version = 1;
+  // provider_uid is the metadata.uid of the Provider the host is enrolled
+  // with.
+  string provider_uid = 2;
+  // host_id is the identity of the Host.
+  string host_id = 3;
+  // install_id is the random 16-byte identifier of the installation.
+  bytes install_id = 4;
+  // enrolment_id is the 16-byte identifier of the active enrolment the grant
+  // named.
+  bytes enrolment_id = 5;
+  // attestation_id is the 16-byte identifier of the agent's current
+  // attestation session.
+  bytes attestation_id = 6;
+  // store_id is the random 16-byte identifier of the host's operation store.
+  bytes store_id = 7;
+  // op_id is the 16-byte op_id of the accepted operation.
+  bytes op_id = 8;
+  // kind is the number of the operation's OperationKind: defined and not 0
+  // (an int32, not the enum type, because provider.proto imports this file).
+  int32 kind = 9;
+  // attempt is the operation's attempt number.
+  uint64 attempt = 10;
+  // vm_uid is the metadata.uid of the VirtualMachine the operation acts on.
+  string vm_uid = 11;
+  // binding_id is the 16-byte identifier of the VM placement.
+  bytes binding_id = 12;
+  // intent_digest is the operation's 32-byte salted request digest.
+  bytes intent_digest = 13;
+  // accepted_seq is the sequence number of the store transaction that
+  // accepted the operation, at least 1.
+  uint64 accepted_seq = 14;
+  // accepted_head is the store's 32-byte chain head at accepted_seq.
+  bytes accepted_head = 15;
+  // grant_digest is the SHA-256 digest of the 4-byte big-endian length of
+  // the grant body, the grant body and the grant signature, of the
+  // OperationGrant of this delivery: unique per send, because each send
+  // carries a freshly signed grant and ECDSA signatures are randomised.
+  bytes grant_digest = 16;
+}
+
+// ChallengePurpose is what a challenge nonce is drawn for.
+enum ChallengePurpose {
+  // CHALLENGE_PURPOSE_UNSPECIFIED is never valid.
+  CHALLENGE_PURPOSE_UNSPECIFIED = 0;
+  // CHALLENGE_PURPOSE_ATTEST: the first attestation after an agent start;
+  // issued only while the agent awaits attestation.
+  CHALLENGE_PURPOSE_ATTEST = 1;
+  // CHALLENGE_PURPOSE_REATTEST: replaces the session of an attested agent;
+  // issued only while the agent is attested.
+  CHALLENGE_PURPOSE_REATTEST = 2;
+}
+
+// ChallengeAnswer is a host's signed answer to a challenge request, the body
+// of the SignedBlob in ChallengeResponse.host_answer. Reserved; not yet
+// implemented.
+message ChallengeAnswer {
+  // context binds the answer to the request and the host.
+  AnswerContext context = 1;
+  // purpose is the request's purpose, echoed.
+  ChallengePurpose purpose = 2;
+  // challenge_nonce is the 16-byte challenge the agent drew; empty when
+  // not_issued_reason is set.
+  bytes challenge_nonce = 3;
+  // valid_for_seconds is how long the challenge is valid: 1 to 300 with a
+  // nonce; 0 otherwise.
+  uint32 valid_for_seconds = 4;
+  // not_issued_reason says why no challenge was drawn, from a closed set;
+  // empty when one was.
+  string not_issued_reason = 5;
+  // ledger is the host's ledger state; always set.
+  HostLedgerState ledger = 6;
+}
+
+// AuthorityOutcome is what a host did with an authority grant.
+enum AuthorityOutcome {
+  // AUTHORITY_OUTCOME_UNSPECIFIED is never valid in an answer.
+  AUTHORITY_OUTCOME_UNSPECIFIED = 0;
+  // AUTHORITY_OUTCOME_APPLIED: the grant was applied.
+  AUTHORITY_OUTCOME_APPLIED = 1;
+  // AUTHORITY_OUTCOME_ALREADY_APPLIED: the grant's effect was already in
+  // place.
+  AUTHORITY_OUTCOME_ALREADY_APPLIED = 2;
+  // AUTHORITY_OUTCOME_NOT_APPLICABLE: the grant does not apply to the host's
+  // state; nothing changed.
+  AUTHORITY_OUTCOME_NOT_APPLICABLE = 3;
+  // AUTHORITY_OUTCOME_REFUSED: the grant was refused; nothing changed.
+  AUTHORITY_OUTCOME_REFUSED = 4;
+  // AUTHORITY_OUTCOME_QUARANTINED: the host's store lost its persistence
+  // guarantee; nothing changed.
+  AUTHORITY_OUTCOME_QUARANTINED = 5;
+}
+
+// AuthorityAnswer is a host's signed answer to an authority grant, the body
+// of the SignedBlob in AuthorityResponse.host_answer. Reserved; not yet
+// implemented.
+message AuthorityAnswer {
+  // context binds the answer to the request and the host.
+  AnswerContext context = 1;
+  // grant_kind is the number of the grant's GrantKind, from a closed set (an
+  // int32, not the enum type, because provider.proto imports this file).
+  int32 grant_kind = 2;
+  // grant_digest is computed as OperationReceipt.grant_digest; empty when no
+  // grant decoded.
+  bytes grant_digest = 3;
+  // outcome is what the host did with the grant.
+  AuthorityOutcome outcome = 4;
+  // outcome_reason qualifies outcome, from a closed set; empty when there is
+  // nothing to add.
+  string outcome_reason = 5;
+  // mark is the host's ledger mark after the grant.
+  LedgerPosition mark = 6;
+  // op_id is the grant's op_id, echoed, for a grant that names an operation.
+  bytes op_id = 7;
+  // op_state is what the store records for that operation.
+  OperationRecordState op_state = 8;
 }

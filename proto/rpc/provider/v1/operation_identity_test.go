@@ -82,6 +82,10 @@ func sampleGrantBody() *GrantBody {
 		CeremonyRecordDigest: bytes.Repeat([]byte{18}, 32),
 		NotAfter:             ts,
 		IssuedAt:             ts,
+		// Reserved for the host ledger protocol (round-trip coverage only).
+		Ledger:           &LedgerPosition{StoreId: bytes.Repeat([]byte{19}, 16), Seq: 20, Head: bytes.Repeat([]byte{21}, 32)},
+		LedgerCheckpoint: &LedgerPosition{StoreId: bytes.Repeat([]byte{19}, 16), Seq: 2048, Head: bytes.Repeat([]byte{22}, 32)},
+		AttestationId:    bytes.Repeat([]byte{23}, 16),
 	}
 }
 
@@ -344,6 +348,9 @@ func TestOperationIdentity_FieldNumbersPinned(t *testing.T) {
 		{"ceremony_record_digest", 29, protoreflect.BytesKind, "", false},
 		{"not_after", 30, protoreflect.MessageKind, timestampMessageName, false},
 		{"issued_at", 31, protoreflect.MessageKind, timestampMessageName, false},
+		{"ledger", 32, protoreflect.MessageKind, ledgerPositionMessageName, false},
+		{"ledger_checkpoint", 33, protoreflect.MessageKind, ledgerPositionMessageName, false},
+		{"attestation_id", 34, protoreflect.BytesKind, "", false},
 	}, true)
 	if !body.ReservedRanges().Has(27) {
 		t.Error("GrantBody: field number 27 is not reserved")

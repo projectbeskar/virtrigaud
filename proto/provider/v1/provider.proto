@@ -74,6 +74,13 @@ message CreateRequest {
 message CreateResponse {
   string id = 1;       // Provider-specific VM identifier
   TaskRef task = 2;    // Optional task reference for async operations
+
+  // operation_receipt is the host's signed receipt for the operation it
+  // accepted: a SignedBlob of an OperationReceipt, to be set only while the
+  // operation is accepted and not yet started, in answer to a grant version
+  // that asks for receipts. Reserved; not yet implemented: no agent or
+  // built-in provider sets it, and the manager does not read it. Additive.
+  SignedBlob operation_receipt = 3;
 }
 
 // Delete a virtual machine
@@ -225,6 +232,12 @@ message TaskResponse {
   // to resize at all: Reconfiguring=False, reason
   // ProviderLacksHonestReconfigure.) Set only on Reconfigure responses. Additive and backward-compatible.
   bool honest_result = 3;
+
+  // operation_receipt is the host's signed receipt for the operation it
+  // accepted, as CreateResponse.operation_receipt. Reserved; not yet
+  // implemented: no agent or built-in provider sets it, and the manager does
+  // not read it. Additive.
+  SignedBlob operation_receipt = 4;
 }
 
 // Describe virtual machine current state
@@ -275,6 +288,13 @@ message DescribeRequest {
   // chain head at that sequence number in AnswerContext.continuity_head. 0 asks
   // for nothing. Set only together with answer_nonce.
   uint64 continuity_seq = 6;
+
+  // ledger_version asks the per-host agent for the host ledger fields of its
+  // signed answer: the highest ledger version the caller implements, or 0
+  // for none. Reserved; not yet implemented: the manager never sets it, and
+  // an agent answers a request that sets it exactly as one that does not
+  // (no ledger field, no echo). Additive.
+  uint32 ledger_version = 7;
 }
 
 message DescribeResponse {
@@ -353,6 +373,14 @@ message TaskStatusRequest {
   // chain head at that sequence number in AnswerContext.continuity_head. 0 asks
   // for nothing. Set only together with answer_nonce.
   uint64 continuity_seq = 6;
+
+  // ledger_version asks the per-host agent for the host ledger fields of its
+  // signed answer (OperationAnswer.accepted_seq, accepted_head,
+  // awaiting_request): the highest ledger version the caller implements, or
+  // 0 for none. Reserved; not yet implemented: the manager never sets it,
+  // and an agent answers a request that sets it exactly as one that does not
+  // (no ledger field, no echo). Additive.
+  uint32 ledger_version = 7;
 }
 
 // TaskOutcome is the typed result of an asynchronous task (ADR-0016 A7). A
@@ -1054,6 +1082,12 @@ message GetHostInfoRequest {
   // none. Set only together with answer_nonce. No built-in provider reads
   // it. Additive and backward-compatible.
   uint32 store_capacity_version = 6;
+  // ledger_version asks the host's per-host agent for its ledger state in
+  // the signed answer (HostAnswer.ledger): the highest ledger version the
+  // caller implements, or 0 for none. Reserved; not yet implemented: the
+  // manager never sets it, and an agent answers a request that sets it
+  // exactly as one that does not (no ledger field, no echo). Additive.
+  uint32 ledger_version = 7;
 }
 
 // Capability check - what features does this provider support
@@ -1724,6 +1758,21 @@ message GrantBody {
   google.protobuf.Timestamp not_after = 30;
   // issued_at is the manager's clock when it signed the grant.
   google.protobuf.Timestamp issued_at = 31;
+
+  // Fields 32 to 34 are reserved for the host ledger protocol, at a later
+  // grant_version only. Reserved; not yet implemented: they are unset at
+  // grant_version 1, and a verifier refuses a version 1 body that sets any of
+  // them.
+
+  // ledger is the ledger position the grant confirms to the host (an
+  // attestation or a ledger mark).
+  LedgerPosition ledger = 32;
+  // ledger_checkpoint is a checkpoint of the host's store at or below
+  // ledger, through which the host can reach ledger at an attestation.
+  LedgerPosition ledger_checkpoint = 33;
+  // attestation_id is the 16-byte identifier of the host's attestation
+  // session the grant is bound to.
+  bytes attestation_id = 34;
 }
 
 // Provider service definition.
