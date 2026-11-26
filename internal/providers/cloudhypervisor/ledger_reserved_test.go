@@ -23,17 +23,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/clustered"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// The host ledger protocol is reserved, not implemented. The Provider relays
-// what it relayed before the fields existed (they were unknown fields then,
-// kept byte for byte), and does not serve the HostAuthority service.
+// The host ledger fields of the Provider service's messages: the Provider
+// relays what it relayed before the fields existed (they were unknown fields
+// then, kept byte for byte). The HostAuthority service is routed
+// (authority_test.go).
 
 // TestLedgerReserved_ReadsForwardedUnchanged: a signed read that carries a
 // ledger_version reaches the agent byte for byte.
@@ -81,23 +80,4 @@ func TestLedgerReserved_ReceiptRelayedAsBefore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, clustered.EncodeHostTaskRef("host-a", "task-1"), resp.GetTask().GetId())
 	assert.True(t, proto.Equal(receipt, resp.GetOperationReceipt()), "relayed unchanged")
-}
-
-// TestLedgerReserved_HostAuthorityNotServed: the Provider registers no
-// HostAuthority service, so each of its methods is Unimplemented.
-func TestLedgerReserved_HostAuthorityNotServed(t *testing.T) {
-	p := newPKI(t)
-	a := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
-	cc := served(t, newProvider(t, p, Options{}, a))
-	ha := providerv1.NewHostAuthorityClient(cc)
-
-	_, err := ha.Challenge(ctx(t), &providerv1.ChallengeRequest{TargetHostId: "host-a"})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "Challenge: %v", err)
-	_, err = ha.Attest(ctx(t), &providerv1.AttestRequest{TargetHostId: "host-a"})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "Attest: %v", err)
-	_, err = ha.LedgerMark(ctx(t), &providerv1.LedgerMarkRequest{TargetHostId: "host-a"})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "LedgerMark: %v", err)
-	_, err = ha.RetireIfUnknown(ctx(t), &providerv1.RetireIfUnknownRequest{TargetHostId: "host-a"})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "RetireIfUnknown: %v", err)
-	assert.Empty(t, a.received(), "nothing reaches the agent")
 }

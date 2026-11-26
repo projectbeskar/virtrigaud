@@ -243,6 +243,10 @@ type route struct {
 	// newResponse returns an empty response of a mutating method, whose
 	// task reference the Provider host-encodes.
 	newResponse func() proto.Message
+	// authority is set for a method of the host authority service
+	// (authorityRoutes): routed by the request's target_host_id, relayed and
+	// answered byte for byte, and only to an agent that serves the service.
+	authority bool
 }
 
 // routes are the forwarded methods: the provider.v1 methods a per-host agent
@@ -306,6 +310,9 @@ func hostOfMutation(r route, outer proto.Message) (string, error) {
 func (p *Provider) handle(ctx context.Context, method string, raw []byte) (proto.Message, error) {
 	r, ok := routes[method]
 	if !ok {
+		r, ok = authorityRoutes[method]
+	}
+	if !ok {
 		return nil, status.Errorf(codes.Unimplemented, "method %s is not served by this Provider", method)
 	}
 	decoded := r.newRequest()
@@ -320,6 +327,9 @@ func (p *Provider) handle(ctx context.Context, method string, raw []byte) (proto
 	if r.mutating {
 		return p.mutate(ctx, r, raw, decoded)
 	}
+	if r.authority {
+		return p.authorize(ctx, r, raw, decoded)
+	}
 	host, forward, err := readRoute(decoded, raw, func(h string) bool { _, ok := p.pool.get(h); return ok })
 	if err != nil {
 		return nil, err
@@ -328,7 +338,7 @@ func (p *Provider) handle(ctx context.Context, method string, raw []byte) (proto
 		return nil, status.Error(codes.InvalidArgument, "the request names no host")
 	}
 	out := &emptypb.Empty{}
-	if err := p.forward(ctx, host, method, rawFrame(forward), out, false); err != nil {
+	if err := p.forward(ctx, host, method, rawFrame(forward), out, false, 0); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -376,7 +386,7 @@ func (p *Provider) mutate(ctx context.Context, r route, raw []byte, decoded prot
 		return nil, err
 	}
 	out := &emptypb.Empty{}
-	if err := p.forward(ctx, host, r.method, rawFrame(raw), out, true); err != nil {
+	if err := p.forward(ctx, host, r.method, rawFrame(raw), out, true, 0); err != nil {
 		return nil, err
 	}
 	resp := r.newResponse()
@@ -399,8 +409,10 @@ func (p *Provider) mutate(ctx context.Context, r route, raw []byte, decoded prot
 
 // forward sends req on method to host's agent, after its Hello, under its
 // breaker and the Provider's own call deadline, and maps a failure that is
-// not the agent's own answer.
-func (p *Provider) forward(ctx context.Context, host, method string, req, resp proto.Message, mutating bool) error {
+// not the agent's own answer. When minAgentAPI is set, an agent whose Hello
+// reported an older API version is not called: the call is answered
+// Unimplemented for that host (hostAuthorityUnsupported).
+func (p *Provider) forward(ctx context.Context, host, method string, req, resp proto.Message, mutating bool, minAgentAPI uint32) error {
 	if p.inventoryFailedClosed() {
 		return hostUnavailable(host, false, CauseInventoryStale)
 	}
@@ -415,6 +427,9 @@ func (p *Provider) forward(ctx context.Context, host, method string, req, resp p
 	for attempt := 0; attempt < helloAttempts; attempt++ {
 		if err = p.pool.helloed(ctx, e); err != nil {
 			return err
+		}
+		if v, ok := e.agentAPIVersion(); ok && v < minAgentAPI {
+			return hostAuthorityUnsupported(host, v)
 		}
 		p.relayFreeze(ctx, e)
 		p.relayRenewal(ctx, e)

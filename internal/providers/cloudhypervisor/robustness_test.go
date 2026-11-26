@@ -38,7 +38,6 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/inventoryfile"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -223,7 +222,7 @@ func TestQuickRestartNeedsNewHello(t *testing.T) {
 	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
 	require.NoError(t, err)
 	before := len(a.received())
-	a.apiVersion.Store(answer.AgentAPIVersion + 1)
+	a.apiVersion.Store(APIVersion + 1)
 	a.lis.dropAll()
 	refused := false
 	for i := 0; i < 50 && !refused; i++ {
@@ -392,7 +391,7 @@ func TestHelloNotKeyedByAddress(t *testing.T) {
 	_, err := client.Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})
 	require.NoError(t, err)
 	before := len(a.received())
-	a.apiVersion.Store(answer.AgentAPIVersion + 1)
+	a.apiVersion.Store(APIVersion + 1)
 	a.lis.dropAll()
 	refused := false
 	for i := 0; i < 50 && !refused; i++ {
