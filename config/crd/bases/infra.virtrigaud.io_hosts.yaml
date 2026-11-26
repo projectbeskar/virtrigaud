@@ -549,6 +549,87 @@ spec:
                 required:
                 - state
                 type: object
+              agentLastStore:
+                description: |-
+                  AgentLastStore is a display mirror of the last store position the
+                  manager verified in a signed answer of the host's agent, for
+                  operators. An output only: nothing reads it back to decide; the
+                  manager keeps the authoritative position in its pins Secret. Reserved
+                  for development builds: not populated yet.
+                properties:
+                  checkpointSeq:
+                    description: |-
+                      CheckpointSeq is the sequence number of the last verified checkpoint;
+                      0 when none was seen.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  seq:
+                    description: Seq is the last verified sequence number of the store.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  storeIDPrefix:
+                    description: |-
+                      StoreIDPrefix is the first 8 lowercase hexadecimal characters of the
+                      store id.
+                    maxLength: 8
+                    pattern: ^[0-9a-f]{8}$
+                    type: string
+                  updatedAt:
+                    description: UpdatedAt is when the mirror was last written.
+                    format: date-time
+                    type: string
+                type: object
+              agentLedger:
+                description: |-
+                  AgentLedger is a display mirror of the manager's ledger of the host's
+                  agent operation store, for operators. An output only: nothing reads it
+                  back to decide. Reserved for development builds: not populated yet.
+                properties:
+                  attestationState:
+                    description: |-
+                      AttestationState is whether the agent's current attestation session
+                      was adopted.
+                    enum:
+                    - Pending
+                    - Attested
+                    type: string
+                  attestedAt:
+                    description: AttestedAt is when the current attestation session
+                      was adopted.
+                    format: date-time
+                    type: string
+                  checkpointSeq:
+                    description: CheckpointSeq is the sequence number of the ledgered
+                      checkpoint.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  ledgerGeneration:
+                    description: |-
+                      LedgerGeneration is the ledger's generation, raised when the ledger
+                      is started afresh for the host's store.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  seq:
+                    description: Seq is the ledgered sequence number of the store.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  storeIDPrefix:
+                    description: |-
+                      StoreIDPrefix is the first 8 lowercase hexadecimal characters of the
+                      store id, for telling stores apart.
+                    maxLength: 8
+                    pattern: ^[0-9a-f]{8}$
+                    type: string
+                  updatedAt:
+                    description: UpdatedAt is when the mirror was last written.
+                    format: date-time
+                    type: string
+                type: object
               allocatableCPU:
                 description: AllocatableCPU is the schedulable vCPU capacity the provider
                   reports live.

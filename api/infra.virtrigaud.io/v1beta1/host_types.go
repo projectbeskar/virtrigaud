@@ -655,6 +655,94 @@ type HostAgentInventoryStatus struct {
 	UnexpectedExtensions []HostInventoryExtension `json:"unexpectedExtensions,omitempty"`
 }
 
+// HostAgentLedgerAttestationState is whether the manager adopted the current
+// attestation session of a host's agent.
+// +kubebuilder:validation:Enum=Pending;Attested
+type HostAgentLedgerAttestationState string
+
+// Attestation states of a host's ledger.
+const (
+	// HostAgentLedgerAttestationPending: an attestation of the host's agent
+	// was begun and not yet adopted.
+	HostAgentLedgerAttestationPending HostAgentLedgerAttestationState = "Pending"
+	// HostAgentLedgerAttestationAttested: the manager adopted the agent's
+	// current attestation session.
+	HostAgentLedgerAttestationAttested HostAgentLedgerAttestationState = "Attested"
+)
+
+// HostAgentLedgerStatus mirrors, for display, the manager's ledger of a
+// host's agent operation store: how far the store's chain is known to the
+// manager. The authoritative ledger is kept elsewhere by the manager; this
+// mirror carries only a store id prefix and counters, never the full store
+// id, a chain head or a session id, and is never read to decide anything.
+// Reserved for development builds: not populated yet.
+type HostAgentLedgerStatus struct {
+	// StoreIDPrefix is the first 8 lowercase hexadecimal characters of the
+	// store id, for telling stores apart.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}$`
+	// +kubebuilder:validation:MaxLength=8
+	StoreIDPrefix string `json:"storeIDPrefix,omitempty"`
+
+	// Seq is the ledgered sequence number of the store.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Seq int64 `json:"seq,omitempty"`
+
+	// CheckpointSeq is the sequence number of the ledgered checkpoint.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CheckpointSeq int64 `json:"checkpointSeq,omitempty"`
+
+	// AttestationState is whether the agent's current attestation session
+	// was adopted.
+	// +optional
+	AttestationState HostAgentLedgerAttestationState `json:"attestationState,omitempty"`
+
+	// AttestedAt is when the current attestation session was adopted.
+	// +optional
+	AttestedAt *metav1.Time `json:"attestedAt,omitempty"`
+
+	// LedgerGeneration is the ledger's generation, raised when the ledger
+	// is started afresh for the host's store.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	LedgerGeneration int64 `json:"ledgerGeneration,omitempty"`
+
+	// UpdatedAt is when the mirror was last written.
+	// +optional
+	UpdatedAt *metav1.Time `json:"updatedAt,omitempty"`
+}
+
+// HostAgentLastStoreStatus mirrors, for display, the last position of a
+// host's agent operation store that the manager verified in a signed answer.
+// It carries only a store id prefix and counters, never the full store id
+// or a chain head, and is never read to decide anything. Reserved for
+// development builds: not populated yet.
+type HostAgentLastStoreStatus struct {
+	// StoreIDPrefix is the first 8 lowercase hexadecimal characters of the
+	// store id.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}$`
+	// +kubebuilder:validation:MaxLength=8
+	StoreIDPrefix string `json:"storeIDPrefix,omitempty"`
+
+	// Seq is the last verified sequence number of the store.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Seq int64 `json:"seq,omitempty"`
+
+	// CheckpointSeq is the sequence number of the last verified checkpoint;
+	// 0 when none was seen.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	CheckpointSeq int64 `json:"checkpointSeq,omitempty"`
+
+	// UpdatedAt is when the mirror was last written.
+	// +optional
+	UpdatedAt *metav1.Time `json:"updatedAt,omitempty"`
+}
+
 // HostStatus is operator-synced observed state from the provider's ListHosts and
 // GetHostInfo calls. It carries capacity and health only, never connection
 // secrets.
@@ -719,6 +807,20 @@ type HostStatus struct {
 	// that runs a per-host agent. Used only by development builds.
 	// +optional
 	AgentInventory *HostAgentInventoryStatus `json:"agentInventory,omitempty"`
+
+	// AgentLedger is a display mirror of the manager's ledger of the host's
+	// agent operation store, for operators. An output only: nothing reads it
+	// back to decide. Reserved for development builds: not populated yet.
+	// +optional
+	AgentLedger *HostAgentLedgerStatus `json:"agentLedger,omitempty"`
+
+	// AgentLastStore is a display mirror of the last store position the
+	// manager verified in a signed answer of the host's agent, for
+	// operators. An output only: nothing reads it back to decide; the
+	// manager keeps the authoritative position in its pins Secret. Reserved
+	// for development builds: not populated yet.
+	// +optional
+	AgentLastStore *HostAgentLastStoreStatus `json:"agentLastStore,omitempty"`
 
 	// LastHeartbeatTime is when the operator last successfully synced this host.
 	// +optional
