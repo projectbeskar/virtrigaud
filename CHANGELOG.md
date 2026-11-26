@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-26 15:00] - The clustered Cloud Hypervisor Provider routes the host authority service to the addressed host's agent (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/cloudhypervisor/authority.go`, `internal/providers/cloudhypervisor/provider.go`, `internal/providers/cloudhypervisor/route.go`: `Provider.Register` also registers `provider.v1.HostAuthority` (`AuthorityServiceDesc`). `Challenge`, `Attest`, `LedgerMark` and `RetireIfUnknown` are routed by `target_host_id`. The request and the agent's signed answer are relayed byte for byte; the Provider never decodes, checks or re-encodes the grant or the answer. The manager does not call the service yet.
+  - A request without a host, or that does not decode, is `InvalidArgument`, and a host the Provider does not front is `HOST_UNAVAILABLE` (cause `HostNotFronted`, the id not echoed), without dialing.
+  - A call the agent never received is `HOST_UNAVAILABLE`; a call that was sent and got no answer is `OUTCOME_UNKNOWN_RETRY`, never "not performed".
+  - An agent answer the manager would count toward its Provider-wide breaker (`Unavailable` or `DeadlineExceeded` without a scoping reason, or `Unknown` without a message) is replaced by `OUTCOME_UNKNOWN_RETRY`, so that one host cannot open the breaker for the others. Every other agent answer is relayed unchanged.
+  - An agent of API version 4 is not called: the Provider answers `Unimplemented` with the new reason `HOST_AUTHORITY_UNSUPPORTED`, naming the host and the agent's version.
+- `internal/providers/contracts/errors.go`: `HostAuthorityUnsupportedReason`.
+- `internal/providers/cloudhypervisor/authority_test.go`, `internal/transport/grpc/host_authority_breaker_test.go`: Tests for byte-identical relay of requests and answers (a non-canonical encoding with an unknown field), routing to the addressed host only, unknown and missing hosts, an agent of version 4, agent answers relayed or rewritten, an unreachable host opening only its own breaker, a connection lost mid-call, and the manager breaker's accounting of each answer.
+
+### Changed
+- `internal/providers/cloudhypervisor/hello.go`: The Provider speaks agent API version 5 and routes agents of version 5 or 4. An agent of version 3 is no longer routed: upgrade the Providers before their agents.
+- `internal/providers/cloudhypervisor/ledger_reserved_test.go`, `internal/providers/cloudhypervisor/provider_test.go`, `internal/providers/cloudhypervisor/robustness_test.go`: Tests follow the new version. The Provider may speak the agent's current API version or the next one.
+- `proto/provider/v1/authority.proto`: The service's file comment says which provider routes it. Generated code is unchanged.
+- `docs/clustered-agent-provider-development.md`, `docs/operation-grants-wire-shape.md`: Document the routing, the errors and the version window.
+
+### Why
+Before the manager can attest a host's agent against its ledger, the clustered Provider has to carry the host authority calls to the right host's agent without changing the signed bytes, and without letting one host's failures fast-fail the others.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-26 14:59] - Reserve the Accepted attempt phase, attempt receipts and the Host ledger mirrors in the API (development builds only, not populated)
 **Author:** @wrkode (William Rizzo)
 

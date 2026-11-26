@@ -115,6 +115,7 @@ type Options struct {
 // safe for concurrent use.
 type Provider struct {
 	providerv1.UnimplementedProviderServer
+	providerv1.UnimplementedHostAuthorityServer
 	opts    Options
 	log     *slog.Logger
 	pool    *pool
@@ -130,7 +131,10 @@ type Provider struct {
 	secret *secretFollower
 }
 
-var _ providerv1.ProviderServer = (*Provider)(nil)
+var (
+	_ providerv1.ProviderServer      = (*Provider)(nil)
+	_ providerv1.HostAuthorityServer = (*Provider)(nil)
+)
 
 // New returns a Provider that fronts the hosts of inv. Nothing is dialed
 // until a call needs a host.
@@ -190,9 +194,13 @@ func (p *Provider) Close() error {
 	return err
 }
 
-// Register registers the Provider's gRPC service on s, with the forwarded
-// methods reading and sending their requests as raw bytes (ServiceDesc).
-func (p *Provider) Register(s grpc.ServiceRegistrar) { s.RegisterService(ServiceDesc(), p) }
+// Register registers the Provider's gRPC services on s: the Provider service
+// (ServiceDesc) and the host authority service (AuthorityServiceDesc), with
+// the forwarded methods reading and sending their requests as raw bytes.
+func (p *Provider) Register(s grpc.ServiceRegistrar) {
+	s.RegisterService(ServiceDesc(), p)
+	s.RegisterService(AuthorityServiceDesc(), p)
+}
 
 // ServiceDesc is the provider.v1 Provider service description in which every
 // forwarded method reads its request as the exact bytes that arrived and

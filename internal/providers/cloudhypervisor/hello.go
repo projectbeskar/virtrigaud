@@ -43,8 +43,12 @@ import (
 // accepts an agent of this version and of the version before it. Version 3
 // relays renewed certificates (InstallRenewedCertificate); version 4 adds
 // nothing the Provider does (the agent answers the store capacity of a
-// GetHostInfo that asks for it, relayed unchanged).
-const APIVersion uint32 = 4
+// GetHostInfo that asks for it, relayed unchanged); version 5 routes the host
+// authority service (provider.v1.HostAuthority) to the addressed host's agent.
+// An agent of version 4 is still routed for every other method; its host
+// authority calls are answered Unimplemented by the Provider
+// (HostAuthorityAgentAPIVersion).
+const APIVersion uint32 = 5
 
 // The signed host answer, as a per-host agent signs it (internal/agent/answer;
 // a test pins the two together). The Provider verifies only the answer to its

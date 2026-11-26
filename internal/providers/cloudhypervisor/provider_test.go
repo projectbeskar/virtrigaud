@@ -42,7 +42,10 @@ import (
 )
 
 // TestPinnedToTheAgentAnswer: the Provider's copy of the host answer's
-// signature input and its API version are the agent's.
+// signature input is the agent's, and the Provider routes the agent of the
+// same release: Providers are upgraded before agents, so the Provider speaks
+// the agent's current API version or the next one, and never drops the
+// agent's.
 func TestPinnedToTheAgentAnswer(t *testing.T) {
 	body := []byte{1, 2, 3}
 	want, err := answer.SignatureInput(answer.BodyTypeHostAnswer, body)
@@ -52,7 +55,10 @@ func TestPinnedToTheAgentAnswer(t *testing.T) {
 	assert.Equal(t, answer.DomainSeparator, hostSignedDomain)
 	assert.Equal(t, answer.NonceLen, nonceLen)
 	assert.Equal(t, answer.MaxBodyBytes, maxAnswerBody)
-	assert.Equal(t, answer.AgentAPIVersion, APIVersion, "the Provider speaks the agent's current API version")
+	assert.Contains(t, []uint32{answer.AgentAPIVersion, answer.AgentAPIVersion + 1}, APIVersion,
+		"the Provider speaks the agent's current API version or the next one")
+	assert.True(t, compatible(answer.AgentAPIVersion, APIVersion), "the Provider routes the agent of the same release")
+	assert.LessOrEqual(t, HostAuthorityAgentAPIVersion, APIVersion, "the Provider speaks the host authority version")
 }
 
 // TestAgentCertificateRefused: an agent whose key is not pinned, whose
@@ -285,7 +291,7 @@ func TestHelloVersionWindow(t *testing.T) {
 		_, err := client.Power(ctx(t), signedPower(t, "host-a"))
 		require.NoError(t, err)
 		// The agent restarts as a newer, unsupported release.
-		a.apiVersion.Store(answer.AgentAPIVersion + 1)
+		a.apiVersion.Store(APIVersion + 1)
 		a.lis.dropAll()
 		require.Eventually(t, func() bool {
 			_, err := client.Power(ctx(t), signedPower(t, "host-a"))

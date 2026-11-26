@@ -332,6 +332,16 @@ const ErrorInfoDomain = "provider.virtrigaud.io"
 // HostUnavailableReason.
 const HostUnavailableErrorDomain = ErrorInfoDomain
 
+// HostAuthorityUnsupportedReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a clustered provider attaches to the codes.Unimplemented
+// answer of a host authority call (provider.v1.HostAuthority) addressed to a
+// host whose agent is of an API version that does not serve that service.
+// The host is named under HostUnavailableHostKey. The call was not sent to the
+// agent. It is scoped to that one host: another host of the same provider may
+// serve the service. A plain Unimplemented without this reason comes from a
+// provider, or an agent, that does not serve the service at all.
+const HostAuthorityUnsupportedReason = "HOST_AUTHORITY_UNSUPPORTED"
+
 // VMOperationFailedReason is the google.rpc.ErrorInfo reason a clustered
 // provider attaches to a failed per-VM call that REACHED the VM's host and
 // failed there — the host answered, but the operation on that one VM did not

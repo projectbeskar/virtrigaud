@@ -364,6 +364,18 @@ func (e *hostEntry) currentHello() (made bool, outcome error) {
 	return true, e.hello
 }
 
+// agentAPIVersion returns the API version the agent reported in the Hello
+// made on the current transport, and whether such a Hello was made and
+// accepted.
+func (e *hostEntry) agentAPIVersion() (uint32, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.helloedLocked(e.gen) || e.hello != nil {
+		return 0, false
+	}
+	return e.apiVersion, true
+}
+
 // helloedFor reports whether connection gen is still the entry's connection,
 // its transport is live, and a Hello was made on that transport.
 func (e *hostEntry) helloedFor(gen uint64) bool {

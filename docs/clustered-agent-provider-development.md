@@ -320,8 +320,11 @@ On every new connection the Provider first calls `agent.v1.AgentService/Hello`
 with a fresh nonce and its API version, and verifies the host-signed answer:
 a `HostAnswer` signed with the key of the certificate the handshake just
 verified (the signer certificate must be that certificate), echoing the nonce
-and naming the host. The Provider speaks API version 4 and routes to an agent
-of version 4 or 3. An agent outside that window, or one that does not serve
+and naming the host. The Provider speaks API version 5 and routes to an agent
+of version 5 or 4 (an agent of version 4 is not sent host authority calls, see
+[Host authority service](#host-authority-service)). Upgrade the Providers
+before their agents: an agent of version 3 is no longer routed by a Provider
+of version 5. An agent outside that window, or one that does not serve
 `Hello`, is not routed until its connection is replaced (cause
 `AgentIncompatible`); the Provider never adapts a request to an older agent.
 An answer that is missing or does not verify leaves the host unavailable
@@ -429,6 +432,7 @@ a pin change recycles the host's connection
 | `TaskStatus` naming a task | By the host encoded in the task reference (`host-task/v1/<host>/<task>`). | A request naming the agent's own task reference. |
 | `ListHosts` | Answered by the Provider from its inventory. | Nothing; the hosts without a Hello on their current transport get one first, all at once, within 5 seconds in all. |
 | `GetCapabilities`, `Validate` | Answered by the Provider. | Nothing. |
+| `HostAuthority`: `Challenge`, `Attest`, `LedgerMark`, `RetireIfUnknown` | By `target_host_id`, to an agent of API version 5 or later (see [Host authority service](#host-authority-service)). | The request, byte for byte. |
 | Every other method (`ListVMs`, snapshots, clones, disk export and import, image preparation, ...) | Not served: `Unimplemented`. | Nothing. |
 
 A mutating call without `operation_envelope` is refused `FailedPrecondition`
@@ -467,6 +471,39 @@ operation is then asked about by `op_id`).
 
 `GetCapabilities` reports `supports_operation_identity`,
 `requires_operation_identity` and `supports_clustering`, and nothing else.
+
+### Host authority service
+
+`Provider.Register` also registers the `provider.v1.HostAuthority` service
+(`cloudhypervisor.AuthorityServiceDesc`), reserved for the host ledger
+protocol. The protocol is not implemented yet: the manager never calls the
+service. The Provider only routes it:
+
+- Each request is routed by its `target_host_id` and forwarded byte for byte,
+  and the agent's answer, a host-signed `ChallengeResponse` or
+  `AuthorityResponse`, is returned byte for byte. The Provider never decodes,
+  checks or re-encodes the grant or the signed answer; the agent judges the
+  request and the manager judges the answer.
+- A request without a host, or that does not decode, is `InvalidArgument`; a
+  host the Provider does not front is `HOST_UNAVAILABLE` (cause
+  `HostNotFronted`, the id is not echoed). Neither dials an agent.
+- An agent whose `Hello` reported API version 4 is not called: the Provider
+  answers `Unimplemented` with the `HOST_AUTHORITY_UNSUPPORTED` reason, the
+  host under the `host` metadata key and the agent's version under
+  `agentApiVersion`. A plain `Unimplemented` without that reason comes from an
+  agent, or a Provider, that does not serve the service.
+- A call the agent never received is `HOST_UNAVAILABLE` (not performed). A call
+  that was sent and got no answer is `OUTCOME_UNKNOWN_RETRY`, never
+  `HOST_UNAVAILABLE`, whatever the method: a challenge, an attestation, a
+  ledger mark and a retirement may each have changed the agent's state, and
+  repeating them is safe.
+- The agent's answers are relayed unchanged, except an answer the manager would
+  count toward its Provider-wide breaker (`Unavailable` or `DeadlineExceeded`
+  without a reason that scopes it to a host, a VM or an operation, such as a
+  reason of the agent contract, or `Unknown` without a message): it
+  is replaced by `OUTCOME_UNKNOWN_RETRY` naming the host and the code. So no
+  failure of one host's host authority calls counts toward the manager's
+  breaker for the other hosts.
 
 ## Per-host circuit breaker
 
