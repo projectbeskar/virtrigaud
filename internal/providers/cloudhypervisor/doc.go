@@ -37,6 +37,13 @@ limitations under the License.
 // mutating call returns is host-encoded (internal/clustered), so that a
 // TaskStatus that names only a task reaches the host that issued it.
 //
+// The Provider also serves the host authority service (provider.v1
+// HostAuthority: Challenge, Attest, LedgerMark, RetireIfUnknown). Each call
+// is routed by its target_host_id; its request and the agent's signed answer
+// are relayed byte for byte. An agent of an API version that does not serve
+// the service is not called (Unimplemented, HOST_AUTHORITY_UNSUPPORTED), and
+// every failure the Provider reports for such a call is scoped to its host.
+//
 // # Hosts
 //
 // The hosts come from the host inventory (internal/clustered/hostsecret),
