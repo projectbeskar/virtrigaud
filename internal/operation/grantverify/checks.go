@@ -26,8 +26,17 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// GrantVersion is the only grant_version this package mints and verifies.
+// GrantVersion is the grant_version a verifier implements unless configured
+// otherwise (VerifierConfig.GrantVersion), and the only one the manager's
+// minter issues for an operation by default.
 const GrantVersion uint32 = 1
+
+// LedgerGrantVersion is the grant_version of the host ledger protocol. A
+// verifier configured for it (a per-host agent with agent API version 5,
+// development builds only) accepts OPERATION grants with the version 1 field
+// rules and GRANT_KIND_ATTEST grants (VerifyAuthority), and refuses version
+// 1. No manager issues it yet.
+const LedgerGrantVersion uint32 = 2
 
 // Field lengths, in bytes, of the random identifiers and digests of a version
 // 1 OPERATION grant.
@@ -158,6 +167,18 @@ func checkEpoch(e *providerv1.Epoch, what string) *Refusal {
 	return nil
 }
 
+// knownVersion reports whether version is a grant_version this package
+// implements.
+func knownVersion(version uint32) bool {
+	return version == GrantVersion || version == LedgerGrantVersion
+}
+
+// placeholderSet reports whether b sets a field set aside for the
+// authority-history protocol (eal_seq, reset_floor, ceremony_record_digest).
+func placeholderSet(b *providerv1.GrantBody) bool {
+	return b.GetEalSeq() != 0 || b.GetResetFloor() != nil || len(b.GetCeremonyRecordDigest()) > 0
+}
+
 // ledgerFieldSet reports whether b sets a GrantBody field reserved for the
 // host ledger protocol (ledger, ledger_checkpoint, attestation_id). Presence
 // counts, not content: an empty LedgerPosition is set.
@@ -170,20 +191,29 @@ func ledgerFieldSet(b *providerv1.GrantBody) bool {
 // verifier's clock and expectations. The minter runs it on every body it
 // builds, so a minted grant always passes it.
 func CheckOperationBody(b *providerv1.GrantBody) *Refusal {
+	return CheckOperationBodyAt(b, GrantVersion)
+}
+
+// CheckOperationBodyAt is CheckOperationBody for an OPERATION grant at
+// grant_version version (GrantVersion or LedgerGrantVersion): the body must
+// name exactly that version, and the field rules are those of version 1 at
+// both (the ledger fields 32 to 34 are unset in an OPERATION grant at either
+// version). Any other version refuses every body.
+func CheckOperationBodyAt(b *providerv1.GrantBody, version uint32) *Refusal {
 	if r := walkMessage(b.ProtoReflect(), "GrantBody"); r != nil {
 		return r
 	}
 	if b.GetGrantVersion() == 0 {
 		return mismatch(RuleGrantVersion, "grant_version is 0")
 	}
-	if b.GetGrantVersion() != GrantVersion {
+	if !knownVersion(version) || b.GetGrantVersion() != version {
 		return mismatch(RuleGrantVersion, "grant_version %d is not implemented", b.GetGrantVersion())
 	}
 	if b.GetGrantKind() == providerv1.GrantKind_GRANT_KIND_UNSPECIFIED {
 		return mismatch(RuleUnspecifiedEnum, "grant_kind is UNSPECIFIED")
 	}
 	if b.GetGrantKind() != providerv1.GrantKind_GRANT_KIND_OPERATION {
-		return mismatch(RuleGrantKind, "grant_kind %s is not issuable at grant_version %d", b.GetGrantKind(), GrantVersion)
+		return mismatch(RuleGrantKind, "grant_kind %s is not an operation grant", b.GetGrantKind())
 	}
 	if b.GetKind() == providerv1.OperationKind_OPERATION_KIND_UNSPECIFIED {
 		return mismatch(RuleUnspecifiedEnum, "kind is UNSPECIFIED")
@@ -191,15 +221,18 @@ func CheckOperationBody(b *providerv1.GrantBody) *Refusal {
 	if _, ok := RowFor(b.GetKind()); !ok {
 		return mismatch(RuleUnknownEnum, "kind %d is not implemented", b.GetKind())
 	}
-	// Fields 26, 28 and 29 are unset at version 1.
-	if b.GetEalSeq() != 0 || b.GetResetFloor() != nil || len(b.GetCeremonyRecordDigest()) > 0 {
+	// Fields 26, 28 and 29 are unset at versions 1 and 2.
+	if placeholderSet(b) {
 		return mismatch(RulePlaceholderSet, "a field set aside at grant_version 1 (26, 28, 29) is set")
 	}
-	// Fields 32 to 34 are reserved for the host ledger protocol and are
-	// unset at version 1: this verifier implements none of them, so a body
-	// that sets any is refused rather than read as if it did not.
+	// Fields 32 to 34 belong to the host ledger protocol's authority grants
+	// and are unset in an OPERATION grant at every version, so a body that
+	// sets any is refused rather than read as if it did not.
 	if ledgerFieldSet(b) {
-		return mismatch(RulePlaceholderSet, "a field reserved at grant_version 1 (32, 33, 34) is set")
+		if version == GrantVersion {
+			return mismatch(RulePlaceholderSet, "a field reserved at grant_version 1 (32, 33, 34) is set")
+		}
+		return mismatch(RuleFieldNotForKind, "a host ledger field (32, 33, 34) is set in an OPERATION grant")
 	}
 	// Fields 20 to 25 belong to ADMIN and ENROL grants.
 	if b.GetTargetNamespace() != "" || b.GetRequestUid() != "" || b.GetAction() != "" ||

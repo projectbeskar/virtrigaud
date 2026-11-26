@@ -94,6 +94,10 @@ type MintRequest struct {
 	// Lifetime is the grant's validity from IssuedAt; 0 means
 	// DefaultGrantLifetime. It may not exceed MaxGrantLifetime.
 	Lifetime time.Duration
+	// GrantVersion is the grant_version of the grant: GrantVersion (also
+	// when 0) or LedgerGrantVersion, which only a host that reported it in a
+	// signed answer accepts. The field rules are the same at both.
+	GrantVersion uint32
 }
 
 // NewRandomID draws a 16-byte random identifier (op_id, binding_id, install_id,
@@ -132,9 +136,13 @@ func buildOperationBody(s Signer, r MintRequest) (*providerv1.GrantBody, error) 
 	if len(r.Request) > MaxRequestBytes {
 		return nil, fmt.Errorf("request is larger than %d bytes", MaxRequestBytes)
 	}
+	version := r.GrantVersion
+	if version == 0 {
+		version = GrantVersion
+	}
 	id := r.Identity
 	body := &providerv1.GrantBody{
-		GrantVersion:        GrantVersion,
+		GrantVersion:        version,
 		GrantKind:           providerv1.GrantKind_GRANT_KIND_OPERATION,
 		InstallId:           append([]byte(nil), s.InstallID()...),
 		ProviderUid:         id.ProviderUID,
@@ -153,7 +161,7 @@ func buildOperationBody(s Signer, r MintRequest) (*providerv1.GrantBody, error) 
 		IssuedAt:            timestamppb.New(r.IssuedAt),
 		NotAfter:            timestamppb.New(r.IssuedAt.Add(lifetime)),
 	}
-	if refusal := grantverify.CheckOperationBody(body); refusal != nil {
+	if refusal := grantverify.CheckOperationBodyAt(body, version); refusal != nil {
 		return nil, fmt.Errorf("mint operation grant: %w", refusal)
 	}
 	row, _ := RowFor(id.Kind) // CheckOperationBody refused an unknown kind
@@ -201,16 +209,22 @@ func MintOperationGrant(ctx context.Context, s Signer, r MintRequest) (*provider
 	if err != nil {
 		return nil, err
 	}
+	return signGrantBody(ctx, s, body, "mint operation grant")
+}
+
+// signGrantBody serialises body once and has s sign those exact bytes; what
+// names the caller in errors.
+func signGrantBody(ctx context.Context, s Signer, body *providerv1.GrantBody, what string) (*providerv1.OperationGrant, error) {
 	bodyBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("mint operation grant: serialise body: %w", err)
+		return nil, fmt.Errorf("%s: serialise body: %w", what, err)
 	}
 	if len(bodyBytes) > MaxGrantBodyBytes {
-		return nil, fmt.Errorf("mint operation grant: body is larger than %d bytes", MaxGrantBodyBytes)
+		return nil, fmt.Errorf("%s: body is larger than %d bytes", what, MaxGrantBodyBytes)
 	}
 	sig, err := s.Sign(ctx, bodyBytes, body.GetNotAfter().AsTime())
 	if err != nil {
-		return nil, fmt.Errorf("mint operation grant: sign: %w", err)
+		return nil, fmt.Errorf("%s: sign: %w", what, err)
 	}
 	return &providerv1.OperationGrant{
 		Body:            bodyBytes,

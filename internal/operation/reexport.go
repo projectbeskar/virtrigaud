@@ -106,8 +106,12 @@ const (
 
 // Grant format constants, as defined by grantverify.
 const (
-	// GrantVersion is the only grant_version this package mints and verifies.
+	// GrantVersion is grantverify.GrantVersion: the grant_version this
+	// package mints unless told otherwise.
 	GrantVersion = grantverify.GrantVersion
+	// LedgerGrantVersion is grantverify.LedgerGrantVersion, the
+	// grant_version of the host ledger protocol.
+	LedgerGrantVersion = grantverify.LedgerGrantVersion
 	// IDLen is the length of install_id, enrolment_id, binding_id, op_id and
 	// Epoch.holder.
 	IDLen = grantverify.IDLen

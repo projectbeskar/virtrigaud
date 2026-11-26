@@ -102,6 +102,10 @@ type VerifierConfig struct {
 	// Now is the verifier's clock as a function; it is kept for callers that
 	// predate Clock. nil means Clock, or WallClock when Clock is nil too.
 	Now func() time.Time
+	// GrantVersion is the one grant_version the verifier accepts:
+	// GrantVersion (also when 0) or LedgerGrantVersion. Only a verifier at
+	// LedgerGrantVersion verifies authority grants (VerifyAuthority).
+	GrantVersion uint32
 }
 
 // Verifier verifies operation grants for one installation, Provider, host and
@@ -115,6 +119,7 @@ type Verifier struct {
 	minGeneration uint64
 	maxSkew       time.Duration
 	clock         Clock
+	version       uint32
 }
 
 // Verified is a call that passed every rule.
@@ -167,6 +172,13 @@ func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
 	}
 	if v.minGeneration == 0 {
 		v.minGeneration = 1
+	}
+	v.version = cfg.GrantVersion
+	if v.version == 0 {
+		v.version = GrantVersion
+	}
+	if !knownVersion(v.version) {
+		return nil, fmt.Errorf("new operation-grant verifier: grant_version %d is not implemented", cfg.GrantVersion)
 	}
 	if v.maxSkew == 0 {
 		v.maxSkew = DefaultMaxClockSkew
@@ -277,7 +289,7 @@ func (v *Verifier) verifyAt(fullMethod string, outer proto.Message, bindAll bool
 	if err := proto.Unmarshal(grant.GetBody(), body); err != nil {
 		return nil, mismatch(RuleMalformedField, "the grant body does not decode")
 	}
-	if refusal := CheckOperationBody(body); refusal != nil {
+	if refusal := CheckOperationBodyAt(body, v.version); refusal != nil {
 		return nil, refusal
 	}
 	if body.GetAuthorityGeneration() < v.minGeneration {
