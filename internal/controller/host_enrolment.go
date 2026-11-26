@@ -1097,6 +1097,7 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 			"host", req.String())
 	}
 	st := &l.state
+	identityInUse := false
 	switch {
 	case host.Spec.Revoked:
 		if st.Current != nil || st.Pending != nil || st.Authorised != nil {
@@ -1153,7 +1154,25 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 				st.retireOpenRecords()
 				p, changed = nil, true
 			}
-			if ok && (p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID)) {
+			draw := ok && (p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID))
+			if draw {
+				// One machine, one live Host: no record is drawn for a Host
+				// whose identity another Host that is not revoked carries.
+				others, err := hostsWithIdentity(ctx, r.liveReader(), host)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if others > 0 {
+					draw, identityInUse = false, true
+					if p != nil {
+						st.retireOpenRecords()
+						changed = true
+					}
+					r.event(host, corev1.EventTypeWarning, reasonEnrolIdentityInUse,
+						"another Host that is not revoked carries the same spec.identity; no enrolment record is drawn")
+				}
+			}
+			if draw {
 				if p != nil {
 					st.retireOpenRecords()
 				}
@@ -1219,7 +1238,7 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 	}
-	return res, r.mirror(ctx, host, st, string(provider.UID))
+	return res, r.mirrorWith(ctx, host, st, string(provider.UID), identityInUse)
 }
 
 // requeueOnConflict returns the result of an enrolment reconcile: one that
@@ -1371,6 +1390,14 @@ func (r *HostEnrolmentReconciler) drawEnrolmentID(retired []string) (string, err
 // Host's Provider now. The patch carries the read resourceVersion, so it
 // never overwrites a concurrent status writer.
 func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState, providerUID string) error {
+	return r.mirrorWith(ctx, host, st, providerUID, false)
+}
+
+// mirrorWith is mirror for a Host whose spec.identity another Host that is
+// not revoked carries (identityInUse): while it is not enrolled its
+// AgentEnrolled reason is IdentityInUse.
+func (r *HostEnrolmentReconciler) mirrorWith(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState, providerUID string,
+	identityInUse bool) error {
 	base := host.DeepCopy()
 	cond := metav1.Condition{Type: infravirtrigaudiov1beta1.HostConditionAgentEnrolled, Status: metav1.ConditionFalse, ObservedGeneration: host.Generation}
 	var agent *infravirtrigaudiov1beta1.HostAgentStatus
@@ -1416,6 +1443,9 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 			if st.rekeyOpen(r.now()) {
 				cond.Message += "; a re-key window is open until " + st.Rekey.Until.UTC().Format(time.RFC3339)
 			}
+		case identityInUse:
+			cond.Reason, cond.Message = reasonEnrolIdentityInUse,
+				"another Host that is not revoked carries the same spec.identity; no enrolment record is drawn until only one does"
 		case st.Authorised != nil:
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentAwaitingCertificate,
 				fmt.Sprintf("certificate request %s is authorised; waiting for the issued certificate", st.Authorised.Request)
@@ -1482,7 +1512,7 @@ func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Host{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.hostRequestFromAnnotation),
-			builder.WithPredicates(inEnrolmentNS, isPins)).
+			builder.WithPredicates(inEnrolmentNS, isPins, ledgerFloorChanged)).
 		Watches(certrequest.NewObject(), handler.EnqueueRequestsFromMapFunc(r.hostRequestFromAnnotation),
 			builder.WithPredicates(inEnrolmentNS)).
 		Named("host-enrolment").

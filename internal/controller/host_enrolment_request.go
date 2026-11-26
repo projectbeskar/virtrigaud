@@ -314,6 +314,11 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if host.Spec.Revoked {
 		return r.deny(ctx, cr, host, nil, reasonEnrolHostRevoked, "the Host is revoked")
 	}
+	if others, err := hostsWithIdentity(ctx, r.liveReader(), host); err != nil {
+		return err
+	} else if others > 0 {
+		return r.deny(ctx, cr, host, nil, reasonEnrolIdentityInUse, "another Host that is not revoked carries the same spec.identity")
+	}
 	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
 	if err != nil {
 		return err

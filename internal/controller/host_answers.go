@@ -115,6 +115,13 @@ type HostStoreState struct {
 	// RegressedEnrolmentID is the enrolment under which it failed: the hold
 	// ends only with a new enrolment.
 	RegressedEnrolmentID []byte
+	// LedgerIndex is the host's tagged ledger index (host_ledger.go); nil
+	// when the document has none. Only the host ledger writes it; every
+	// other write of the store state keeps it as it is.
+	LedgerIndex *HostLedgerIndex
+	// ledgerIndexRaw is the stored ledger index when it could not be
+	// decoded: kept and written back unchanged, and treated as tampered.
+	ledgerIndexRaw json.RawMessage
 
 	// unknown are the top-level members of the stored document a newer
 	// manager wrote and this one does not know, and recordUnknown those of
@@ -269,6 +276,7 @@ type hostStoreStateJSON struct {
 	Previous             []storeRecordJSON `json:"previous,omitempty"`
 	RegressedReason      string            `json:"regressedReason,omitempty"`
 	RegressedEnrolmentID string            `json:"regressedEnrolmentID,omitempty"`
+	LedgerIndex          json.RawMessage   `json:"ledgerIndex,omitempty"`
 	// Unknown are the members a newer manager wrote that this one does
 	// not know, written back unchanged (host_state_compat.go).
 	Unknown unknownMembers `json:"-"`
@@ -363,6 +371,20 @@ func decodeStoreState(data []byte) (HostStoreState, error) {
 		}
 		st.RegressedEnrolmentID = id
 	}
+	if len(j.LedgerIndex) > 0 && !bytes.Equal(bytes.TrimSpace(j.LedgerIndex), []byte("null")) {
+		var xj ledgerIndexJSON
+		x, err := (*HostLedgerIndex)(nil), json.Unmarshal(j.LedgerIndex, &xj)
+		if err == nil {
+			x, err = fromIndexJSON(&xj)
+		}
+		if err != nil {
+			// Kept as it is and refused by the host ledger as tampered;
+			// the rest of the store state is still usable.
+			st.ledgerIndexRaw = bytes.Clone(j.LedgerIndex)
+		} else {
+			st.LedgerIndex = x
+		}
+	}
 	return st, nil
 }
 
@@ -380,6 +402,16 @@ func encodeStoreState(st HostStoreState) ([]byte, error) {
 	}
 	if len(st.RegressedEnrolmentID) > 0 {
 		j.RegressedEnrolmentID = hex.EncodeToString(st.RegressedEnrolmentID)
+	}
+	switch {
+	case st.LedgerIndex != nil:
+		raw, err := json.Marshal(toIndexJSON(st.LedgerIndex))
+		if err != nil {
+			return nil, fmt.Errorf("encode the host ledger index: %w", err)
+		}
+		j.LedgerIndex = raw
+	case len(st.ledgerIndexRaw) > 0:
+		j.LedgerIndex = st.ledgerIndexRaw
 	}
 	b, err := json.Marshal(j)
 	if err != nil {
@@ -485,6 +517,9 @@ type hostAnswerState struct {
 	// answer: a request field is sent only to an agent of the version that
 	// introduced it.
 	hostAPIVersion uint32
+	// mirroredAt is when the host's ledger mirrors were last refreshed
+	// (mirrorLedger).
+	mirroredAt time.Time
 }
 
 // HostAnswers is the manager's shared state of signed host answers, used by
@@ -501,6 +536,11 @@ type HostAnswers struct {
 	// Inventory is the host inventory policy (nil: the default policy,
 	// DefaultHostInventoryPolicy).
 	Inventory *HostInventoryPolicy
+
+	// Ledger is the host ledger of a manager with host ledger keys (nil:
+	// none); set it with AttachLedger. Nothing signed reads it yet; the
+	// heartbeat mirrors it into Host.status.agentLedger.
+	Ledger *HostLedger
 
 	mu    sync.Mutex
 	hosts map[string]*hostAnswerState
