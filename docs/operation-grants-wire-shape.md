@@ -534,9 +534,12 @@ A new service, `HostAuthority`, in its own file
 (`ChallengeRequest` 1–3 → `ChallengeResponse` 1), and `Attest`, `LedgerMark` and
 `RetireIfUnknown` (`AttestRequest`, `LedgerMarkRequest`, `RetireIfUnknownRequest`, each
 1–3, carrying an `OperationGrant` → `AuthorityResponse` 1). It is a separate service,
-not part of the `Provider` service: no bundled provider and no agent registers it, so
-gRPC answers each of its methods `Unimplemented`, and nothing in
-`GetCapabilitiesResponse` changes. A provider author does not implement it.
+not part of the `Provider` service, and nothing in `GetCapabilitiesResponse` changes.
+The clustered Cloud Hypervisor Provider of a development build routes it to the
+addressed host's agent, relaying requests and answers unchanged (see
+[Host authority service](clustered-agent-provider-development.md#host-authority-service));
+no other bundled provider registers it, so gRPC answers each of its methods
+`Unimplemented` there. A provider author does not implement it.
 
 The Kubernetes API reserves the matching status fields, all optional and none populated
 yet: the `Accepted` phase and the `receipt` and `ledgerGeneration` fields of
