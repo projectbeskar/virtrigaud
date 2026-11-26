@@ -74,6 +74,12 @@ const (
 	BodyTypeVMAnswer = hostidentity.BodyTypeVMAnswer
 	// BodyTypeHostAnswer is the body type of an answer about the host.
 	BodyTypeHostAnswer = hostidentity.BodyTypeHostAnswer
+	// BodyTypeChallengeAnswer is the body type of an answer to an
+	// attestation challenge request (host ledger protocol).
+	BodyTypeChallengeAnswer = hostidentity.BodyTypeChallengeAnswer
+	// BodyTypeAuthorityAnswer is the body type of an answer to a host
+	// authority grant (host ledger protocol).
+	BodyTypeAuthorityAnswer = hostidentity.BodyTypeAuthorityAnswer
 )
 
 // Size limits of a signed answer.
@@ -100,10 +106,19 @@ const (
 	// InstallRenewedCertificate (development builds); version 4 puts the
 	// store capacity in every answer to a GetHostInfo that asks for it, so a
 	// manager that asked can tell a request stripped in transit from an
-	// older agent (hostidentity.StoreCapacityAgentAPIVersion).
-	AgentAPIVersion uint32 = 4
-	// GrantVersion is the operation grant version the agent implements.
-	GrantVersion uint32 = 1
+	// older agent (hostidentity.StoreCapacityAgentAPIVersion); version 5
+	// speaks the host ledger protocol (development builds): it serves
+	// HostAuthority Challenge and Attest, puts the ledger state in every
+	// answer to a GetHostInfo that asks for it and the ledger fields in the
+	// context of every answer to a request that asks for them, accepts grant
+	// version 2 only, and accepts no operation before it is attested.
+	AgentAPIVersion uint32 = 5
+	// GrantVersion is the one operation grant version the agent implements:
+	// the host ledger protocol's.
+	GrantVersion = grantverify.LedgerGrantVersion
+	// LedgerVersion is the highest host ledger protocol version the agent
+	// implements (HostLedgerState.version).
+	LedgerVersion uint32 = 1
 )
 
 // ErrNoAnswer is returned when no answer may be made: the request carried no
@@ -137,7 +152,8 @@ func SignatureInput(bodyType string, body []byte) ([]byte, error) {
 }
 
 // bodyTypes is the closed set.
-var bodyTypes = []string{BodyTypeOperationAnswer, BodyTypeVMAnswer, BodyTypeHostAnswer}
+var bodyTypes = []string{BodyTypeOperationAnswer, BodyTypeVMAnswer, BodyTypeHostAnswer, BodyTypeChallengeAnswer,
+	BodyTypeAuthorityAnswer}
 
 // Sign serialises body and signs it with signer, whose public key must be the
 // ECDSA P-256 key certDER certifies. The signature is verified before it is
@@ -147,13 +163,11 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	if !slices.Contains(bodyTypes, bodyType) {
 		return nil, fmt.Errorf("%w: %s is not a host answer body", ErrSign, bodyType)
 	}
-	// This agent implements none of the host ledger fields: whatever built
-	// the answer, one that sets any is never signed (the manager would
-	// refuse it as "no answer" anyway).
-	if !guard.Off(guard.LedgerFieldsNeverSigned) {
-		if err := hostidentity.CheckNoLedgerFields(body); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrSign, err)
-		}
+	// Whatever built the answer, a host ledger field is signed only where
+	// the request asked for the ledger protocol, and the fields this agent
+	// does not implement yet are never signed.
+	if err := checkLedgerFields(body); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrSign, err)
 	}
 	return signBody(signer, certDER, bodyType, body, MaxBlobBytes)
 }
@@ -209,7 +223,8 @@ func signBody(signer crypto.Signer, certDER []byte, bodyType string, body proto.
 // reasonRE is the shape of a state reason.
 var reasonRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
-// lostReasons are the state reasons of a quarantined store.
+// lostReasons are the state reasons of a quarantined store that every
+// answer may carry.
 var lostReasons = []journal.LostReason{
 	journal.LostJournalCorrupt, journal.LostRolledBack, journal.LostInconsistentStore, journal.LostAnchorMissing,
 	journal.LostAnchorCorrupt, journal.LostJournalMissing, journal.LostIOError,
@@ -279,6 +294,20 @@ type Host struct {
 	// whatever the caller passed, as NOT_MEASURED when it was not measured
 	// (MaxBytes 0).
 	StoreCapacity opstore.Capacity
+	// LedgerRequested is the request's ledger_version; 0 when it asked for
+	// none. The context echoes it; at 1 or more it carries the attestation
+	// id, a host answer carries the ledger state, and a quarantine an
+	// attestation recorded keeps its own reason.
+	LedgerRequested uint32
+	// Authority marks an answer to a host authority request (a challenge or
+	// an authority grant): it is part of the ledger protocol whatever the
+	// request carries.
+	Authority bool
+	// Attestation is the agent's attestation session; Attested is false
+	// while it awaits its first attestation.
+	Attestation opstore.Attestation
+	// Attested reports whether Attestation is set.
+	Attested bool
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no
@@ -297,6 +326,7 @@ func HostAnswer(h Host) (*providerv1.HostAnswer, error) {
 		AgentVersion:            h.AgentVersion,
 		AgentApiVersion:         AgentAPIVersion,
 		GrantVersions:           []uint32{GrantVersion},
+		Ledger:                  hostLedger(h),
 		Mode:                    providerv1.AgentMode_AGENT_MODE_IDENTITY,
 		JournalSchemaVersion:    h.JournalSchemaVersion,
 		StagedCertificateSha256: bytes.Clone(h.StagedCertificateSHA256),
@@ -376,7 +406,7 @@ func answerContext(h Host) (*providerv1.AnswerContext, error) {
 	}
 	switch h.State {
 	case providerv1.AgentState_AGENT_STATE_QUARANTINED:
-		if !slices.Contains(lostReasons, journal.LostReason(h.StateReason)) {
+		if !slices.Contains(lostReasons, journal.LostReason(h.StateReason)) && !journal.IsLedgerReason(journal.LostReason(h.StateReason)) {
 			return nil, fmt.Errorf("%w: quarantine reason %q is not a store loss reason", ErrSign, h.StateReason)
 		}
 	case providerv1.AgentState_AGENT_STATE_READY, providerv1.AgentState_AGENT_STATE_UNATTESTED:
@@ -386,8 +416,9 @@ func answerContext(h Host) (*providerv1.AnswerContext, error) {
 	default:
 		return nil, fmt.Errorf("%w: agent state %v", ErrSign, h.State)
 	}
-	if h.StateReason != "" && !reasonRE.MatchString(h.StateReason) {
-		return nil, fmt.Errorf("%w: state reason %q is malformed", ErrSign, h.StateReason)
+	reason := stateReason(h)
+	if reason != "" && !reasonRE.MatchString(reason) {
+		return nil, fmt.Errorf("%w: state reason %q is malformed", ErrSign, reason)
 	}
 	ctx := &providerv1.AnswerContext{
 		Nonce:          bytes.Clone(h.Nonce),
@@ -397,13 +428,20 @@ func answerContext(h Host) (*providerv1.AnswerContext, error) {
 		EnrolmentId:    bytes.Clone(e.ID),
 		ChainPosition:  pos,
 		AgentState:     h.State,
-		StateReason:    h.StateReason,
+		StateReason:    reason,
 		AgentTime:      timestamppb.New(h.Now),
 		ContinuityHead: bytes.Clone(h.View.ContinuityHead),
 		CheckpointSeq:  h.View.CheckpointSeq,
 	}
 	if h.View.CheckpointSeq > 0 {
 		ctx.CheckpointHead = bytes.Clone(h.View.CheckpointHead[:])
+	}
+	// The host ledger fields: the request's ledger_version, echoed so that a
+	// manager can tell a request stripped in transit, and the attestation
+	// session, only to a ledger-aware request.
+	ctx.LedgerVersionEcho = h.LedgerRequested
+	if ledgerAware(h) && attested(h) {
+		ctx.AttestationId = bytes.Clone(h.Attestation.Session)
 	}
 	return ctx, nil
 }
