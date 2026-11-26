@@ -113,3 +113,68 @@ func MintAttestGrant(ctx context.Context, s Signer, r AttestMintRequest) (*provi
 	}
 	return signGrantBody(ctx, s, body, "mint attestation grant")
 }
+
+// LedgerMarkMintRequest is the input of MintLedgerMarkGrant.
+type LedgerMarkMintRequest struct {
+	// ProviderUID is the Provider's metadata.uid.
+	ProviderUID string
+	// HostID is the Host the grant is for.
+	HostID string
+	// EnrolmentID is the host's 16-byte active enrolment.
+	EnrolmentID []byte
+	// Epoch is the epoch the grant is issued under.
+	Epoch Epoch
+	// AttestationID is the 16-byte attestation session the mark is for (the
+	// session the host's signed answers name).
+	AttestationID []byte
+	// Ledger is the ledger position the host's mark is raised to.
+	Ledger LedgerPosition
+	// IssuedAt is the manager's clock at signing.
+	IssuedAt time.Time
+	// Lifetime is the grant's validity from IssuedAt; 0 means
+	// DefaultGrantLifetime. It may not exceed MaxGrantLifetime.
+	Lifetime time.Duration
+}
+
+// MintLedgerMarkGrant builds a GRANT_KIND_LEDGER_MARK GrantBody at
+// LedgerGrantVersion for r (fields 1-8, 30-32 and 34; every other field
+// unset), checks it with grantverify.CheckLedgerMarkBody, serialises it once
+// and has s sign those exact bytes. A nil signer is refused with
+// ErrNoSigner.
+//
+// No manager controller calls it yet: the host ledger protocol is not wired
+// to the manager.
+func MintLedgerMarkGrant(ctx context.Context, s Signer, r LedgerMarkMintRequest) (*providerv1.OperationGrant, error) {
+	const what = "mint ledger mark grant"
+	if isNilSigner(s) {
+		return nil, fmt.Errorf("%s: %w", what, ErrNoSigner)
+	}
+	lifetime := r.Lifetime
+	if lifetime == 0 {
+		lifetime = DefaultGrantLifetime
+	}
+	if lifetime < 0 || lifetime > MaxGrantLifetime {
+		return nil, fmt.Errorf("%s: lifetime %s is outside (0, %s]", what, lifetime, MaxGrantLifetime)
+	}
+	if r.IssuedAt.IsZero() {
+		return nil, fmt.Errorf("%s: issued_at is not set", what)
+	}
+	body := &providerv1.GrantBody{
+		GrantVersion:        LedgerGrantVersion,
+		GrantKind:           providerv1.GrantKind_GRANT_KIND_LEDGER_MARK,
+		InstallId:           append([]byte(nil), s.InstallID()...),
+		ProviderUid:         r.ProviderUID,
+		HostId:              r.HostID,
+		EnrolmentId:         append([]byte(nil), r.EnrolmentID...),
+		AuthorityGeneration: s.AuthorityGeneration(),
+		Epoch:               r.Epoch.toProto(),
+		Ledger:              r.Ledger.toProto(),
+		AttestationId:       append([]byte(nil), r.AttestationID...),
+		IssuedAt:            timestamppb.New(r.IssuedAt),
+		NotAfter:            timestamppb.New(r.IssuedAt.Add(lifetime)),
+	}
+	if refusal := grantverify.CheckLedgerMarkBody(body); refusal != nil {
+		return nil, fmt.Errorf("%s: %w", what, refusal)
+	}
+	return signGrantBody(ctx, s, body, what)
+}

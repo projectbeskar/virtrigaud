@@ -37,6 +37,9 @@ const (
 	// LedgerCheckpointEvery is the interval of the chain checkpoints a
 	// ledger checkpoint may name: its seq is a multiple of it.
 	LedgerCheckpointEvery = 1024
+	// AttestationIDLen is the length of an attestation session id
+	// (GrantBody.attestation_id of a LEDGER_MARK grant).
+	AttestationIDLen = 16
 )
 
 // VerifiedAuthority is an authority grant that passed every rule.
@@ -104,8 +107,8 @@ func CheckStrictRequest(m proto.Message) error {
 //  4. the body decodes, at grant_version LedgerGrantVersion, and its
 //     grant_kind is the one fullMethod carries, checked before any other
 //     field (else GRANT_MISMATCH);
-//  5. the kind's field rules (CheckAttestBody; LEDGER_MARK and
-//     RETIRE_IF_UNKNOWN are not implemented and are refused);
+//  5. the kind's field rules (CheckAttestBody, CheckLedgerMarkBody;
+//     RETIRE_IF_UNKNOWN is not implemented and is refused);
 //  6. authority_generation, validity, and the installation, Provider, host
 //     and enrolment are the verifier's.
 //
@@ -159,6 +162,10 @@ func (v *Verifier) VerifyAuthority(fullMethod string, req proto.Message, clock C
 	switch want {
 	case providerv1.GrantKind_GRANT_KIND_ATTEST:
 		if refusal := CheckAttestBody(body); refusal != nil {
+			return nil, refusal
+		}
+	case providerv1.GrantKind_GRANT_KIND_LEDGER_MARK:
+		if refusal := CheckLedgerMarkBody(body); refusal != nil {
 			return nil, refusal
 		}
 	default:
@@ -233,23 +240,8 @@ func CheckAttestBody(b *providerv1.GrantBody) *Refusal {
 	if b.GetGrantKind() != providerv1.GrantKind_GRANT_KIND_ATTEST {
 		return mismatch(RuleGrantKind, "grant_kind %s is not an attestation grant", b.GetGrantKind())
 	}
-	if r := checkCommonFields(b); r != nil {
+	if r := checkAuthorityCommon(b, "an attestation grant"); r != nil {
 		return r
-	}
-	// Fields 10 to 18 belong to operation grants.
-	if b.GetVmUid() != "" || len(b.GetBindingId()) > 0 || len(b.GetOpId()) > 0 ||
-		b.GetKind() != providerv1.OperationKind_OPERATION_KIND_UNSPECIFIED || b.GetAttempt() != 0 ||
-		len(b.GetIntentDigest()) > 0 || len(b.GetDigestSalt()) > 0 || b.GetMintEpoch() != nil || b.GetExpectKnown() {
-		return mismatch(RuleFieldNotForKind, "an operation field (10-18) is set in an attestation grant")
-	}
-	// Fields 20 to 23 and 25 belong to administrative grants; 24 is the
-	// challenge nonce.
-	if b.GetTargetNamespace() != "" || b.GetRequestUid() != "" || b.GetAction() != "" ||
-		len(b.GetSpecDigest()) > 0 || b.GetPrecondition() != nil {
-		return mismatch(RuleFieldNotForKind, "an administrative field (20-23, 25) is set in an attestation grant")
-	}
-	if placeholderSet(b) {
-		return mismatch(RulePlaceholderSet, "a field set aside (26, 28, 29) is set")
 	}
 	if len(b.GetAttestationId()) > 0 {
 		return mismatch(RuleFieldNotForKind, "attestation_id is set in an attestation grant")
@@ -273,6 +265,64 @@ func CheckAttestBody(b *providerv1.GrantBody) *Refusal {
 		case cp.GetSeq() > l.GetSeq():
 			return mismatch(RuleMalformedField, "ledger_checkpoint.seq is above ledger.seq")
 		}
+	}
+	return nil
+}
+
+// CheckLedgerMarkBody applies every rule that a GRANT_KIND_LEDGER_MARK body
+// at LedgerGrantVersion must satisfy on its own: the common fields (1 to 8,
+// 30 and 31) set, counters at least 1 and lengths exact; ledger set with a
+// 16-byte store, a seq of at least 1 and a 32-byte head; attestation_id of
+// AttestationIDLen bytes (the session the mark is for); and every other
+// field unset, the challenge nonce and ledger_checkpoint included. A minter
+// runs it on every ledger mark body it builds.
+func CheckLedgerMarkBody(b *providerv1.GrantBody) *Refusal {
+	if r := walkMessage(b.ProtoReflect(), "GrantBody"); r != nil {
+		return r
+	}
+	if b.GetGrantVersion() != LedgerGrantVersion {
+		return mismatch(RuleGrantVersion, "grant_version %d is not implemented", b.GetGrantVersion())
+	}
+	if b.GetGrantKind() != providerv1.GrantKind_GRANT_KIND_LEDGER_MARK {
+		return mismatch(RuleGrantKind, "grant_kind %s is not a ledger mark grant", b.GetGrantKind())
+	}
+	if r := checkAuthorityCommon(b, "a ledger mark grant"); r != nil {
+		return r
+	}
+	if len(b.GetSingleUseNonce()) > 0 {
+		return mismatch(RuleFieldNotForKind, "single_use_nonce is set in a ledger mark grant")
+	}
+	if b.GetLedgerCheckpoint() != nil {
+		return mismatch(RuleFieldNotForKind, "ledger_checkpoint is set in a ledger mark grant")
+	}
+	if len(b.GetAttestationId()) != AttestationIDLen {
+		return mismatch(RuleMalformedField, "attestation_id is %d bytes, not %d", len(b.GetAttestationId()), AttestationIDLen)
+	}
+	return checkLedgerPosition(b.GetLedger(), "ledger")
+}
+
+// checkAuthorityCommon checks what every authority grant kind shares: the
+// common fields (1 to 8, 30 and 31), and the operation fields (10 to 18),
+// the administrative fields (20 to 23 and 25) and the fields set aside (26,
+// 28, 29) unset. what names the kind in errors.
+func checkAuthorityCommon(b *providerv1.GrantBody, what string) *Refusal {
+	if r := checkCommonFields(b); r != nil {
+		return r
+	}
+	// Fields 10 to 18 belong to operation grants.
+	if b.GetVmUid() != "" || len(b.GetBindingId()) > 0 || len(b.GetOpId()) > 0 ||
+		b.GetKind() != providerv1.OperationKind_OPERATION_KIND_UNSPECIFIED || b.GetAttempt() != 0 ||
+		len(b.GetIntentDigest()) > 0 || len(b.GetDigestSalt()) > 0 || b.GetMintEpoch() != nil || b.GetExpectKnown() {
+		return mismatch(RuleFieldNotForKind, "an operation field (10-18) is set in %s", what)
+	}
+	// Fields 20 to 23 and 25 belong to administrative grants; 24 is the
+	// challenge nonce, which each kind checks.
+	if b.GetTargetNamespace() != "" || b.GetRequestUid() != "" || b.GetAction() != "" ||
+		len(b.GetSpecDigest()) > 0 || b.GetPrecondition() != nil {
+		return mismatch(RuleFieldNotForKind, "an administrative field (20-23, 25) is set in %s", what)
+	}
+	if placeholderSet(b) {
+		return mismatch(RulePlaceholderSet, "a field set aside (26, 28, 29) is set")
 	}
 	return nil
 }

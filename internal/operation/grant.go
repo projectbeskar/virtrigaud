@@ -98,6 +98,11 @@ type MintRequest struct {
 	// when 0) or LedgerGrantVersion, which only a host that reported it in a
 	// signed answer accepts. The field rules are the same at both.
 	GrantVersion uint32
+	// ExpectKnown sets expect_known: the grant is a re-send of an operation
+	// the host acknowledged with a receipt the host ledger covers, so a host
+	// that holds no record of the op_id must refuse it rather than accept it
+	// as new. Only a LedgerGrantVersion grant may set it.
+	ExpectKnown bool
 }
 
 // NewRandomID draws a 16-byte random identifier (op_id, binding_id, install_id,
@@ -160,6 +165,10 @@ func buildOperationBody(s Signer, r MintRequest) (*providerv1.GrantBody, error) 
 		MintEpoch:           id.MintEpoch.toProto(),
 		IssuedAt:            timestamppb.New(r.IssuedAt),
 		NotAfter:            timestamppb.New(r.IssuedAt.Add(lifetime)),
+		ExpectKnown:         r.ExpectKnown,
+	}
+	if r.ExpectKnown && version != LedgerGrantVersion {
+		return nil, fmt.Errorf("mint operation grant: expect_known is set only at grant_version %d", LedgerGrantVersion)
 	}
 	if refusal := grantverify.CheckOperationBodyAt(body, version); refusal != nil {
 		return nil, fmt.Errorf("mint operation grant: %w", refusal)
