@@ -252,6 +252,11 @@ func main() {
 	flag.StringVar(&hostEnrolmentFlags.CABundleFile, controller.DevHostEnrolmentCABundleFileFlagName, "",
 		devOnly+"PEM file of the host-agent subordinate CA that issued agent certificates must chain to.")
 	registerDevHostEnrolmentCAKeySecretFlag(flag.CommandLine, &hostEnrolmentFlags)
+	var hostLedgerKeyDir string
+	flag.StringVar(&hostLedgerKeyDir, controller.DevHostLedgerKeyDirFlagName, "",
+		devOnly+"Directory holding the host ledger keys (files current, optional previous, and identity, each 64 "+
+			"lowercase hexadecimal characters), normally a Secret volume mounted only into the manager pod. It needs "+
+			"per-host agent enrolment. The keys tag the manager's host ledger objects; nothing signed uses the ledger yet.")
 	var hostInventoryFlags controller.HostInventoryFlags
 	flag.StringVar(&hostInventoryFlags.AllowListFile, controller.ComponentAllowListFileFlagName, "",
 		devOnly+"Component allow-list file (JSON) that host inventories are compared with, read once at start. "+
@@ -359,6 +364,17 @@ func main() {
 	// The host inventory policy, refused by a release build like the
 	// signer. An allow-list that cannot be put in force does not stop the
 	// manager: it serves no Provider whose type runs a per-host agent.
+	// The host ledger keys, refused by a release build like the signer.
+	// Never logged: only their ids are.
+	hostLedgerKeys, err := controller.LoadHostLedgerKeys(hostLedgerKeyDir, hostEnrolment != nil)
+	if err != nil {
+		setupLog.Error(err, "invalid --"+controller.DevHostLedgerKeyDirFlagName)
+		os.Exit(1)
+	}
+	if hostLedgerKeys != nil {
+		setupLog.Info("Host ledger keys loaded; nothing signed uses the host ledger yet", "currentKeyID", hostLedgerKeys.CurrentKeyID(),
+			"previousKeyID", hostLedgerKeys.PreviousKeyID())
+	}
 	hostInventoryPolicy, err := controller.ParseHostInventoryPolicy(hostInventoryFlags)
 	if err != nil {
 		setupLog.Error(err, "invalid host inventory flags")
@@ -595,6 +611,10 @@ func main() {
 	hostAnswers := controller.NewHostAnswers(mgr.GetClient(), mgr.GetAPIReader(), hostEnrolment, installID)
 	if hostAnswers != nil {
 		hostAnswers.Inventory = hostInventoryPolicy
+		// The host ledger library (development builds only, with host
+		// ledger keys): its status mirror only; nothing signs from it yet.
+		hostAnswers.AttachLedger(controller.NewHostLedger(mgr.GetClient(), mgr.GetAPIReader(), hostAnswers.Trust, hostLedgerKeys,
+			hostEnrolment, mgr.GetEventRecorderFor("host-ledger")))
 	}
 
 	vmReconciler := &controller.VirtualMachineReconciler{
