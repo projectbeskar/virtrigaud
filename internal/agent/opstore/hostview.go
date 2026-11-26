@@ -57,6 +57,13 @@ type HostView struct {
 	// LastStartEpoch is the highest start epoch of any enrolment so far; 0
 	// for a store that was never enrolled.
 	LastStartEpoch uint64
+	// OriginEnrolmentID is the enrolment under which the store was first
+	// enrolled; nil for a store that records none (it was enrolled before
+	// origin evidence existed, or was never enrolled).
+	OriginEnrolmentID []byte
+	// EnrolmentActivations is how many enrolments were activated in the
+	// store; 0 when it records no origin.
+	EnrolmentActivations uint32
 }
 
 // HostView reads the active enrolment, the committed chain position, the
@@ -97,6 +104,9 @@ func hostViewTx(tx *journal.Tx, continuitySeq uint64) (HostView, error) {
 		return HostView{}, err
 	}
 	v.LastStartEpoch = m.GetLastStartEpoch()
+	if v.OriginEnrolmentID, v.EnrolmentActivations, err = tx.StoreOrigin(); err != nil {
+		return HostView{}, err
+	}
 	e, err := activeEnrolment(tx)
 	if err != nil {
 		return HostView{}, err

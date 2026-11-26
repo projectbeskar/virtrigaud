@@ -248,6 +248,53 @@ const (
 	// host ledger protocol is never signed (the agent implements none of
 	// them, and a manager refuses an answer that sets one).
 	LedgerFieldsNeverSigned Name = "ledger-fields-never-signed"
+	// LedgerFieldsOnlyWhenAsked: the host ledger fields of an answer (the
+	// attestation id and ledger version echo of its context, the ledger
+	// state of a host answer) are signed only in the answer to a request that
+	// asked for the ledger protocol, or in a host authority answer.
+	LedgerFieldsOnlyWhenAsked Name = "ledger-fields-only-when-asked"
+	// LedgerReasonsGated: a quarantine an attestation recorded is reported
+	// with its own reason only to a request that asked for the ledger
+	// protocol (or in a host authority answer), and as rolled_back to any
+	// other.
+	LedgerReasonsGated Name = "ledger-reasons-gated"
+	// OriginOnlyFirstEnrolment: a store records its origin enrolment only in
+	// the activation of its first enrolment, never for a store enrolled
+	// before origin evidence existed.
+	OriginOnlyFirstEnrolment Name = "origin-only-first-enrolment"
+	// OriginNeverRewritten: a store's origin enrolment, once recorded, is
+	// never replaced.
+	OriginNeverRewritten Name = "origin-never-rewritten"
+	// LedgerRetentionFloor: a checkpoint prunes no chain entry at or above
+	// the position of the last attestation.
+	LedgerRetentionFloor Name = "ledger-retention-floor"
+	// AttestStoreMatch: an attestation that names another store quarantines
+	// the store.
+	AttestStoreMatch Name = "attest-store-match"
+	// AttestNotAhead: an attestation that names a position beyond the store's
+	// chain quarantines the store.
+	AttestNotAhead Name = "attest-not-ahead"
+	// AttestHeadCompare: an attestation passes only when the store holds the
+	// attested head (or a matching checkpoint) and quarantines it otherwise.
+	AttestHeadCompare Name = "attest-head-compare"
+	// AttestMarkMax: a re-attestation never lowers the ledger mark.
+	AttestMarkMax Name = "attest-mark-max"
+	// ChallengeSingleUse: an attestation challenge is consumed by the first
+	// attestation that names it.
+	ChallengeSingleUse Name = "challenge-single-use"
+	// ChallengePurpose: an attestation is applied only with a challenge of
+	// the purpose the agent's state allows (a first attestation while
+	// awaiting one, a re-attestation while attested).
+	ChallengePurpose Name = "challenge-purpose"
+	// ChallengeExpiry: an attestation challenge is refused once its validity
+	// has passed.
+	ChallengeExpiry Name = "challenge-expiry"
+	// MutationsAfterAttestation: every mutating call is refused until the
+	// agent is attested.
+	MutationsAfterAttestation Name = "mutations-after-attestation"
+	// NoCommitBeforeAttest: the agent starts recovery, and the commits that
+	// come with it, only after its first attestation.
+	NoCommitBeforeAttest Name = "no-commit-before-attest"
 )
 
 // All lists every guard, in a fixed order.
@@ -267,5 +314,8 @@ func All() []Name {
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
 		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartMarkerExcl,
 		BootStartStartedSince, StoreCapacityOnlyWhenAsked, LedgerFieldsNeverSigned,
+		LedgerFieldsOnlyWhenAsked, LedgerReasonsGated, OriginOnlyFirstEnrolment, OriginNeverRewritten,
+		LedgerRetentionFloor, AttestStoreMatch, AttestNotAhead, AttestHeadCompare, AttestMarkMax,
+		ChallengeSingleUse, ChallengePurpose, ChallengeExpiry, MutationsAfterAttestation, NoCommitBeforeAttest,
 	}
 }
