@@ -46,10 +46,15 @@ import (
 // GetHostInfo that asks for it, relayed unchanged); version 5 is the agent that
 // speaks the host ledger protocol (development builds), whose ledger fields the
 // Provider relays unchanged, and the Provider routes the host authority service
-// (provider.v1.HostAuthority) to the addressed host's agent. An agent of version
-// 4 is still routed for every other method; its host authority calls are
-// answered Unimplemented by the Provider (HostAuthorityAgentAPIVersion).
-const APIVersion uint32 = 5
+// (provider.v1.HostAuthority) to the addressed host's agent; version 6 is the
+// agent that also serves LedgerMark and answers accepted operations with
+// receipts (development builds), relayed unchanged in the Create and task
+// responses. This Provider therefore routes agents of versions 6 and 5; an
+// agent of version 5 answers LedgerMark Unimplemented itself. A Provider of
+// an older version, configured through Options.APIVersion, still answers the
+// host authority calls of an agent before HostAuthorityAgentAPIVersion
+// Unimplemented itself.
+const APIVersion uint32 = 6
 
 // The signed host answer, as a per-host agent signs it (internal/agent/answer;
 // a test pins the two together). The Provider verifies only the answer to its

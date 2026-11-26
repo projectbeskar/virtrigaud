@@ -400,7 +400,7 @@ and a client may not send keepalive pings more often than every 15 seconds
 | Method | Answer |
 |--------|--------|
 | `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)); with `renewal_version` of at least 1, a development build puts its pending renewal request in it (see [Certificate renewal](#certificate-renewal)). `host_id` naming another host, a nonce that is not 16 bytes, or `continuity_seq`, `inventory_version` or `renewal_version` without a nonce: `InvalidArgument`. |
-| `provider.v1.HostAuthority/Challenge`, `Attest` | Development builds: attestation against the manager's host ledger (see [Host ledger attestation](#host-ledger-attestation)). `LedgerMark` and `RetireIfUnknown`: `Unimplemented`. Release builds: every method `Unimplemented`. |
+| `provider.v1.HostAuthority/Challenge`, `Attest`, `LedgerMark` | Development builds: attestation against the manager's host ledger and ledger marks (see [Host ledger attestation](#host-ledger-attestation)). `RetireIfUnknown`: `Unimplemented`. Release builds: every method `Unimplemented`. |
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
 | `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. A freeze confirmation it carries is applied first, and the outcome for each confirmed id is returned in `freeze_results` (see [Freeze confirmation](#freeze-confirmation)). |
 | `agent.v1.AgentService/InstallRenewedCertificate` | Development builds: stages a renewed certificate (`activate` false) or puts the staged one in use (`activate` true), and answers with a signed `HostAnswer` (see [Certificate renewal](#certificate-renewal)). The nonce and a certificate are required. Release builds: `Unimplemented`. |
@@ -413,7 +413,7 @@ A signed answer is made only for a request with a nonce, and only while the
 store's active enrolment is the one the host certificate names; otherwise the
 read answers without `host_answer`. Its body carries the nonce, the enrolment,
 the store's chain position, newest checkpoint and trust state (read together),
-the agent's API version (5), grant versions (`[2]`), mode (`identity`), store
+the agent's API version (6), grant versions (`[2]`), mode (`identity`), store
 schema version, clock floor and, in a development build, the digest of a
 staged renewed certificate (`staged_certificate_sha256`). It is signed with the host key, by the signer process, over
 `"virtrigaud.host-signed.v1" 0x00 ‖ be16(len(body_type)) ‖ body_type ‖ be32(len(body)) ‖ body`
@@ -445,9 +445,25 @@ in [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#agent-attes
 - The store records its origin enrolment (the first one it was enrolled under) and
   how many enrolments were activated in it, in the activation itself; a store
   enrolled before this record existed reports none.
-- Operation grants must be grant version 2; version 1 is refused. Receipts, ledger
-  marks and holding an accepted operation back until a manager has recorded it are
-  not implemented yet.
+- Operation grants must be grant version 2; version 1 is refused.
+- Every operation accepted while attested is answered with a host-signed receipt
+  (in the `CreateResponse` or `TaskResponse`) naming the operation, the store, the
+  chain position and head at which it was accepted, the session and the delivered
+  grant. The operation is then held back, committing nothing and having no effect,
+  until a `LedgerMark` (a manager-signed ledger mark grant for the current session)
+  raises the mark to or above that position; its request bytes are held in memory
+  meanwhile. After a restart, an operation accepted above the new attestation's
+  position is held back again, and one whose request bytes the restart lost waits
+  for a delivery of the same op_id (the fake executor needs none).
+- A ledger mark is checked against the chain like an attestation (another store, a
+  position beyond the chain, another head, or a head above the mark the store no
+  longer holds quarantine it); a mark for another session is refused and changes
+  nothing.
+- While 4096 accepted operations wait above the mark, or when a new request would
+  take the held request bytes above 256 MiB, new operations are refused
+  `RESOURCE_EXHAUSTED` `LEDGER_BEHIND` (definitely not performed). A grant with
+  `expect_known` for an op_id the store knows nothing of is refused
+  `UNKNOWN_TO_AGENT`.
 
 ## Operations
 
