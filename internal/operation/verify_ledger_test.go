@@ -276,10 +276,10 @@ func TestMintAttestGrant_Refusals(t *testing.T) {
 func TestCheckStrictRequest(t *testing.T) {
 	ok := &providerv1.ChallengeRequest{TargetHostId: testHostID, AnswerNonce: bytesOf(1, 16), Purpose: providerv1.ChallengePurpose_CHALLENGE_PURPOSE_ATTEST}
 	require.NoError(t, grantverify.CheckStrictRequest(ok))
-	bad := proto.Clone(ok).(*providerv1.ChallengeRequest)
+	bad := proto.CloneOf(ok)
 	bad.ProtoReflect().SetUnknown(unknownField())
 	assert.Equal(t, RuleUnknownField, ruleOf(t, grantverify.CheckStrictRequest(bad)))
-	enum := proto.Clone(ok).(*providerv1.ChallengeRequest)
+	enum := proto.CloneOf(ok)
 	enum.Purpose = 9
 	assert.Equal(t, RuleUnknownEnum, ruleOf(t, grantverify.CheckStrictRequest(enum)))
 	assert.Equal(t, RuleNotMutatingRequest, ruleOf(t, grantverify.CheckStrictRequest(nil)))
