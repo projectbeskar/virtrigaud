@@ -17,10 +17,14 @@ option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1;p
 // OperationGrant of the matching grant kind, and each answer is host-signed.
 //
 // Reserved; not yet implemented. It is a separate service, not part of the
-// Provider service: no built-in provider and no agent registers it, so a
-// call to any of its methods is answered Unimplemented by gRPC, and the
-// manager never calls it. A verifier refuses a request message of this
-// service that carries a field it does not know.
+// Provider service, and the manager never calls it. The clustered Cloud
+// Hypervisor Provider of a development build routes it to the agent of the
+// host named by target_host_id, relaying each request and answer unchanged,
+// and answers Unimplemented (reason HOST_AUTHORITY_UNSUPPORTED) for an agent
+// of an API version below 5. No other built-in provider registers it, so a
+// call to any of its methods is answered Unimplemented by gRPC. A verifier
+// refuses a request message of this service that carries a field it does
+// not know.
 // ---------------------------------------------------------------------------
 
 // HostAuthority is the per-host authority service of the host ledger
