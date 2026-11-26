@@ -47,12 +47,22 @@ type stubStore struct {
 	panics     bool
 	block      chan struct{}
 	panicCount int
+	// parks is how many calls return ErrAwaitingLedger before the others.
+	parks    int
+	wake     chan struct{}
+	deposits [][]byte
+	payloads [][]byte
 }
 
-func (s *stubStore) Execute(ctx context.Context, _ opstore.OpRef, _ []byte) (opstore.OpView, error) {
+func (s *stubStore) Execute(ctx context.Context, _ opstore.OpRef, payload []byte) (opstore.OpView, error) {
 	s.mu.Lock()
 	s.calls++
-	fail, panics, block := s.calls <= s.fails, s.panics, s.block
+	s.payloads = append(s.payloads, payload)
+	if s.calls <= s.parks {
+		s.mu.Unlock()
+		return opstore.OpView{}, opstore.ErrAwaitingLedger
+	}
+	fail, panics, block := s.calls-s.parks <= s.fails, s.panics, s.block
 	s.mu.Unlock()
 	if panics {
 		panic("executor bug")
@@ -84,6 +94,31 @@ func (s *stubStore) Panics(context.Context, opstore.OpRef) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.panicCount, nil
+}
+
+func (s *stubStore) LedgerWake() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wake == nil {
+		s.wake = make(chan struct{})
+	}
+	return s.wake
+}
+
+// wakeUp closes the wake channel and makes a new one.
+func (s *stubStore) wakeUp() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wake != nil {
+		close(s.wake)
+	}
+	s.wake = make(chan struct{})
+}
+
+func (s *stubStore) DepositRequest(_ opstore.OpRef, payload []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deposits = append(s.deposits, payload)
 }
 
 func (s *stubStore) Lost() bool {

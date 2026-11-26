@@ -5,6 +5,38 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-26 23:30] - The per-host agent answers accepted operations with signed receipts and runs none before the manager's host ledger covers it (development builds only, not wired to the manager)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/opstore/ledger.go`, `internal/agent/opstore/steps.go`: With the ledger gate (development builds), an accepted operation commits no step until the ledger mark of the current attestation session is at or above the chain position at which it was accepted. The check is made under the store lock of the first step's commit. Until then the operation is parked and its request bytes are held in memory only. A covered operation whose request bytes were lost by a restart waits for a delivery of the same op_id, unless the executor runs its kind without them (`executor.RequestOptional`; the fake executor does). An operation whose first step was already committed is never held back.
+- `internal/agent/opstore/ledger.go`: `LedgerMark` raises the mark of the current session after checking the position against the chain. Another store, a position beyond the chain, another head, or a head above the mark the store no longer holds quarantine the store. A mark for another session is refused without change. The pending count is rebuilt from the store at every attestation and re-enrolment.
+- `internal/agent/opstore/admit.go`: New operations are refused `LEDGER_BEHIND` (definitely not performed) while 4096 accepted operations sit above the mark, or when the request would take the parked request bytes above 256 MiB. A grant that sets `expect_known` for an op_id with neither record nor tombstone is refused `UNKNOWN_TO_AGENT` and audited as `expect_known_unknown`. Admission reports where an accepted operation was accepted and the session it was decided in.
+- `internal/agent/answer/receipt.go`, `internal/agent/server/operation.go`: Every operation accepted while attested, and every re-delivery while it is still accepted, is answered with a host-signed `OperationReceipt` in `CreateResponse` or `TaskResponse`. The receipt names the operation, the store, the accepted sequence number and head, the session and the delivered grant's digest. It is signed by its own signer, never the answer signer, within a per-Provider receipt limit (20 per second, burst 40).
+- `internal/agent/server/authority.go`: The development-build agent serves `HostAuthority` `LedgerMark`. Every outcome (`APPLIED`, `ALREADY_APPLIED`, `REFUSED` `grant_invalid`/`not_attested`/`stale_attestation`, `QUARANTINED`) is a signed answer naming the session and the mark.
+- `internal/agent/runner/runner.go`: A parked run waits for the store to wake it (a mark, a delivered request, a re-enrolment) or for a one-minute recheck. It counts no failure and is never given up. A second start of an operation with a run adds no goroutine and hands its request bytes to the store.
+- `internal/operation/grantverify/authority.go`, `internal/operation/grant_attest.go`, `internal/operation/grant.go`: The grant version 2 verifier accepts ledger mark grants on `LedgerMark` (the kind is checked against the method first). A verified operation grant carries its grant digest. The minter issues ledger mark grants and can set `expect_known` at grant version 2. No manager controller calls either.
+- `internal/agent/attest/attesttest/attesttest.go`: Test helpers attest at a given ledger position and raise the mark.
+- `internal/agent/internal/guard/guard.go`: Ten mutation guards for the new checks, each killed by a test. The guard over the operation answer's ledger fields replaces the one that refused them outright.
+
+### Changed
+- `internal/agent/answer/answer.go`: The agent reports agent API version 6.
+- `internal/agent/answer/operation.go`, `internal/agent/answer/ledger.go`: An operation answer to a request with `ledger_version` carries `accepted_seq`, and, while the operation is accepted, `accepted_head` and `awaiting_request`. The host answer's ledger state reports the pending receipts (capped at 65535) and the parked request bytes and budget.
+- `internal/agent/daemon/daemon.go`: A development build opens its store with the ledger gate.
+- `internal/providers/cloudhypervisor/hello.go`: The Cloud Hypervisor Provider speaks agent API version 6 and routes agents of versions 6 and 5. An agent of version 4 is no longer routed: upgrade Providers before agents.
+- `test/conformance/clustered/agenttarget/`: The agent target raises each host's ledger mark over the operations it accepts, from the receipt or from the agent's own chain position, as the manager will.
+- `docs/operation-grants-wire-shape.md`, `docs/per-host-agent-development.md`, `docs/clustered-agent-provider-development.md`: Receipts, the ledger gate, `LEDGER_BEHIND`, `expect_known`, `LedgerMark` and the version window.
+
+### Why
+Once the agent ran a version 2 operation as soon as it was attested, an operation lost to an agent store rollback could have had an effect the manager never recorded. Holding every operation until the manager's host ledger covers its acceptance closes that gap. The receipts let a manager record acceptances without asking again.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only. The manager still signs only grant version 1, so it signs nothing for a development-build agent, which runs no operation against it.
+
 ## [2026-11-26 18:00] - The per-host agent attests its store against the manager's host ledger before it runs anything (development builds only, not wired to the manager)
 **Author:** @wrkode (William Rizzo)
 

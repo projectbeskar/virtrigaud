@@ -111,8 +111,14 @@ const (
 	// HostAuthority Challenge and Attest, puts the ledger state in every
 	// answer to a GetHostInfo that asks for it and the ledger fields in the
 	// context of every answer to a request that asks for them, accepts grant
-	// version 2 only, and accepts no operation before it is attested.
-	AgentAPIVersion uint32 = 5
+	// version 2 only, and accepts no operation before it is attested;
+	// version 6 (development builds) serves HostAuthority LedgerMark, signs
+	// a receipt for every operation it accepts (in CreateResponse and
+	// TaskResponse), puts the acceptance position in the operation answers
+	// of a request that asks for the ledger fields, honours expect_known,
+	// and runs no accepted operation before the ledger mark covers its
+	// acceptance (refusing new ones LEDGER_BEHIND while too many wait).
+	AgentAPIVersion uint32 = 6
 	// GrantVersion is the one operation grant version the agent implements:
 	// the host ledger protocol's.
 	GrantVersion = grantverify.LedgerGrantVersion
@@ -308,6 +314,9 @@ type Host struct {
 	Attestation opstore.Attestation
 	// Attested reports whether Attestation is set.
 	Attested bool
+	// Backlog is what the ledger gate holds back (opstore.Store.Backlog),
+	// reported in the ledger state.
+	Backlog opstore.LedgerBacklog
 }
 
 // HostAnswer builds the HostAnswer for h. It returns ErrNoAnswer when h has no

@@ -293,6 +293,15 @@ func (s *Store) saveOp(ctx context.Context, rec *pb.OpRecord, extra func(tx *jou
 // payload is the verified request, passed to the executor in memory and
 // never written. Cancelling ctx stops between steps and leaves the operation
 // to recovery; it never resolves a step.
+//
+// With the ledger gate (Options.LedgerGate), an operation that has no step
+// intent yet starts only when the ledger mark of the current attestation
+// session covers its acceptance: otherwise Execute commits nothing and
+// returns ErrAwaitingLedger, holding payload (within the parked request
+// budget) for a later call. It also starts only with its request bytes,
+// payload or those the store holds, unless the executor runs its kind
+// without them: otherwise ErrAwaitingRequest. A later call may pass a nil
+// payload. An operation with a step intent is never gated.
 func (s *Store) Execute(ctx context.Context, ref OpRef, payload []byte) (OpView, error) {
 	s.mu.Lock()
 	if !s.ready || s.freezing.Load() {
@@ -302,6 +311,7 @@ func (s *Store) Execute(ctx context.Context, ref OpRef, payload []byte) (OpView,
 	k := runKey(ref)
 	if s.running[k] {
 		s.mu.Unlock()
+		s.DepositRequest(ref, payload)
 		return OpView{}, ErrRunning
 	}
 	s.running[k] = true
@@ -317,7 +327,16 @@ func (s *Store) Execute(ctx context.Context, ref OpRef, payload []byte) (OpView,
 		return OpView{}, fmt.Errorf("execute %s: %w", ref, err)
 	}
 	if rec.GetState() != StateAccepted && rec.GetState() != StateExecuting {
+		s.unpark(k)
 		return viewOfRecord(rec), nil
+	}
+	if rec.GetState() == StateAccepted {
+		s.mu.Lock()
+		payload, err = s.gateLocked(k, rec, payload)
+		s.mu.Unlock()
+		if err != nil {
+			return viewOfRecord(rec), fmt.Errorf("execute %s: %w", ref, err)
+		}
 	}
 	if len(rec.GetSteps()) == 0 {
 		plan, err := s.exec.Plan(providerv1.OperationKind(rec.GetIdentity().GetKind()))
@@ -370,12 +389,19 @@ func (s *Store) runStep(ctx context.Context, rec *pb.OpRecord, i int, op executo
 		return s.resolveByInspection(ctx, rec, i, op, ReasonGoalNotObserved, false)
 	}
 	if !st.GetIntent() {
+		s.mu.Lock()
+		if rec.GetState() == StateAccepted && s.gated() && !s.covered(rec) {
+			// The first step intent is committed only under a ledger mark
+			// that covers the acceptance (checked again here, under the
+			// lock of the commit).
+			s.mu.Unlock()
+			return false, ErrAwaitingLedger
+		}
 		st.Intent = true
 		if st.GetOnce() || st.GetIrreversible() {
 			rec.Irrev = true
 		}
 		rec.State = StateExecuting
-		s.mu.Lock()
 		err := s.saveOp(ctx, rec, nil)
 		s.mu.Unlock()
 		if err != nil {
@@ -486,6 +512,7 @@ func (s *Store) fail(ctx context.Context, rec *pb.OpRecord, reason string) error
 
 // outcomeUnknown records OutcomeUnknown. The record keeps holding its VM.
 func (s *Store) outcomeUnknown(ctx context.Context, rec *pb.OpRecord, reason string) error {
+	defer s.unpark(runKey(refOf(rec)))
 	rec.State, rec.Reason = StateOutcomeUnknown, reason
 	buf := s.newAuditBuf()
 	id := rec.GetIdentity()
@@ -503,6 +530,7 @@ func (s *Store) outcomeUnknown(ctx context.Context, rec *pb.OpRecord, reason str
 // tombstone, the VM record update and, for a completed Delete, the VM
 // tombstone.
 func (s *Store) finish(ctx context.Context, rec *pb.OpRecord, state OpState, reason string) error {
+	defer s.unpark(runKey(refOf(rec)))
 	rec.State, rec.Reason = state, reason
 	buf := s.newAuditBuf()
 	s.mu.Lock()
@@ -562,4 +590,9 @@ func terminalWrites(tx *journal.Tx, rec *pb.OpRecord, buf *auditBuf) error {
 	}
 	return buf.write(tx, AuditEvent{Event: "terminal", Ref: OpRef{EnrolmentID: id.GetEnrolmentId(), OpID: id.GetOpId()},
 		VMUID: id.GetVmUid(), Kind: kind, Reason: rec.GetReason(), State: rec.GetState()})
+}
+
+// refOf names rec's operation.
+func refOf(rec *pb.OpRecord) OpRef {
+	return OpRef{EnrolmentID: rec.GetIdentity().GetEnrolmentId(), OpID: rec.GetIdentity().GetOpId()}
 }

@@ -349,12 +349,16 @@ func (t *Target) NewGRPCServer() *grpc.Server {
 }
 
 // recordTasks records the host-encoded task reference of a mutating call's
-// answer.
+// answer, and raises the host's ledger mark over the operation it accepted
+// (markAccepted), so that the agent runs it.
 func (t *Target) recordTasks(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	resp, err := handler(ctx, req)
 	if task, ok := resp.(interface{ GetTask() *providerv1.TaskRef }); ok && err == nil && task.GetTask().GetId() != "" {
 		if host, inner, perr := hostTask(task.GetTask().GetId()); perr == nil {
 			t.recordTask(host, inner)
+			if _, perr := ParseTask(inner); perr == nil {
+				t.markAccepted(host, receiptOf(resp))
+			}
 		}
 	}
 	return resp, err
@@ -534,6 +538,7 @@ func (t *Target) SendDirect(ctx context.Context, host string, kind providerv1.Op
 	if err := t.byName[host].Conn().Invoke(ctx, row.FullMethod, req, resp); err != nil {
 		return "", err
 	}
+	t.markAccepted(host, receiptOf(resp))
 	if c, ok := resp.(*providerv1.CreateResponse); ok {
 		return c.GetTask().GetId(), nil
 	}
@@ -586,6 +591,11 @@ func (t *Target) settle(ctx context.Context, host string, tasks []string) error 
 	h := t.byName[host]
 	if err := fake.SetHold(h.FakeDir(), false); err != nil {
 		return err
+	}
+	// An operation whose accept answer was lost has had no mark yet: raise
+	// the mark to the agent's chain position before waiting for it.
+	if len(tasks) > 0 {
+		t.markAccepted(host, nil)
 	}
 	defer func() { _ = fake.SetHold(h.FakeDir(), true) }()
 	for _, task := range tasks {

@@ -82,9 +82,9 @@ func TestLedger_HostAuthorityNotServedWithoutAuthority(t *testing.T) {
 }
 
 // TestLedgerVersion_TaskStatusAndDescribe: a signed TaskStatus or Describe
-// that asks for a ledger version echoes it (the operation answer's ledger
-// fields are not implemented yet); a plain one that carries it is refused;
-// and the accept response of a mutation carries no operation receipt.
+// that asks for a ledger version echoes it and carries the acceptance
+// position; a plain one that carries it is refused; and the accept response
+// of an agent outside the ledger protocol carries no operation receipt.
 func TestLedgerVersion_TaskStatusAndDescribe(t *testing.T) {
 	e := newOpsEnv(t)
 	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
@@ -106,8 +106,8 @@ func TestLedgerVersion_TaskStatusAndDescribe(t *testing.T) {
 		oa := &providerv1.OperationAnswer{}
 		verifyBlob(t, e, resp.GetHostAnswer(), answer.BodyTypeOperationAnswer, oa)
 		assert.Equal(t, v, oa.GetContext().GetLedgerVersionEcho())
-		assert.Zero(t, oa.GetAcceptedSeq())
-		assert.Empty(t, oa.GetAcceptedHead())
+		assert.NotZero(t, oa.GetAcceptedSeq(), "the acceptance position, from the record")
+		assert.Empty(t, oa.GetAcceptedHead(), "no head once the operation left ACCEPTED")
 		assert.False(t, oa.GetAwaitingRequest())
 
 		_, err = c.TaskStatus(ctx(t), &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: task}, LedgerVersion: v})

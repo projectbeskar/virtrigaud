@@ -484,9 +484,9 @@ the agent starts it, and attests the agent's operation store against that record
 each agent start.
 
 **Partly implemented, development builds only, not wired to the manager.** The
-development-build agent implements the attestation part (see
-[Agent attestation](#agent-attestation-development-builds) below); receipts, ledger
-marks and retire-if-unknown are not implemented by anyone yet. The manager sends no
+development-build agent implements attestation, receipts and ledger marks (see
+[Agent attestation](#agent-attestation-development-builds) below); retire-if-unknown is
+not implemented by anyone yet. The manager sends no
 `ledger_version`, signs no grant at version 2, calls no `HostAuthority` method and
 ignores `operation_receipt`; its host answer verifier still refuses an answer that
 sets a ledger field of `AnswerContext`, `OperationAnswer` or `HostAnswer`, or carries
@@ -541,7 +541,7 @@ addressed host's agent, relaying requests and answers unchanged (see
 [Host authority service](clustered-agent-provider-development.md#host-authority-service));
 no other bundled provider registers it, so gRPC answers each of its methods
 `Unimplemented` there. A provider author does not implement it. The development-build
-agent serves `Challenge` and `Attest` (below).
+agent serves `Challenge`, `Attest` and `LedgerMark` (below).
 
 The Kubernetes API reserves the matching status fields, all optional and none populated
 yet: the `Accepted` phase and the `receipt` and `ledgerGeneration` fields of
@@ -552,17 +552,17 @@ and `Host.status.agentLedger` and `Host.status.agentLastStore` (see
 
 ### Agent attestation (development builds)
 
-A development-build agent reports agent API version 5 and grant versions `[2]`. It is
+A development-build agent reports agent API version 6 and grant versions `[2]`. It is
 not wired to any manager: the current manager signs only grant version 1, so it signs
-nothing for such an agent, and the agent refuses every operation until it is attested.
-A release-build agent reports the same versions, serves no `HostAuthority` method,
-runs no operation, and reports itself awaiting attestation in every ledger state.
+nothing for such an agent, and the agent refuses every operation until it is attested
+and runs none until a ledger mark covers its acceptance. A release-build agent reports
+the same versions, serves no `HostAuthority` method, runs no operation, and reports
+itself awaiting attestation in every ledger state. Agent API version 5 was the agent
+with attestation but without receipts, ledger marks or the ledger gate.
 
 - **Grant version 2.** The agent verifies operation grants at grant version 2 only
   (version 1 is refused, rule `grant_version`), with the version 1 field rules; fields
-  32 to 34 stay unset in an operation grant. An operation grant at version 2 is not
-  yet receipt-bound: the agent returns no `operation_receipt` and does not yet hold an
-  accepted operation back until its acceptance is recorded by a manager.
+  32 to 34 stay unset in an operation grant, and `expect_known` (18) may be set.
 - **Awaiting attestation.** After every start the agent serves reads and refuses every
   mutation `UNATTESTED` (cause `awaiting_attestation`) and commits nothing: continuity,
   the clock floor commit and recovery wait for the first attestation. The only
@@ -597,16 +597,62 @@ runs no operation, and reports itself awaiting attestation in every ledger state
   mark becomes the ledger position (the higher of the two on a re-attestation). The
   session and mark live in memory only. Every outcome is a signed `AuthorityAnswer`
   whose context names the session after the grant and whose `grant_digest` is
-  SHA-256(be32(len(body)) ‖ body ‖ signature) of the delivered grant. `LedgerMark` and
-  `RetireIfUnknown` are `Unimplemented`.
+  SHA-256(be32(len(body)) ‖ body ‖ signature) of the delivered grant.
+  `RetireIfUnknown` is `Unimplemented`.
+- **Receipts.** Every operation the agent accepts while attested is answered with an
+  `operation_receipt` in its `CreateResponse` or `TaskResponse`: a host-signed
+  `provider.v1.OperationReceipt` (receipt version 1) naming the Provider, host,
+  installation and enrolment, the attestation session the store held when it decided,
+  the store, the operation's identity (op_id, kind, attempt, VM, binding, intent
+  digest), the chain sequence number and head at which it was accepted, and the grant
+  digest of that delivery. A re-delivery of an operation that is still accepted gets a
+  receipt for the same acceptance, bound to its own grant. No receipt is signed once
+  the operation has started, for an operation of another enrolment or Provider than
+  the certificate's, or above a per-Provider receipt limit (20 per second, burst 40,
+  separate from the answer limit); the manager then asks for the operation's state.
+- **The ledger gate.** An accepted operation commits no step, and so has no effect,
+  until the ledger mark of the current attestation session is at or above the chain
+  sequence number at which it was accepted. Until then it is parked: its request bytes
+  are held in memory only, and its run waits for the mark. An operation the mark
+  covers but whose request bytes the agent does not hold (a restart lost them, or they
+  did not fit the budget) waits for a delivery of the same op_id, unless the executor
+  runs its kind without them (the development fake executor does). An operation whose
+  first step was already committed is never held back. A restart forgets the mark, so
+  every operation accepted above the next attestation's ledger position is held back
+  again.
+- **`LEDGER_BEHIND`.** A new operation is refused `RESOURCE_EXHAUSTED` with reason
+  `LEDGER_BEHIND` (definitely not performed) while 4096 accepted operations sit above
+  the mark, or when its request would take the parked request bytes above their budget
+  (256 MiB). An op_id the agent already knows is answered as usual.
+- **`expect_known`.** A grant that sets `expect_known` for an op_id the agent holds
+  neither a record nor a tombstone of is refused `NOT_FOUND` `UNKNOWN_TO_AGENT` (not
+  definite), nothing is accepted, and the decision is audited as
+  `expect_known_unknown`.
+- **`LedgerMark`.** After the request rules, the grant must verify at grant version 2
+  as a `GRANT_KIND_LEDGER_MARK` grant (the kind first) for the agent's host, Provider,
+  installation and certificate enrolment, with `ledger` and a 16-byte
+  `attestation_id` set and every other field unset (else `REFUSED` `grant_invalid`).
+  Then: a quarantined store is `QUARANTINED`; an agent that awaits its first
+  attestation is `REFUSED` `not_attested`; a session other than the current one is
+  `REFUSED` `stale_attestation` and changes nothing. The position is checked against
+  the chain: another store, a position beyond the chain, another head, or a head above
+  the mark the store no longer holds quarantine the store with the ledger loss
+  reason. A position above the mark raises it (`APPLIED`) and wakes the operations it
+  now covers; one at or below it is `ALREADY_APPLIED`. The answer names the session
+  and the mark after the grant.
 - **Ledger fields in reads.** `GetHostInfo`, `TaskStatus` and `Describe` with
   `answer_nonce` and `ledger_version` ≥ 1 echo the version in
   `AnswerContext.ledger_version_echo` and name the session in
   `AnswerContext.attestation_id` while the agent is attested (never while
   quarantined); `GetHostInfo` also carries `HostAnswer.ledger` (version 1, session
-  state, session id and mark when attested, origin evidence; `pending_receipts` and the
-  parked request bytes are 0 until receipts are implemented). `ledger_version` without
-  `answer_nonce` is `InvalidArgument`. `OperationAnswer` 12–14 are never set yet.
+  state, session id and mark when attested, origin evidence, the accepted operations
+  above the mark in `pending_receipts`, capped at 65535, and the parked request bytes
+  and their budget). `ledger_version` without `answer_nonce` is `InvalidArgument`. In
+  such an answer `OperationAnswer.accepted_seq` is the sequence number at which the
+  operation was accepted (from its record); `accepted_head`, the chain head there, is
+  set while the operation is accepted and the store holds that head, and
+  `awaiting_request` while it is accepted, covered by the mark and waiting for its
+  request bytes. An answer to a request without `ledger_version` sets none of them.
 - **Ledger loss reasons.** A quarantine an attestation recorded keeps its reason
   (`ledger_store_mismatch`, `ledger_ahead`, `ledger_mismatch`, `ledger_unverifiable`)
   only in an answer to a request with `ledger_version` ≥ 1 and in host authority
@@ -615,9 +661,9 @@ runs no operation, and reports itself awaiting attestation in every ledger state
   enrolled and how many enrolments were activated in it since, in the activation
   transaction itself. A store enrolled before this record existed reports none and
   never gets one inferred.
-- **Retention.** No checkpoint prunes a chain entry at or above the attested mark, so
-  the head at every position since the last attestation stays on the store. Until
-  ledger marks are implemented, the mark does not move between attestations.
+- **Retention.** No checkpoint prunes a chain entry at or above the ledger mark, so
+  the head at every position since the mark stays on the store; a ledger mark raises
+  the floor with the mark.
 
 ## Compatibility
 

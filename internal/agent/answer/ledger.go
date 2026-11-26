@@ -27,6 +27,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/attest"
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
+	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -70,11 +71,14 @@ const (
 	ReasonSessionReplaced = "session_replaced"
 	// ReasonStoreBusy: the store could not be read; nothing changed.
 	ReasonStoreBusy = "store_busy"
+	// ReasonStaleAttestation: a ledger mark named another attestation
+	// session than the agent's current one; nothing changed.
+	ReasonStaleAttestation = "stale_attestation"
 )
 
 // outcomeReasons is the closed set of outcome_reason values this agent signs.
 var outcomeReasons = []string{ReasonGrantInvalid, ReasonChallengeUnknown, ReasonChallengeExpired, ReasonNotAttested,
-	ReasonAlreadyAttested, ReasonSessionReplaced, ReasonStoreBusy, string(journal.LostLedgerStoreMismatch),
+	ReasonAlreadyAttested, ReasonSessionReplaced, ReasonStoreBusy, ReasonStaleAttestation, string(journal.LostLedgerStoreMismatch),
 	string(journal.LostLedgerAhead), string(journal.LostLedgerMismatch), string(journal.LostLedgerUnverifiable)}
 
 // ledgerAware reports whether h answers a request of the host ledger
@@ -103,11 +107,14 @@ func stateReason(h Host) string {
 // ledger version requested (a host authority answer passes 1).
 func ledgerState(h Host, requested uint32) *providerv1.HostLedgerState {
 	st := &providerv1.HostLedgerState{
-		RequestedVersion:       requested,
-		Version:                max(min(requested, LedgerVersion), 1),
-		State:                  providerv1.LedgerSessionState_LEDGER_SESSION_STATE_AWAITING_ATTESTATION,
-		StoreOriginEnrolmentId: bytes.Clone(h.View.OriginEnrolmentID),
-		StoreEnrolmentCount:    h.View.EnrolmentActivations,
+		RequestedVersion:         requested,
+		Version:                  max(min(requested, LedgerVersion), 1),
+		State:                    providerv1.LedgerSessionState_LEDGER_SESSION_STATE_AWAITING_ATTESTATION,
+		StoreOriginEnrolmentId:   bytes.Clone(h.View.OriginEnrolmentID),
+		StoreEnrolmentCount:      h.View.EnrolmentActivations,
+		PendingReceipts:          min(h.Backlog.PendingReceipts, opstore.MaxReportedPendingReceipts),
+		ParkedRequestBytes:       h.Backlog.ParkedRequestBytes,
+		ParkedRequestBudgetBytes: h.Backlog.ParkedRequestBudgetBytes,
 	}
 	if attested(h) {
 		st.State = providerv1.LedgerSessionState_LEDGER_SESSION_STATE_ATTESTED
@@ -244,8 +251,10 @@ var errLedgerField = errors.New("host ledger field")
 // checkLedgerFields refuses, before signing, an answer body that sets a host
 // ledger field where it may not:
 //
-//   - the operation answer's ledger fields (12 to 14) are not implemented by
-//     this agent and are never signed;
+//   - the operation answer's ledger fields (12 to 14) only with a ledger
+//     version echo of at least 1; the accepted head (32 bytes) and
+//     awaiting_request only for an ACCEPTED operation with its accepted
+//     sequence number;
 //   - in an operation, VM or host answer, the context's attestation id and
 //     a host answer's ledger state only with a ledger version echo of at
 //     least 1 (the request asked), and the ledger state's requested version
@@ -253,10 +262,9 @@ var errLedgerField = errors.New("host ledger field")
 //   - in a challenge or authority answer, the echo is 0 (those requests
 //     carry no ledger version).
 func checkLedgerFields(body proto.Message) error {
-	if !guard.Off(guard.LedgerFieldsNeverSigned) {
-		if oa, ok := body.(*providerv1.OperationAnswer); ok &&
-			(oa.GetAcceptedSeq() != 0 || len(oa.GetAcceptedHead()) > 0 || oa.GetAwaitingRequest()) {
-			return fmt.Errorf("%w: the operation answer sets a ledger field this agent does not implement (12-14)", errLedgerField)
+	if oa, ok := body.(*providerv1.OperationAnswer); ok && !guard.Off(guard.OperationLedgerFields) {
+		if err := checkOperationLedgerFields(oa); err != nil {
+			return err
 		}
 	}
 	if guard.Off(guard.LedgerFieldsOnlyWhenAsked) {
@@ -293,3 +301,24 @@ func checkLedgerFields(body proto.Message) error {
 	}
 	return nil
 }
+
+// checkOperationLedgerFields applies the rules of an operation answer's
+// ledger fields (12 to 14).
+func checkOperationLedgerFields(oa *providerv1.OperationAnswer) error {
+	set := oa.GetAcceptedSeq() != 0 || len(oa.GetAcceptedHead()) > 0 || oa.GetAwaitingRequest()
+	accepted := oa.GetState() == providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED
+	switch {
+	case !set:
+		return nil
+	case oa.GetContext().GetLedgerVersionEcho() == 0:
+		return fmt.Errorf("%w: an operation answer's ledger fields in an answer to a request that did not ask for them", errLedgerField)
+	case len(oa.GetAcceptedHead()) > 0 && (len(oa.GetAcceptedHead()) != headLen || oa.GetAcceptedSeq() == 0 || !accepted):
+		return fmt.Errorf("%w: an accepted head without an accepted operation and its sequence number", errLedgerField)
+	case oa.GetAwaitingRequest() && (oa.GetAcceptedSeq() == 0 || !accepted):
+		return fmt.Errorf("%w: awaiting_request for an operation that is not accepted", errLedgerField)
+	}
+	return nil
+}
+
+// headLen is the length of a chain head.
+const headLen = 32

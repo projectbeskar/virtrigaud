@@ -213,14 +213,17 @@ func TestHostAuthority_WrongHost(t *testing.T) {
 }
 
 // TestHostAuthority_OldAgent: an agent of the API version before the host
-// authority service is still routed for the Provider service, but its host
-// authority calls are answered Unimplemented by the Provider, naming the
-// host, without reaching the agent or touching its breaker.
+// authority service, behind a Provider whose window still routes it (the
+// Provider of the host authority version), is still routed for the Provider
+// service, but its host authority calls are answered Unimplemented by the
+// Provider, naming the host, without reaching the agent or touching its
+// breaker.
 func TestHostAuthority_OldAgent(t *testing.T) {
 	p := newPKI(t)
 	old := newFakeAgent(t, p, "host-a", fakeAgentOptions{})
 	old.apiVersion.Store(HostAuthorityAgentAPIVersion - 1)
-	prov := newProvider(t, p, Options{Breaker: &resilience.Config{FailureThreshold: 1, ResetTimeout: time.Hour, HalfOpenMaxCalls: 1}}, old)
+	prov := newProvider(t, p, Options{APIVersion: HostAuthorityAgentAPIVersion,
+		Breaker: &resilience.Config{FailureThreshold: 1, ResetTimeout: time.Hour, HalfOpenMaxCalls: 1}}, old)
 	cc := served(t, prov)
 
 	_, err := providerv1.NewProviderClient(cc).Describe(ctx(t), &providerv1.DescribeRequest{TargetHostId: "host-a"})

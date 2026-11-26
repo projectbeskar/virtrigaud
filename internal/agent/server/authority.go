@@ -36,8 +36,8 @@ import (
 )
 
 // authorityService serves provider.v1.HostAuthority for this host
-// (development builds): Challenge and Attest. LedgerMark and
-// RetireIfUnknown are Unimplemented: they are not implemented yet.
+// (development builds): Challenge, Attest and LedgerMark. RetireIfUnknown is
+// Unimplemented: it is not implemented yet.
 //
 // Every request is on the strict path: a field or an enum value the agent
 // does not know, a target that is not this host, or an answer_nonce that is
@@ -239,4 +239,81 @@ func decodedGrantDigest(g *providerv1.OperationGrant) []byte {
 		return nil
 	}
 	return grantverify.GrantDigest(g)
+}
+
+// LedgerMark applies a ledger mark grant, in this order:
+//
+//  1. the request rules (strict path, this host, a 16-byte answer_nonce);
+//  2. the grant verifies at grant version 2 as a ledger mark grant for this
+//     host, Provider, installation and the certificate's enrolment, at the
+//     clock floor (else REFUSED grant_invalid);
+//  3. a quarantined store is QUARANTINED, unchanged;
+//  4. the store applies it (opstore.Store.LedgerMark): an agent that awaits
+//     its first attestation is REFUSED not_attested, a mark for another
+//     session REFUSED stale_attestation (never a quarantine); a position
+//     that is not on the store's chain QUARANTINES it with the ledger loss
+//     reason; a position above the mark raises it (APPLIED) and wakes the
+//     operations it now covers; one at or below it is ALREADY_APPLIED.
+//
+// The answer names the session and the mark after the grant.
+func (a *authorityService) LedgerMark(ctx context.Context, req *providerv1.LedgerMarkRequest) (*providerv1.AuthorityResponse, error) {
+	s := a.s
+	if err := s.checkAuthorityRequest(req, req.GetTargetHostId(), req.GetAnswerNonce()); err != nil {
+		return nil, err
+	}
+	s.attestMu.Lock()
+	defer s.attestMu.Unlock()
+	outcome, reason := s.ledgerMark(ctx, req)
+	digest := decodedGrantDigest(req.GetGrant())
+	blob := s.signAnswer(ctx, req.GetAnswerNonce(), 0, func(h answer.Host) (proto.Message, error) {
+		view, err := s.opts.Agent.HostView(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		h.View = view
+		return answer.AuthorityAnswer(answer.Authority{Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_LEDGER_MARK,
+			GrantDigest: digest, Outcome: outcome, Reason: reason})
+	})
+	s.opts.Log.V(1).Info("ledger mark", "outcome", outcome.String(), "reason", reason)
+	return &providerv1.AuthorityResponse{HostAnswer: blob}, nil
+}
+
+// ledgerMark decides on one ledger mark grant (LedgerMark steps 2 to 4) and
+// returns the outcome and its reason.
+func (s *Server) ledgerMark(ctx context.Context, req *providerv1.LedgerMarkRequest) (providerv1.AuthorityOutcome, string) {
+	refused := providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED
+	v, err := s.verifier()
+	if err != nil {
+		return refused, answer.ReasonGrantInvalid
+	}
+	clock, _ := s.grantClock()
+	got, err := v.VerifyAuthority(providerv1.HostAuthority_LedgerMark_FullMethodName, req, clock)
+	if err != nil {
+		if r, ok := grantverify.AsRefusal(err); ok {
+			s.opts.Log.Info("ledger mark grant refused", "rule", string(r.Rule))
+		}
+		return refused, answer.ReasonGrantInvalid
+	}
+	if state, _ := s.opts.Agent.TrustState(); state == providerv1.AgentState_AGENT_STATE_QUARANTINED {
+		return providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_QUARANTINED, ""
+	}
+	res, err := s.opts.Authority.LedgerMark(ctx, opstore.LedgerMarkRequest{Session: bytes.Clone(got.Body.GetAttestationId()),
+		Ledger: position(got.Body.GetLedger())})
+	switch {
+	case errors.Is(err, journal.ErrLost):
+		return providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_QUARANTINED, ""
+	case errors.Is(err, opstore.ErrAttestState):
+		return refused, answer.ReasonNotAttested
+	case errors.Is(err, opstore.ErrStaleAttestation):
+		return refused, answer.ReasonStaleAttestation
+	case err != nil:
+		s.logNoAnswer(err, "the ledger mark could not be checked against the store")
+		return refused, answer.ReasonStoreBusy
+	case res.Outcome == opstore.LedgerMarkQuarantined:
+		s.opts.Log.Error(nil, "a ledger mark quarantined the store", "reason", string(res.Quarantined))
+		return providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_QUARANTINED, string(res.Quarantined)
+	case res.Outcome == opstore.LedgerMarkAlreadyApplied:
+		return providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_ALREADY_APPLIED, ""
+	}
+	return providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, ""
 }

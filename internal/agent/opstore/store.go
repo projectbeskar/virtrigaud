@@ -119,6 +119,20 @@ type Options struct {
 	// discard removes. Zero uses DefaultDiscardChunk; tests set a small
 	// value to exercise a discard that takes several transactions.
 	DiscardChunk int
+	// LedgerGate gates the first step of every accepted operation on the
+	// ledger mark of the store's attestation session (see ErrAwaitingLedger),
+	// bounds what the gate holds back (MaxPendingReceipts,
+	// ParkedRequestBudget; RefusalLedgerBehind) and parks the request bytes
+	// of the operations it holds back in memory. Development builds, which
+	// speak the host ledger protocol, set it.
+	LedgerGate bool
+	// MaxPendingReceipts is the number of accepted operations above the
+	// ledger mark at which new operations are refused. Zero uses
+	// DefaultMaxPendingReceipts.
+	MaxPendingReceipts int
+	// ParkedRequestBudget bounds the request bytes held in memory for parked
+	// operations. Zero uses DefaultParkedRequestBudget.
+	ParkedRequestBudget int64
 	// Audit receives every admission decision and state change, including
 	// refusals that write nothing, for example to write a structured
 	// system-journal line. It never receives request bytes. Nil discards. It
@@ -205,6 +219,17 @@ type Store struct {
 	// without it (Attestation).
 	attestation atomic.Pointer[Attestation]
 	running     map[string]bool
+
+	// parkMu guards what the ledger gate holds back: parked maps each
+	// parked operation to its request bytes (nil when it holds none),
+	// parkedBytes sums them, pending lists the accepted operations above the
+	// ledger mark in acceptance order, and wake is closed when a parked
+	// operation may be able to run. It is taken after mu, never before it.
+	parkMu      sync.Mutex
+	parked      map[string][]byte
+	parkedBytes int64
+	pending     []pendingOp
+	wake        chan struct{}
 	dirs        map[string]bool
 
 	// auditMu guards the audit cursor state: auditPending counts, by commit
@@ -251,7 +276,8 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("open operation store: %w", err)
 	}
 	s := &Store{j: j, exec: opts.Executor, opts: opts, fsys: j.FS(), audit: opts.Audit,
-		running: map[string]bool{}, dirs: map[string]bool{}, discardSem: make(chan struct{}, 1)}
+		running: map[string]bool{}, dirs: map[string]bool{}, discardSem: make(chan struct{}, 1),
+		parked: map[string][]byte{}, wake: make(chan struct{})}
 	if err := s.checkMarker(ctx); err != nil {
 		_ = j.Close()
 		return nil, fmt.Errorf("open operation store: %w", err)

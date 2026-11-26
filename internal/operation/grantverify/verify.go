@@ -134,6 +134,9 @@ type Verified struct {
 	// RequestBytes are the exact request bytes the grant binds. They are
 	// never logged.
 	RequestBytes []byte
+	// GrantDigest is GrantDigest of the delivered grant, which a host's
+	// operation receipt echoes.
+	GrantDigest []byte
 }
 
 // NewVerifier returns a verifier for cfg. It refuses a config with no
@@ -324,7 +327,7 @@ func (v *Verifier) verifyAt(fullMethod string, outer proto.Message, bindAll bool
 	if subtle.ConstantTimeCompare(want, body.GetIntentDigest()) != 1 {
 		return nil, mismatch(RuleIntentDigest, "intent_digest does not match the request")
 	}
-	return &Verified{Body: body, Kind: body.GetKind(), Request: req, RequestBytes: env.GetRequest()}, nil
+	return &Verified{Body: body, Kind: body.GetKind(), Request: req, RequestBytes: env.GetRequest(), GrantDigest: GrantDigest(grant)}, nil
 }
 
 // checkSizes applies the size caps before anything is parsed: the grant's

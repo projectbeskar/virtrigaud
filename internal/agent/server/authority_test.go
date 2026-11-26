@@ -71,6 +71,17 @@ func (a *authProxy) Attest(ctx context.Context, r opstore.AttestRequest) (opstor
 	return a.store().Attest(ctx, r)
 }
 
+func (a *authProxy) LedgerMark(ctx context.Context, r opstore.LedgerMarkRequest) (opstore.LedgerMarkResult, error) {
+	return a.store().LedgerMark(ctx, r)
+}
+
+func (a *authProxy) Backlog() opstore.LedgerBacklog {
+	if st := a.store(); st != nil {
+		return st.Backlog()
+	}
+	return opstore.LedgerBacklog{}
+}
+
 // rawClock is a settable challenge clock.
 type rawClock struct{ now atomic.Int64 }
 
@@ -85,10 +96,23 @@ type authEnv struct {
 
 func newAuthEnv(t *testing.T) *authEnv {
 	t.Helper()
+	return newAuthEnvWith(t, nil)
+}
+
+// newAuthEnvWith is newAuthEnv with storeMod adjusting the store's options
+// (the ledger gate is always on) and mods the server's.
+func newAuthEnvWith(t *testing.T, storeMod func(*opstore.Options), mods ...withOptions) *authEnv {
+	t.Helper()
 	proxy := &authProxy{}
 	clock := &rawClock{}
 	clock.now.Store(int64(time.Hour))
-	e := newOpsEnv(t, func(o *server.Options) { o.Authority, o.ChallengeClock = proxy, clock })
+	all := append([]withOptions{func(o *server.Options) { o.Authority, o.ChallengeClock = proxy, clock }}, mods...)
+	e := newOpsEnvStore(t, nil, func(o *opstore.Options) {
+		o.LedgerGate = true
+		if storeMod != nil {
+			storeMod(o)
+		}
+	}, all...)
 	proxy.mu.Lock()
 	proxy.st = e.store
 	proxy.mu.Unlock()
@@ -188,6 +212,7 @@ func TestAuthority_AttestThenOperate(t *testing.T) {
 
 	task, err := e.send(o)
 	require.NoError(t, err, "a mutation after the attestation")
+	pos = e.markTip(t)
 	e.waitDone(task)
 
 	info, err = pc.GetHostInfo(ctx(t), &providerv1.GetHostInfoRequest{AnswerNonce: nonce(6), LedgerVersion: 1})
@@ -207,7 +232,7 @@ func TestAuthority_AttestThenOperate(t *testing.T) {
 	assert.Zero(t, ha.GetContext().GetLedgerVersionEcho())
 
 	// TaskStatus and Describe echo the version and name the session when
-	// asked; the accept response carries no receipt yet.
+	// asked.
 	ts, err := pc.TaskStatus(ctx(t), &providerv1.TaskStatusRequest{AnswerNonce: nonce(8), OpId: o.id.OpID,
 		OpEnrolmentId: o.id.EnrolmentID, TargetHostId: trusttest.HostName, LedgerVersion: 3})
 	require.NoError(t, err)
@@ -215,7 +240,8 @@ func TestAuthority_AttestThenOperate(t *testing.T) {
 	verifyBlob(t, e.opsEnv, ts.GetHostAnswer(), answer.BodyTypeOperationAnswer, oa)
 	assert.Equal(t, uint32(3), oa.GetContext().GetLedgerVersionEcho())
 	assert.Equal(t, ch.GetChallengeNonce(), oa.GetContext().GetAttestationId())
-	assert.Zero(t, oa.GetAcceptedSeq())
+	assert.NotZero(t, oa.GetAcceptedSeq(), "the acceptance position, from the record")
+	assert.Empty(t, oa.GetAcceptedHead(), "no head once the operation left ACCEPTED")
 	d, err := pc.Describe(ctx(t), &providerv1.DescribeRequest{Owner: ownerOf("vm-1"), TargetHostId: trusttest.HostName,
 		AnswerNonce: nonce(9), BindingId: o.id.BindingID, LedgerVersion: 1})
 	require.NoError(t, err)
@@ -233,7 +259,7 @@ func TestAuthority_AttestThenOperate(t *testing.T) {
 	o2 := e.newOp(kCreate, "vm-2", randID(), 1, createReq("vm-2", nil))
 	req := &providerv1.CreateRequest{OperationEnvelope: &providerv1.OperationEnvelope{Request: o2.request, Grant: e.grant(o2, time.Now(), 0)}}
 	require.NoError(t, e.cc().Invoke(ctx(t), providerv1.Provider_Create_FullMethodName, req, created))
-	assert.Nil(t, created.GetOperationReceipt(), "an accept response carries no receipt yet")
+	assert.NotNil(t, created.GetOperationReceipt(), "an accept response carries a receipt")
 }
 
 // TestAuthority_ChallengeRules: ATTEST only while awaiting, REATTEST only
@@ -282,6 +308,7 @@ func TestAuthority_Reattest(t *testing.T) {
 		return e.send(e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil)))
 	}()
 	require.NoError(t, err)
+	e.markTip(t)
 	e.waitDone(task)
 	newer := e.store.Position()
 	require.Greater(t, newer.Seq, older.Seq)
@@ -400,8 +427,10 @@ func TestAuthority_RequestRules(t *testing.T) {
 	}
 	_, err := e.ha.Attest(ctx(t), &providerv1.AttestRequest{TargetHostId: "host-b", AnswerNonce: nonce(2)})
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
-	_, err = e.ha.LedgerMark(ctx(t), &providerv1.LedgerMarkRequest{TargetHostId: trusttest.HostName, AnswerNonce: nonce(3)})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "LedgerMark is not implemented yet")
+	_, err = e.ha.LedgerMark(ctx(t), &providerv1.LedgerMarkRequest{TargetHostId: "host-b", AnswerNonce: nonce(3)})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	_, err = e.ha.LedgerMark(ctx(t), &providerv1.LedgerMarkRequest{TargetHostId: trusttest.HostName, AnswerNonce: nonce(3)[:8]})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 	_, err = e.ha.RetireIfUnknown(ctx(t), &providerv1.RetireIfUnknownRequest{TargetHostId: trusttest.HostName, AnswerNonce: nonce(4)})
 	assert.Equal(t, codes.Unimplemented, status.Code(err), "RetireIfUnknown is not implemented yet")
 	// A caller that is not the enrolled Provider is refused before the

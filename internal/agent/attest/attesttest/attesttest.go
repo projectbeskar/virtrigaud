@@ -141,6 +141,12 @@ func (s *Signer) AttestGrant(t Target, nonce []byte, ledger *providerv1.LedgerPo
 // enrolment) as the grant's. It returns the agent's authority answer, or an
 // error when no challenge was issued or no answer was signed.
 func Attest(ctx context.Context, cc grpc.ClientConnInterface, s *Signer, hostID string) (*providerv1.AuthorityAnswer, error) {
+	return AttestAt(ctx, cc, s, hostID, nil)
+}
+
+// AttestAt is Attest at the ledger position ledger instead of the agent's
+// own chain position (nil: the agent's).
+func AttestAt(ctx context.Context, cc grpc.ClientConnInterface, s *Signer, hostID string, ledger *providerv1.LedgerPosition) (*providerv1.AuthorityAnswer, error) {
 	ha := providerv1.NewHostAuthorityClient(cc)
 	n := make([]byte, 16)
 	_, _ = rand.Read(n)
@@ -163,7 +169,9 @@ func Attest(ctx context.Context, cc grpc.ClientConnInterface, s *Signer, hostID 
 	if len(pos) != positionSize {
 		return nil, fmt.Errorf("chain position of %d bytes", len(pos))
 	}
-	ledger := &providerv1.LedgerPosition{StoreId: pos[:16], Seq: beUint64(pos[16:24]), Head: pos[24:]}
+	if ledger == nil {
+		ledger = &providerv1.LedgerPosition{StoreId: pos[:16], Seq: beUint64(pos[16:24]), Head: pos[24:]}
+	}
 	c := ch.GetContext()
 	t := Target{ProviderUID: c.GetProviderUid(), HostID: hostID, InstallID: c.GetInstallId(), EnrolmentID: c.GetEnrolmentId()}
 	g, err := s.AttestGrant(t, ch.GetChallengeNonce(), ledger)
@@ -176,6 +184,73 @@ func Attest(ctx context.Context, cc grpc.ClientConnInterface, s *Signer, hostID 
 	}
 	if ar.GetHostAnswer() == nil {
 		return nil, errors.New("attest: no signed answer")
+	}
+	a := &providerv1.AuthorityAnswer{}
+	if err := proto.Unmarshal(ar.GetHostAnswer().GetBody(), a); err != nil {
+		return nil, fmt.Errorf("authority answer: %w", err)
+	}
+	return a, nil
+}
+
+// LedgerMarkGrant is a ledger mark grant for t naming the attestation
+// session at ledger, valid for five minutes from now.
+func (s *Signer) LedgerMarkGrant(t Target, session []byte, ledger *providerv1.LedgerPosition) (*providerv1.OperationGrant, error) {
+	now := time.Now()
+	body := &providerv1.GrantBody{
+		GrantVersion: grantverify.LedgerGrantVersion, GrantKind: providerv1.GrantKind_GRANT_KIND_LEDGER_MARK,
+		InstallId: t.InstallID, ProviderUid: t.ProviderUID, HostId: t.HostID, EnrolmentId: t.EnrolmentID,
+		AuthorityGeneration: 1, Epoch: &providerv1.Epoch{Counter: 1, Holder: make([]byte, 16)},
+		AttestationId: session, Ledger: ledger,
+		IssuedAt: timestamppb.New(now.Add(-time.Minute)), NotAfter: timestamppb.New(now.Add(5 * time.Minute)),
+	}
+	if r := grantverify.CheckLedgerMarkBody(body); r != nil {
+		return nil, r
+	}
+	return s.Sign(body)
+}
+
+// Mark raises the ledger mark of the agent of hostID behind cc, as a
+// manager's heartbeat raise does: a GetHostInfo that asks for the ledger
+// fields gives the session and the chain position, and a ledger mark grant
+// for that session at ledger (nil: that chain position) is delivered. It
+// returns the agent's authority answer, or an error when the agent is not
+// attested or no answer was signed.
+func Mark(ctx context.Context, cc grpc.ClientConnInterface, s *Signer, hostID string, ledger *providerv1.LedgerPosition) (*providerv1.AuthorityAnswer, error) {
+	n := make([]byte, 16)
+	_, _ = rand.Read(n)
+	info, err := providerv1.NewProviderClient(cc).GetHostInfo(ctx, &providerv1.GetHostInfoRequest{AnswerNonce: n, LedgerVersion: 1})
+	if err != nil {
+		return nil, fmt.Errorf("host info: %w", err)
+	}
+	if info.GetHostAnswer() == nil {
+		return nil, errors.New("host info: no signed answer")
+	}
+	ha := &providerv1.HostAnswer{}
+	if err := proto.Unmarshal(info.GetHostAnswer().GetBody(), ha); err != nil {
+		return nil, fmt.Errorf("host answer: %w", err)
+	}
+	c := ha.GetContext()
+	if len(c.GetAttestationId()) != 16 {
+		return nil, errors.New("the agent is not attested")
+	}
+	pos := c.GetChainPosition()
+	if len(pos) != positionSize {
+		return nil, fmt.Errorf("chain position of %d bytes", len(pos))
+	}
+	if ledger == nil {
+		ledger = &providerv1.LedgerPosition{StoreId: pos[:16], Seq: beUint64(pos[16:24]), Head: pos[24:]}
+	}
+	t := Target{ProviderUID: c.GetProviderUid(), HostID: hostID, InstallID: c.GetInstallId(), EnrolmentID: c.GetEnrolmentId()}
+	g, err := s.LedgerMarkGrant(t, c.GetAttestationId(), ledger)
+	if err != nil {
+		return nil, err
+	}
+	ar, err := providerv1.NewHostAuthorityClient(cc).LedgerMark(ctx, &providerv1.LedgerMarkRequest{TargetHostId: hostID, AnswerNonce: n, Grant: g})
+	if err != nil {
+		return nil, fmt.Errorf("ledger mark: %w", err)
+	}
+	if ar.GetHostAnswer() == nil {
+		return nil, errors.New("ledger mark: no signed answer")
 	}
 	a := &providerv1.AuthorityAnswer{}
 	if err := proto.Unmarshal(ar.GetHostAnswer().GetBody(), a); err != nil {

@@ -33,6 +33,13 @@ limitations under the License.
 // operation's VM busy: clearing it is an operator path that a later change
 // adds.
 //
+// An operation that the store's ledger gate parks (opstore.ErrAwaitingLedger,
+// opstore.ErrAwaitingRequest) is not a failure: its run waits, holding no
+// store lock and counting no resumption, until the store wakes the parked
+// operations (opstore.Store.LedgerWake: a ledger mark, a deposited request,
+// a re-enrolment) or Options.ParkRecheck passes, and tries again. A parked
+// run is never given up: its operation committed nothing.
+//
 // A panic in a run (for example in an executor) is recovered, logged,
 // counted durably for its operation (opstore.Store.RecordPanic) and reported
 // to Options.OnPanic; the operation is left to recovery. An operation whose
@@ -72,6 +79,9 @@ const (
 	DefaultMaxPanics = 3
 	// DefaultMaxBackoff bounds the pause between resumptions.
 	DefaultMaxBackoff = 10 * time.Second
+	// DefaultParkRecheck is how long a parked run waits for a wake-up
+	// before it asks the store again.
+	DefaultParkRecheck = time.Minute
 )
 
 // Store is what the pool needs from the operation store.
@@ -88,6 +98,12 @@ type Store interface {
 	RecordPanic(ctx context.Context, ref opstore.OpRef) (int, error)
 	// Panics returns how many runs of ref panicked (opstore.Store.Panics).
 	Panics(ctx context.Context, ref opstore.OpRef) (int, error)
+	// LedgerWake returns the channel closed when parked operations may run
+	// (opstore.Store.LedgerWake).
+	LedgerWake() <-chan struct{}
+	// DepositRequest gives a parked operation its request bytes
+	// (opstore.Store.DepositRequest).
+	DepositRequest(ref opstore.OpRef, payload []byte)
 }
 
 // Options configures New. Zero fields take their defaults.
@@ -111,6 +127,9 @@ type Options struct {
 	// given up without running it again: its outcome is recorded unknown
 	// (opstore.ReasonRunPanicked).
 	MaxPanics int
+	// ParkRecheck is how long a parked run waits for a wake-up before it
+	// asks the store again.
+	ParkRecheck time.Duration
 }
 
 // ErrDraining is returned by Start once the pool drains.
@@ -125,7 +144,11 @@ type Pool struct {
 
 	mu       sync.Mutex
 	draining bool
-	wg       sync.WaitGroup
+	// active holds the operations that have a run, so that a second start
+	// of one adds no run (and no parked goroutine) but only hands its
+	// request bytes to the store.
+	active map[string]bool
+	wg     sync.WaitGroup
 }
 
 // New returns a pool whose runs stop when ctx ends.
@@ -145,20 +168,33 @@ func New(ctx context.Context, store Store, log logr.Logger, opts Options) *Pool 
 	if opts.GiveUpAfter <= 0 {
 		opts.GiveUpAfter = DefaultGiveUpAfter
 	}
-	return &Pool{ctx: ctx, store: store, log: log, opts: opts}
+	if opts.ParkRecheck <= 0 {
+		opts.ParkRecheck = DefaultParkRecheck
+	}
+	return &Pool{ctx: ctx, store: store, log: log, opts: opts, active: map[string]bool{}}
 }
+
+// runKey names ref in active.
+func runKey(ref opstore.OpRef) string { return string(ref.EnrolmentID) + string(ref.OpID) }
 
 // Start runs the operation ref in a new goroutine. payload is the verified
 // request, held in memory for the run only (nil when the operation is resumed
-// after a restart). Starting an operation that already has a run is
-// harmless: the store refuses the second run. It returns ErrDraining once the
-// pool drains or its context ended.
+// after a restart). Starting an operation that already has a run adds no
+// run: payload is handed to the store, which gives it to the run if it is
+// parked without it. It returns ErrDraining once the pool drains or its
+// context ended.
 func (p *Pool) Start(ref opstore.OpRef, payload []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.draining || p.ctx.Err() != nil {
 		return ErrDraining
 	}
+	k := runKey(ref)
+	if p.active[k] {
+		p.store.DepositRequest(ref, payload)
+		return nil
+	}
+	p.active[k] = true
 	p.wg.Add(1)
 	go p.run(ref, payload)
 	return nil
@@ -167,6 +203,11 @@ func (p *Pool) Start(ref opstore.OpRef, payload []byte) error {
 // run drives one operation, resuming it on store errors.
 func (p *Pool) run(ref opstore.OpRef, payload []byte) {
 	defer p.wg.Done()
+	defer func() {
+		p.mu.Lock()
+		delete(p.active, runKey(ref))
+		p.mu.Unlock()
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			p.log.Error(fmt.Errorf("panic: %v", r), "an operation run panicked; the operation is left to recovery", "op", ref.String())
@@ -195,8 +236,18 @@ func (p *Pool) run(ref opstore.OpRef, payload []byte) {
 	backoff := p.opts.InitialBackoff
 	var firstFailure time.Time
 	for failures := 0; ; failures++ {
+		wake := p.store.LedgerWake()
 		v, err := p.store.Execute(p.ctx, ref, payload)
 		switch {
+		case errors.Is(err, opstore.ErrAwaitingLedger) || errors.Is(err, opstore.ErrAwaitingRequest):
+			// Parked: the store holds the request bytes now; nothing was
+			// committed, so this is not a failure.
+			payload = nil
+			if !p.park(ref, wake, err) {
+				return
+			}
+			failures, backoff, firstFailure = -1, p.opts.InitialBackoff, time.Time{}
+			continue
 		case err == nil:
 			p.log.V(1).Info("operation run ended", "op", ref.String(), "state", v.State.String(), "reason", v.Reason)
 			return
@@ -226,6 +277,22 @@ func (p *Pool) run(ref opstore.OpRef, payload []byte) {
 		}
 		backoff = min(2*backoff, p.opts.MaxBackoff)
 	}
+}
+
+// park waits, for the parked operation ref, until wake is closed or
+// ParkRecheck passes; it returns false when the pool's context ended.
+func (p *Pool) park(ref opstore.OpRef, wake <-chan struct{}, why error) bool {
+	p.log.V(1).Info("operation parked by the ledger gate", "op", ref.String(), "why", why.Error())
+	t := time.NewTimer(p.opts.ParkRecheck)
+	defer t.Stop()
+	select {
+	case <-p.ctx.Done():
+		p.log.Info("parked operation left to the next start by the drain", "op", ref.String())
+		return false
+	case <-wake:
+	case <-t.C:
+	}
+	return true
 }
 
 // giveUp records the operation's outcome as unknown after its last failed

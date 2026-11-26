@@ -308,6 +308,13 @@ func newOpsEnv(t testing.TB, mods ...withOptions) *opsEnv {
 // host certificate's enrolment when nil).
 func newOpsEnvEnrolled(t testing.TB, enrolment []byte, mods ...withOptions) *opsEnv {
 	t.Helper()
+	return newOpsEnvStore(t, enrolment, nil, mods...)
+}
+
+// newOpsEnvStore is newOpsEnvEnrolled with storeMod adjusting the store's
+// options.
+func newOpsEnvStore(t testing.TB, enrolment []byte, storeMod func(*opstore.Options), mods ...withOptions) *opsEnv {
+	t.Helper()
 	x := newTestExec()
 	proxy := &opsProxy{exec: x}
 	logs := &logLines{}
@@ -322,8 +329,12 @@ func newOpsEnvEnrolled(t testing.TB, enrolment []byte, mods ...withOptions) *ops
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	st, err := opstore.Open(ctx, opstore.Options{Journal: journal.Options{Dir: dir}, Executor: x,
-		StepDeadlines: map[providerv1.OperationKind]time.Duration{providerv1.OperationKind_OPERATION_KIND_POWER_OFF: 300 * time.Millisecond}})
+	so := opstore.Options{Journal: journal.Options{Dir: dir}, Executor: x,
+		StepDeadlines: map[providerv1.OperationKind]time.Duration{providerv1.OperationKind_OPERATION_KIND_POWER_OFF: 300 * time.Millisecond}}
+	if storeMod != nil {
+		storeMod(&so)
+	}
+	st, err := opstore.Open(ctx, so)
 	if err != nil {
 		t.Fatal(err)
 	}

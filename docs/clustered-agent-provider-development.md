@@ -320,11 +320,12 @@ On every new connection the Provider first calls `agent.v1.AgentService/Hello`
 with a fresh nonce and its API version, and verifies the host-signed answer:
 a `HostAnswer` signed with the key of the certificate the handshake just
 verified (the signer certificate must be that certificate), echoing the nonce
-and naming the host. The Provider speaks API version 5 and routes to an agent
-of version 5 or 4 (an agent of version 4 is not sent host authority calls, see
-[Host authority service](#host-authority-service)). Upgrade the Providers
-before their agents: an agent of version 3 is no longer routed by a Provider
-of version 5. An agent outside that window, or one that does not serve
+and naming the host. The Provider speaks API version 6 and routes to an agent
+of version 6 or 5 (an agent of version 5 answers `LedgerMark` `Unimplemented`
+itself; version 6 is the development-build agent with receipts and ledger
+marks, whose receipts the Provider relays unchanged in the Create and task
+responses). Upgrade the Providers before their agents: an agent of version 4 is
+no longer routed by a Provider of version 6. An agent outside that window, or one that does not serve
 `Hello`, is not routed until its connection is replaced (cause
 `AgentIncompatible`); the Provider never adapts a request to an older agent.
 An answer that is missing or does not verify leaves the host unavailable
@@ -487,7 +488,8 @@ service. The Provider only routes it:
 - A request without a host, or that does not decode, is `InvalidArgument`; a
   host the Provider does not front is `HOST_UNAVAILABLE` (cause
   `HostNotFronted`, the id is not echoed). Neither dials an agent.
-- An agent whose `Hello` reported API version 4 is not called: the Provider
+- An agent whose `Hello` reported API version 4 (routed only by a Provider of
+  an older version) is not called: the Provider
   answers `Unimplemented` with the `HOST_AUTHORITY_UNSUPPORTED` reason, the
   host under the `host` metadata key and the agent's version under
   `agentApiVersion`. A plain `Unimplemented` without that reason comes from an

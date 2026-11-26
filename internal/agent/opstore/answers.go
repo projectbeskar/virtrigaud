@@ -45,6 +45,14 @@ type OpAnswerView struct {
 	EnrolmentHeld bool
 	// Host is the host view of the same read.
 	Host HostView
+	// AcceptedHead is the chain head at Op.AcceptedSeq, set only while the
+	// operation is ACCEPTED and the store holds that head.
+	AcceptedHead []byte
+	// AwaitingRequest is set, by a store with the ledger gate, for an
+	// ACCEPTED operation that the ledger mark covers but that cannot start
+	// because the agent holds no request bytes for it: a delivery of the
+	// same op_id brings them.
+	AwaitingRequest bool
 }
 
 // AnswerOp reads what the store holds for ref and the host view, in one read
@@ -68,16 +76,24 @@ func (s *Store) AnswerOp(ctx context.Context, ref OpRef, continuitySeq uint64) (
 		if err != nil {
 			return err
 		}
-		if ok {
+		rec := &pb.OpRecord{}
+		hasRec, err := get(tx, bucketOps, key, rec)
+		if err != nil {
+			return err
+		}
+		switch {
+		case ok:
 			v.Found, v.Op = true, viewOfTombstone(t)
-		} else {
-			rec := &pb.OpRecord{}
-			ok, err := get(tx, bucketOps, key, rec)
-			if err != nil {
-				return err
+			// The acceptance position comes from a record only.
+			if hasRec {
+				v.Op.AcceptedSeq = rec.GetAcceptedSeq()
 			}
-			if ok {
-				v.Found, v.Op = true, viewOfRecord(rec)
+		case hasRec:
+			v.Found, v.Op = true, viewOfRecord(rec)
+			if v.Op.State == StateAccepted && v.Op.AcceptedSeq != 0 {
+				if head, held := tx.HeadAt(v.Op.AcceptedSeq); held {
+					v.AcceptedHead = append([]byte(nil), head[:]...)
+				}
 			}
 		}
 		v.EnrolmentHeld, err = enrolmentHeld(tx, ref.EnrolmentID)
@@ -85,6 +101,9 @@ func (s *Store) AnswerOp(ctx context.Context, ref OpRef, continuitySeq uint64) (
 	})
 	if err != nil {
 		return OpAnswerView{}, fmt.Errorf("answer %s: %w", ref, err)
+	}
+	if v.Found {
+		v.AwaitingRequest = s.awaitingRequest(ref, v.Op)
 	}
 	return v, nil
 }
