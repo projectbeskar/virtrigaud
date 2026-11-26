@@ -96,7 +96,7 @@ func TestRestartWithANewCertificateReenrols(t *testing.T) {
 	}
 
 	h.installCert(h.pki.HostCertPEM)
-	r, _ = h.run()
+	r = h.runRefused()
 	if got := answerEnrolment(r); got != nil {
 		t.Fatalf("an answer under a used enrolment: %x", got)
 	}
@@ -153,7 +153,7 @@ func TestStoreOfAnotherHostIsNotReenrolled(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.probe.Edit(func(f *hostchecktest.Fake) { f.Content[marker] = []byte(otherURI + "\n") })
-	r, _ = h.run()
+	r = h.runRefused()
 	waitLog(t, h, "StoreOfOtherHost")
 	if got := answerEnrolment(r); got != nil {
 		t.Fatalf("an answer from a store of another host: %x", got)
@@ -255,7 +255,7 @@ func waitAnswerEnrolment(t *testing.T, r *running, b byte) {
 func TestDevEnrolmentFileMustMatchTheRecordsEpoch(t *testing.T) {
 	h := newHost(t)
 	h.installCert(certWithEnrolmentAt(h, 0x21, 5)) // the file says 2
-	r, _ := h.run()
+	r := h.runRefused()
 	if got := answerEnrolment(r); got != nil {
 		t.Fatalf("an answer under a refused enrolment: %x", got)
 	}

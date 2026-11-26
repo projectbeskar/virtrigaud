@@ -124,7 +124,7 @@ func TestUnattestedBeforeReady(t *testing.T) {
 	if code, reason := r.create(); code != "Unavailable" || reason != opstore.ReasonUnattested {
 		t.Fatalf("Create before ready = %s %s", code, reason)
 	}
-	if h.notes.has(systemd.NotifyReady) {
+	if h.notes.readyStarted() {
 		t.Fatal("READY=1 sent before recovery")
 	}
 	close(release)
@@ -150,7 +150,7 @@ func TestStopDuringRecovery(t *testing.T) {
 	if err := r.stop(); err != nil {
 		t.Fatalf("Run = %v", err)
 	}
-	if h.notes.has(systemd.NotifyReady) {
+	if h.notes.readyStarted() {
 		t.Fatal("READY=1 sent")
 	}
 	if !strings.Contains(h.logs.text(), "recovery cancelled by a stop") {

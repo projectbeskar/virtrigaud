@@ -38,7 +38,19 @@ limitations under the License.
 //     verifies is gone or damaged, like a missing store marker).
 //  5. The server starts serving in the unattested state: reads, Hello and
 //     GetHostInfo answer; every mutation is refused UNATTESTED. Nothing is
-//     committed before step 6.
+//     committed before step 6. A development build then awaits its
+//     attestation against the manager's host ledger (HostAuthority Challenge
+//     and Attest; see package server): systemd is notified READY=1 with the
+//     status "awaiting attestation", and steps 6 to 8 run only once the
+//     first attestation was applied. The only commits before it are those
+//     without which the agent could sign no answer at all, so could never be
+//     attested: when the store's active enrolment is not the one the host
+//     certificate carries, continuity is established, the clock floor
+//     committed and the store enrolled (step 6) before the attestation; no
+//     operation step runs and recovery still waits for it. An attestation
+//     that quarantines the store ends the start-up as a quarantine. A
+//     release build does not take part in the ledger protocol and runs
+//     steps 6 to 8 at once.
 //  6. Continuity is established (with the local store, the checks of step
 //     3). The store's active enrolment is brought to the one the host
 //     certificate carries (syncEnrolment): a fresh store is enrolled, and a
@@ -104,6 +116,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -205,6 +218,9 @@ type Hooks struct {
 	// HealConnected runs when a tick that finishes an interrupted
 	// activation has reached the signer, before it takes the renewal lock.
 	HealConnected func()
+	// AwaitingAttestation runs when a development build starts awaiting its
+	// first attestation (step 5), once the server answers.
+	AwaitingAttestation func()
 }
 
 // Options configures Run.
@@ -287,7 +303,40 @@ type agentState struct {
 	floor atomic.Pointer[clockfloor.Floor]
 	// renewal is the certificate renewal (nil: none, a release build).
 	renewal *renewer
+	// auth is the attestation against the manager's host ledger (nil: none,
+	// a release build).
+	auth *attestation
 }
+
+// attestation is the server's Authority in a development build: the
+// operation store's attestation, which also tells the start-up when the
+// first attestation was decided (applied, or quarantined the store).
+type attestation struct {
+	st      *opstore.Store
+	decided chan struct{}
+	once    sync.Once
+}
+
+// newAttestation returns the attestation of st.
+func newAttestation(st *opstore.Store) *attestation {
+	return &attestation{st: st, decided: make(chan struct{})}
+}
+
+// Attestation implements server.Authority.
+func (a *attestation) Attestation() (opstore.Attestation, bool) { return a.st.Attestation() }
+
+// Attest implements server.Authority: opstore.Store.Attest, and the first
+// attestation applied or a quarantine it recorded ends the wait of the
+// start-up.
+func (a *attestation) Attest(ctx context.Context, r opstore.AttestRequest) (opstore.AttestResult, error) {
+	res, err := a.st.Attest(ctx, r)
+	if err == nil && (res.First || res.Quarantined != "") {
+		a.once.Do(func() { close(a.decided) })
+	}
+	return res, err
+}
+
+var _ server.Authority = (*attestation)(nil)
 
 var _ server.Agent = (*agentState)(nil)
 
@@ -334,6 +383,11 @@ func (a *agentState) UnattestedCause() string {
 	if a.renewal.activationIncomplete() {
 		return server.CauseRenewalIncomplete
 	}
+	if a.auth != nil {
+		if _, ok := a.auth.Attestation(); !ok {
+			return server.CauseAwaitingAttestation
+		}
+	}
 	switch a.ClockFloorState() {
 	case clockfloor.StateOK:
 		return ""
@@ -365,6 +419,10 @@ func (a *agentState) ClockFloor() time.Time {
 const (
 	statusOpening    = "STATUS=opening the operation store"
 	statusRecovering = "STATUS=establishing continuity and recovering interrupted operations"
+	// statusAwaiting is sent with READY=1 while a development build awaits
+	// its first attestation: the unit has started and answers reads, and
+	// the wait lasts as long as no manager attests it.
+	statusAwaiting = systemd.NotifyReady + "\nSTATUS=awaiting attestation by the manager; operations are refused until then"
 )
 
 // allowTestOverrides lets this package's tests use the test overrides of
@@ -379,7 +437,7 @@ func (o Options) testOverrides() []string {
 	for name, on := range map[string]bool{
 		"Probe": o.Probe != nil, "UID": o.UID != nil, "SignerUID": o.SignerUID != nil, "AllowSignerSameUser": o.AllowSignerSameUser, "TrustDir": o.TrustDir != "", "JournalFS": o.JournalFS != nil,
 		"TrustFileOwner": o.TrustFileOwner != nil, "InventoryRoot": o.InventoryRoot != "", "Listener": o.Listener != nil, "Now": o.Now != nil,
-		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil || o.Hooks.RenewalStep != nil || o.Hooks.HealConnected != nil,
+		"Floor": o.Floor.Wall != nil || o.Floor.Boot != nil || o.Floor.BootID != nil || o.Floor.TimeNS != nil, "Hooks": o.Hooks.BeforeRecover != nil || o.Hooks.Started != nil || o.Hooks.RenewalStep != nil || o.Hooks.HealConnected != nil || o.Hooks.AwaitingAttestation != nil,
 		"StepDeadlines": o.StepDeadlines != nil, "CompactEvery": o.CompactEvery != 0, "MaxStoreBytes": o.MaxStoreBytes != 0,
 	} {
 		if on {
@@ -413,6 +471,9 @@ type daemon struct {
 	pendingEnrolLog func()
 	// renewal is the certificate renewal; nil in a release build.
 	renewal *renewer
+	// agent is what the server reads about the agent, once the store is
+	// open.
+	agent *agentState
 }
 
 // Run runs the agent until ctx ends or a stop signal arrives on signals, and
@@ -523,7 +584,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	hooks, rotate := devJournalHooks(d.log)
 	st, err := opstore.Open(ctx, opstore.Options{
 		Journal: journal.Options{Dir: d.o.Config.StateDir, FS: d.o.JournalFS, Events: d.journalEvent,
-			Hooks: hooks, AnchorRotateBytes: rotate},
+			Hooks: hooks, AnchorRotateBytes: rotate, LedgerRetention: config.DevBuild},
 		Executor:          d.o.Executor,
 		Audit:             d.auditEvent,
 		StepDeadlines:     d.o.StepDeadlines,
@@ -555,6 +616,12 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		}
 	}
 	agent := &agentState{store: st, renewal: d.renewal}
+	var authority server.Authority
+	if config.DevBuild {
+		agent.auth = newAttestation(st)
+		authority = agent.auth
+	}
+	d.agent = agent
 	closeStore := func() {
 		if err := st.Close(); err != nil {
 			d.log.Error(err, "close the operation store")
@@ -609,7 +676,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 	srv, err := server.New(server.Options{Agent: agent, Credentials: d.creds, Version: d.o.Version,
 		JournalSchemaVersion: schema, Log: d.log.WithName("server"), Operations: ops, Inventory: coll, Freezes: freezes,
-		Renewals: renewals, LogProviderRefusals: config.DevBuild})
+		Renewals: renewals, LogProviderRefusals: config.DevBuild, Authority: authority})
 	if err != nil {
 		closeStore()
 		return err
@@ -648,6 +715,7 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	// writes a closed store.
 	compactCtx, stopCompact := context.WithCancel(ctx)
 	compactDone := make(chan struct{})
+	compactStarted := false
 
 	drain := func() {
 		stopScrub()
@@ -665,6 +733,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		case <-invDone:
 		case <-dctx.Done():
 			d.log.Error(dctx.Err(), "the host inventory collector did not stop within the drain timeout; abandoned")
+		}
+		if !compactStarted {
+			close(compactDone)
 		}
 		select {
 		case <-compactDone:
@@ -692,33 +763,43 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 		d.log.Info("stopped")
 	}
 
-	// Steps 6 to 8.
-	if config.DevBuild {
-		_ = d.notifier.Notify(statusRecovering)
-	}
-	for _, ref := range d.establish(ctx, st, agent.floor.Load()) {
-		if ops != nil && !guard.Off(guard.RecoveredOpsRun) {
-			_ = pool.Start(ref, nil)
+	// Steps 6 to 8: at once in a release build, or for a store that cannot
+	// be attested (quarantined at open); after the first attestation in a
+	// development build.
+	startUp := func() {
+		if config.DevBuild {
+			_ = d.notifier.Notify(statusRecovering)
+		}
+		for _, ref := range d.establish(ctx, st, agent.floor.Load()) {
+			if ops != nil && !guard.Off(guard.RecoveredOpsRun) {
+				_ = pool.Start(ref, nil)
+			}
+		}
+		if ctx.Err() == nil {
+			state, reason := agent.TrustState()
+			if err := d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent)); err != nil {
+				d.log.Error(err, "notify systemd")
+			}
+			d.log.Info("started", "state", state.String(), "reason", reason)
+			d.started.Store(true)
+			if d.o.Hooks.Started != nil {
+				d.o.Hooks.Started(state)
+			}
+		}
+		if config.DevBuild && ctx.Err() == nil {
+			compactStarted = true
+			go func() {
+				defer close(compactDone)
+				d.compactLoop(compactCtx, st)
+			}()
 		}
 	}
-	if ctx.Err() == nil {
-		state, reason := agent.TrustState()
-		if err := d.notifier.Notify(systemd.NotifyReady + "\nSTATUS=" + trustStatus(agent)); err != nil {
-			d.log.Error(err, "notify systemd")
-		}
-		d.log.Info("started", "state", state.String(), "reason", reason)
-		d.started.Store(true)
-		if d.o.Hooks.Started != nil {
-			d.o.Hooks.Started(state)
-		}
-	}
-	if config.DevBuild && ctx.Err() == nil {
-		go func() {
-			defer close(compactDone)
-			d.compactLoop(compactCtx, st)
-		}()
+	var attested <-chan struct{}
+	if js, _ := st.Journal().State(); agent.auth != nil && js != journal.StateLost && !guard.Off(guard.NoCommitBeforeAttest) {
+		attested = agent.auth.decided
+		d.awaitAttestation(ctx, st, agent)
 	} else {
-		close(compactDone)
+		startUp()
 	}
 
 	// The cause that keeps a ready host from running operations (an incomplete
@@ -745,6 +826,10 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			d.log.Error(fmt.Errorf("%v", r), "an operation run panicked; the agent stops so that recovery resolves it")
 			drain()
 			return fmt.Errorf("%w: %v", ErrRunPanicked, r)
+		case <-attested:
+			attested = nil
+			d.log.Info("attested by the manager; establishing continuity and recovering interrupted operations")
+			startUp()
 		case <-reload:
 			_ = d.notifier.Notify(systemd.NotifyReloading)
 			if err := d.renewal.exclusive(func() error { return d.reload(ctx, st) }); err != nil {
@@ -770,6 +855,12 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 				if err := f.Observe(ctx); err != nil {
 					d.log.Error(err, "raise the clock floor")
 				}
+			}
+			if js, _ := st.Journal().State(); attested != nil && js == journal.StateLost {
+				// Quarantined while awaiting (a scrub): it can no longer be
+				// attested; the start-up ends as a quarantine.
+				attested = nil
+				startUp()
 			}
 			if c := agent.UnattestedCause(); c != lastCause {
 				if c != "" {
@@ -946,6 +1037,12 @@ func (d *daemon) reload(ctx context.Context, st *opstore.Store) error {
 		if id.HostURI != cur.HostURI || !config.DevBuild {
 			return errEnrolmentChanged
 		}
+		// While the agent awaits its attestation the store does not commit
+		// yet; a re-enrolment, without which the new credentials could sign
+		// no answer, makes it ready first, as the start-up does.
+		if d.agent != nil && !d.commitReady(ctx, st, d.agent.floor.Load()) {
+			return fmt.Errorf("%w: the store cannot commit", errReenrolmentRefused)
+		}
 		// A new enrolment of this host (vrtg-agent enroll install --replace):
 		// the store is re-enrolled first, then the credentials are swapped, so
 		// an answer never names an enrolment the store has not activated.
@@ -1039,22 +1136,88 @@ func (d *daemon) openFloor(ctx context.Context, agent *agentState) error {
 	return fmt.Errorf("%w: %s: %v", ErrStartRefused, hostcheck.ReasonUnsupportedHost, err)
 }
 
-// establish runs steps 6 and 7: continuity, the first commit of the clock
-// floor, the development enrolment stand-in, and recovery. floor is nil when
-// the floor could not be opened (the store is quarantined). It returns the
-// operations recovery left runnable.
-func (d *daemon) establish(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) []opstore.OpRef {
-	if js, _ := st.Journal().State(); js != journal.StateUnattested {
-		return nil
+// awaitAttestation is step 5 of a development build: it commits the
+// enrolment change the agent needs to sign any answer (prepare), when the
+// store's active enrolment is not the certificate's, notifies systemd that
+// the agent awaits its attestation, and runs the AwaitingAttestation hook.
+func (d *daemon) awaitAttestation(ctx context.Context, st *opstore.Store, agent *agentState) {
+	if d.enrolmentPending(ctx, st) {
+		d.log.Info("the store's active enrolment is not the host certificate's; enrolling before the attestation")
+		d.prepare(ctx, st, agent.floor.Load())
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	_ = d.notifier.Notify(statusAwaiting)
+	d.log.Info("awaiting attestation by the manager; operations are refused and recovery waits until then")
+	if d.o.Hooks.AwaitingAttestation != nil {
+		d.o.Hooks.AwaitingAttestation()
+	}
+}
+
+// enrolmentPending reports whether the store's active enrolment is not the
+// one the host certificate carries (none, or another). A store that cannot
+// be read reports false: nothing is committed on it.
+func (d *daemon) enrolmentPending(ctx context.Context, st *opstore.Store) bool {
+	v, err := st.HostView(ctx, 0)
+	if err != nil {
+		return false
+	}
+	return !activeIsCertificates(v.Enrolment, d.creds.Load().Identity)
+}
+
+// activeIsCertificates reports whether the active enrolment e is the one the
+// host certificate of id carries.
+func activeIsCertificates(e *opstore.ActiveEnrolment, id *trust.Identity) bool {
+	return e != nil && bytes.Equal(e.ID, id.Record.EnrolmentID) && e.ProviderUID == id.Record.ProviderUID &&
+		bytes.Equal(e.InstallID, id.Record.InstallID)
+}
+
+// prepare runs step 6 up to recovery: continuity, the first commit of the
+// clock floor, and the enrolment from the host certificate. It reports
+// whether the store is ready to commit; a store that is already (prepared
+// before the attestation) reports true without running anything again.
+func (d *daemon) prepare(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) bool {
+	switch js, _ := st.Journal().State(); js {
+	case journal.StateReady:
+		return true
+	case journal.StateUnattested:
+	default:
+		return false
+	}
+	if !d.commitReady(ctx, st, floor) {
+		return false
+	}
+	d.enrol(ctx, st)
+	return true
+}
+
+// commitReady establishes continuity and commits the clock floor, unless
+// the store is ready already, and reports whether the store can commit.
+func (d *daemon) commitReady(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) bool {
+	switch js, _ := st.Journal().State(); js {
+	case journal.StateReady:
+		return true
+	case journal.StateUnattested:
+	default:
+		return false
 	}
 	if err := st.EstablishContinuity(ctx); err != nil {
 		d.log.Error(err, "continuity not established")
+		return false
+	}
+	return d.startFloor(ctx, st, floor)
+}
+
+// establish runs steps 6 and 7: continuity, the first commit of the clock
+// floor, the development enrolment stand-in (prepare, unless it ran before
+// the attestation), and recovery. floor is nil when the floor could not be
+// opened (the store is quarantined). It returns the operations recovery
+// left runnable.
+func (d *daemon) establish(ctx context.Context, st *opstore.Store, floor *clockfloor.Floor) []opstore.OpRef {
+	if !d.prepare(ctx, st, floor) {
 		return nil
 	}
-	if !d.startFloor(ctx, st, floor) {
-		return nil
-	}
-	d.enrol(ctx, st)
 	if d.o.Hooks.BeforeRecover != nil {
 		d.o.Hooks.BeforeRecover(ctx)
 	}
