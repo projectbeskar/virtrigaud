@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,6 +166,13 @@ type Options struct {
 	// Migrations are applied, in order of ToVersion, to a store whose schema
 	// is older than SchemaVersion.
 	Migrations []Migration
+	// LedgerRetention keeps every chain entry at or above the retention
+	// floor (SetRetentionFloor) when a checkpoint prunes the chain, so that
+	// the head at every position above the manager's last attested ledger
+	// position stays on the store and the next attestation can compare it.
+	// While no floor is set, nothing is pruned. False prunes as before:
+	// entries older than the previous checkpoint.
+	LedgerRetention bool
 }
 
 // State is the trust state of an open store.
@@ -231,6 +239,9 @@ type Store struct {
 	storeID [16]byte
 	seq     uint64
 	head    [32]byte
+	// retainFrom is the retention floor of Options.LedgerRetention: no chain
+	// entry at or above it is pruned. Zero (no floor) prunes nothing.
+	retainFrom atomic.Uint64
 	// prevHead is the head before the newest step, as verifyChain recomputed
 	// it at open: what the anchor tail rule compares with the anchor log.
 	prevHead   [32]byte
@@ -1100,6 +1111,33 @@ func (s *Store) Position() Position {
 	return Position{StoreID: s.storeID, Seq: s.seq, Head: s.head}
 }
 
+// SetRetentionFloor sets the retention floor of Options.LedgerRetention: a
+// later checkpoint prunes no chain entry at or above seq. The floor never
+// goes down: a lower seq leaves it as it is. It has no effect without
+// Options.LedgerRetention.
+func (s *Store) SetRetentionFloor(seq uint64) {
+	for {
+		cur := s.retainFrom.Load()
+		if seq <= cur || s.retainFrom.CompareAndSwap(cur, seq) {
+			return
+		}
+	}
+}
+
+// RetentionFloor returns the retention floor (SetRetentionFloor); zero when
+// none is set.
+func (s *Store) RetentionFloor() uint64 { return s.retainFrom.Load() }
+
+// pruneFloor is the position below which a checkpoint may prune chain
+// entries, beside its own bound: unbounded without Options.LedgerRetention,
+// the retention floor with it (zero, nothing, while none is set).
+func (s *Store) pruneFloor() uint64 {
+	if !s.opts.LedgerRetention || guard.Off(guard.LedgerRetentionFloor) {
+		return math.MaxUint64
+	}
+	return s.retainFrom.Load()
+}
+
 // Dir returns the state directory.
 func (s *Store) Dir() string { return s.opts.Dir }
 
@@ -1247,7 +1285,7 @@ func (s *Store) updateLocked(fn func(tx *Tx) error, migrating bool) (pos Positio
 			return &txFuncError{err: fmt.Errorf("write chain entry: %w", err)}
 		}
 		if seq%s.opts.CheckpointEvery == 0 {
-			if err := checkpoint(btx, seq, head, s.head, s.opts.CheckpointEvery); err != nil {
+			if err := checkpoint(btx, seq, head, s.head, s.opts.CheckpointEvery, s.pruneFloor()); err != nil {
 				return &txFuncError{err: err}
 			}
 		}

@@ -19,11 +19,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	bolt "go.etcd.io/bbolt"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb"
 )
 
@@ -309,4 +311,78 @@ func (t *Tx) HeadAt(seq uint64) (head [32]byte, ok bool) {
 		return head, false
 	}
 	return headAt(t.btx, seq)
+}
+
+// StoreOrigin returns the store's origin evidence as recorded in this
+// transaction's snapshot: the enrolment under which the store was first
+// enrolled (nil when the store records none) and how many enrolments were
+// activated in it since (0 when it records no origin).
+func (t *Tx) StoreOrigin() (origin []byte, activations uint32, err error) {
+	meta, err := t.storeMeta()
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(meta.GetOriginEnrolmentId()) == 0 {
+		return nil, 0, nil
+	}
+	return append([]byte(nil), meta.GetOriginEnrolmentId()...), meta.GetEnrolmentActivations(), nil
+}
+
+// RecordEnrolmentActivation updates the store's origin evidence in the
+// transaction that activates enrolmentID. firstEnrolment says that the store
+// was never enrolled before this activation. The first activation of a store
+// that was never enrolled records enrolmentID as the store's origin and one
+// activation; every later activation of a store with an origin adds one. A
+// store enrolled before origin evidence existed records none, ever: its
+// origin is never inferred, so it never passes for a store created under its
+// current enrolment. The origin, once written, is never changed.
+func (t *Tx) RecordEnrolmentActivation(enrolmentID []byte, firstEnrolment bool) error {
+	if !t.writable {
+		return errReadOnly
+	}
+	if len(enrolmentID) != len(t.storeID) {
+		return fmt.Errorf("journal: origin enrolment id is %d bytes, not %d", len(enrolmentID), len(t.storeID))
+	}
+	meta, err := t.storeMeta()
+	if err != nil {
+		return err
+	}
+	switch {
+	case len(meta.GetOriginEnrolmentId()) != 0 && !guard.Off(guard.OriginNeverRewritten):
+		if meta.GetEnrolmentActivations() < math.MaxUint32 {
+			meta.EnrolmentActivations++
+		}
+	case (firstEnrolment && meta.GetEnrolmentActivations() == 0) || guard.Off(guard.OriginOnlyFirstEnrolment):
+		meta.OriginEnrolmentId = append([]byte(nil), enrolmentID...)
+		meta.EnrolmentActivations = 1
+	default:
+		// Enrolled before origin evidence existed: nothing is recorded.
+		return nil
+	}
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("journal: encode store meta: %w", err)
+	}
+	mb, err := t.bucket(bucketMeta)
+	if err != nil {
+		return err
+	}
+	if err := mb.Put(keyStoreMeta, b); err != nil {
+		return fmt.Errorf("journal: write store meta: %w", err)
+	}
+	t.writes = append(t.writes, write{op: writePut, bucket: bucketMeta, key: keyStoreMeta, value: b})
+	return nil
+}
+
+// storeMeta decodes the store meta of this transaction's snapshot.
+func (t *Tx) storeMeta() (*journalpb.StoreMeta, error) {
+	m := t.btx.Bucket([]byte(bucketMeta))
+	if m == nil {
+		return nil, fmt.Errorf("journal: bucket %s missing", bucketMeta)
+	}
+	meta := &journalpb.StoreMeta{}
+	if err := proto.Unmarshal(m.Get(keyStoreMeta), meta); err != nil {
+		return nil, fmt.Errorf("journal: decode store meta: %w", err)
+	}
+	return meta, nil
 }

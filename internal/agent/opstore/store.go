@@ -200,8 +200,12 @@ type Store struct {
 	// recovered mirrors ready for readers that must not wait for s.mu
 	// (Ready), which Recover holds while it runs.
 	recovered atomic.Bool
-	running   map[string]bool
-	dirs      map[string]bool
+	// attestation is the current attestation session (Attest), nil while
+	// the store awaits its first one. It is written under mu and read
+	// without it (Attestation).
+	attestation atomic.Pointer[Attestation]
+	running     map[string]bool
+	dirs        map[string]bool
 
 	// auditMu guards the audit cursor state: auditPending counts, by commit
 	// sequence, the transactions whose audit events are not emitted yet;
@@ -548,6 +552,11 @@ func activate(tx *journal.Tx, e Enrolment, storeID []byte) error {
 	}
 	m, err := readAgentMeta(tx)
 	if err != nil {
+		return err
+	}
+	// The store's origin evidence changes in the same transaction: a store
+	// that was never enrolled records e as its origin.
+	if err := tx.RecordEnrolmentActivation(e.ID, m.GetLastStartEpoch() == 0); err != nil {
 		return err
 	}
 	m.CurrentEnrolmentId = append([]byte(nil), e.ID...)

@@ -74,6 +74,9 @@ type Host struct {
 	state      providerv1.AgentState
 	extraEnv   []string
 	lastStatus *os.ProcessState
+	// attest attests the agent once it awaits its attestation, as the
+	// manager will (Target.attestHost).
+	attest func(*Host) error
 }
 
 // FakeDir is the host's fake executor directory.
@@ -217,6 +220,14 @@ func (h *Host) Start(extraEnv ...string) error {
 				if err := h.dial(val); err != nil {
 					return err
 				}
+			case lineAwaiting:
+				if h.attest != nil {
+					go func() {
+						if err := h.attest(h); err != nil {
+							h.appendLog("attestation by the target failed: " + err.Error())
+						}
+					}()
+				}
 			case lineStarted:
 				h.mu.Lock()
 				h.state = providerv1.AgentState(providerv1.AgentState_value[val])
@@ -248,6 +259,16 @@ func (h *Host) dial(addr string) error {
 		_ = old.Close()
 	}
 	return nil
+}
+
+// appendLog adds a line of the target's own to the agent's log.
+func (h *Host) appendLog(line string) {
+	f, err := os.OpenFile(h.logPath, os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- the test's own log file
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(line + "\n")
+	_ = f.Close()
 }
 
 // tail is the end of the agent's log, for error messages.

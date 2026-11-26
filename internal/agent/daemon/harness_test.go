@@ -41,12 +41,14 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/attest/attesttest"
 	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/daemon"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/none"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck"
 	"github.com/projectbeskar/virtrigaud/internal/agent/hostcheck/hostchecktest"
 	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/systemd"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	agentv1 "github.com/projectbeskar/virtrigaud/proto/rpc/agent/v1"
@@ -90,6 +92,20 @@ func (n *notifications) has(prefix string) bool {
 	defer n.mu.Unlock()
 	for _, s := range n.sent {
 		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// readyStarted reports whether READY=1 was sent for the end of the start-up
+// sequence: the READY=1 of a development build that awaits its attestation
+// (its status says so) does not count, it says only that the unit started.
+func (n *notifications) readyStarted() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, s := range n.sent {
+		if strings.HasPrefix(s, systemd.NotifyReady) && !strings.Contains(s, "awaiting attestation") {
 			return true
 		}
 	}
@@ -164,6 +180,13 @@ type host struct {
 	// and size threshold when set.
 	compactEvery  time.Duration
 	maxStoreBytes int64
+	// noAttest leaves a development build awaiting its attestation: the
+	// harness does not attest it when it starts awaiting.
+	noAttest bool
+	// providerCert is the allowed Provider's client certificate.
+	providerCert tls.Certificate
+	// grants signs attestation grants under the test grant anchor.
+	grants *attesttest.Signer
 }
 
 // testSigner is a real signer process stand-in: the signer's server on a
@@ -227,6 +250,12 @@ func newHost(t *testing.T) *host {
 	h.probe = hostchecktest.Healthy(hostcheck.Config{StateDir: h.stateDir, PKIDir: h.cfg.PKIDir(), TrustDir: h.trustDir, UID: testUID,
 		SignerKeyFile: h.cfg.SignerKeyFile, SignerSocketDir: filepath.Dir(h.cfg.SignerSocket), SignerUID: testUID}, h.pki.HostURI)
 	h.probe.Edit(func(f *hostchecktest.Fake) { f.UID = probeEUID() })
+	g, err := attesttest.NewSigner(h.pki.GrantCA.Cert, h.pki.GrantCA.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.grants = g
+	h.providerCert = h.pki.ProviderCert(t, nil, trusttest.ProviderURI(trusttest.ProviderUID))
 	return h
 }
 
@@ -238,6 +267,10 @@ type running struct {
 	done    chan error
 	exited  chan struct{}
 	started chan providerv1.AgentState
+	// awaiting is closed when the agent starts awaiting its attestation.
+	awaiting chan struct{}
+	// attested receives the outcome of the harness's attestation.
+	attested chan *providerv1.AuthorityAnswer
 }
 
 // start runs the agent; it does not wait for the start-up sequence.
@@ -248,9 +281,20 @@ func (h *host) start() *running {
 		h.t.Fatal(err)
 	}
 	r := &running{h: h, addr: lis.Addr().String(), signals: make(chan os.Signal, 4), done: make(chan error, 1),
-		exited: make(chan struct{}), started: make(chan providerv1.AgentState, 1)}
+		exited: make(chan struct{}), started: make(chan providerv1.AgentState, 1), awaiting: make(chan struct{}),
+		attested: make(chan *providerv1.AuthorityAnswer, 1)}
 	hooks := h.hooks
 	hooks.Started = func(s providerv1.AgentState) { r.started <- s }
+	inner := h.hooks.AwaitingAttestation
+	hooks.AwaitingAttestation = func() {
+		if inner != nil {
+			inner()
+		}
+		close(r.awaiting)
+		if !h.noAttest {
+			go r.attestNow()
+		}
+	}
 	uid := testUID
 	signerUID := h.signerUID
 	opts := daemon.Options{
@@ -295,6 +339,24 @@ func (h *host) run() (*running, providerv1.AgentState) {
 	return nil, 0
 }
 
+// attestNow attests the agent at its own chain position, as a manager
+// will, and sends the answer (nil when none) on r.attested.
+func (r *running) attestNow() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cc, err := grpc.NewClient(r.addr, grpc.WithTransportCredentials(credentials.NewTLS(r.providerTLS())))
+	if err != nil {
+		r.attested <- nil
+		return
+	}
+	defer func() { _ = cc.Close() }()
+	a, err := attesttest.Attest(ctx, cc, r.h.grants, trusttest.HostName)
+	if err != nil {
+		r.h.logs.logger().Info("test attestation failed", "error", err.Error())
+	}
+	r.attested <- a
+}
+
 // stop sends SIGTERM and waits for Run to return.
 func (r *running) stop() error {
 	r.h.t.Helper()
@@ -311,9 +373,19 @@ func (r *running) stop() error {
 // conn dials the agent as the allowed Provider.
 func (r *running) conn() *grpc.ClientConn {
 	r.h.t.Helper()
-	cert := r.h.pki.ProviderCert(r.h.t, nil, trusttest.ProviderURI(trusttest.ProviderUID))
+	cc, err := grpc.NewClient(r.addr, grpc.WithTransportCredentials(credentials.NewTLS(r.providerTLS())))
+	if err != nil {
+		r.h.t.Fatal(err)
+	}
+	r.h.t.Cleanup(func() { _ = cc.Close() })
+	return cc
+}
+
+// providerTLS is the allowed Provider's client TLS configuration.
+func (r *running) providerTLS() *tls.Config {
+	cert := r.h.providerCert
 	roots := r.h.pki.HostCAPool()
-	cfg := &tls.Config{
+	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true, // #nosec G402 -- verified below against the host identity issuer
@@ -326,12 +398,6 @@ func (r *running) conn() *grpc.ClientConn {
 			return err
 		},
 	}
-	cc, err := grpc.NewClient(r.addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
-	if err != nil {
-		r.h.t.Fatal(err)
-	}
-	r.h.t.Cleanup(func() { _ = cc.Close() })
-	return cc
 }
 
 func callCtx(t *testing.T) context.Context {

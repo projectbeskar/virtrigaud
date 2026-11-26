@@ -51,6 +51,8 @@ const childEnv = "VRTG_AGENTTARGET_CHILD"
 const (
 	lineAddr    = "ADDR"
 	lineStarted = "STARTED"
+	// lineAwaiting: the agent awaits its attestation (development builds).
+	lineAwaiting = "AWAITING"
 )
 
 // childConfig is what an agent process is started with.
@@ -157,7 +159,8 @@ func runChild(path string, stdout, stderr io.Writer) int {
 		Config: cfg, Executor: exec, DevEnrolment: &config.DevEnrolment{StartEpoch: c.StartEpoch}, Notifier: noNotify{},
 		Log: log, Version: "agenttarget", Probe: probe, UID: &ownUID, SignerUID: &ownUID, AllowSignerSameUser: true,
 		Listener: lis, TrustDir: c.TrustDir, TrustFileOwner: &ownUID, StepDeadlines: deadlines,
-		Hooks: daemon.Hooks{Started: func(s providerv1.AgentState) { _, _ = fmt.Fprintf(stdout, "%s %s\n", lineStarted, s) }},
+		Hooks: daemon.Hooks{Started: func(s providerv1.AgentState) { _, _ = fmt.Fprintf(stdout, "%s %s\n", lineStarted, s) },
+			AwaitingAttestation: func() { _, _ = fmt.Fprintf(stdout, "%s\n", lineAwaiting) }},
 	}, signals)
 	if err != nil {
 		log.Error(err, "the agent stopped")

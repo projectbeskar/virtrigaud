@@ -46,7 +46,36 @@ const (
 	// LostIOError: a write or fsync failed. The page-cache state after a
 	// failed fsync is unknown, so the store is never trusted again.
 	LostIOError LostReason = "io_error"
+	// LostLedgerStoreMismatch: an attestation named another store than this
+	// one: the store is not the one the manager's ledger records for the
+	// host.
+	LostLedgerStoreMismatch LostReason = "ledger_store_mismatch"
+	// LostLedgerAhead: an attestation named a ledger position beyond the
+	// store's chain: the store lost commits the manager recorded.
+	LostLedgerAhead LostReason = "ledger_ahead"
+	// LostLedgerMismatch: the store holds another chain head than the one
+	// the manager's ledger recorded at the same position: the chain forked.
+	LostLedgerMismatch LostReason = "ledger_mismatch"
+	// LostLedgerUnverifiable: the store holds no head at the attested ledger
+	// position and no matching checkpoint, so the position cannot be checked
+	// against its chain.
+	LostLedgerUnverifiable LostReason = "ledger_unverifiable"
 )
+
+// LedgerReasons are the lost reasons an attestation against the manager's
+// ledger records. They reach a manager only in answers to requests that ask
+// for the ledger protocol; any other answer reports them as LostRolledBack.
+var LedgerReasons = []LostReason{LostLedgerStoreMismatch, LostLedgerAhead, LostLedgerMismatch, LostLedgerUnverifiable}
+
+// IsLedgerReason reports whether r is one of LedgerReasons.
+func IsLedgerReason(r LostReason) bool {
+	for _, l := range LedgerReasons {
+		if l == r {
+			return true
+		}
+	}
+	return false
+}
 
 // reasonCodes gives each reason its anchor-record code. Codes are never
 // reused.
@@ -58,6 +87,11 @@ var reasonCodes = map[LostReason]uint16{
 	LostAnchorCorrupt:     5,
 	LostJournalMissing:    6,
 	LostIOError:           7,
+	// Codes 8 to 11: attestation against the manager's ledger.
+	LostLedgerStoreMismatch: 8,
+	LostLedgerAhead:         9,
+	LostLedgerMismatch:      10,
+	LostLedgerUnverifiable:  11,
 }
 
 // code returns the reason's anchor-record code (0 for none).

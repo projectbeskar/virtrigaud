@@ -186,7 +186,7 @@ func TestHostAnswer(t *testing.T) {
 		t.Fatalf("context = %v", c)
 	}
 	if a.GetMode() != providerv1.AgentMode_AGENT_MODE_IDENTITY || a.GetAgentApiVersion() != answer.AgentAPIVersion ||
-		len(a.GetGrantVersions()) != 1 || a.GetGrantVersions()[0] != 1 || a.GetClockFloor().AsTime().Unix() != 1700000000 {
+		len(a.GetGrantVersions()) != 1 || a.GetGrantVersions()[0] != answer.GrantVersion || a.GetClockFloor().AsTime().Unix() != 1700000000 {
 		t.Fatalf("answer = %v", a)
 	}
 	blob, err := answer.Sign(p.HostKey, leafDER(t, p), a)

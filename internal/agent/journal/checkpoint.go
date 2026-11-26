@@ -31,11 +31,12 @@ import (
 const checkpointSize = 64
 
 // checkpoint records the head at seq (and the head before it) as a checkpoint
-// and prunes chain entries older than the previous checkpoint. Checkpoints
-// themselves are kept for the life of the store (64 bytes per interval), so
-// that an external party can later ask whether an older position lies on this
-// store's chain.
-func checkpoint(btx *bolt.Tx, seq uint64, head, prev [32]byte, every uint64) error {
+// and prunes chain entries older than the previous checkpoint and below
+// floor (the retention floor of the manager's ledger; math.MaxUint64 when
+// there is none). Checkpoints themselves are kept for the life of the store
+// (64 bytes per interval), so that an external party can later ask whether
+// an older position lies on this store's chain.
+func checkpoint(btx *bolt.Tx, seq uint64, head, prev [32]byte, every, floor uint64) error {
 	cp := make([]byte, checkpointSize)
 	copy(cp[:32], head[:])
 	copy(cp[32:], prev[:])
@@ -45,7 +46,7 @@ func checkpoint(btx *bolt.Tx, seq uint64, head, prev [32]byte, every uint64) err
 	if seq < 2*every {
 		return nil
 	}
-	keepFrom := seq - every
+	keepFrom := min(seq-every, floor)
 	chain := btx.Bucket([]byte(bucketChain))
 	c := chain.Cursor()
 	var stale [][]byte

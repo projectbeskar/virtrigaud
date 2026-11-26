@@ -483,15 +483,16 @@ records every operation a host's agent accepted, from a host-signed receipt, bef
 the agent starts it, and attests the agent's operation store against that record after
 each agent start.
 
-**Reserved; not yet implemented.** No agent, Provider or manager sets, sends or signs
-any of the fields, messages or RPCs below. Every verifier refuses a message that sets
-one of the reserved fields (set means refused): the grant verifier refuses a version 1
-`GrantBody` that sets field 32, 33 or 34, and the host answer verifier refuses an
-answer that sets a reserved field of `AnswerContext`, `OperationAnswer` or
-`HostAnswer`, or carries one of the three reserved body types. An agent answers a
-request that carries `ledger_version` exactly as one that does not (no ledger field,
-no echo); the manager never sends `ledger_version` and ignores `operation_receipt`.
-The comments in the `.proto` files are the normative description of every field.
+**Partly implemented, development builds only, not wired to the manager.** The
+development-build agent implements the attestation part (see
+[Agent attestation](#agent-attestation-development-builds) below); receipts, ledger
+marks and retire-if-unknown are not implemented by anyone yet. The manager sends no
+`ledger_version`, signs no grant at version 2, calls no `HostAuthority` method and
+ignores `operation_receipt`; its host answer verifier still refuses an answer that
+sets a ledger field of `AnswerContext`, `OperationAnswer` or `HostAnswer`, or carries
+one of the three ledger body types, and the grant verifier refuses a version 1
+`GrantBody` that sets field 32, 33 or 34. The comments in the `.proto` files are the
+normative description of every field.
 
 Fields added to existing messages:
 
@@ -539,7 +540,8 @@ The clustered Cloud Hypervisor Provider of a development build routes it to the
 addressed host's agent, relaying requests and answers unchanged (see
 [Host authority service](clustered-agent-provider-development.md#host-authority-service));
 no other bundled provider registers it, so gRPC answers each of its methods
-`Unimplemented` there. A provider author does not implement it.
+`Unimplemented` there. A provider author does not implement it. The development-build
+agent serves `Challenge` and `Attest` (below).
 
 The Kubernetes API reserves the matching status fields, all optional and none populated
 yet: the `Accepted` phase and the `receipt` and `ledgerGeneration` fields of
@@ -547,6 +549,75 @@ yet: the `Accepted` phase and the `receipt` and `ledgerGeneration` fields of
 [Attempt markers](operation-grants-manager.md#attempt-markers-statusoperationattempts)),
 and `Host.status.agentLedger` and `Host.status.agentLastStore` (see
 [Host fields](host-agent-enrolment.md#host-fields)).
+
+### Agent attestation (development builds)
+
+A development-build agent reports agent API version 5 and grant versions `[2]`. It is
+not wired to any manager: the current manager signs only grant version 1, so it signs
+nothing for such an agent, and the agent refuses every operation until it is attested.
+A release-build agent reports the same versions, serves no `HostAuthority` method,
+runs no operation, and reports itself awaiting attestation in every ledger state.
+
+- **Grant version 2.** The agent verifies operation grants at grant version 2 only
+  (version 1 is refused, rule `grant_version`), with the version 1 field rules; fields
+  32 to 34 stay unset in an operation grant. An operation grant at version 2 is not
+  yet receipt-bound: the agent returns no `operation_receipt` and does not yet hold an
+  accepted operation back until its acceptance is recorded by a manager.
+- **Awaiting attestation.** After every start the agent serves reads and refuses every
+  mutation `UNATTESTED` (cause `awaiting_attestation`) and commits nothing: continuity,
+  the clock floor commit and recovery wait for the first attestation. The only
+  exception is an enrolment change (a fresh store, or a certificate that names a new
+  enrolment): without it the agent could sign no answer, so it is committed before the
+  attestation; recovery still waits.
+- **`Challenge`.** Request rules: no unknown field or enum value, `target_host_id` is
+  the agent's host, a 16-byte `answer_nonce`, purpose `ATTEST` or `REATTEST`; anything
+  else is `InvalidArgument`. `ATTEST` is issued only while the agent awaits its first
+  attestation, `REATTEST` only while it is attested, neither while the store is
+  quarantined; otherwise `not_issued_reason` is `already_attested`, `not_attested` or
+  `quarantined`. A challenge is 16 random bytes, valid for 300 seconds of
+  `CLOCK_MONOTONIC_RAW`, single-use, held in memory only (a restart forgets it), at most
+  four per purpose (a fifth evicts the oldest). The answer always carries a
+  `HostLedgerState` with the store's origin evidence. An agent whose store's active
+  enrolment is not its certificate's signs no answer at all, so it never says
+  `not_enrolled`.
+- **`Attest`.** After the request rules, the grant must verify at grant version 2 as a
+  `GRANT_KIND_ATTEST` grant (the kind is checked against the method before any other
+  field) for the agent's host, Provider, installation and certificate enrolment, at
+  the clock floor, with the challenge nonce in `single_use_nonce`, `ledger` set and
+  `ledger_checkpoint`, when set, a multiple of 1024 at or below it in the same store;
+  every other field unset (else `REFUSED` `grant_invalid`). Then: a quarantined store
+  is `QUARANTINED`; the nonce must name an outstanding challenge (else
+  `challenge_unknown` or `challenge_expired`) whose purpose the agent's state allows
+  (else `already_attested` or `not_attested`); only then is the challenge consumed.
+  The store compares the ledger position with its chain: another store quarantines it
+  (`ledger_store_mismatch`), a position beyond its chain (`ledger_ahead`), another head
+  at the position, or at a held checkpoint, (`ledger_mismatch`), and no head and no
+  held checkpoint (`ledger_unverifiable`). When it passes, the challenge nonce becomes
+  the attestation session (`APPLIED`, `session_replaced` on a re-attestation) and the
+  mark becomes the ledger position (the higher of the two on a re-attestation). The
+  session and mark live in memory only. Every outcome is a signed `AuthorityAnswer`
+  whose context names the session after the grant and whose `grant_digest` is
+  SHA-256(be32(len(body)) ‖ body ‖ signature) of the delivered grant. `LedgerMark` and
+  `RetireIfUnknown` are `Unimplemented`.
+- **Ledger fields in reads.** `GetHostInfo`, `TaskStatus` and `Describe` with
+  `answer_nonce` and `ledger_version` ≥ 1 echo the version in
+  `AnswerContext.ledger_version_echo` and name the session in
+  `AnswerContext.attestation_id` while the agent is attested (never while
+  quarantined); `GetHostInfo` also carries `HostAnswer.ledger` (version 1, session
+  state, session id and mark when attested, origin evidence; `pending_receipts` and the
+  parked request bytes are 0 until receipts are implemented). `ledger_version` without
+  `answer_nonce` is `InvalidArgument`. `OperationAnswer` 12–14 are never set yet.
+- **Ledger loss reasons.** A quarantine an attestation recorded keeps its reason
+  (`ledger_store_mismatch`, `ledger_ahead`, `ledger_mismatch`, `ledger_unverifiable`)
+  only in an answer to a request with `ledger_version` ≥ 1 and in host authority
+  answers; every other answer says `rolled_back`, which every manager knows.
+- **Origin evidence.** The store records the enrolment under which it was first
+  enrolled and how many enrolments were activated in it since, in the activation
+  transaction itself. A store enrolled before this record existed reports none and
+  never gets one inferred.
+- **Retention.** No checkpoint prunes a chain entry at or above the attested mark, so
+  the head at every position since the last attestation stays on the store. Until
+  ledger marks are implemented, the mark does not move between attestations.
 
 ## Compatibility
 
@@ -571,6 +642,11 @@ and `Host.status.agentLedger` and `Host.status.agentLastStore` (see
   unassigned and 27 reserved. Because generated code now knows the reserved fields,
   the verifiers refuse them explicitly when set, instead of through the unknown-field
   rule.
+- Agent API version 5 (development builds) is not compatible with the current
+  manager on purpose: it reports grant versions `[2]`, and the manager, which signs
+  version 1 only, signs nothing for it, so the agent's VMs keep running and control
+  waits. The Cloud Hypervisor Provider speaks agent API version 5 (it accepts agents
+  of version 4 and 5); update Providers before agents.
 - A provider built against an older contract ignores the new fields; a manager built
   against an older contract never sends them.
 - The grant messages live in `provider.proto`. The contract's breaking-change check

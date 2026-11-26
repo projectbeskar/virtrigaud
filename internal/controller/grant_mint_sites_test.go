@@ -69,7 +69,10 @@ type grantSite struct{ file, function string }
 // envelope, and why.
 var allowedGrantSites = map[grantSite]string{
 	{"internal/transport/grpc/client_operation.go", "SendOperation"}: "mints the grant and builds the envelope of every send",
-	{"internal/operation/grant.go", "MintOperationGrant"}:            "the mint itself builds the grant it returns",
+	{"internal/operation/grant.go", "signGrantBody"}:                 "the mints (operation and attestation grants) build the grant they return",
+	// The agent's test helper signs attestation grants for the agent's own
+	// tests; nothing in the manager imports it.
+	{"internal/agent/attest/attesttest/attesttest.go", "Sign"}: "test-only attestation grants for the agent's tests",
 	// An empty envelope literal used only for its descriptor's full name
 	// (the outer-request check compares the field's message type); it is
 	// never filled or returned.

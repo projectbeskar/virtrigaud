@@ -371,6 +371,10 @@ type OperationIdentityConfig struct {
 	// enrolled. An op_id minted before it is never accepted on its first
 	// delivery. 0 means 1.
 	EnrolmentStartEpoch uint64
+	// GrantVersion is the grant_version the suite mints: 0 means
+	// operation.GrantVersion. An agent of agent API version 5 accepts
+	// operation.LedgerGrantVersion only.
+	GrantVersion uint32
 }
 
 // OperationIdentityTarget is implemented by a Target that offers

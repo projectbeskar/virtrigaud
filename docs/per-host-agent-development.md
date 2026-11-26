@@ -136,7 +136,7 @@ the host's URI identity and, under the same trust domain,
 | 2 | The store opens with full fsync and checks its schema. | A store written for a newer agent refuses the start, naming the schema version it needs. |
 | 3 | Local continuity checks: chain, anchor log, store marker, quarantine record. | The store is quarantined: reads still answer, every mutation is refused. |
 | 4 | The clock floor record is read from the store and raised in memory from the host's own clocks. Nothing is written. | A missing floor for an enrolled store, or an unreadable one, quarantines the store (`inconsistent_store`); clocks the floor cannot use refuse the start. |
-| 5 | The server starts serving, unattested. Nothing is committed before step 6. | |
+| 5 | The server starts serving, unattested. Nothing is committed before step 6. A development build then awaits its first attestation by the manager's host ledger (`HostAuthority` `Challenge` and `Attest`, see [Host ledger attestation](#host-ledger-attestation)): it sends `READY=1` with `STATUS=awaiting attestation by the manager; operations are refused until then`, refuses every mutation `UNATTESTED` (cause `awaiting_attestation`), and runs steps 6 to 8 only after the first attestation. The only commits before it are those of an enrolment change (step 6 for a store whose active enrolment is not the certificate's), without which no answer could be signed; recovery still waits. A release build goes on at once. | An attestation that quarantines the store ends the start-up as a quarantine. |
 | 6 | Continuity is established. The clock floor is committed as the first write. The store's active enrolment is brought to the one the host certificate carries: in a development build a store that was never enrolled is enrolled, and a store with another (or no) active enrolment is re-enrolled with the [freeze](#re-enrolment-freeze) (see [Enrolment](#enrolment)); a release build does neither. | A floor that cannot be committed quarantines the store (`io_error`). |
 | 7 | Recovery of interrupted operations. A development build starts a runner for every operation that recovery left runnable, so that no operation stays running without one. | |
 | 8 | systemd is notified `READY=1`; the agent's trust state is READY. A development build now runs signed operations. | |
@@ -400,6 +400,7 @@ and a client may not send keepalive pings more often than every 15 seconds
 | Method | Answer |
 |--------|--------|
 | `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)); with `renewal_version` of at least 1, a development build puts its pending renewal request in it (see [Certificate renewal](#certificate-renewal)). `host_id` naming another host, a nonce that is not 16 bytes, or `continuity_seq`, `inventory_version` or `renewal_version` without a nonce: `InvalidArgument`. |
+| `provider.v1.HostAuthority/Challenge`, `Attest` | Development builds: attestation against the manager's host ledger (see [Host ledger attestation](#host-ledger-attestation)). `LedgerMark` and `RetireIfUnknown`: `Unimplemented`. Release builds: every method `Unimplemented`. |
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
 | `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. A freeze confirmation it carries is applied first, and the outcome for each confirmed id is returned in `freeze_results` (see [Freeze confirmation](#freeze-confirmation)). |
 | `agent.v1.AgentService/InstallRenewedCertificate` | Development builds: stages a renewed certificate (`activate` false) or puts the staged one in use (`activate` true), and answers with a signed `HostAnswer` (see [Certificate renewal](#certificate-renewal)). The nonce and a certificate are required. Release builds: `Unimplemented`. |
@@ -412,13 +413,41 @@ A signed answer is made only for a request with a nonce, and only while the
 store's active enrolment is the one the host certificate names; otherwise the
 read answers without `host_answer`. Its body carries the nonce, the enrolment,
 the store's chain position, newest checkpoint and trust state (read together),
-the agent's API version (3), grant versions (`[1]`), mode (`identity`), store
+the agent's API version (5), grant versions (`[2]`), mode (`identity`), store
 schema version, clock floor and, in a development build, the digest of a
 staged renewed certificate (`staged_certificate_sha256`). It is signed with the host key, by the signer process, over
 `"virtrigaud.host-signed.v1" 0x00 ‖ be16(len(body_type)) ‖ body_type ‖ be32(len(body)) ‖ body`
 (ECDSA P-256, SHA-256, low-S), as defined in
 [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#the-signature-input); a test
 reproduces the published test vector.
+
+## Host ledger attestation
+
+Development builds only, and not wired to any manager yet: no manager attests an
+agent, so a development-build agent started against the current manager stays
+awaiting attestation and runs no operation (its VMs keep running). The wire rules are
+in [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#agent-attestation-development-builds).
+
+- After every start the agent awaits an attestation: a `Challenge` (purpose `ATTEST`)
+  gives a single-use nonce valid for 300 seconds, and an `Attest` with a
+  manager-signed attestation grant (grant version 2) naming that nonce and the
+  manager's ledger position for the store applies it. The agent compares the
+  position with its own chain: the same store, not beyond its chain, and the same
+  head at that position (or at a held checkpoint at or below it). A position that
+  fails any of these quarantines the store with `ledger_store_mismatch`,
+  `ledger_ahead`, `ledger_mismatch` or `ledger_unverifiable`; the quarantine is durable
+  and is reported as `rolled_back` to a manager that did not ask for the ledger
+  protocol.
+- An attested agent can be re-attested (`REATTEST`), which replaces its session and
+  never lowers its mark. The session and mark are kept in memory only; a restart
+  awaits a new attestation.
+- From the attestation on, no checkpoint prunes a chain entry at or above the mark.
+- The store records its origin enrolment (the first one it was enrolled under) and
+  how many enrolments were activated in it, in the activation itself; a store
+  enrolled before this record existed reports none.
+- Operation grants must be grant version 2; version 1 is refused. Receipts, ledger
+  marks and holding an accepted operation back until a manager has recorded it are
+  not implemented yet.
 
 ## Operations
 

@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
@@ -115,6 +116,9 @@ func (s *Server) verifier() (*grantverify.Verifier, error) {
 		HostID:      c.Identity.HostID(),
 		EnrolmentID: c.Identity.Record.EnrolmentID,
 		Clock:       grantverify.ClockFunc(func() time.Time { c, _ := s.grantClock(); return c.Now() }),
+		// Agent API version 5 accepts the host ledger protocol's grant
+		// version only.
+		GrantVersion: answer.GrantVersion,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("grant verifier: %w", err)

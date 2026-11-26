@@ -113,10 +113,11 @@ func (e *Env) NewOp(kind providerv1.OperationKind, host string, req proto.Messag
 func (e *Env) Grant(op *SignedOp) *providerv1.OperationGrant {
 	e.T.Helper()
 	g, err := operation.MintOperationGrant(e.ctx, e.OperationIdentity().Signer, operation.MintRequest{
-		Identity:   op.Identity,
-		DigestSalt: op.Salt,
-		Request:    op.Request,
-		IssuedAt:   time.Now(),
+		Identity:     op.Identity,
+		DigestSalt:   op.Salt,
+		Request:      op.Request,
+		IssuedAt:     time.Now(),
+		GrantVersion: e.OperationIdentity().GrantVersion,
 	})
 	require.NoError(e.T, err, "mint the grant")
 	return g

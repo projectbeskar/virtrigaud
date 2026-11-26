@@ -173,7 +173,7 @@ func (c *caller) newOp(kind providerv1.OperationKind, vm string, binding []byte,
 // envelope mints a grant for o issued now and wraps it with the request.
 func (c *caller) envelope(ctx context.Context, o *opSpec) (*providerv1.OperationEnvelope, error) {
 	g, err := operation.MintOperationGrant(ctx, c.grants, operation.MintRequest{
-		Identity: o.id, DigestSalt: o.salt, Request: o.request, IssuedAt: time.Now()})
+		Identity: o.id, DigestSalt: o.salt, Request: o.request, IssuedAt: time.Now(), GrantVersion: operation.LedgerGrantVersion})
 	if err != nil {
 		return nil, fmt.Errorf("mint grant: %w", err)
 	}

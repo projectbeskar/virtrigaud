@@ -46,6 +46,17 @@ message StoreMeta {
   // writer_version is the writer schema of the binary that last migrated the
   // store.
   uint32 writer_version = 4;
+  // origin_enrolment_id is the 16-byte enrolment under which the store was
+  // first enrolled: written in the transaction that activates the first
+  // enrolment of a store that was never enrolled, and never changed after.
+  // Empty for a store that was enrolled before the field existed: it is never
+  // inferred.
+  bytes origin_enrolment_id = 5;
+  // enrolment_activations counts the enrolments activated in this store
+  // (active, frozen and retired), raised by one in every activation
+  // transaction of a store whose origin_enrolment_id is set. Zero for a
+  // store that was enrolled before the field existed.
+  uint32 enrolment_activations = 6;
 }
 
 // Quarantine records why the store lost its persistence guarantee.
