@@ -57,6 +57,9 @@ func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHo
 	if req.GetStoreCapacityVersion() != 0 && len(req.GetAnswerNonce()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "store_capacity_version is set without answer_nonce")
 	}
+	if req.GetLedgerVersion() != 0 && len(req.GetAnswerNonce()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "ledger_version is set without answer_nonce")
+	}
 	hostID := p.s.opts.Credentials.Load().Identity.HostID()
 	if req.GetHostId() != "" && req.GetHostId() != hostID {
 		return nil, status.Error(codes.InvalidArgument, "host_id names another host")
@@ -66,7 +69,7 @@ func (p *providerService) GetHostInfo(ctx context.Context, req *providerv1.GetHo
 		health = providerv1.HostHealth_HOST_HEALTH_READY
 	}
 	blob := p.s.hostAnswerWithInventory(ctx, req.GetAnswerNonce(), req.GetContinuitySeq(), req.GetInventoryVersion(),
-		req.GetRenewalVersion(), req.GetStoreCapacityVersion())
+		req.GetRenewalVersion(), req.GetStoreCapacityVersion(), req.GetLedgerVersion())
 	return &providerv1.HostInfo{
 		Id:         hostID,
 		Health:     health,

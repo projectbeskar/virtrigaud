@@ -58,6 +58,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -72,7 +73,9 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/attest"
 	"github.com/projectbeskar/virtrigaud/internal/agent/clockfloor"
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/inventory"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/signer"
@@ -232,6 +235,9 @@ const (
 	// host certificate names; new operations are refused until the host is
 	// enrolled again.
 	CauseEnrolmentMismatch = "enrolment_mismatch"
+	// CauseAwaitingAttestation: the agent has not been attested against the
+	// manager's host ledger since it started (development builds).
+	CauseAwaitingAttestation = "awaiting_attestation"
 )
 
 // ReasonStoreFull is the ErrorInfo reason (in ErrorInfoDomain) of an
@@ -294,6 +300,25 @@ type Options struct {
 	// (InstallRenewedCertificate is Unimplemented and no answer carries a
 	// renewal request): a release build never sets it.
 	Renewals Renewals
+	// Authority is the agent's attestation against the manager's host
+	// ledger. Nil serves no HostAuthority service (every method is
+	// Unimplemented) and reports the agent as awaiting attestation in every
+	// ledger state: a release build never sets it. When set, every mutating
+	// method is refused UNATTESTED until the agent is attested.
+	Authority Authority
+	// ChallengeClock replaces CLOCK_MONOTONIC_RAW for the validity of
+	// attestation challenges. Only tests set it.
+	ChallengeClock attest.Clock
+}
+
+// Authority is the agent's attestation against the manager's host ledger,
+// as the server serves it (the operation store, opstore.Store).
+type Authority interface {
+	// Attestation returns the current attestation session; ok is false
+	// while the agent awaits its first attestation.
+	Attestation() (a opstore.Attestation, ok bool)
+	// Attest applies a verified attestation (opstore.Store.Attest).
+	Attest(ctx context.Context, r opstore.AttestRequest) (opstore.AttestResult, error)
 }
 
 // Renewals is the host's certificate renewal, as the server serves it.
@@ -357,6 +382,12 @@ type Server struct {
 	providerS *providerService
 	agentS    *agentService
 	vc        verifierCache
+	// challenges are the outstanding attestation challenges.
+	challenges *attest.Challenges
+	// attestMu serialises the attestations, so that a challenge's purpose,
+	// its consumption and the store's attestation state are judged
+	// together.
+	attestMu sync.Mutex
 }
 
 // New returns a server for opts.
@@ -405,6 +436,10 @@ func New(opts Options) (*Server, error) {
 	s.agentS = &agentService{s: s}
 	providerv1.RegisterProviderServer(s.grpc, s.providerS)
 	agentv1.RegisterAgentServiceServer(s.grpc, s.agentS)
+	if opts.Authority != nil {
+		s.challenges = attest.New(opts.ChallengeClock)
+		providerv1.RegisterHostAuthorityServer(s.grpc, &authorityService{s: s})
+	}
 	return s, nil
 }
 
@@ -534,6 +569,10 @@ func (s *Server) gate(ctx context.Context, method string) error {
 	state, reason := s.opts.Agent.TrustState()
 	var err error
 	cause := s.opts.Agent.UnattestedCause()
+	if cause == "" && state != providerv1.AgentState_AGENT_STATE_QUARANTINED && !s.attested() &&
+		!guard.Off(guard.MutationsAfterAttestation) {
+		cause = CauseAwaitingAttestation
+	}
 	switch {
 	case state == providerv1.AgentState_AGENT_STATE_QUARANTINED:
 		err = refusal(codes.FailedPrecondition, opstore.ReasonQuarantined, "the host's operation store is quarantined ("+reason+")")
@@ -576,7 +615,17 @@ func (s *Server) streamGate(srv any, ss grpc.ServerStream, info *grpc.StreamServ
 // made (no nonce, no matching enrolment, a store that cannot be read). It
 // carries no inventory and no renewal request.
 func (s *Server) hostAnswer(ctx context.Context, nonce []byte, continuitySeq uint64) *providerv1.SignedBlob {
-	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0, 0, 0)
+	return s.hostAnswerWithInventory(ctx, nonce, continuitySeq, 0, 0, 0, 0)
+}
+
+// attested reports whether the agent is attested; true when the server has
+// no Authority (it does not take part in the ledger protocol).
+func (s *Server) attested() bool {
+	if s.opts.Authority == nil {
+		return true
+	}
+	_, ok := s.opts.Authority.Attestation()
+	return ok
 }
 
 // helloAnswer is hostAnswer for Hello, under the separate Hello answer limit.
@@ -593,13 +642,14 @@ func (s *Server) helloAnswer(ctx context.Context, nonce []byte) *providerv1.Sign
 
 // hostAnswerWithInventory is hostAnswer for a request that asked for the host
 // inventory in version inventoryVersion, for the pending renewal request in
-// version renewalVersion and for the store's capacity in version
-// storeCapacityVersion (0: it asked for none). See signWith for what happens
+// version renewalVersion, for the store's capacity in version
+// storeCapacityVersion and for the host ledger state in version
+// ledgerVersion (0: it asked for none). See signWith for what happens
 // when the inventory cannot be signed. The capacity is read just after the
 // store's view (Agent.StoreCapacity: two counters, not a scan); the answer
 // carries it only when the request asked for it (answer.HostAnswer).
 func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, continuitySeq uint64,
-	inventoryVersion, renewalVersion, storeCapacityVersion uint32) *providerv1.SignedBlob {
+	inventoryVersion, renewalVersion, storeCapacityVersion, ledgerVersion uint32) *providerv1.SignedBlob {
 	return s.signAnswerUnder(ctx, s.answers, nonce, inventoryVersion, renewalVersion, func(h answer.Host) (proto.Message, error) {
 		view, err := s.opts.Agent.HostView(ctx, continuitySeq)
 		if err != nil {
@@ -607,6 +657,7 @@ func (s *Server) hostAnswerWithInventory(ctx context.Context, nonce []byte, cont
 		}
 		h.View = view
 		h.StoreCapacityRequested, h.StoreCapacity = storeCapacityVersion, s.opts.Agent.StoreCapacity()
+		h.LedgerRequested = ledgerVersion
 		return answer.HostAnswer(h)
 	})
 }
@@ -648,6 +699,9 @@ func (s *Server) signAnswerUnder(ctx context.Context, lim *sourceLimiter, nonce 
 	}
 	if inventoryVersion != 0 && s.opts.Inventory != nil {
 		h.Inventory = s.opts.Inventory.Inventory(inventoryVersion)
+	}
+	if s.opts.Authority != nil {
+		h.Attestation, h.Attested = s.opts.Authority.Attestation()
 	}
 	if s.opts.Renewals != nil {
 		h.StagedCertificateSHA256 = s.opts.Renewals.StagedSHA256()

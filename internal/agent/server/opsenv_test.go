@@ -392,7 +392,8 @@ func (e *opsEnv) newOp(kind providerv1.OperationKind, vm string, binding []byte,
 func (e *opsEnv) grant(o *op, issued time.Time, lifetime time.Duration) *providerv1.OperationGrant {
 	e.t.Helper()
 	g, err := operation.MintOperationGrant(context.Background(), e.grants, operation.MintRequest{
-		Identity: o.id, DigestSalt: o.salt, Request: o.request, IssuedAt: issued, Lifetime: lifetime})
+		Identity: o.id, DigestSalt: o.salt, Request: o.request, IssuedAt: issued, Lifetime: lifetime,
+		GrantVersion: operation.LedgerGrantVersion})
 	if err != nil {
 		e.t.Fatal(err)
 	}

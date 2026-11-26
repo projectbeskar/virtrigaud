@@ -115,8 +115,9 @@ func checkTaskStatus(req *providerv1.TaskStatusRequest, hostID string) error {
 		return err
 	}
 	if len(req.GetAnswerNonce()) == 0 {
-		if len(req.GetOpId()) != 0 || len(req.GetOpEnrolmentId()) != 0 || req.GetTargetHostId() != "" || req.GetContinuitySeq() != 0 {
-			return status.Error(codes.InvalidArgument, "op_id, op_enrolment_id, target_host_id and continuity_seq are set only with answer_nonce")
+		if len(req.GetOpId()) != 0 || len(req.GetOpEnrolmentId()) != 0 || req.GetTargetHostId() != "" || req.GetContinuitySeq() != 0 ||
+			req.GetLedgerVersion() != 0 {
+			return status.Error(codes.InvalidArgument, "op_id, op_enrolment_id, target_host_id, continuity_seq and ledger_version are set only with answer_nonce")
 		}
 		if req.GetTask().GetId() == "" {
 			return status.Error(codes.InvalidArgument, "no task")
@@ -173,6 +174,7 @@ func (p *providerService) TaskStatus(ctx context.Context, req *providerv1.TaskSt
 		if err := read(); err != nil {
 			return nil, err
 		}
+		h.LedgerRequested = req.GetLedgerVersion()
 		return answer.OperationAnswer(answer.Operation{Host: h, Ref: ref, View: view})
 	})
 	if !didRead {
@@ -204,8 +206,8 @@ func checkDescribe(req *providerv1.DescribeRequest, hostID string) error {
 		return status.Error(codes.InvalidArgument, "target_host_id names another host")
 	case signed && len(req.GetBindingId()) != idLen:
 		return status.Errorf(codes.InvalidArgument, "binding_id must be %d bytes with answer_nonce", idLen)
-	case !signed && (len(req.GetBindingId()) != 0 || req.GetContinuitySeq() != 0):
-		return status.Error(codes.InvalidArgument, "binding_id and continuity_seq are set only with answer_nonce")
+	case !signed && (len(req.GetBindingId()) != 0 || req.GetContinuitySeq() != 0 || req.GetLedgerVersion() != 0):
+		return status.Error(codes.InvalidArgument, "binding_id, continuity_seq and ledger_version are set only with answer_nonce")
 	}
 	return nil
 }
@@ -240,6 +242,7 @@ func (p *providerService) Describe(ctx context.Context, req *providerv1.Describe
 		if err := read(); err != nil {
 			return nil, err
 		}
+		h.LedgerRequested = req.GetLedgerVersion()
 		return answer.VMAnswer(answer.VM{Host: h, VMUID: uid, BindingID: binding, View: view})
 	})
 	if !didRead {
