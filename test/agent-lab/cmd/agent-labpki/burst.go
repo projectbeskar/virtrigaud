@@ -258,7 +258,7 @@ func (b *burster) op(kind providerv1.OperationKind, vm string, binding []byte) e
 	g, err := operation.MintOperationGrant(ctx, b.grants, operation.MintRequest{
 		Identity: operation.Identity{ProviderUID: b.rec.ProviderUID, HostID: b.rec.Host, EnrolmentID: b.rec.EnrolmentID,
 			Epoch: b.epoch, VMUID: vm, BindingID: binding, OpID: randomID(), Kind: kind, Attempt: 1, MintEpoch: b.epoch},
-		DigestSalt: append(randomID(), randomID()...), Request: reqBytes, IssuedAt: time.Now(),
+		DigestSalt: append(randomID(), randomID()...), Request: reqBytes, IssuedAt: time.Now(), GrantVersion: operation.LedgerGrantVersion,
 	})
 	if err != nil {
 		return fmt.Errorf("mint grant: %w", err)

@@ -188,6 +188,7 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		if err != nil {
 			return nil, err
 		}
+		h.attest = tg.attestHost
 		tg.hosts = append(tg.hosts, h)
 		tg.byName[name] = h
 		tg.scripts[name] = fake.Script{CreateStopped: true}
@@ -508,7 +509,8 @@ func (t *Target) Mint(ctx context.Context, host, uid string, kind providerv1.Ope
 	}
 	id := operation.Identity{ProviderUID: trusttest.ProviderUID, HostID: host, EnrolmentID: h.Enrolment, Epoch: t.epoch,
 		VMUID: uid, BindingID: binding, OpID: opID, Kind: kind, Attempt: attempt, MintEpoch: t.epoch}
-	g, err := operation.MintOperationGrant(ctx, t.signer, operation.MintRequest{Identity: id, DigestSalt: salt, Request: b, IssuedAt: time.Now()})
+	g, err := operation.MintOperationGrant(ctx, t.signer, operation.MintRequest{Identity: id, DigestSalt: salt, Request: b, IssuedAt: time.Now(),
+		GrantVersion: operation.LedgerGrantVersion})
 	if err != nil {
 		return nil, operation.Identity{}, err
 	}
@@ -636,7 +638,7 @@ func (t *Target) OperationIdentity() clustered.OperationIdentityConfig {
 		enrolments[h.Name] = append([]byte(nil), h.Enrolment...)
 	}
 	return clustered.OperationIdentityConfig{Signer: t.signer, ProviderUID: trusttest.ProviderUID, Enrolments: enrolments,
-		Epoch: t.epoch, EnrolmentStartEpoch: StartEpoch}
+		Epoch: t.epoch, EnrolmentStartEpoch: StartEpoch, GrantVersion: operation.LedgerGrantVersion}
 }
 
 // NextPlacement implements clustered.PlacementTracker.

@@ -198,6 +198,16 @@ func (p *provider) answerContext(host string, hs *hostState, nonce []byte, conti
 	return ctx
 }
 
+// The versions the fake agent reports: those of the agent the current
+// manager signs operation grants for (agent API version 4, grant version 1).
+// An agent that speaks the host ledger protocol (API version 5, grant
+// version 2 only) is not one the manager signs for until the ledger is
+// wired to it.
+const (
+	fakeAgentAPIVersion = hostidentity.StoreCapacityAgentAPIVersion
+	fakeGrantVersion    = uint32(1)
+)
+
 // signedHostInfo adds a signed HostAnswer to info for a GetHostInfo that
 // carries answer_nonce. The caller holds w.mu.
 func (p *provider) signedHostInfo(req *providerv1.GetHostInfoRequest, hs *hostState, info *providerv1.HostInfo) error {
@@ -205,7 +215,7 @@ func (p *provider) signedHostInfo(req *providerv1.GetHostInfoRequest, hs *hostSt
 		return status.Error(codes.InvalidArgument, "answer_nonce must be 16 bytes")
 	}
 	a := &providerv1.HostAnswer{Context: p.answerContext(req.GetHostId(), hs, req.GetAnswerNonce(), req.GetContinuitySeq()),
-		AgentVersion: "fake", AgentApiVersion: answer.AgentAPIVersion, GrantVersions: []uint32{answer.GrantVersion},
+		AgentVersion: "fake", AgentApiVersion: fakeAgentAPIVersion, GrantVersions: []uint32{fakeGrantVersion},
 		Mode: providerv1.AgentMode_AGENT_MODE_IDENTITY}
 	if p.inventory && req.GetInventoryVersion() >= 1 {
 		a.Inventory = FakeInventory(req.GetInventoryVersion())

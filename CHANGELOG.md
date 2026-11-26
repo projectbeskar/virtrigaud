@@ -5,6 +5,47 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-26 18:00] - The per-host agent attests its store against the manager's host ledger before it runs anything (development builds only, not wired to the manager)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/server/authority.go`: The development-build agent serves `HostAuthority` `Challenge` and `Attest`. `Challenge` issues a single-use 16-byte nonce. `ATTEST` is issued only while the agent awaits its first attestation and `REATTEST` only while it is attested. Each nonce is valid for 300 seconds of `CLOCK_MONOTONIC_RAW`, held in memory, at most four per purpose. `Attest` checks, in order:
+  1. the grant verifies at grant version 2 as an attestation grant for this host, Provider, installation and certificate enrolment;
+  2. the challenge's purpose matches the agent's state;
+  3. only then is the challenge consumed;
+  4. the store compares the ledger position with its chain.
+
+  Every outcome is a host-signed `AuthorityAnswer` that names the session after the grant. `LedgerMark` and `RetireIfUnknown` stay `Unimplemented`.
+- `internal/agent/opstore/attest.go`: The store holds the attestation session and mark in memory. It quarantines with `ledger_store_mismatch`, `ledger_ahead`, `ledger_mismatch` or `ledger_unverifiable` when the position names another store, lies beyond its chain, or has a head (or held checkpoint head) that differs or that it does not hold. A re-attestation never lowers the mark.
+- `internal/agent/attest/`: The outstanding challenge set, and `attesttest`, a test helper that attests an agent as a manager will.
+- `internal/agent/journal/journalpb/journal.proto`, `internal/agent/journal/tx.go`: The store meta records the enrolment the store was first enrolled under and how many enrolments were activated in it since. Both are written in the activation transaction. A store enrolled before this record existed reports none and never gets one inferred.
+- `internal/agent/journal/store.go`, `internal/agent/journal/checkpoint.go`: With ledger retention on (development builds), no checkpoint prunes a chain entry at or above the attested mark.
+- `internal/agent/journal/reasons.go`: Four ledger loss reasons with anchor codes 8 to 11.
+- `internal/agent/answer/ledger.go`: Builders for the signed `ChallengeAnswer` and `AuthorityAnswer`, and the `HostLedgerState`.
+- `internal/operation/grantverify/authority.go`, `internal/operation/grant_attest.go`: The verifier for attestation grants (the grant kind is checked against the method first), the grant digest, and the attestation grant minter. No manager controller calls the minter.
+- `internal/agent/internal/guard/guard.go`: Fourteen mutation guards for the new checks, each killed by a test.
+
+### Changed
+- `internal/agent/answer/answer.go`: The agent reports agent API version 5 and grant versions `[2]`. A request that asks for `ledger_version` gets the echo and, while attested, the attestation id in the answer context. `GetHostInfo` also returns the ledger state with the store's origin evidence. A ledger loss reason reaches only such a request; any other request reads `rolled_back`.
+- `internal/agent/server/server.go`, `internal/agent/server/reads.go`, `internal/agent/server/services.go`: Every mutation is refused `UNATTESTED` (cause `awaiting_attestation`) until the agent is attested. `ledger_version` without `answer_nonce` is `InvalidArgument`. The operation path verifies grant version 2 only.
+- `internal/agent/daemon/daemon.go`: After it starts serving, a development build sends `READY=1` with an awaiting-attestation status. It runs continuity, the clock floor commit and recovery only after the first attestation. The only commits before it are those of an enrolment change, without which no answer could be signed. An attestation that quarantines the store ends the start-up as a quarantine.
+- `internal/operation/grantverify/checks.go`, `internal/operation/grantverify/verify.go`, `internal/operation/grant.go`: A verifier and the minter can be set to grant version 2. The manager still mints and verifies version 1.
+- `internal/providers/cloudhypervisor/hello.go`: The comment on the agent API version now says that version 5 is the agent that speaks the host ledger protocol, whose ledger fields the Provider relays unchanged.
+- `test/conformance/clustered/agenttarget/`, `test/agent-lab/cmd/`: The crash-point suite attests each agent at start and mints grant version 2. The lab tools mint grant version 2.
+- `test/conformance/clustered/fake/answers.go`: The fake agent keeps reporting the versions the current manager signs for (4 and `[1]`).
+- `docs/operation-grants-wire-shape.md`, `docs/per-host-agent-development.md`: Document the attestation, the start-up wait and the version change.
+
+### Why
+Before the agent runs or recovers an operation, it must prove to the manager that its store is not rolled back or forked. This change adds that proof on the agent side.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Development builds only. A development-build agent at this version accepts no operation from the current manager, which signs grant version 1 only. Update Providers before agents.
+
 ## [2026-11-26 15:00] - The clustered Cloud Hypervisor Provider routes the host authority service to the addressed host's agent (development builds only)
 **Author:** @wrkode (William Rizzo)
 
