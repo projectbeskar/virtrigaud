@@ -229,13 +229,13 @@ func position(l *providerv1.LedgerPosition) journal.Position {
 	return p
 }
 
-// decodedGrantDigest is the grant digest of g when g is within the size caps
-// and its body decodes; nil otherwise ("no grant decoded").
+// decodedGrantDigest is the grant digest of g when the call carries a grant
+// within the size caps; nil otherwise ("no grant decoded"). The digest is a
+// hash of bytes the caller sent, so it names the delivery even for a grant
+// that did not verify.
 func decodedGrantDigest(g *providerv1.OperationGrant) []byte {
-	if g == nil || len(g.GetBody()) > grantverify.MaxGrantBodyBytes || len(g.GetSignature()) > grantverify.MaxSignatureBytes {
-		return nil
-	}
-	if err := proto.Unmarshal(g.GetBody(), &providerv1.GrantBody{}); err != nil {
+	if g == nil || len(g.GetBody()) == 0 || len(g.GetBody()) > grantverify.MaxGrantBodyBytes ||
+		len(g.GetSignature()) > grantverify.MaxSignatureBytes {
 		return nil
 	}
 	return grantverify.GrantDigest(g)

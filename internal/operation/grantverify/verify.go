@@ -331,7 +331,18 @@ func (v *Verifier) verifyAt(fullMethod string, outer proto.Message, bindAll bool
 // parts are refused as GRANT_UNAUTHENTICATED (they were not authenticated),
 // the request as GRANT_MISMATCH.
 func checkSizes(env *providerv1.OperationEnvelope) *Refusal {
-	g := env.GetGrant()
+	if r := checkGrantSizes(env.GetGrant()); r != nil {
+		return r
+	}
+	if len(env.GetRequest()) > MaxRequestBytes {
+		return mismatch(RuleSizeLimit, "the request is larger than %d bytes", MaxRequestBytes)
+	}
+	return nil
+}
+
+// checkGrantSizes applies the size caps of a grant's parts, refused as
+// GRANT_UNAUTHENTICATED (they were not authenticated).
+func checkGrantSizes(g *providerv1.OperationGrant) *Refusal {
 	if len(g.GetBody()) > MaxGrantBodyBytes {
 		return unauthenticated(RuleSizeLimit, "the grant body is larger than %d bytes", MaxGrantBodyBytes)
 	}
@@ -345,9 +356,6 @@ func checkSizes(env *providerv1.OperationEnvelope) *Refusal {
 		if len(c) > MaxCertBytes {
 			return unauthenticated(RuleSizeLimit, "certificate %d is larger than %d bytes", i, MaxCertBytes)
 		}
-	}
-	if len(env.GetRequest()) > MaxRequestBytes {
-		return mismatch(RuleSizeLimit, "the request is larger than %d bytes", MaxRequestBytes)
 	}
 	return nil
 }

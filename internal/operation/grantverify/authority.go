@@ -128,7 +128,7 @@ func (v *Verifier) VerifyAuthority(fullMethod string, req proto.Message, clock C
 	if grant == nil {
 		return nil, unauthenticated(RuleGrantMissing, "the call carries no grant")
 	}
-	if refusal := checkSizes(&providerv1.OperationEnvelope{Grant: grant}); refusal != nil {
+	if refusal := checkGrantSizes(grant); refusal != nil {
 		return nil, refusal
 	}
 	if refusal := walkMessage(req.ProtoReflect(), string(req.ProtoReflect().Descriptor().Name())); refusal != nil {
