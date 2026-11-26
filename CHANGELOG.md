@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-26 09:00] - Upgrade OpenTelemetry to v1.47.0 (GO-2026-6974)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `go.sum`, `sdk/go.mod`, `sdk/go.sum`: upgraded `go.opentelemetry.io/otel`, `otel/sdk`, `otel/trace`, `otel/metric` and the OTLP trace exporters from v1.45.0 to v1.47.0, which fixes GO-2026-6974 (an attribute value length limit bypass in the SDK via U+FFFD runes). The manager's tracing (`internal/obs/tracing`) calls the affected code. The newer modules raise some indirect requirements to their minimum versions, among them `google.golang.org/protobuf` v1.36.12, `genproto`, `grpc-gateway` v2.30.0, `otelhttp` v0.70.0, `go-openapi` and `github.com/stretchr/testify` v1.12.1. No code changes.
+
+### Why
+The supply-chain scan (`govulncheck`) in CI failed on every branch because of GO-2026-6974.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-21 11:16] - Agent certificates carry their enrolment record under the trust domain, so the sub-CA can be name-constrained (development builds only)
 **Author:** @wrkode (William Rizzo)
 
