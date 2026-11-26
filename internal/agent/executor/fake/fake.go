@@ -122,10 +122,15 @@ func (e *Executor) crash(point string) error {
 }
 
 var (
-	_ executor.Executor  = (*Executor)(nil)
-	_ executor.Stopper   = (*Executor)(nil)
-	_ executor.Describer = (*Executor)(nil)
+	_ executor.Executor        = (*Executor)(nil)
+	_ executor.Stopper         = (*Executor)(nil)
+	_ executor.Describer       = (*Executor)(nil)
+	_ executor.RequestOptional = (*Executor)(nil)
 )
+
+// RunsWithoutRequest implements executor.RequestOptional: the fake reads
+// nothing from the request, so every kind runs without it.
+func (e *Executor) RunsWithoutRequest(providerv1.OperationKind) bool { return true }
 
 // New returns a fake executor keeping its VMs under dir, created 0700.
 func New(dir string) (*Executor, error) {

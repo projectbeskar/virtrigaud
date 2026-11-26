@@ -138,6 +138,18 @@ type Describer interface {
 	Describe(ctx context.Context, vmUID string) (VMState, error)
 }
 
+// RequestOptional is implemented by an executor that runs some kinds of
+// operation without their request bytes (Operation.Payload). A store with
+// the ledger gate starts an accepted operation without its request bytes
+// (lost by a restart) only for such a kind; for any other kind, or an
+// executor that does not implement it, the operation waits for a delivery of
+// the same op_id to bring them again.
+type RequestOptional interface {
+	// RunsWithoutRequest reports whether every step of kind can be run
+	// without the request bytes.
+	RunsWithoutRequest(kind providerv1.OperationKind) bool
+}
+
 // Stopper stops every VM an executor runs. The agent's shutdown command calls
 // it only while the host itself is shutting down, rebooting, halting or
 // powering off.

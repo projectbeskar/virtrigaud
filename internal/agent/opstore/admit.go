@@ -17,6 +17,7 @@ limitations under the License.
 package opstore
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 
@@ -73,6 +74,19 @@ const (
 	// server answers RESOURCE_EXHAUSTED with its own reason STORE_FULL
 	// (Reason here stays empty: it is not a provider contract reason).
 	RefusalStoreFull
+	// RefusalLedgerBehind: the ledger gate holds back too much already (the
+	// accepted operations above the ledger mark reach their bound, or the
+	// request would take the parked request bytes above their budget).
+	// Definite (the op_id is not known, as known op_ids are answered first);
+	// the agent's server answers RESOURCE_EXHAUSTED with its own reason
+	// LEDGER_BEHIND (Reason here stays empty).
+	RefusalLedgerBehind
+	// RefusalExpectKnownUnknown: the grant says the manager holds a ledgered
+	// receipt for the op_id (expect_known), and the store has no record or
+	// tombstone of it. Nothing is accepted. Not definite: the op_id may have
+	// run in a store this one replaced; the server answers
+	// UNKNOWN_TO_AGENT.
+	RefusalExpectKnownUnknown
 )
 
 // The reason strings of the refusals. They equal the provider contract's
@@ -92,19 +106,20 @@ const (
 
 // DefiniteNotPerformed reports whether the refusal says the operation was
 // definitely not performed and never will be: GRANT_MISMATCH,
-// PROVIDER_MISMATCH and store full. Every other refusal leaves the outcome to
+// PROVIDER_MISMATCH, store full and ledger behind. Every other refusal leaves the outcome to
 // a later answer for the same op_id. It matches the provider contract's
 // classification of the reason strings; a test checks that.
 func (r Refusal) DefiniteNotPerformed() bool {
 	switch r {
-	case RefusalGrantMismatch, RefusalProviderMismatch, RefusalStoreFull:
+	case RefusalGrantMismatch, RefusalProviderMismatch, RefusalStoreFull, RefusalLedgerBehind:
 		return true
 	}
 	return false
 }
 
-// Reason returns the refusal's reason string ("" for RefusalNone and
-// RefusalStoreFull).
+// Reason returns the refusal's reason string ("" for RefusalNone,
+// RefusalStoreFull and RefusalLedgerBehind; UNKNOWN_TO_AGENT for
+// RefusalExpectKnownUnknown).
 func (r Refusal) Reason() string {
 	switch r {
 	case RefusalQuarantined:
@@ -123,7 +138,7 @@ func (r Refusal) Reason() string {
 		return ReasonVMBindingStale
 	case RefusalVMNotOwned:
 		return ReasonVMNotOwned
-	case RefusalUnknownToAgent:
+	case RefusalUnknownToAgent, RefusalExpectKnownUnknown:
 		return ReasonUnknownToAgent
 	}
 	return ""
@@ -131,8 +146,13 @@ func (r Refusal) Reason() string {
 
 // String implements fmt.Stringer.
 func (r Refusal) String() string {
-	if r == RefusalStoreFull {
+	switch r {
+	case RefusalStoreFull:
 		return "STORE_FULL"
+	case RefusalLedgerBehind:
+		return "LEDGER_BEHIND"
+	case RefusalExpectKnownUnknown:
+		return AuditExpectKnownUnknown
 	}
 	if r == RefusalNone {
 		return "NONE"
@@ -154,6 +174,9 @@ const (
 	OutcomeRefused
 )
 
+// AuditExpectKnownUnknown is the audit reason of RefusalExpectKnownUnknown.
+const AuditExpectKnownUnknown = "expect_known_unknown"
+
 // Decision is the answer to an admission.
 type Decision struct {
 	// Outcome is the decision.
@@ -162,6 +185,22 @@ type Decision struct {
 	Refusal Refusal
 	// Op is the operation's state, for OutcomeAccepted and OutcomeKnown.
 	Op OpView
+	// Acceptance is where the operation was accepted and the attestation
+	// session at the decision, for its receipt: set only by a store with
+	// the ledger gate, while it is attested, for an operation whose record
+	// is ACCEPTED and whose acceptance head the store holds.
+	Acceptance *Acceptance
+}
+
+// Acceptance is the chain position at which an operation was accepted, and
+// the attestation session the store held when it decided, read under the
+// store lock.
+type Acceptance struct {
+	// Position is the store, the accepted sequence number and the chain
+	// head at it.
+	Position journal.Position
+	// Session is the attestation session.
+	Session []byte
 }
 
 // Admit decides on one delivery of an operation, under the store lock, by the
@@ -188,10 +227,16 @@ type Decision struct {
 //  9. an attempt not above the highest accepted for the VM and kind in this
 //     enrolment ⇒ OP_ID_CONFLICT;
 //  10. the store's live size above its threshold ⇒ store full;
-//  11. otherwise the operation, its VM record and its attempt mark are
+//  11. with the ledger gate: the accepted operations above the ledger mark
+//     at their bound, or a request that would take the parked request bytes
+//     above their budget ⇒ ledger behind;
+//  12. otherwise the operation, its VM record and its attempt mark are
 //     written in one transaction, anchored, and only then reported accepted.
 //
-// Decisions 1–10 write nothing. An error means the store could not decide
+// An op_id with neither record nor tombstone whose grant sets expect_known
+// is refused (RefusalExpectKnownUnknown) before rows 4 to 11.
+//
+// Decisions 1–11 write nothing. An error means the store could not decide
 // (for example it failed while writing, and is then quarantined); the caller
 // must treat the operation as not admitted and must not answer "not
 // performed" unless a later Lookup says so.
@@ -236,8 +281,13 @@ func (s *Store) admitLocked(ctx context.Context, r Request) (Decision, *auditBuf
 	var accept bool
 	if err := s.j.View(ctx, func(tx *journal.Tx) error {
 		var err error
-		d, accept, err = decide(tx, r, id, key)
-		return err
+		if d, accept, err = decide(tx, r, id, key); err != nil {
+			return err
+		}
+		if d.Outcome == OutcomeKnown && d.Op.State == StateAccepted && !d.Op.Tombstoned {
+			d.Acceptance = s.acceptanceTx(tx, d.Op.AcceptedSeq)
+		}
+		return nil
 	}); err != nil {
 		return Decision{}, buf, fmt.Errorf("admit: %w", err)
 	}
@@ -247,11 +297,14 @@ func (s *Store) admitLocked(ctx context.Context, r Request) (Decision, *auditBuf
 	if s.j.LiveSize() > s.opts.MaxStoreBytes {
 		return refused(RefusalStoreFull), buf, nil
 	}
+	if !s.admitBacklogLocked(r.RequestBytes) {
+		return refused(RefusalLedgerBehind), buf, nil
+	}
 	if err := s.j.CrashPoint(PointBeforeAccept); err != nil {
 		return Decision{}, buf, err
 	}
 	rec := &pb.OpRecord{Identity: id, State: StateAccepted}
-	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+	pos, err := s.j.Update(ctx, func(tx *journal.Tx) error {
 		rec.AcceptedSeq = tx.Seq()
 		if err := put(tx, bucketOps, key, rec); err != nil {
 			return err
@@ -277,7 +330,33 @@ func (s *Store) admitLocked(ctx context.Context, r Request) (Decision, *auditBuf
 	if err != nil {
 		return Decision{}, buf, fmt.Errorf("admit: record operation: %w", err)
 	}
-	return Decision{Outcome: OutcomeAccepted, Op: viewOfRecord(rec)}, buf, nil
+	d = Decision{Outcome: OutcomeAccepted, Op: viewOfRecord(rec)}
+	if s.opts.LedgerGate {
+		s.parkAcceptedLocked(runKey(OpRef{EnrolmentID: r.EnrolmentID, OpID: r.OpID}), rec.GetAcceptedSeq(), r.RequestBytes)
+		if a := s.attestation.Load(); a != nil && pos.Seq == rec.GetAcceptedSeq() {
+			d.Acceptance = &Acceptance{Position: pos, Session: bytes.Clone(a.Session)}
+		}
+	}
+	return d, buf, nil
+}
+
+// acceptanceTx is the Acceptance of an operation accepted at seq, read in
+// tx under the store lock: nil without the ledger gate, while the store is
+// not attested, or when the store no longer holds the head at seq.
+func (s *Store) acceptanceTx(tx *journal.Tx, seq uint64) *Acceptance {
+	a := s.attestation.Load()
+	if !s.opts.LedgerGate || a == nil || seq == 0 {
+		return nil
+	}
+	pos, ok := tx.CommittedPosition()
+	if !ok {
+		return nil
+	}
+	head, ok := tx.HeadAt(seq)
+	if !ok {
+		return nil
+	}
+	return &Acceptance{Position: journal.Position{StoreID: pos.StoreID, Seq: seq, Head: head}, Session: bytes.Clone(a.Session)}
 }
 
 // decide runs rows 2–9 of the admission table in a read transaction. accept
@@ -347,6 +426,12 @@ func decide(tx *journal.Tx, r Request, id *pb.OpIdentity, key []byte) (Decision,
 			return refused(RefusalOpIDConflict), false, nil
 		}
 		return Decision{Outcome: OutcomeKnown, Op: viewOfRecord(rec)}, false, nil
+	}
+	if r.ExpectKnown && !guard.Off(guard.ExpectKnownRefused) {
+		// The manager holds a ledgered receipt for this op_id: it was
+		// accepted, here or in a store this one replaced. Never accept it
+		// as new, and never refuse it definitely.
+		return refused(RefusalExpectKnownUnknown), false, nil
 	}
 	if d, done, err := enrolmentCheck(); err != nil || done {
 		return d, false, err

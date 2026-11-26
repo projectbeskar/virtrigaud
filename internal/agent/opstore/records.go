@@ -211,6 +211,15 @@ type Request struct {
 	// Actor names the caller for the audit trail, for example the Provider
 	// identity from the peer certificate. It is not an identity field.
 	Actor string
+	// ExpectKnown is the grant's expect_known: the manager holds a receipt
+	// for the op_id that its host ledger covers, so an op_id the store has
+	// no record or tombstone of is refused (RefusalExpectKnownUnknown), never
+	// accepted as new. It is not an identity field.
+	ExpectKnown bool
+	// RequestBytes are the verified request bytes. A store with the ledger
+	// gate holds them in memory while the accepted operation is parked; they
+	// are never written. They are not an identity field.
+	RequestBytes []byte
 }
 
 // ErrInvalidRequest reports a Request with a malformed field.
@@ -297,6 +306,10 @@ type OpView struct {
 	// IntentDigest is the salted digest of the operation's request bytes, an
 	// identity field.
 	IntentDigest []byte
+	// AcceptedSeq is the chain sequence number of the commit that accepted
+	// the operation; 0 when the view comes from a tombstone, which does not
+	// record it.
+	AcceptedSeq uint64
 }
 
 func viewOf(id *pb.OpIdentity, state OpState, reason string, irrev, tomb bool) OpView {
@@ -315,7 +328,9 @@ func viewOf(id *pb.OpIdentity, state OpState, reason string, irrev, tomb bool) O
 }
 
 func viewOfRecord(r *pb.OpRecord) OpView {
-	return viewOf(r.GetIdentity(), r.GetState(), r.GetReason(), r.GetIrrev(), false)
+	v := viewOf(r.GetIdentity(), r.GetState(), r.GetReason(), r.GetIrrev(), false)
+	v.AcceptedSeq = r.GetAcceptedSeq()
+	return v
 }
 
 func viewOfTombstone(t *pb.Tombstone) OpView {

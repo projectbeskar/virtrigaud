@@ -139,6 +139,15 @@ func (s *Store) Attest(ctx context.Context, r AttestRequest) (AttestResult, erro
 	}
 	s.attestation.Store(next)
 	s.j.SetRetentionFloor(next.Mark.Seq)
+	// The accepted operations above the new mark are counted again from the
+	// store (the count is held in memory only), and every parked operation
+	// is woken: the mark may cover it now.
+	if err := s.rebuildBacklogLocked(ctx, next.Mark.Seq); err != nil {
+		s.parkMu.Lock()
+		s.prunePendingLocked(next.Mark.Seq)
+		s.parkMu.Unlock()
+	}
+	s.wakeParked()
 	return AttestResult{First: cur == nil, Attestation: Attestation{Session: bytes.Clone(next.Session), Mark: next.Mark}}, nil
 }
 

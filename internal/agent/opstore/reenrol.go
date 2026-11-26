@@ -178,6 +178,15 @@ func (s *Store) Reenrol(ctx context.Context, e Enrolment) error {
 	if err := s.activateBound(ctx, e, prev); err != nil {
 		return fmt.Errorf("re-enrol: %w", err)
 	}
+	// The freeze retired or resolved the predecessor's accepted operations:
+	// they no longer count above the ledger mark, and their parked runs are
+	// woken to see it.
+	if a := s.attestation.Load(); a != nil {
+		_ = s.rebuildBacklogLocked(ctx, a.Mark.Seq)
+	} else {
+		_ = s.rebuildBacklogLocked(ctx, 0)
+	}
+	s.wakeParked()
 	return nil
 }
 

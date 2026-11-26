@@ -295,6 +295,43 @@ const (
 	// NoCommitBeforeAttest: the agent starts recovery, and the commits that
 	// come with it, only after its first attestation.
 	NoCommitBeforeAttest Name = "no-commit-before-attest"
+	// LedgerGate: an accepted operation commits its first step intent only
+	// once the ledger mark of the current attestation session covers its
+	// acceptance.
+	LedgerGate Name = "ledger-gate"
+	// AwaitRequest: an accepted operation the ledger mark covers starts
+	// without its request bytes only when the executor runs its kind without
+	// them.
+	AwaitRequest Name = "await-request"
+	// LedgerBehindCount: a new operation is refused while the accepted
+	// operations above the ledger mark are at their bound.
+	LedgerBehindCount Name = "ledger-behind-count"
+	// LedgerBehindBytes: the request bytes held for parked operations never
+	// exceed their budget; a new operation whose request would is refused.
+	LedgerBehindBytes Name = "ledger-behind-bytes"
+	// LedgerMarkSession: a ledger mark is applied only for the current
+	// attestation session.
+	LedgerMarkSession Name = "ledger-mark-session"
+	// LedgerMarkStoreMatch: a ledger mark that names another store
+	// quarantines the store.
+	LedgerMarkStoreMatch Name = "ledger-mark-store-match"
+	// LedgerMarkNotAhead: a ledger mark beyond the store's chain quarantines
+	// the store.
+	LedgerMarkNotAhead Name = "ledger-mark-not-ahead"
+	// LedgerMarkHeadCompare: a ledger mark is applied only when the store's
+	// head at its position equals the mark's head, and quarantines it
+	// otherwise.
+	LedgerMarkHeadCompare Name = "ledger-mark-head-compare"
+	// ExpectKnownRefused: an op_id the store has no record or tombstone of
+	// is never accepted when its grant sets expect_known.
+	ExpectKnownRefused Name = "expect-known-refused"
+	// ReceiptOnlyAccepted: an operation receipt is signed only for an
+	// operation whose record is ACCEPTED, in the session the store held when
+	// it decided.
+	ReceiptOnlyAccepted Name = "receipt-only-accepted"
+	// LedgerMarkKind: a ledger mark is applied only from a grant that
+	// verified as a ledger mark grant for this host.
+	LedgerMarkKind Name = "ledger-mark-kind"
 )
 
 // All lists every guard, in a fixed order.
@@ -317,5 +354,7 @@ func All() []Name {
 		LedgerFieldsOnlyWhenAsked, LedgerReasonsGated, OriginOnlyFirstEnrolment, OriginNeverRewritten,
 		LedgerRetentionFloor, AttestStoreMatch, AttestNotAhead, AttestHeadCompare, AttestMarkMax,
 		ChallengeSingleUse, ChallengePurpose, ChallengeExpiry, MutationsAfterAttestation, NoCommitBeforeAttest,
+		LedgerGate, AwaitRequest, LedgerBehindCount, LedgerBehindBytes, LedgerMarkSession, LedgerMarkStoreMatch,
+		LedgerMarkNotAhead, LedgerMarkHeadCompare, ExpectKnownRefused, ReceiptOnlyAccepted, LedgerMarkKind,
 	}
 }
