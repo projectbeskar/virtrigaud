@@ -443,6 +443,13 @@ func TestAgentIdentity_AdversarialMarkerEdits(t *testing.T) {
 		"phase back": func(a *infravirtrigaudiov1beta1.OperationAttempt) {
 			a.Phase = infravirtrigaudiov1beta1.OperationAttemptPhasePrepared
 		},
+		"phase forward to the reserved Accepted": func(a *infravirtrigaudiov1beta1.OperationAttempt) {
+			a.Phase = infravirtrigaudiov1beta1.OperationAttemptPhaseAccepted
+			a.Receipt = &infravirtrigaudiov1beta1.OperationAttemptReceipt{
+				StoreID: strings.Repeat("1", 32), Seq: 1, Head: strings.Repeat("2", 64),
+				AttestationID: strings.Repeat("3", 32), ReceiptTag: strings.Repeat("4", 64),
+			}
+		},
 		"task tag":    func(a *infravirtrigaudiov1beta1.OperationAttempt) { a.TaskTag = strings.Repeat("00", 32) },
 		"task ref":    func(a *infravirtrigaudiov1beta1.OperationAttempt) { a.TaskRef = "forged-task" },
 		"provider id": func(a *infravirtrigaudiov1beta1.OperationAttempt) { a.ID = "forged-id" },

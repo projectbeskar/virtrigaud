@@ -215,6 +215,14 @@ func stateLost(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 		(placed != nil && placed.Status == metav1.ConditionTrue && placed.Reason == k8s.ReasonBound)
 }
 
+// attemptDelivered reports whether phase records that the Provider accepted
+// the attempt's operation and its outcome is not known yet: Sent, or
+// Accepted, which is Sent with the host agent's receipt. Accepted is reserved
+// and not written yet; an attempt in it is driven exactly as a Sent one.
+func attemptDelivered(phase infravirtrigaudiov1beta1.OperationAttemptPhase) bool {
+	return phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent || phase == infravirtrigaudiov1beta1.OperationAttemptPhaseAccepted
+}
+
 // deleteAwaitingRelease reports whether a is a Delete recorded Succeeded
 // whose VM still holds its finalizer: its intent Secret is kept until the
 // finalizer is released, as the evidence the release is checked against.
@@ -713,7 +721,7 @@ func (r *VirtualMachineReconciler) driveAttempt(ctx context.Context, vm *infravi
 		return step, res, nil
 	}
 	ia.noteResult(&prepared, nil)
-	if a.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseSent && !r.taskRefBound(vm, a) {
+	if attemptDelivered(a.Phase) && !r.taskRefBound(vm, a) {
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationStateLost, msgTaskNotBound, operationHoldRecheckInterval), nil
 	}
 	return r.driveSigned(ctx, vm, ia, a, prepared, predecessor, false)
@@ -1027,13 +1035,13 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 // carried: the task reference, bound to the attempt by its task tag, the
 // provider's VM id of a Create (kept on the marker, never in the Secret,
 // until the Create Succeeded) and the flags of a Reconfigure. A marker that
-// is already Sent keeps its transition time, so a re-send does not extend
-// the attempt's deadline, and a known value is not cleared by a send that
-// was not answered.
+// is already Sent (or Accepted, which stays Accepted) keeps its transition
+// time, so a re-send does not extend the attempt's deadline, and a known
+// value is not cleared by a send that was not answered.
 func (r *VirtualMachineReconciler) markSent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	a *infravirtrigaudiov1beta1.OperationAttempt, answer *contracts.OperationAnswer) (*infravirtrigaudiov1beta1.OperationAttempt, error) {
 	sent := *a
-	if sent.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseSent {
+	if !attemptDelivered(sent.Phase) {
 		sent.Phase, sent.LastTransitionTime = infravirtrigaudiov1beta1.OperationAttemptPhaseSent, metav1.NewTime(r.now())
 	}
 	if answer != nil {

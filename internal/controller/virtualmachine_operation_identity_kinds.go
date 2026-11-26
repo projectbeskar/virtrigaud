@@ -134,12 +134,12 @@ func (r *VirtualMachineReconciler) forgetIdentityRepeats(vm *infravirtrigaudiov1
 	}
 }
 
-// runningPastDeadline reports whether the Sent attempt a, a power or
-// Reconfigure attempt, has been in phase Sent longer than
+// runningPastDeadline reports whether the Sent (or Accepted) attempt a, a
+// power or Reconfigure attempt, has been in that phase longer than
 // sentAttemptDeadline (a lastTransitionTime in the future counts as now). A
 // Create or a Delete is never past it.
 func (r *VirtualMachineReconciler) runningPastDeadline(a *infravirtrigaudiov1beta1.OperationAttempt) bool {
-	if !repeatableKind(contracts.OperationKind(a.Kind)) || a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseSent {
+	if !repeatableKind(contracts.OperationKind(a.Kind)) || !attemptDelivered(a.Phase) {
 		return false
 	}
 	return max(r.now().Sub(a.LastTransitionTime.Time), 0) > sentAttemptDeadline

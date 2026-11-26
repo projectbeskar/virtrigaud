@@ -64,6 +64,8 @@ type apiSchemaNode struct {
 	MinLength  *int64                   `yaml:"minLength"`
 	MaxLength  *int64                   `yaml:"maxLength"`
 	Properties map[string]apiSchemaNode `yaml:"properties"`
+	Items      *apiSchemaNode           `yaml:"items"`
+	Required   []string                 `yaml:"required"`
 }
 
 // prop returns the named child property, failing the test if it is absent.

@@ -494,7 +494,8 @@ type VirtualMachineStatus struct {
 	// sends to a Provider that requires operation identity (development
 	// builds only; no built-in Provider type requires it): at most one entry
 	// per operation kind, the latest attempt of that kind. An entry is written
-	// before its operation is first sent, and moves Prepared, Sent, Terminal.
+	// before its operation is first sent, and moves Prepared, Sent, Terminal
+	// (Accepted, after Sent, is reserved and not written yet).
 	// The exact request bytes of a non-terminal attempt are kept in an
 	// authenticated Secret in the Provider's namespace, never here. Never
 	// written for any other Provider. Written only by the operator. The
@@ -534,7 +535,7 @@ const (
 )
 
 // OperationAttemptPhase is where an OperationAttempt stands.
-// +kubebuilder:validation:Enum=Prepared;Sent;Terminal
+// +kubebuilder:validation:Enum=Prepared;Sent;Accepted;Terminal
 type OperationAttemptPhase string
 
 const (
@@ -544,6 +545,13 @@ const (
 	// OperationAttemptPhaseSent: the Provider accepted the operation and its
 	// outcome is not known yet.
 	OperationAttemptPhaseSent OperationAttemptPhase = "Sent"
+	// OperationAttemptPhaseAccepted: like Sent, and the host's agent also
+	// returned a signed receipt that it accepted the operation at a position
+	// of its operation store (status.operationAttempts[].receipt); its
+	// outcome is not known yet. Reserved for development builds: no
+	// released manager writes it yet, and one that reads it treats it as
+	// Sent.
+	OperationAttemptPhaseAccepted OperationAttemptPhase = "Accepted"
 	// OperationAttemptPhaseTerminal: the attempt's outcome is known
 	// (status.operationAttempts[].outcome).
 	OperationAttemptPhaseTerminal OperationAttemptPhase = "Terminal"
@@ -655,8 +663,70 @@ type OperationAttempt struct {
 	// +kubebuilder:validation:MaxLength=1024
 	ID string `json:"id,omitempty"`
 
+	// Receipt is the host agent's receipt for the attempt: where in its
+	// operation store the agent accepted it. A mirror of a signed receipt
+	// the operator verified, bound to the attempt by ReceiptTag. Reserved
+	// for development builds: not populated yet, and never read to decide
+	// anything.
+	// +optional
+	Receipt *OperationAttemptReceipt `json:"receipt,omitempty"`
+
+	// LedgerGeneration is, for display only, the generation of the host's
+	// ledger the attempt was prepared under; the value the operator acts on
+	// is the one covered by the attempt's authenticated intent, never this
+	// field. Reserved for development builds: not populated yet.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	LedgerGeneration int64 `json:"ledgerGeneration,omitempty"`
+
 	// LastTransitionTime is when the attempt last changed phase.
 	LastTransitionTime metav1.Time `json:"lastTransitionTime"`
+}
+
+// OperationAttemptReceiptTagContext is the domain-separation prefix of the
+// message an OperationAttemptReceipt's ReceiptTag covers: an HMAC-SHA256 tag
+// under an operator key, so a receipt copied onto another attempt, or edited,
+// does not verify. Reserved for development builds; no tag is computed or
+// verified yet.
+const OperationAttemptReceiptTagContext = "virtrigaud.io/operation-receipt/v1\x00"
+
+// OperationAttemptReceipt records where the host's agent accepted an
+// operation attempt: the store, the position (sequence number and chain head)
+// and the attestation session it answered in. Every value is a public
+// identifier or digest, never key material. Reserved for development builds:
+// not populated yet, and never read to decide anything.
+type OperationAttemptReceipt struct {
+	// StoreID identifies the agent's operation store: 32 lowercase
+	// hexadecimal characters.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	// +kubebuilder:validation:MaxLength=32
+	StoreID string `json:"storeID"`
+
+	// Seq is the store's sequence number at which the agent accepted the
+	// operation.
+	// +kubebuilder:validation:Minimum=1
+	Seq int64 `json:"seq"`
+
+	// Head is the store's chain head at Seq: the SHA-256 digest, as 64
+	// lowercase hexadecimal characters.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=64
+	Head string `json:"head"`
+
+	// AttestationID identifies the attestation session the agent accepted
+	// the operation in: 32 lowercase hexadecimal characters.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{32}$`
+	// +kubebuilder:validation:MaxLength=32
+	AttestationID string `json:"attestationID"`
+
+	// ReceiptTag binds the receipt to its attempt: an HMAC-SHA256 tag (64
+	// lowercase hexadecimal characters) under an operator key, over a message
+	// that starts with the domain-separation prefix
+	// "virtrigaud.io/operation-receipt/v1" and a zero byte. A receipt whose
+	// tag does not verify is never trusted.
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=64
+	ReceiptTag string `json:"receiptTag"`
 }
 
 // BoundProviderRef identifies the Provider object a VirtualMachine is bound
