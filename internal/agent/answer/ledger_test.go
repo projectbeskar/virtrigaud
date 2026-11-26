@@ -261,6 +261,13 @@ func TestSign_LedgerFieldRules(t *testing.T) {
 		return &providerv1.OperationAnswer{Context: host().GetContext(), OpId: bytes.Repeat([]byte{1}, 16),
 			OpEnrolmentId: p.Record.EnrolmentID, State: providerv1.OperationRecordState_OPERATION_RECORD_STATE_NO_RECORD}
 	}
+	accepted := func() *providerv1.OperationAnswer {
+		a := op()
+		a.Context.LedgerVersionEcho = 1
+		a.State = providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED
+		a.AcceptedSeq, a.AcceptedHead, a.AwaitingRequest = 7, bytes.Repeat([]byte{4}, 32), true
+		return a
+	}
 	vm := func() *providerv1.VMAnswer {
 		return &providerv1.VMAnswer{Context: host().GetContext(), VmUid: "vm-uid-1", BindingId: bytes.Repeat([]byte{2}, 16),
 			Presence: providerv1.VMPresence_VM_PRESENCE_NO_RECORD}
@@ -295,17 +302,39 @@ func TestSign_LedgerFieldRules(t *testing.T) {
 		},
 		"operation attestation id unasked": func() proto.Message { a := op(); a.Context.AttestationId = testSession; return a },
 		"vm attestation id unasked":        func() proto.Message { a := vm(); a.Context.AttestationId = testSession; return a },
-		"operation accepted_seq":           func() proto.Message { a := op(); a.AcceptedSeq = 1; return a },
-		"operation accepted_head":          func() proto.Message { a := op(); a.AcceptedHead = bytes.Repeat([]byte{4}, 32); return a },
-		"operation awaiting_request":       func() proto.Message { a := op(); a.AwaitingRequest = true; return a },
+		"operation accepted_seq unasked":   func() proto.Message { a := op(); a.AcceptedSeq = 1; return a },
+		"operation accepted_head unasked": func() proto.Message {
+			a := accepted()
+			a.Context.LedgerVersionEcho = 0
+			return a
+		},
+		"operation awaiting_request unasked": func() proto.Message {
+			a := accepted()
+			a.Context.LedgerVersionEcho, a.AcceptedHead = 0, nil
+			return a
+		},
+		"accepted head of a running op": func() proto.Message {
+			a := accepted()
+			a.State = providerv1.OperationRecordState_OPERATION_RECORD_STATE_EXECUTING
+			a.AwaitingRequest = false
+			return a
+		},
+		"accepted head without seq": func() proto.Message { a := accepted(); a.AcceptedSeq, a.AwaitingRequest = 0, false; return a },
+		"short accepted head":       func() proto.Message { a := accepted(); a.AcceptedHead = bytes.Repeat([]byte{4}, 31); return a },
+		"awaiting a completed op": func() proto.Message {
+			a := accepted()
+			a.State, a.AcceptedHead = providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED, nil
+			return a
+		},
+		"awaiting without seq": func() proto.Message { a := accepted(); a.AcceptedSeq, a.AcceptedHead = 0, nil; return a },
 		"ledger reason unasked": func() proto.Message {
 			a := host()
 			a.Context.AgentState, a.Context.StateReason = providerv1.AgentState_AGENT_STATE_QUARANTINED, string(journal.LostLedgerAhead)
 			return a
 		},
-		"challenge answer echo":  func() proto.Message { a := ch(); a.Context.LedgerVersionEcho = 1; return a },
-		"authority answer echo":  func() proto.Message { a := au(); a.Context.LedgerVersionEcho = 1; return a },
-		"receipt body (not yet)": func() proto.Message { return &providerv1.OperationReceipt{ReceiptVersion: 1} },
+		"challenge answer echo":     func() proto.Message { a := ch(); a.Context.LedgerVersionEcho = 1; return a },
+		"authority answer echo":     func() proto.Message { a := au(); a.Context.LedgerVersionEcho = 1; return a },
+		"receipt body through Sign": func() proto.Message { return &providerv1.OperationReceipt{ReceiptVersion: 1} },
 	}
 	for name, body := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -315,13 +344,19 @@ func TestSign_LedgerFieldRules(t *testing.T) {
 		})
 	}
 	allowed := map[string]func() proto.Message{
-		"host":         func() proto.Message { return host() },
-		"operation":    func() proto.Message { return op() },
-		"vm":           func() proto.Message { return vm() },
-		"vm echo":      func() proto.Message { a := vm(); a.Context.LedgerVersionEcho = 2; return a },
-		"challenge":    func() proto.Message { return ch() },
-		"authority":    func() proto.Message { return au() },
-		"challenge+id": func() proto.Message { a := ch(); a.Context.AttestationId = testSession; return a },
+		"host":               func() proto.Message { return host() },
+		"operation":          func() proto.Message { return op() },
+		"vm":                 func() proto.Message { return vm() },
+		"vm echo":            func() proto.Message { a := vm(); a.Context.LedgerVersionEcho = 2; return a },
+		"challenge":          func() proto.Message { return ch() },
+		"authority":          func() proto.Message { return au() },
+		"challenge+id":       func() proto.Message { a := ch(); a.Context.AttestationId = testSession; return a },
+		"op asked, accepted": func() proto.Message { return accepted() },
+		"op asked, seq only": func() proto.Message {
+			a := accepted()
+			a.State, a.AcceptedHead, a.AwaitingRequest = providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED, nil, false
+			return a
+		},
 		"op asked + id": func() proto.Message {
 			a := op()
 			a.Context.LedgerVersionEcho, a.Context.AttestationId = 1, testSession
@@ -344,7 +379,7 @@ func TestSign_LedgerFieldRules(t *testing.T) {
 }
 
 func TestVersions(t *testing.T) {
-	if answer.AgentAPIVersion != 5 || answer.GrantVersion != 2 || answer.LedgerVersion != 1 {
+	if answer.AgentAPIVersion != 6 || answer.GrantVersion != 2 || answer.LedgerVersion != 1 {
 		t.Fatalf("api %d, grant %d, ledger %d", answer.AgentAPIVersion, answer.GrantVersion, answer.LedgerVersion)
 	}
 }

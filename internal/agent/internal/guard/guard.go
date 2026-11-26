@@ -244,10 +244,11 @@ const (
 	// answer of a GetHostInfo that asked for it (an older manager refuses an
 	// answer that carries a field it does not know).
 	StoreCapacityOnlyWhenAsked Name = "store-capacity-only-when-asked"
-	// LedgerFieldsNeverSigned: an answer that sets a field reserved for the
-	// host ledger protocol is never signed (the agent implements none of
-	// them, and a manager refuses an answer that sets one).
-	LedgerFieldsNeverSigned Name = "ledger-fields-never-signed"
+	// OperationLedgerFields: an operation answer's ledger fields (the
+	// acceptance position and awaiting_request) are signed only in the
+	// answer to a request that asked for the ledger protocol, the head and
+	// awaiting_request only for an accepted operation.
+	OperationLedgerFields Name = "operation-ledger-fields"
 	// LedgerFieldsOnlyWhenAsked: the host ledger fields of an answer (the
 	// attestation id and ledger version echo of its context, the ledger
 	// state of a host answer) are signed only in the answer to a request that
@@ -350,7 +351,7 @@ func All() []Name {
 		RenewMinLifetime, RenewChain, RenewProfile, RenewSameIdentity, RenewPendingKey, RenewActivateStaged,
 		RenewalOnlyWhenAsked, SignerRenewalURIs, SignerActivatePin,
 		EnrolStatePersistent, SignerKeyDirPersistent, BootStartMarker, BootStartMarkerExcl,
-		BootStartStartedSince, StoreCapacityOnlyWhenAsked, LedgerFieldsNeverSigned,
+		BootStartStartedSince, StoreCapacityOnlyWhenAsked, OperationLedgerFields,
 		LedgerFieldsOnlyWhenAsked, LedgerReasonsGated, OriginOnlyFirstEnrolment, OriginNeverRewritten,
 		LedgerRetentionFloor, AttestStoreMatch, AttestNotAhead, AttestHeadCompare, AttestMarkMax,
 		ChallengeSingleUse, ChallengePurpose, ChallengeExpiry, MutationsAfterAttestation, NoCommitBeforeAttest,

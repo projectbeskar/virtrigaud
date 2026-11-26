@@ -123,6 +123,19 @@ func OperationAnswer(o Operation) (*providerv1.OperationAnswer, error) {
 	a.BindingId = bytes.Clone(op.BindingID)
 	a.IntentDigest = bytes.Clone(op.IntentDigest)
 	a.OutcomeReason = op.Reason
+	// The ledger fields, only to a request that asked for them: where the
+	// store accepted the operation (from its record), the head there while
+	// it is accepted (a receipt's equivalent), and whether it waits for its
+	// request bytes.
+	if h.LedgerRequested >= 1 {
+		a.AcceptedSeq = op.AcceptedSeq
+		if a.AcceptedSeq != 0 && state == providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED {
+			if len(o.View.AcceptedHead) == headLen {
+				a.AcceptedHead = bytes.Clone(o.View.AcceptedHead)
+			}
+			a.AwaitingRequest = o.View.AwaitingRequest
+		}
+	}
 	return a, nil
 }
 
