@@ -87,6 +87,10 @@ func fullAnswerContext() *AnswerContext {
 		ContinuityHead: fill(0x05, 32),
 		CheckpointSeq:  1024,
 		CheckpointHead: fill(0x06, 32),
+		// Reserved for the host ledger protocol; set here only so that the
+		// round trip covers every field.
+		AttestationId:     fill(0x0f, 16),
+		LedgerVersionEcho: 1,
 	}
 }
 
@@ -112,6 +116,10 @@ func fullOperationAnswer() *OperationAnswer {
 		BindingId:     fill(0x09, 16),
 		IntentDigest:  fill(0x0a, 32),
 		OutcomeReason: "witness_no_effect",
+		// Reserved for the host ledger protocol (round-trip coverage only).
+		AcceptedSeq:     12,
+		AcceptedHead:    fill(0x10, 32),
+		AwaitingRequest: true,
 	}
 }
 
@@ -140,6 +148,7 @@ func fullHostAnswer() *HostAnswer {
 		Inventory:               fullHostInventory(),
 		PendingRenewal:          fullRenewalBlob(),
 		StoreCapacity:           fullStoreCapacity(),
+		Ledger:                  fullHostLedgerState(), // reserved (round-trip coverage only)
 	}
 }
 
@@ -311,6 +320,8 @@ func TestHostAnswer_FieldNumbersPinned(t *testing.T) {
 		{"continuity_head", 10, protoreflect.BytesKind, "", false},
 		{"checkpoint_seq", 11, protoreflect.Uint64Kind, "", false},
 		{"checkpoint_head", 12, protoreflect.BytesKind, "", false},
+		{"attestation_id", 13, protoreflect.BytesKind, "", false},
+		{"ledger_version_echo", 14, protoreflect.Uint32Kind, "", false},
 	}, true)
 	checkFields(t, (&OperationAnswer{}).ProtoReflect().Descriptor(), []fieldSpec{
 		{"context", 1, protoreflect.MessageKind, answerContextMessageName, false},
@@ -324,6 +335,9 @@ func TestHostAnswer_FieldNumbersPinned(t *testing.T) {
 		{"binding_id", 9, protoreflect.BytesKind, "", false},
 		{"intent_digest", 10, protoreflect.BytesKind, "", false},
 		{"outcome_reason", 11, protoreflect.StringKind, "", false},
+		{"accepted_seq", 12, protoreflect.Uint64Kind, "", false},
+		{"accepted_head", 13, protoreflect.BytesKind, "", false},
+		{"awaiting_request", 14, protoreflect.BoolKind, "", false},
 	}, true)
 	checkFields(t, (&VMAnswer{}).ProtoReflect().Descriptor(), []fieldSpec{
 		{"context", 1, protoreflect.MessageKind, answerContextMessageName, false},
@@ -346,13 +360,15 @@ func TestHostAnswer_FieldNumbersPinned(t *testing.T) {
 		{"inventory", 9, protoreflect.MessageKind, hostInventoryMessageName, false},
 		{"pending_renewal", 10, protoreflect.MessageKind, signedBlobMessageName, false},
 		{"store_capacity", 11, protoreflect.MessageKind, storeCapacityMessageName, false},
+		{"ledger", 12, protoreflect.MessageKind, hostLedgerStateMessageName, false},
 	}, true)
 }
 
-// TestHostAnswer_AdditiveRequestFieldsPinned pins the sixteen additive
-// fields on six existing messages, the field count of each message (so no
-// other field was added with them) and that each added field is the
-// highest number of its message.
+// TestHostAnswer_AdditiveRequestFieldsPinned pins the nineteen additive
+// fields on six existing messages (three of them the reserved
+// ledger_version), the field count of each message (so no other field was
+// added with them) and that each last added field is the highest number of
+// its message.
 func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 	cases := []struct {
 		msg     proto.Message
@@ -366,7 +382,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			{"op_enrolment_id", 4, protoreflect.BytesKind, "", false},
 			{"target_host_id", 5, protoreflect.StringKind, "", false},
 			{"continuity_seq", 6, protoreflect.Uint64Kind, "", false},
-		}, 6, "continuity_seq"},
+			{"ledger_version", 7, protoreflect.Uint32Kind, "", false},
+		}, 7, "ledger_version"},
 		{&TaskStatusResponse{}, []fieldSpec{
 			{"host_answer", 5, protoreflect.MessageKind, signedBlobMessageName, false},
 		}, 5, "host_answer"},
@@ -374,7 +391,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			{"answer_nonce", 4, protoreflect.BytesKind, "", false},
 			{"binding_id", 5, protoreflect.BytesKind, "", false},
 			{"continuity_seq", 6, protoreflect.Uint64Kind, "", false},
-		}, 6, "continuity_seq"},
+			{"ledger_version", 7, protoreflect.Uint32Kind, "", false},
+		}, 7, "ledger_version"},
 		{&DescribeResponse{}, []fieldSpec{
 			{"host_answer", 8, protoreflect.MessageKind, signedBlobMessageName, false},
 		}, 8, "host_answer"},
@@ -384,7 +402,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			{"inventory_version", 4, protoreflect.Uint32Kind, "", false},
 			{"renewal_version", 5, protoreflect.Uint32Kind, "", false},
 			{"store_capacity_version", 6, protoreflect.Uint32Kind, "", false},
-		}, 6, "store_capacity_version"},
+			{"ledger_version", 7, protoreflect.Uint32Kind, "", false},
+		}, 7, "ledger_version"},
 		{&HostInfo{}, []fieldSpec{
 			{"host_answer", 12, protoreflect.MessageKind, signedBlobMessageName, false},
 		}, 12, "host_answer"},
@@ -401,8 +420,8 @@ func TestHostAnswer_AdditiveRequestFieldsPinned(t *testing.T) {
 			t.Errorf("%s: %s is not the highest field number (%d)", md.FullName(), c.highest, highestFieldNumber(md))
 		}
 	}
-	if added != 16 {
-		t.Errorf("pinned %d additive fields, want 16", added)
+	if added != 19 {
+		t.Errorf("pinned %d additive fields, want 19", added)
 	}
 }
 

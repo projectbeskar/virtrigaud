@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package provider.v1;
+
+import "provider/v1/host_answer.proto";
+import "provider/v1/provider.proto";
+
+option go_package = "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1;providerv1";
+
+// ---------------------------------------------------------------------------
+// Host authority service (reserved)
+//
+// HostAuthority is reserved for the host ledger protocol: the manager asks a
+// host's agent for an attestation challenge, attests the agent's operation
+// store against the manager's ledger, confirms ledger positions, and retires
+// operations the host has no record of. Each call carries a manager-signed
+// OperationGrant of the matching grant kind, and each answer is host-signed.
+//
+// Reserved; not yet implemented. It is a separate service, not part of the
+// Provider service: no built-in provider and no agent registers it, so a
+// call to any of its methods is answered Unimplemented by gRPC, and the
+// manager never calls it. A verifier refuses a request message of this
+// service that carries a field it does not know.
+// ---------------------------------------------------------------------------
+
+// HostAuthority is the per-host authority service of the host ledger
+// protocol. Reserved; not yet implemented.
+service HostAuthority {
+  // Challenge asks the host for a fresh attestation challenge.
+  rpc Challenge(ChallengeRequest) returns (ChallengeResponse);
+  // Attest delivers a GRANT_KIND_ATTEST grant.
+  rpc Attest(AttestRequest) returns (AuthorityResponse);
+  // LedgerMark delivers a GRANT_KIND_LEDGER_MARK grant.
+  rpc LedgerMark(LedgerMarkRequest) returns (AuthorityResponse);
+  // RetireIfUnknown delivers a GRANT_KIND_RETIRE_IF_UNKNOWN grant.
+  rpc RetireIfUnknown(RetireIfUnknownRequest) returns (AuthorityResponse);
+}
+
+// ChallengeRequest asks a host for an attestation challenge.
+message ChallengeRequest {
+  // target_host_id is the host the call is for.
+  string target_host_id = 1;
+  // answer_nonce is 16 random bytes, fresh for each request, that the signed
+  // answer echoes.
+  bytes answer_nonce = 2;
+  // purpose is what the challenge is for.
+  ChallengePurpose purpose = 3;
+}
+
+// ChallengeResponse carries the host's signed answer to a ChallengeRequest.
+message ChallengeResponse {
+  // host_answer is a SignedBlob of a ChallengeAnswer.
+  SignedBlob host_answer = 1;
+}
+
+// AttestRequest delivers an attestation grant to a host.
+message AttestRequest {
+  // target_host_id is the host the call is for.
+  string target_host_id = 1;
+  // answer_nonce is 16 random bytes, fresh for each request, that the signed
+  // answer echoes.
+  bytes answer_nonce = 2;
+  // grant is a GRANT_KIND_ATTEST grant.
+  OperationGrant grant = 3;
+}
+
+// LedgerMarkRequest delivers a ledger mark grant to a host.
+message LedgerMarkRequest {
+  // target_host_id is the host the call is for.
+  string target_host_id = 1;
+  // answer_nonce is 16 random bytes, fresh for each request, that the signed
+  // answer echoes.
+  bytes answer_nonce = 2;
+  // grant is a GRANT_KIND_LEDGER_MARK grant.
+  OperationGrant grant = 3;
+}
+
+// RetireIfUnknownRequest delivers a retire-if-unknown grant to a host.
+message RetireIfUnknownRequest {
+  // target_host_id is the host the call is for.
+  string target_host_id = 1;
+  // answer_nonce is 16 random bytes, fresh for each request, that the signed
+  // answer echoes.
+  bytes answer_nonce = 2;
+  // grant is a GRANT_KIND_RETIRE_IF_UNKNOWN grant.
+  OperationGrant grant = 3;
+}
+
+// AuthorityResponse carries the host's signed answer to an authority grant.
+message AuthorityResponse {
+  // host_answer is a SignedBlob of an AuthorityAnswer.
+  SignedBlob host_answer = 1;
+}

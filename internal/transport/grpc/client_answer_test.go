@@ -199,6 +199,29 @@ func TestClient_HostAnswerAsksForStoreCapacity(t *testing.T) {
 	assert.Zero(t, srv.hosts[1].GetStoreCapacityVersion())
 }
 
+// No signed read sets the reserved ledger_version: the manager behaves as one
+// that predates the host ledger protocol.
+func TestClient_SignedReadsSendNoLedgerVersion(t *testing.T) {
+	srv := &answerServer{blob: testBlob()}
+	dialer, cleanup := startBufconnServer(t, srv)
+	defer cleanup()
+	c := newTestClient(t, dialer, "cloudhypervisor")
+	_, _, err := c.OperationAnswer(context.Background(), contracts.OperationAnswerQuery{OpID: bytes.Repeat([]byte{1}, 16),
+		OpEnrolmentID: bytes.Repeat([]byte{2}, 16), HostID: "host-a", ContinuitySeq: 9})
+	require.NoError(t, err)
+	_, _, err = c.VMAnswer(context.Background(), contracts.VMAnswerQuery{VM: opTestVM, BindingID: bytes.Repeat([]byte{5}, 16)})
+	require.NoError(t, err)
+	_, _, err = c.HostAnswer(context.Background(), contracts.HostAnswerQuery{HostID: "host-a", InventoryVersion: 1, RenewalVersion: 1,
+		StoreCapacityVersion: 1})
+	require.NoError(t, err)
+	require.Len(t, srv.tasks, 1)
+	require.Len(t, srv.describes, 1)
+	require.Len(t, srv.hosts, 1)
+	assert.Zero(t, srv.tasks[0].GetLedgerVersion())
+	assert.Zero(t, srv.describes[0].GetLedgerVersion())
+	assert.Zero(t, srv.hosts[0].GetLedgerVersion())
+}
+
 // The signed Describe carries the owner, the binding and a nonce.
 func TestClient_VMAnswer(t *testing.T) {
 	srv := &answerServer{blob: testBlob()}

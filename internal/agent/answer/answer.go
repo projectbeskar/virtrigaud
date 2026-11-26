@@ -147,6 +147,14 @@ func Sign(signer crypto.Signer, certDER []byte, body proto.Message) (*providerv1
 	if !slices.Contains(bodyTypes, bodyType) {
 		return nil, fmt.Errorf("%w: %s is not a host answer body", ErrSign, bodyType)
 	}
+	// This agent implements none of the host ledger fields: whatever built
+	// the answer, one that sets any is never signed (the manager would
+	// refuse it as "no answer" anyway).
+	if !guard.Off(guard.LedgerFieldsNeverSigned) {
+		if err := hostidentity.CheckNoLedgerFields(body); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSign, err)
+		}
+	}
 	return signBody(signer, certDER, bodyType, body, MaxBlobBytes)
 }
 

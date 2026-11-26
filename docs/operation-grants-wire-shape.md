@@ -19,7 +19,7 @@ only and is used by no controller; see
 |---|---|---|
 | `OperationEnvelope` | message | One authorised mutating request: `request` (1, the exact serialised request message) and `grant` (2). |
 | `OperationGrant` | message | A signed `GrantBody`: `body` (1, the serialised `GrantBody`), `signature` (2) over those exact bytes, `signer_cert_chain` (3, DER certificates, leaf first). |
-| `GrantBody` | message | The signed content of a grant: version, grant kind, installation, Provider, host, enrolment, authority generation and epoch (1–8); operation fields (10–18); administrative fields (20–25); fields 26, 28, 29 set aside for the authority-history protocol (defined, unset at grant version 1; field 27 is a proto `reserved` number); validity `not_after` (30) and `issued_at` (31). |
+| `GrantBody` | message | The signed content of a grant: version, grant kind, installation, Provider, host, enrolment, authority generation and epoch (1–8); operation fields (10–18); administrative fields (20–25); fields 26, 28, 29 set aside for the authority-history protocol (defined, unset at grant version 1; field 27 is a proto `reserved` number); validity `not_after` (30) and `issued_at` (31); fields 32–34 reserved for the host ledger protocol (see [Host ledger protocol (reserved)](#host-ledger-protocol-reserved); unset at grant version 1, and a verifier refuses a version 1 body that sets any). |
 | `Epoch` | message | A manager epoch: `counter` (1) and the random `holder` (2) of the term that holds it. |
 | `GrantPrecondition` | message | Host state a grant requires: `store_id`, `seq`, `head`, `quarantine_id`, `clock_floor` (1–5). |
 | `GrantKind` | enum | What a grant authorises: `GRANT_KIND_OPERATION` and eleven other kinds (values 0–11, 0 is `UNSPECIFIED`). |
@@ -476,6 +476,68 @@ is not part of the provider contract, external Provider implementations neither 
 nor call it, and the manager never calls it. A development build of the per-host agent
 serves it and the Cloud Hypervisor Provider calls it.
 
+## Host ledger protocol (reserved)
+
+The contract reserves the wire shape of a later protocol in which the manager durably
+records every operation a host's agent accepted, from a host-signed receipt, before
+the agent starts it, and attests the agent's operation store against that record after
+each agent start.
+
+**Reserved; not yet implemented.** No agent, Provider or manager sets, sends or signs
+any of the fields, messages or RPCs below. Every verifier refuses a message that sets
+one of the reserved fields (set means refused): the grant verifier refuses a version 1
+`GrantBody` that sets field 32, 33 or 34, and the host answer verifier refuses an
+answer that sets a reserved field of `AnswerContext`, `OperationAnswer` or
+`HostAnswer`, or carries one of the three reserved body types. An agent answers a
+request that carries `ledger_version` exactly as one that does not (no ledger field,
+no echo); the manager never sends `ledger_version` and ignores `operation_receipt`.
+The comments in the `.proto` files are the normative description of every field.
+
+Fields added to existing messages:
+
+| Message | Field | No. | Type |
+|---|---|---|---|
+| `CreateResponse` | `operation_receipt` | 3 | `SignedBlob` |
+| `TaskResponse` | `operation_receipt` | 4 | `SignedBlob` |
+| `TaskStatusRequest`, `DescribeRequest`, `GetHostInfoRequest` | `ledger_version` | 7 | uint32 |
+| `GrantBody` | `ledger` | 32 | `LedgerPosition` |
+| | `ledger_checkpoint` | 33 | `LedgerPosition` |
+| | `attestation_id` | 34 | bytes |
+| `AnswerContext` | `attestation_id` | 13 | bytes |
+| | `ledger_version_echo` | 14 | uint32 |
+| `OperationAnswer` | `accepted_seq` | 12 | uint64 |
+| | `accepted_head` | 13 | bytes |
+| | `awaiting_request` | 14 | bool |
+| `HostAnswer` | `ledger` | 12 | `HostLedgerState` |
+
+New messages and enums, in
+[`host_answer.proto`](../proto/provider/v1/host_answer.proto):
+
+| Name | Kind | Purpose |
+|---|---|---|
+| `LedgerPosition` | message | A position in a host's operation store: `store_id` (1), `seq` (2), `head` (3). |
+| `LedgerSessionState` | enum | `AWAITING_ATTESTATION`, `ATTESTED` (values 0–2, 0 is `UNSPECIFIED`). |
+| `HostLedgerState` | message | A host's ledger state (fields 1–10): the requested and used versions, session state and id, the confirmed mark, pending receipts, the store's origin enrolment and enrolment count, and the parked request bytes and budget. |
+| `OperationReceipt` | message | A host's receipt for an accepted operation (fields 1–16), bound to the delivered grant by `grant_digest`. |
+| `ChallengePurpose` | enum | `ATTEST`, `REATTEST` (values 0–2, 0 is `UNSPECIFIED`). |
+| `ChallengeAnswer` | message | A host's answer to a challenge request (fields 1–6). |
+| `AuthorityOutcome` | enum | `APPLIED`, `ALREADY_APPLIED`, `NOT_APPLICABLE`, `REFUSED`, `QUARANTINED` (values 0–5, 0 is `UNSPECIFIED`). |
+| `AuthorityAnswer` | message | A host's answer to an authority grant (fields 1–8). |
+
+Reserved `body_type` values (outside the closed set above; a verifier refuses them):
+`provider.v1.OperationReceipt` (only in `operation_receipt`),
+`provider.v1.ChallengeAnswer` (only in `ChallengeResponse.host_answer`) and
+`provider.v1.AuthorityAnswer` (only in `AuthorityResponse.host_answer`).
+
+A new service, `HostAuthority`, in its own file
+[`authority.proto`](../proto/provider/v1/authority.proto): `Challenge`
+(`ChallengeRequest` 1–3 → `ChallengeResponse` 1), and `Attest`, `LedgerMark` and
+`RetireIfUnknown` (`AttestRequest`, `LedgerMarkRequest`, `RetireIfUnknownRequest`, each
+1–3, carrying an `OperationGrant` → `AuthorityResponse` 1). It is a separate service,
+not part of the `Provider` service: no bundled provider and no agent registers it, so
+gRPC answers each of its methods `Unimplemented`, and nothing in
+`GetCapabilitiesResponse` changes. A provider author does not implement it.
+
 ## Compatibility
 
 - Additive on the wire: new messages, enums, one new field per mutating request and
@@ -494,6 +556,11 @@ serves it and the Cloud Hypervisor Provider calls it.
   `HostAnswer.store_capacity`, `StoreCapacity`, `StoreLevel`) is additive in the same
   way. It adds no `body_type` and changes no framing or existing field. Agent API
   version 4 marks an agent that always answers it when asked.
+- The host ledger reservation is additive in the same way: new messages, enums and a
+  new file and service, and fields at unused numbers only. `GrantBody` 19 stays
+  unassigned and 27 reserved. Because generated code now knows the reserved fields,
+  the verifiers refuse them explicitly when set, instead of through the unknown-field
+  rule.
 - A provider built against an older contract ignores the new fields; a manager built
   against an older contract never sends them.
 - The grant messages live in `provider.proto`. The contract's breaking-change check

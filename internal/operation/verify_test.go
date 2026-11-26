@@ -313,6 +313,24 @@ func TestVerify_Refusals(t *testing.T) {
 			reason: mm, rule: RulePlaceholderSet},
 		{name: "ceremony_record_digest set", edit: setBody(func(b *providerv1.GrantBody) { b.CeremonyRecordDigest = []byte{1} }),
 			reason: mm, rule: RulePlaceholderSet},
+		// Fields reserved for the host ledger protocol (32, 33, 34): set
+		// means refused, whatever the content, an empty message included.
+		{name: "ledger set", edit: setBody(func(b *providerv1.GrantBody) {
+			b.Ledger = &providerv1.LedgerPosition{StoreId: bytesOf(1, 16), Seq: 1, Head: bytesOf(2, 32)}
+		}), reason: mm, rule: RulePlaceholderSet},
+		{name: "ledger set empty", edit: setBody(func(b *providerv1.GrantBody) { b.Ledger = &providerv1.LedgerPosition{} }),
+			reason: mm, rule: RulePlaceholderSet},
+		{name: "ledger_checkpoint set", edit: setBody(func(b *providerv1.GrantBody) {
+			b.LedgerCheckpoint = &providerv1.LedgerPosition{StoreId: bytesOf(1, 16), Seq: 1024, Head: bytesOf(2, 32)}
+		}), reason: mm, rule: RulePlaceholderSet},
+		{name: "ledger_checkpoint set empty", edit: setBody(func(b *providerv1.GrantBody) { b.LedgerCheckpoint = &providerv1.LedgerPosition{} }),
+			reason: mm, rule: RulePlaceholderSet},
+		{name: "attestation_id set", edit: setBody(func(b *providerv1.GrantBody) { b.AttestationId = bytesOf(3, 16) }),
+			reason: mm, rule: RulePlaceholderSet},
+		{name: "ledger fields at grant_version 2", edit: setBody(func(b *providerv1.GrantBody) {
+			b.GrantVersion = 2
+			b.Ledger = &providerv1.LedgerPosition{StoreId: bytesOf(1, 16), Seq: 1, Head: bytesOf(2, 32)}
+		}), reason: mm, rule: RuleGrantVersion},
 		// Fields the OPERATION kind does not use.
 		{name: "target_namespace set", edit: setBody(func(b *providerv1.GrantBody) { b.TargetNamespace = "ns" }), reason: mm, rule: RuleFieldNotForKind},
 		{name: "request_uid set", edit: setBody(func(b *providerv1.GrantBody) { b.RequestUid = "r" }), reason: mm, rule: RuleFieldNotForKind},
