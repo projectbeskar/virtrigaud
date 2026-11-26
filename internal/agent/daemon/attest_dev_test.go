@@ -207,3 +207,21 @@ func attesttestTarget(c *providerv1.AnswerContext) attesttest.Target {
 	return attesttest.Target{ProviderUID: c.GetProviderUid(), HostID: trusttest.HostName, InstallID: c.GetInstallId(),
 		EnrolmentID: c.GetEnrolmentId()}
 }
+
+// runRefused starts the agent on a store whose enrolment it refuses: it
+// cannot sign the answer an attestation needs, so it stays awaiting one (or
+// ends its start-up, when the store is quarantined). It returns once either
+// happened.
+func (h *host) runRefused() *running {
+	h.t.Helper()
+	r := h.start()
+	select {
+	case <-r.started:
+	case <-r.awaiting:
+	case err := <-r.done:
+		h.t.Fatalf("the agent stopped during start-up: %v\n%s", err, h.logs.text())
+	case <-time.After(10 * time.Second):
+		h.t.Fatalf("the agent did not finish starting\n%s", h.logs.text())
+	}
+	return r
+}

@@ -324,24 +324,6 @@ func (h *host) start() *running {
 	return r
 }
 
-// runRefused starts the agent on a store whose enrolment it refuses: a
-// release build ends its start-up (answers stay unsigned); a development
-// build cannot sign the answer an attestation needs, so it stays awaiting
-// one. It returns once either happened.
-func (h *host) runRefused() *running {
-	h.t.Helper()
-	r := h.start()
-	select {
-	case <-r.started:
-	case <-r.awaiting:
-	case err := <-r.done:
-		h.t.Fatalf("the agent stopped during start-up: %v\n%s", err, h.logs.text())
-	case <-time.After(10 * time.Second):
-		h.t.Fatalf("the agent did not finish starting\n%s", h.logs.text())
-	}
-	return r
-}
-
 // run starts the agent and waits for the start-up sequence to end.
 func (h *host) run() (*running, providerv1.AgentState) {
 	h.t.Helper()
