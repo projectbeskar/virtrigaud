@@ -43,6 +43,7 @@ require (
 )
 
 require (
+	github.com/blang/semver/v4 v4.0.0
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
@@ -57,7 +58,6 @@ require (
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20190424111038-f61b66f89f4a // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect

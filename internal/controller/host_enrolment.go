@@ -551,6 +551,9 @@ type hostEnrolmentState struct {
 	// RenewalAttempts are the failure histories of renewed keys, oldest
 	// first, at most maxRenewalAttempts (failRenewal).
 	RenewalAttempts []renewalAttempt `json:"renewalAttempts,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // rekeyRequest is an open re-key window.
@@ -559,6 +562,9 @@ type rekeyRequest struct {
 	Value string `json:"value"`
 	// Until is when the window closes.
 	Until metav1.Time `json:"until"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // enrolmentRecord is an enrolment record in hex.
@@ -568,6 +574,9 @@ type enrolmentRecord struct {
 	InstallID   string `json:"installID"`
 	// StartEpoch is the record's start epoch; zero is the first epoch.
 	StartEpoch uint64 `json:"startEpoch,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // authorisedRequest is an authorised request.
@@ -584,6 +593,9 @@ type authorisedRequest struct {
 	KeyPin string `json:"keyPin"`
 	// Requester is the requester's username, for the audit of a re-key.
 	Requester string `json:"requester,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // currentEnrolment is a pinned enrolment. Only the key pins and the expiry
@@ -597,6 +609,9 @@ type currentEnrolment struct {
 	// state written before it was recorded (then no renewal deadline is
 	// derived).
 	NotBefore *metav1.Time `json:"notBefore,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // renewalOverdueAt returns when the pinned certificate's renewal is overdue:
@@ -611,6 +626,12 @@ func (c *currentEnrolment) renewalOverdueAt() (at time.Time, ok bool) {
 	}
 	life := c.NotAfter.Sub(c.NotBefore.Time)
 	return c.NotBefore.Add(life / 6 * 5), true
+}
+
+// same reports whether two records are the same record: their known fields
+// are equal (members a newer manager added are not compared).
+func (e enrolmentRecord) same(o enrolmentRecord) bool {
+	return e.EnrolmentID == o.EnrolmentID && e.ProviderUID == o.ProviderUID && e.InstallID == o.InstallID && e.StartEpoch == o.StartEpoch
 }
 
 // epoch returns the start epoch of a record (FirstStartEpoch when unset).
@@ -759,6 +780,9 @@ type requestOutcome struct {
 	Request string `json:"request"`
 	Reason  string `json:"reason"`
 	Message string `json:"message,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // toRecord converts to a hostidentity.Record.
@@ -826,9 +850,15 @@ type loadedEnrolment struct {
 // namespace. A missing Secret yields a fresh state. A state that names
 // another UID or identity (a replaced host) yields a fresh state with reset
 // set: the old pins are never inherited. A Secret that is not a VirtRigaud
-// pins Secret for this Host is refused (errForeignPinsSecret).
+// pins Secret for this Host is refused (errForeignPinsSecret). State that
+// requires a newer manager (a downgrade floor in the pins Secret or in a
+// host ledger Secret of the Host, host_state_compat.go) is refused with an
+// error wrapping errManagerTooOld, and so is never written back.
 func loadHostEnrolment(ctx context.Context, c client.Reader, cfg *HostEnrolmentConfig, host *infravirtrigaudiov1beta1.Host) (loadedEnrolment, error) {
 	fresh := hostEnrolmentState{HostUID: string(host.UID), Identity: host.Spec.Identity}
+	if err := checkHostLedgerFloors(ctx, c, cfg, host.Namespace, host.Name); err != nil {
+		return loadedEnrolment{}, fmt.Errorf("Host %s/%s: %w", host.Namespace, host.Name, err)
+	}
 	sec := &corev1.Secret{}
 	err := c.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: hostEnrolmentSecretName(host.Namespace, host.Name)}, sec)
 	if apierrors.IsNotFound(err) {
@@ -839,6 +869,9 @@ func loadHostEnrolment(ctx context.Context, c client.Reader, cfg *HostEnrolmentC
 	}
 	if !isPinsSecretFor(sec, host.Namespace, host.Name) {
 		return loadedEnrolment{}, fmt.Errorf("Host %s/%s: %w", host.Namespace, host.Name, errForeignPinsSecret)
+	}
+	if err := checkPinsSecretFloor(sec); err != nil {
+		return loadedEnrolment{}, fmt.Errorf("Host %s/%s: %w", host.Namespace, host.Name, err)
 	}
 	var st hostEnrolmentState
 	if err := json.Unmarshal(sec.Data[hostEnrolmentStateKey], &st); err != nil ||
@@ -861,6 +894,9 @@ func isPinsSecretFor(sec *corev1.Secret, namespace, name string) bool {
 // resourceVersion, so a concurrent writer makes it fail with a conflict
 // instead of being overwritten. No owner reference: the Secret is in
 // another namespace than the Host, and is deleted by the Host reconciler.
+// The manager sets its own labels and annotation and keeps the others, and
+// keeps every data key it does not own (state a newer manager wrote), except
+// when the stored state belonged to another Host object or identity.
 func saveHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentConfig, host *infravirtrigaudiov1beta1.Host, l *loadedEnrolment) error {
 	data, err := json.Marshal(l.state)
 	if err != nil {
@@ -873,18 +909,24 @@ func saveHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentC
 	} else {
 		sec = sec.DeepCopy()
 	}
-	sec.Labels = map[string]string{k8sLabelComponent: hostEnrolmentComponent, k8sLabelManagedBy: k8sManagedByVirtRigaud}
-	sec.Annotations = map[string]string{certrequest.AnnotationHost: hostKey(host.Namespace, host.Name)}
+	if sec.Labels == nil {
+		sec.Labels = map[string]string{}
+	}
+	sec.Labels[k8sLabelComponent], sec.Labels[k8sLabelManagedBy] = hostEnrolmentComponent, k8sManagedByVirtRigaud
+	if sec.Annotations == nil {
+		sec.Annotations = map[string]string{}
+	}
+	sec.Annotations[certrequest.AnnotationHost] = hostKey(host.Namespace, host.Name)
 	sec.OwnerReferences = nil
 	sec.Type = corev1.SecretTypeOpaque
-	// The store positions under their own key (host_answers.go) are kept,
-	// except when the stored state belonged to another Host object or
-	// identity: a replaced host inherits nothing.
-	keep := sec.Data[hostStoreStateKey]
-	sec.Data = map[string][]byte{hostEnrolmentStateKey: data}
-	if len(keep) > 0 && !l.reset {
-		sec.Data[hostStoreStateKey] = keep
+	// The store positions under their own key (host_answers.go) and any data
+	// key a newer manager added are kept, except when the stored state
+	// belonged to another Host object or identity: a replaced host inherits
+	// nothing.
+	if l.reset || sec.Data == nil {
+		sec.Data = map[string][]byte{}
 	}
+	sec.Data[hostEnrolmentStateKey] = data
 	if create {
 		err = c.Create(ctx, sec)
 	} else {
@@ -903,6 +945,8 @@ func saveHostEnrolment(ctx context.Context, c client.Client, cfg *HostEnrolmentC
 // stored UID). The Secret is read through reader (pass a live reader, so a
 // stale cache never decides a deletion) and deleted with UID and
 // resourceVersion preconditions, so a Secret rewritten in between is kept.
+// A Secret whose state requires a newer manager (host_state_compat.go) is
+// kept too, with an error wrapping errManagerTooOld: that manager removes it.
 func deleteHostEnrolment(ctx context.Context, c client.Client, reader client.Reader, cfg *HostEnrolmentConfig, namespace, name string, ownerUID types.UID) error {
 	sec := &corev1.Secret{}
 	err := reader.Get(ctx, types.NamespacedName{Namespace: cfg.Namespace, Name: hostEnrolmentSecretName(namespace, name)}, sec)
@@ -914,6 +958,12 @@ func deleteHostEnrolment(ctx context.Context, c client.Client, reader client.Rea
 	}
 	if !isPinsSecretFor(sec, namespace, name) {
 		return nil
+	}
+	if err := checkPinsSecretFloor(sec); err != nil {
+		return fmt.Errorf("keep pins Secret of Host %s/%s: %w", namespace, name, err)
+	}
+	if err := checkHostLedgerFloors(ctx, reader, cfg, namespace, name); err != nil {
+		return fmt.Errorf("keep pins Secret of Host %s/%s: %w", namespace, name, err)
 	}
 	if ownerUID != "" {
 		var st hostEnrolmentState
@@ -1019,7 +1069,13 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 	if !host.DeletionTimestamp.IsZero() {
 		r.freezeWaits.Delete(req.String())
 		// A deleting Host is never enrolled again; its pins go first.
-		return ctrl.Result{}, deleteHostEnrolment(ctx, r.Client, r.liveReader(), r.Config, host.Namespace, host.Name, host.UID)
+		err := deleteHostEnrolment(ctx, r.Client, r.liveReader(), r.Config, host.Namespace, host.Name, host.UID)
+		if errors.Is(err, errManagerTooOld) {
+			// Its state requires a newer manager, which removes it.
+			r.event(host, corev1.EventTypeWarning, reasonEnrolManagerTooOld, "the pins Secret is kept: "+err.Error())
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 	provider, agent, err := hostRunsAgent(ctx, r.Client, host)
 	if err != nil || !agent {
@@ -1029,6 +1085,9 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, r.mirror(ctx, host, nil, "")
 	}
 	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
+	if errors.Is(err, errManagerTooOld) {
+		return ctrl.Result{}, r.refuseManagerTooOld(ctx, host, err)
+	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1177,6 +1236,34 @@ func requeueOnConflict(res ctrl.Result, err error) (ctrl.Result, error) {
 	return res, err
 }
 
+// refuseManagerTooOld reports on the Host that its persisted state requires a
+// newer manager (cause wraps errManagerTooOld): the AgentEnrolled condition
+// is set False with reason ManagerTooOld, and a warning event is emitted when
+// the condition was not already so. Nothing else is written: the pins Secret
+// stays exactly as the newer manager left it, and status.agent keeps its last
+// value. The Host is visited again when its pins Secret, a host ledger Secret
+// or the Host changes, and when the manager restarts.
+func (r *HostEnrolmentReconciler) refuseManagerTooOld(ctx context.Context, host *infravirtrigaudiov1beta1.Host, cause error) error {
+	log.FromContext(ctx).Info("Refusing to manage a Host whose enrolment state requires a newer manager; its state is left untouched",
+		"host", hostKey(host.Namespace, host.Name), "reason", cause.Error())
+	base := host.DeepCopy()
+	msg := "this manager is too old for the Host's persisted enrolment state and leaves it untouched; " +
+		"run a manager at least as new as the one that wrote it: " + cause.Error()
+	if prev := meta.FindStatusCondition(base.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled); prev == nil ||
+		prev.Reason != reasonEnrolManagerTooOld {
+		r.event(host, corev1.EventTypeWarning, reasonEnrolManagerTooOld, msg)
+	}
+	meta.SetStatusCondition(&host.Status.Conditions, metav1.Condition{Type: infravirtrigaudiov1beta1.HostConditionAgentEnrolled,
+		Status: metav1.ConditionFalse, ObservedGeneration: host.Generation, Reason: reasonEnrolManagerTooOld, Message: msg})
+	if equality.Semantic.DeepEqual(base.Status, host.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, host, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("report the refusal on Host %s/%s: %w", host.Namespace, host.Name, err)
+	}
+	return nil
+}
+
 // updateRekeyWindow opens or closes the re-key window of an enrolled Host
 // from its re-key request annotation (HostRekeyRequestAnnotation): a new
 // value naming a time no older than rekeyWindow (and at most
@@ -1226,7 +1313,14 @@ func (r *HostEnrolmentReconciler) forgetGoneHost(ctx context.Context, key types.
 	if err := reader.Get(ctx, key, &infravirtrigaudiov1beta1.Host{}); !apierrors.IsNotFound(err) {
 		return client.IgnoreNotFound(err)
 	}
-	return deleteHostEnrolment(ctx, r.Client, reader, r.Config, key.Namespace, key.Name, "")
+	err := deleteHostEnrolment(ctx, r.Client, reader, r.Config, key.Namespace, key.Name, "")
+	if errors.Is(err, errManagerTooOld) {
+		// Its state requires a newer manager, which removes it.
+		log.FromContext(ctx).Info("Keeping the pins Secret of a gone Host: its state requires a newer manager",
+			"host", key.String(), "reason", err.Error())
+		return nil
+	}
+	return err
 }
 
 // liveReader returns the APIReader, which reads the API server, or the
@@ -1368,7 +1462,8 @@ func (r *HostEnrolmentReconciler) hostRequestFromAnnotation(_ context.Context, o
 // SetupWithManager registers the reconciler: Hosts, the pins Secrets in the
 // enrolment namespace (so a Secret change is mirrored at once, and every
 // pins Secret is visited at start-up, which deletes those of Hosts gone
-// while the manager was down), and enrolment requests (so an abandoned
+// while the manager was down), host ledger Secrets (so a downgrade floor
+// in one is honoured at once), and enrolment requests (so an abandoned
 // request's record is retired).
 func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// The freeze confirmation reads a Provider's VirtualMachines through
@@ -1381,7 +1476,8 @@ func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	inEnrolmentNS := predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetNamespace() == r.Config.Namespace })
 	isPins := predicate.NewPredicateFuncs(func(o client.Object) bool {
-		return o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent
+		_, ledger := o.GetLabels()[LabelHostLedger]
+		return o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent || ledger
 	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Host{}).
@@ -1414,6 +1510,9 @@ func resolveHostAgentTLS(ctx context.Context, c client.Reader, cfg *HostEnrolmen
 	if err != nil {
 		if errors.Is(err, errForeignPinsSecret) {
 			return hostsecret.Credentials{}, "host pins Secret is not a VirtRigaud pins Secret"
+		}
+		if errors.Is(err, errManagerTooOld) {
+			return hostsecret.Credentials{}, "host enrolment state requires a newer manager"
 		}
 		return hostsecret.Credentials{}, "host pins Secret unreadable"
 	}

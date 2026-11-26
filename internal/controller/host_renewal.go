@@ -213,6 +213,9 @@ type renewalState struct {
 	// IdentityReported records that the manager reported it cannot create
 	// the request because it does not know its own identity.
 	IdentityReported bool `json:"identityReported,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // renewalAttempt is the failure history of renewals for one new key.
@@ -225,6 +228,9 @@ type renewalAttempt struct {
 	NextTry metav1.Time `json:"nextTry"`
 	// Reason is why the last one failed.
 	Reason string `json:"reason,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // renewalRetryBaseFor returns the backoff base for a certificate with
@@ -722,7 +728,7 @@ func (r *HostEnrolmentReconciler) pinRenewalAtExpiry(ctx context.Context, host *
 		return false, err
 	}
 	lc, lr := l.state.Current, l.state.Renewal
-	if lc == nil || lc.Record != cur.Record || lr == nil || lr.PinnedAt != nil || lr.KeyPin != ren.KeyPin ||
+	if lc == nil || !lc.Record.same(cur.Record) || lr == nil || lr.PinnedAt != nil || lr.KeyPin != ren.KeyPin ||
 		lr.CertificateSHA256 != ren.CertificateSHA256 || !bytes.Equal(lr.Certificate, ren.Certificate) {
 		return false, nil
 	}

@@ -115,6 +115,13 @@ type HostStoreState struct {
 	// RegressedEnrolmentID is the enrolment under which it failed: the hold
 	// ends only with a new enrolment.
 	RegressedEnrolmentID []byte
+
+	// unknown are the top-level members of the stored document a newer
+	// manager wrote and this one does not know, and recordUnknown those of
+	// each store record, by store id: encodeStoreState writes them back
+	// (host_state_compat.go).
+	unknown       unknownMembers
+	recordUnknown map[[16]byte]unknownMembers
 }
 
 // HostTrustSource returns what the manager trusts about a host, and keeps
@@ -251,6 +258,9 @@ type storeRecordJSON struct {
 	CheckpointSeq  uint64 `json:"checkpointSeq,omitempty"`
 	CheckpointHead string `json:"checkpointHead,omitempty"`
 	UseCheckpoint  bool   `json:"useCheckpoint,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
 // hostStoreStateJSON is the JSON form of a HostStoreState.
@@ -259,17 +269,23 @@ type hostStoreStateJSON struct {
 	Previous             []storeRecordJSON `json:"previous,omitempty"`
 	RegressedReason      string            `json:"regressedReason,omitempty"`
 	RegressedEnrolmentID string            `json:"regressedEnrolmentID,omitempty"`
+	// Unknown are the members a newer manager wrote that this one does
+	// not know, written back unchanged (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
 }
 
-func toStoreJSON(r hostidentity.StoreRecord) storeRecordJSON {
+// toStoreJSON converts a store record to its JSON form, with the unknown
+// members kept for its store.
+func toStoreJSON(r hostidentity.StoreRecord, unknown unknownMembers) storeRecordJSON {
 	j := storeRecordJSON{StoreID: hex.EncodeToString(r.StoreID[:]), EnrolmentID: hex.EncodeToString(r.EnrolmentID), Seq: r.Seq,
-		Head: hex.EncodeToString(r.Head[:]), CheckpointSeq: r.CheckpointSeq, UseCheckpoint: r.UseCheckpoint}
+		Head: hex.EncodeToString(r.Head[:]), CheckpointSeq: r.CheckpointSeq, UseCheckpoint: r.UseCheckpoint, Unknown: unknown}
 	if r.CheckpointSeq > 0 {
 		j.CheckpointHead = hex.EncodeToString(r.CheckpointHead[:])
 	}
 	return j
 }
 
+// fromStoreJSON converts the JSON form of a store record.
 func fromStoreJSON(j storeRecordJSON) (hostidentity.StoreRecord, error) {
 	var r hostidentity.StoreRecord
 	dec := func(s string, out []byte) error {
@@ -311,12 +327,25 @@ func decodeStoreState(data []byte) (HostStoreState, error) {
 	if err := json.Unmarshal(data, &j); err != nil {
 		return st, fmt.Errorf("decode the host store state: %w", err)
 	}
+	st.unknown = j.Unknown
+	keep := func(r hostidentity.StoreRecord, unknown unknownMembers) {
+		if len(unknown) == 0 {
+			return
+		}
+		if st.recordUnknown == nil {
+			st.recordUnknown = map[[16]byte]unknownMembers{}
+		}
+		if _, ok := st.recordUnknown[r.StoreID]; !ok {
+			st.recordUnknown[r.StoreID] = unknown
+		}
+	}
 	if j.Current != nil {
 		r, err := fromStoreJSON(*j.Current)
 		if err != nil {
 			return st, err
 		}
 		st.Current = r
+		keep(r, j.Current.Unknown)
 	}
 	for _, p := range j.Previous {
 		r, err := fromStoreJSON(p)
@@ -324,6 +353,7 @@ func decodeStoreState(data []byte) (HostStoreState, error) {
 			return st, err
 		}
 		st.Previous = append(st.Previous, r)
+		keep(r, p.Unknown)
 	}
 	st.RegressedReason = j.RegressedReason
 	if j.RegressedEnrolmentID != "" {
@@ -336,15 +366,17 @@ func decodeStoreState(data []byte) (HostStoreState, error) {
 	return st, nil
 }
 
-// encodeStoreState encodes st for the store state data key.
+// encodeStoreState encodes st for the store state data key, with the
+// members a newer manager wrote that st carries from decodeStoreState: the
+// top-level ones, and each store record's for the record of the same store.
 func encodeStoreState(st HostStoreState) ([]byte, error) {
-	j := hostStoreStateJSON{RegressedReason: st.RegressedReason}
+	j := hostStoreStateJSON{RegressedReason: st.RegressedReason, Unknown: st.unknown}
 	if !st.Current.Empty() {
-		c := toStoreJSON(st.Current)
+		c := toStoreJSON(st.Current, st.recordUnknown[st.Current.StoreID])
 		j.Current = &c
 	}
 	for _, p := range st.Previous {
-		j.Previous = append(j.Previous, toStoreJSON(p))
+		j.Previous = append(j.Previous, toStoreJSON(p, st.recordUnknown[p.StoreID]))
 	}
 	if len(st.RegressedEnrolmentID) > 0 {
 		j.RegressedEnrolmentID = hex.EncodeToString(st.RegressedEnrolmentID)

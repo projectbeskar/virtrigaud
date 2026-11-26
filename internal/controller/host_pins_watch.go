@@ -174,5 +174,8 @@ func onlyStorePositionsChanged(oldS, newS *corev1.Secret) bool {
 	if err1 != nil || err2 != nil {
 		return false
 	}
-	return o.RegressedReason == n.RegressedReason && bytes.Equal(o.RegressedEnrolmentID, n.RegressedEnrolmentID)
+	// A change of the members a newer manager wrote (a downgrade floor,
+	// say) is not a position change.
+	return o.RegressedReason == n.RegressedReason && bytes.Equal(o.RegressedEnrolmentID, n.RegressedEnrolmentID) &&
+		o.unknown.equal(n.unknown) && maps.EqualFunc(o.recordUnknown, n.recordUnknown, unknownMembers.equal)
 }

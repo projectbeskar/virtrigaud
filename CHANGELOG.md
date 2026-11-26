@@ -20,6 +20,40 @@ The supply-chain scan (`govulncheck`) in CI failed on every branch because of GO
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-11-25 11:58] - The manager keeps per-Host state a newer manager wrote, and refuses a Host whose state requires a newer manager (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/host_state_compat.go`, `internal/controller/host_enrolment.go`, `internal/controller/host_renewal.go`, `internal/controller/host_answers.go`: The enrolment state (`enrolment.json`) and the store positions (`store.json`) in a Host's pins Secret now keep every JSON member the manager does not know, at every nesting level. Before, a read-modify-write dropped them. A record's unknown members stay with that record. Store records are matched by store id. A document without unknown members is written exactly as before.
+- `internal/controller/host_enrolment.go`: `saveHostEnrolment` keeps the pins Secret's data keys, labels and annotations that it does not own. Before, it kept only `store.json` and replaced the labels and annotations. It still sets its own. A state bound to another Host UID or identity is still discarded with everything in it.
+
+### Added
+- `internal/controller/host_state_compat.go`, `internal/controller/host_enrolment.go`: A downgrade floor. When `enrolment.json`, `store.json`, or a Secret in the enrolment namespace labelled `virtrigaud.io/host-ledger` for the Host (or for no particular Host) carries a top-level `minManagerVersion`, the manager refuses the Host in any of these cases:
+  - the floor is above the manager's own version;
+  - the floor is malformed;
+  - the manager has no semantic version, as in an unversioned build.
+
+  A refused Host's pins Secret is never written or deleted. The manager approves no certificate request for it, verifies none of its signed answers and renders no agent credentials for it. The Host gets `AgentEnrolled=False` with reason `ManagerTooOld` and a warning event. No current code creates a host ledger Secret. The enrolment reconciler now also watches host ledger Secrets.
+- `internal/controller/host_pins_watch.go`: A change to the members of `store.json` that the manager does not know is no longer filtered out as a position-only write.
+- `go.mod`: `github.com/blang/semver/v4` becomes a direct dependency. It was already in the module graph.
+- `internal/controller/host_state_compat_test.go`, `internal/controller/host_state_compat_envtest_test.go`: Tests for:
+  - a round trip of the previous encoder's output;
+  - nested and per-record unknown members;
+  - unknown data keys, labels and annotations;
+  - floors above, equal to, below and malformed, in each document and in a ledger Secret;
+  - an unversioned build, which is refused only when a floor is present;
+  - no write, condition and event, with the pins Secret kept when the Host is deleted.
+- `docs/host-agent-enrolment.md`: A new section, "State written by a newer manager".
+
+### Why
+If an operator rolled the manager back, the older build silently deleted per-Host state that a newer manager had added. A newer manager can also now mark state that an older manager must not act on.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-21 11:16] - Agent certificates carry their enrolment record under the trust domain, so the sub-CA can be name-constrained (development builds only)
 **Author:** @wrkode (William Rizzo)
 
