@@ -330,9 +330,6 @@ const (
 	// operation whose record is ACCEPTED, in the session the store held when
 	// it decided.
 	ReceiptOnlyAccepted Name = "receipt-only-accepted"
-	// LedgerMarkKind: a ledger mark is applied only from a grant that
-	// verified as a ledger mark grant for this host.
-	LedgerMarkKind Name = "ledger-mark-kind"
 )
 
 // All lists every guard, in a fixed order.
@@ -356,6 +353,6 @@ func All() []Name {
 		LedgerRetentionFloor, AttestStoreMatch, AttestNotAhead, AttestHeadCompare, AttestMarkMax,
 		ChallengeSingleUse, ChallengePurpose, ChallengeExpiry, MutationsAfterAttestation, NoCommitBeforeAttest,
 		LedgerGate, AwaitRequest, LedgerBehindCount, LedgerBehindBytes, LedgerMarkSession, LedgerMarkStoreMatch,
-		LedgerMarkNotAhead, LedgerMarkHeadCompare, ExpectKnownRefused, ReceiptOnlyAccepted, LedgerMarkKind,
+		LedgerMarkNotAhead, LedgerMarkHeadCompare, ExpectKnownRefused, ReceiptOnlyAccepted,
 	}
 }

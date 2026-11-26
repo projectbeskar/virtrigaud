@@ -225,6 +225,13 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		return nil, status.Error(codes.Unavailable, "the host's operation store could not decide; ask again with the same op_id")
 	}
 	if !seen.Found {
+		if body.GetExpectKnown() && !guard.Off(guard.ExpectKnownRefused) {
+			// The manager holds a receipt for this op_id that its host
+			// ledger covers: it was accepted, here or in a store this one
+			// replaced. Never refuse it definitely, never accept it as new.
+			audit("refused", opstore.AuditExpectKnownUnknown)
+			return nil, admissionRefusal(opstore.RefusalExpectKnownUnknown)
+		}
 		// Definite refusals are made only for an op_id the store has no
 		// trace of; a known op_id is answered from its record by the store.
 		if err := s.checkNew(verified, seen.Host, audit); err != nil {
@@ -237,6 +244,8 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 		IntentDigest: body.GetIntentDigest(),
 		MintEpoch:    opstore.Epoch{Counter: body.GetMintEpoch().GetCounter(), Holder: body.GetMintEpoch().GetHolder()},
 		Actor:        truncate(actor, actorMax),
+		ExpectKnown:  body.GetExpectKnown(),
+		RequestBytes: verified.RequestBytes,
 	}
 	d, err := s.opts.Operations.Admit(ctx, r)
 	if errors.Is(err, opstore.ErrInvalidRequest) {
@@ -272,10 +281,42 @@ func (s *Server) operate(ctx context.Context, method string, req any) (any, erro
 	}
 	audit(map[opstore.Outcome]string{opstore.OutcomeAccepted: "accepted", opstore.OutcomeKnown: "known"}[d.Outcome], d.Op.State.String())
 	task := &providerv1.TaskRef{Id: TaskRef(ref)}
+	receipt := s.receipt(ctx, verified, d)
 	if verified.Kind == providerv1.OperationKind_OPERATION_KIND_CREATE {
-		return &providerv1.CreateResponse{Id: r.VMUID, Task: task}, nil
+		return &providerv1.CreateResponse{Id: r.VMUID, Task: task, OperationReceipt: receipt}, nil
 	}
-	return &providerv1.TaskResponse{Task: task}, nil
+	return &providerv1.TaskResponse{Task: task, OperationReceipt: receipt}, nil
+}
+
+// receipt signs the operation receipt of a delivery the store decided on
+// (d): only for an operation it holds ACCEPTED while attested, whose
+// acceptance it reported (opstore.Decision.Acceptance), of the Provider and
+// enrolment the host certificate names, bound to this delivery's grant,
+// within the per-identity receipt limit. Otherwise it returns nil: the
+// call is answered without a receipt, and the manager asks for the
+// operation's state instead.
+func (s *Server) receipt(ctx context.Context, verified *grantverify.Verified, d opstore.Decision) *providerv1.SignedBlob {
+	if d.Acceptance == nil || s.opts.Authority == nil {
+		return nil
+	}
+	c := s.opts.Credentials.Load()
+	if verified.Body.GetProviderUid() != c.Identity.Record.ProviderUID {
+		return nil
+	}
+	id := peerIdentity(ctx)
+	if id == "" || !s.receipts.allow(id, s.opts.Now()) {
+		if ok, n := s.limited.allow(s.opts.Now()); ok {
+			s.opts.Log.Info("no operation receipt: the Provider is above its receipt rate", "suppressedSinceLast", n)
+		}
+		return nil
+	}
+	blob, err := answer.SignReceipt(c.Identity.Signer, c.Identity.Leaf.Raw, answer.Receipt{Record: c.Identity.Record,
+		HostID: c.Identity.HostID(), Op: d.Op, Acceptance: *d.Acceptance, GrantDigest: verified.GrantDigest})
+	if err != nil {
+		s.logNoAnswer(err, "no operation receipt")
+		return nil
+	}
+	return blob
 }
 
 // checkNew applies the checks made only to an op_id the store has no trace
@@ -387,6 +428,11 @@ func admissionRefusal(r opstore.Refusal) error {
 		return refusal(codes.NotFound, opstore.ReasonVMNotOwned, "this host has no placement of the VM")
 	case opstore.RefusalUnknownToAgent:
 		return refusal(codes.NotFound, opstore.ReasonUnknownToAgent, "this host holds no record of the grant's enrolment")
+	case opstore.RefusalExpectKnownUnknown:
+		return refusal(codes.NotFound, opstore.ReasonUnknownToAgent, "this host holds no record of an op_id the grant says it acknowledged")
+	case opstore.RefusalLedgerBehind:
+		return refusal(codes.ResourceExhausted, ReasonLedgerBehind, "the host holds back too many accepted operations whose "+
+			"acceptance the host ledger does not cover yet: the operation was not performed; retry once the ledger mark rises")
 	case opstore.RefusalStoreFull:
 		return refusal(codes.ResourceExhausted, ReasonStoreFull, "the host's operation store is full: the operation was not "+
 			"performed and new operations are refused; re-keying the Host (a new enrolment) reclaims the space once its "+

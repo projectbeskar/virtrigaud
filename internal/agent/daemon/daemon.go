@@ -336,6 +336,14 @@ func (a *attestation) Attest(ctx context.Context, r opstore.AttestRequest) (opst
 	return res, err
 }
 
+// LedgerMark implements server.Authority: opstore.Store.LedgerMark.
+func (a *attestation) LedgerMark(ctx context.Context, r opstore.LedgerMarkRequest) (opstore.LedgerMarkResult, error) {
+	return a.st.LedgerMark(ctx, r)
+}
+
+// Backlog implements server.Authority: opstore.Store.Backlog.
+func (a *attestation) Backlog() opstore.LedgerBacklog { return a.st.Backlog() }
+
 var _ server.Authority = (*attestation)(nil)
 
 var _ server.Agent = (*agentState)(nil)
@@ -585,11 +593,14 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	st, err := opstore.Open(ctx, opstore.Options{
 		Journal: journal.Options{Dir: d.o.Config.StateDir, FS: d.o.JournalFS, Events: d.journalEvent,
 			Hooks: hooks, AnchorRotateBytes: rotate, LedgerRetention: config.DevBuild},
-		Executor:          d.o.Executor,
-		Audit:             d.auditEvent,
-		StepDeadlines:     d.o.StepDeadlines,
-		MaxStoreBytes:     d.o.MaxStoreBytes,
-		ReplayAudit:       config.DevBuild,
+		Executor:      d.o.Executor,
+		Audit:         d.auditEvent,
+		StepDeadlines: d.o.StepDeadlines,
+		MaxStoreBytes: d.o.MaxStoreBytes,
+		ReplayAudit:   config.DevBuild,
+		// A development build speaks the host ledger protocol: no accepted
+		// operation starts before the ledger mark covers its acceptance.
+		LedgerGate:        config.DevBuild,
 		AuditRetainEvents: d.o.Config.AuditRetainEvents,
 		AuditRetainBytes:  d.o.Config.AuditRetainBytes,
 	})

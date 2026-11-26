@@ -240,6 +240,13 @@ const (
 	CauseAwaitingAttestation = "awaiting_attestation"
 )
 
+// ReasonLedgerBehind is the ErrorInfo reason (in ErrorInfoDomain) of an
+// operation refused because the host holds back too many accepted
+// operations whose acceptance the manager's host ledger does not cover yet,
+// or too many parked request bytes: RESOURCE_EXHAUSTED, definitely not
+// performed (development builds only).
+const ReasonLedgerBehind = "LEDGER_BEHIND"
+
 // ReasonStoreFull is the ErrorInfo reason (in ErrorInfoDomain) of an
 // operation refused because the host's operation store is above its size
 // threshold: RESOURCE_EXHAUSTED, definitely not performed. A re-key of the
@@ -289,6 +296,14 @@ type Options struct {
 	HelloAnswersPerSecond float64
 	// HelloAnswerBurst is the burst of the per-identity Hello answer limit.
 	HelloAnswerBurst int
+	// ReceiptsPerSecond and ReceiptBurst limit the operation receipts
+	// signed for one Provider identity, separately from AnswersPerSecond.
+	// A delivery above the limit is answered without a receipt (the
+	// manager asks for the operation's state instead). Zero fields take
+	// DefaultReceiptsPerSecond and DefaultReceiptBurst.
+	ReceiptsPerSecond float64
+	// ReceiptBurst is the burst of the per-identity receipt limit.
+	ReceiptBurst int
 	// Operations is the agent's operation path. Nil refuses every mutating
 	// method once the agent is ready (Unimplemented): a release build never
 	// sets it.
@@ -304,7 +319,8 @@ type Options struct {
 	// ledger. Nil serves no HostAuthority service (every method is
 	// Unimplemented) and reports the agent as awaiting attestation in every
 	// ledger state: a release build never sets it. When set, every mutating
-	// method is refused UNATTESTED until the agent is attested.
+	// method is refused UNATTESTED until the agent is attested, and every
+	// operation accepted while attested is answered with a signed receipt.
 	Authority Authority
 	// ChallengeClock replaces CLOCK_MONOTONIC_RAW for the validity of
 	// attestation challenges. Only tests set it.
@@ -319,6 +335,10 @@ type Authority interface {
 	Attestation() (a opstore.Attestation, ok bool)
 	// Attest applies a verified attestation (opstore.Store.Attest).
 	Attest(ctx context.Context, r opstore.AttestRequest) (opstore.AttestResult, error)
+	// LedgerMark applies a verified ledger mark (opstore.Store.LedgerMark).
+	LedgerMark(ctx context.Context, r opstore.LedgerMarkRequest) (opstore.LedgerMarkResult, error)
+	// Backlog is what the ledger gate holds back (opstore.Store.Backlog).
+	Backlog() opstore.LedgerBacklog
 }
 
 // Renewals is the host's certificate renewal, as the server serves it.
@@ -366,6 +386,13 @@ const (
 	// DefaultHelloAnswerBurst is the burst of signed Hello answers for one
 	// identity.
 	DefaultHelloAnswerBurst = 5
+	// DefaultReceiptsPerSecond is the sustained operation receipts per
+	// second for one Provider identity; with the answer and Hello limits it
+	// stays below the signer's budget.
+	DefaultReceiptsPerSecond = 20.0
+	// DefaultReceiptBurst is the burst of operation receipts for one
+	// identity.
+	DefaultReceiptBurst = 40
 )
 
 // Server is the agent's gRPC server.
@@ -376,6 +403,7 @@ type Server struct {
 	throttle  *throttle
 	answers   *sourceLimiter
 	hellos    *sourceLimiter
+	receipts  *sourceLimiter
 	noAnswer  logGate
 	limited   logGate
 	refusedPr logGate
@@ -414,6 +442,13 @@ func New(opts Options) (*Server, error) {
 		opts.HelloAnswerBurst = DefaultHelloAnswerBurst
 	}
 	s.hellos = newSourceLimiter(opts.HelloAnswersPerSecond, opts.HelloAnswerBurst)
+	if opts.ReceiptsPerSecond <= 0 {
+		opts.ReceiptsPerSecond = DefaultReceiptsPerSecond
+	}
+	if opts.ReceiptBurst <= 0 {
+		opts.ReceiptBurst = DefaultReceiptBurst
+	}
+	s.receipts = newSourceLimiter(opts.ReceiptsPerSecond, opts.ReceiptBurst)
 	s.limited = logGate{every: refusalLogEvery}
 	s.refusedPr = logGate{every: refusalLogEvery}
 	s.opts = opts
@@ -702,6 +737,7 @@ func (s *Server) signAnswerUnder(ctx context.Context, lim *sourceLimiter, nonce 
 	}
 	if s.opts.Authority != nil {
 		h.Attestation, h.Attested = s.opts.Authority.Attestation()
+		h.Backlog = s.opts.Authority.Backlog()
 	}
 	if s.opts.Renewals != nil {
 		h.StagedCertificateSHA256 = s.opts.Renewals.StagedSHA256()

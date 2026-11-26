@@ -49,6 +49,10 @@ func (panicExec) Goal(context.Context, executor.Operation, executor.Step) (bool,
 }
 func (panicExec) StopAll(context.Context) error { return nil }
 
+// RunsWithoutRequest implements executor.RequestOptional: the steps read
+// nothing from the request, so a recovered operation runs (and panics).
+func (panicExec) RunsWithoutRequest(providerv1.OperationKind) bool { return true }
+
 // TestRunPanicStopsTheAgent: a run that panics is recovered and counted, and
 // the agent drains and stops with ErrRunPanicked, leaving the operation to the
 // next start's recovery. After the limit of panicked runs the next start

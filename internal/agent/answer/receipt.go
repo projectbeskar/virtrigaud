@@ -21,6 +21,7 @@ import (
 	"crypto"
 	"fmt"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
@@ -60,7 +61,7 @@ type Receipt struct {
 func OperationReceipt(r Receipt) (*providerv1.OperationReceipt, error) {
 	op, acc := r.Op, r.Acceptance
 	switch {
-	case op.State != opstore.StateAccepted || op.Tombstoned:
+	case (op.State != opstore.StateAccepted || op.Tombstoned) && !guard.Off(guard.ReceiptOnlyAccepted):
 		return nil, fmt.Errorf("%w: a receipt for an operation that is not accepted", ErrSign)
 	case !bytes.Equal(op.Ref.EnrolmentID, r.Record.EnrolmentID) || len(op.Ref.EnrolmentID) != idLen:
 		return nil, fmt.Errorf("%w: a receipt for another enrolment than the certificate's", ErrSign)
