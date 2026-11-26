@@ -237,7 +237,7 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 	switch st := poll.state(); st {
 	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED, providerv1.OperationRecordState_OPERATION_RECORD_STATE_EXECUTING:
 		cur := a
-		if a.Phase != infravirtrigaudiov1beta1.OperationAttemptPhaseSent {
+		if !attemptDelivered(a.Phase) {
 			m, err := r.markSent(ctx, vm, a, nil)
 			if err != nil {
 				return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
