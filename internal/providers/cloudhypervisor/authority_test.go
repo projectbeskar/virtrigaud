@@ -150,26 +150,30 @@ func TestHostAuthority_TypedClient(t *testing.T) {
 		return &providerv1.AuthorityResponse{HostAnswer: blob}, nil
 	})
 	ha := providerv1.NewHostAuthorityClient(served(t, newProvider(t, p, Options{}, a)))
-	reqs := authorityMethods("host-a")
+	nonce := make([]byte, nonceLen)
+	grant := &providerv1.OperationGrant{Body: []byte("opaque"), Signature: []byte("sig"), SignerCertChain: [][]byte{[]byte("leaf")}}
 
-	c, err := ha.Challenge(ctx(t), reqs[providerv1.HostAuthority_Challenge_FullMethodName].(*providerv1.ChallengeRequest))
+	c, err := ha.Challenge(ctx(t), &providerv1.ChallengeRequest{TargetHostId: "host-a", AnswerNonce: nonce,
+		Purpose: providerv1.ChallengePurpose_CHALLENGE_PURPOSE_REATTEST})
 	require.NoError(t, err)
 	assert.True(t, proto.Equal(blob, c.GetHostAnswer()))
-	r, err := ha.Attest(ctx(t), reqs[providerv1.HostAuthority_Attest_FullMethodName].(*providerv1.AttestRequest))
+	r, err := ha.Attest(ctx(t), &providerv1.AttestRequest{TargetHostId: "host-a", AnswerNonce: nonce, Grant: grant})
 	require.NoError(t, err)
 	assert.True(t, proto.Equal(blob, r.GetHostAnswer()))
-	r, err = ha.LedgerMark(ctx(t), reqs[providerv1.HostAuthority_LedgerMark_FullMethodName].(*providerv1.LedgerMarkRequest))
+	r, err = ha.LedgerMark(ctx(t), &providerv1.LedgerMarkRequest{TargetHostId: "host-a", AnswerNonce: nonce, Grant: grant})
 	require.NoError(t, err)
 	assert.True(t, proto.Equal(blob, r.GetHostAnswer()))
-	r, err = ha.RetireIfUnknown(ctx(t), reqs[providerv1.HostAuthority_RetireIfUnknown_FullMethodName].(*providerv1.RetireIfUnknownRequest))
+	r, err = ha.RetireIfUnknown(ctx(t), &providerv1.RetireIfUnknownRequest{TargetHostId: "host-a", AnswerNonce: nonce, Grant: grant})
 	require.NoError(t, err)
 	assert.True(t, proto.Equal(blob, r.GetHostAnswer()))
 
 	// The Provider's own methods, called directly, behave the same.
 	prov := newProvider(t, p, Options{}, a)
-	r, err = prov.Attest(ctx(t), reqs[providerv1.HostAuthority_Attest_FullMethodName].(*providerv1.AttestRequest))
+	r, err = prov.Attest(ctx(t), &providerv1.AttestRequest{TargetHostId: "host-a", AnswerNonce: nonce, Grant: grant})
 	require.NoError(t, err)
 	assert.True(t, proto.Equal(blob, r.GetHostAnswer()))
+	_, err = prov.Challenge(ctx(t), &providerv1.ChallengeRequest{TargetHostId: "host-unknown", AnswerNonce: nonce})
+	requireHostUnavailable(t, err, CauseNotFronted)
 }
 
 // TestHostAuthority_WrongHost: a request without a host, one that does not
