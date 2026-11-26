@@ -5,6 +5,42 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-26 14:59] - Reserve the Accepted attempt phase, attempt receipts and the Host ledger mirrors in the API (development builds only, not populated)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: The operation attempt phase `Accepted` (`Sent` plus the host agent's receipt). Two optional fields on `status.operationAttempts[]`:
+  - `receipt` (`storeID`, `seq`, `head`, `attestationID`, `receiptTag`), with hexadecimal patterns and lengths, each required once a receipt is written;
+  - `ledgerGeneration` (at least 1), for display only.
+
+  The constant `OperationAttemptReceiptTagContext` (`virtrigaud.io/operation-receipt/v1` and a zero byte) names the domain-separation prefix of the receipt tag. No tag is computed or verified yet.
+- `api/infra.virtrigaud.io/v1beta1/host_types.go`: Two optional, top-level Host status fields, outside `status.agent`:
+  - `status.agentLedger` (`storeIDPrefix`, `seq`, `checkpointSeq`, `attestationState` `Pending`/`Attested`, `attestedAt`, `ledgerGeneration`, `updatedAt`);
+  - `status.agentLastStore` (`storeIDPrefix`, `seq`, `checkpointSeq`, `updatedAt`).
+
+  Both are display mirrors. `storeIDPrefix` is limited to the first 8 hexadecimal characters of the store id. Neither carries a full store id, a chain head or a session id.
+- `config/crd/bases/infra.virtrigaud.io_virtualmachines.yaml`, `config/crd/bases/infra.virtrigaud.io_hosts.yaml`, `api/infra.virtrigaud.io/v1beta1/zz_generated.deepcopy.go`: Regenerated.
+- `api/infra.virtrigaud.io/v1beta1/host_ledger_types_test.go`, `internal/controller/host_ledger_mirror_envtest_test.go`: Schema tests: exact field sets, patterns, enums and optionality, the receipt tag prefix, omission when unset, and envtest acceptance and refusal of each bound.
+- `docs/operation-grants-manager.md`, `docs/host-agent-enrolment.md`, `docs/operation-grants-wire-shape.md`, `docs/README.md`: The reserved fields, marked as not populated yet.
+
+### Changed
+- `internal/controller/virtualmachine_operation_identity.go`, `internal/controller/virtualmachine_operation_answers.go`, `internal/controller/virtualmachine_operation_identity_kinds.go`: An attempt in the `Accepted` phase is driven exactly as a `Sent` one:
+  - its task reference must be bound to it;
+  - it is never demoted to `Sent` and keeps its receipt and transition time;
+  - it counts against the running deadline of power and Reconfigure attempts.
+
+  The behaviour for `Prepared`, `Sent` and `Terminal` is unchanged. Nothing writes `Accepted`, `receipt`, `ledgerGeneration`, `agentLedger` or `agentLastStore` yet, and nothing reads them to decide anything.
+- `internal/controller/virtualmachine_operation_accepted_test.go`, `internal/controller/virtualmachine_operation_agent_test.go`: Tests for the `Accepted` handling, including an adversarial marker edit to `Accepted` that still executes at most one Create on the agent.
+
+### Why
+These fields reserve the API for the later host ledger protocol, in which the manager records each operation a host's agent accepted. Reserving them now, optional and additive, lets the agent, Provider and manager work land separately without changing v1beta1 again.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-26 09:00] - Upgrade OpenTelemetry to v1.47.0 (GO-2026-6974)
 **Author:** @wrkode (William Rizzo)
 

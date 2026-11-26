@@ -444,7 +444,22 @@ other Provider, and neither carries request bytes, a salt or a digest.
 |---|---|
 | `Prepared` | The attempt's identity and exact request are stored. It may or may not have been delivered. |
 | `Sent` | The attempt was delivered at least once (whatever the Provider answered); its outcome is not known yet. |
+| `Accepted` | Reserved, not written yet: `Sent`, plus the host agent's receipt for the attempt (see below). A manager that reads it drives the attempt exactly as `Sent`. |
 | `Terminal` | The host signed the outcome: `Succeeded`, `FailedClean`, `FailedDirty` or `Retired`; or, for a held power or Reconfigure attempt of a VM being deleted, `Superseded` (its outcome is unknown; see "One attempt at a time"). `Cancelled` and `Rejected` are no longer written for these Providers (there is no signed answer for them). |
+
+Two more fields of an entry are reserved for the host ledger protocol (see
+[Host ledger protocol (reserved)](operation-grants-wire-shape.md#host-ledger-protocol-reserved))
+and are **not populated yet**; no manager reads them to decide anything:
+
+- `receipt`: where the host's agent accepted the attempt: `storeID` (32 hexadecimal
+  characters), `seq` (at least 1), `head` (64 hexadecimal characters), `attestationID`
+  (32 hexadecimal characters) and `receiptTag`, an HMAC-SHA256 tag (64 hexadecimal
+  characters) under a manager key over a message that starts with the
+  domain-separation prefix `virtrigaud.io/operation-receipt/v1` and a zero byte. Every
+  field is required once a receipt is written.
+- `ledgerGeneration`: for display only, the generation of the host's ledger the attempt
+  was prepared under (at least 1). The value a manager will act on is the one covered by
+  the attempt's authenticated intent, never this field.
 
 Every marker write is a JSON Patch on the status subresource whose `test` operations
 require the markers (and, where written, `status.placement` and `status.id`) to be exactly
@@ -768,7 +783,9 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
 ## Known limits
 
 - No receipts, ledger marks, release, retire-if-unknown or cancel grants: only
-  `GRANT_KIND_OPERATION` is minted or accepted.
+  `GRANT_KIND_OPERATION` is minted or accepted. The `Accepted` phase and the `receipt`
+  and `ledgerGeneration` fields of an attempt marker are reserved in the schema and
+  never written.
 - For a Provider that requires operation identity, only signed host answers decide; a
   Create the host refused and never recorded stays in flight (its host keeps answering
   `NO_RECORD` and refusing the re-send), so its VM is released only by orphan-on-delete or

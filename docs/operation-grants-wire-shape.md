@@ -538,6 +538,13 @@ not part of the `Provider` service: no bundled provider and no agent registers i
 gRPC answers each of its methods `Unimplemented`, and nothing in
 `GetCapabilitiesResponse` changes. A provider author does not implement it.
 
+The Kubernetes API reserves the matching status fields, all optional and none populated
+yet: the `Accepted` phase and the `receipt` and `ledgerGeneration` fields of
+`VirtualMachine.status.operationAttempts[]` (see
+[Attempt markers](operation-grants-manager.md#attempt-markers-statusoperationattempts)),
+and `Host.status.agentLedger` and `Host.status.agentLastStore` (see
+[Host fields](host-agent-enrolment.md#host-fields)).
+
 ## Compatibility
 
 - Additive on the wire: new messages, enums, one new field per mutating request and
