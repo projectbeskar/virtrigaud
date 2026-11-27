@@ -150,6 +150,33 @@ type RequestOptional interface {
 	RunsWithoutRequest(kind providerv1.OperationKind) bool
 }
 
+// Trace is what a trace scan found among the objects an executor owns on
+// the host.
+type Trace struct {
+	// Op reports an object stamped with the operation's launch identity
+	// (its op_id): an effect, or the record of an effect begun.
+	Op bool
+	// Placement reports, for a Create, a VM with the operation's VM UID and
+	// binding: the placement the Create would have made.
+	Placement bool
+}
+
+// Found reports whether the scan found anything.
+func (t Trace) Found() bool { return t.Op || t.Placement }
+
+// TraceScanner is implemented by an executor that can scan the objects it
+// owns on the host for a trace of one operation. The operation store asks
+// it before it retires an operation it has no record of: a trace means the
+// store lost a record whose operation left an effect. An executor that does
+// not implement it, or whose scan fails, gives no retirement: the store
+// never retires what it cannot scan for.
+type TraceScanner interface {
+	// Traces scans every object the executor owns for op (its OpID, and for
+	// a Create its VMUID and BindingID). It reads only; it never changes an
+	// object. op carries no Payload.
+	Traces(ctx context.Context, op Operation) (Trace, error)
+}
+
 // Stopper stops every VM an executor runs. The agent's shutdown command calls
 // it only while the host itself is shutting down, rebooting, halting or
 // powering off.

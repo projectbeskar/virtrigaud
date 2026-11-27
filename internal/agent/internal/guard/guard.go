@@ -340,6 +340,27 @@ const (
 	// AttestRecordReported: every host ledger state of version 2 or higher
 	// reports the store's attestation record.
 	AttestRecordReported Name = "attest-record-reported"
+	// RetireTraceScan: a retire-if-unknown scans the executor's objects for
+	// a trace of the operation before it retires it, and quarantines the
+	// store on a trace no record explains.
+	RetireTraceScan Name = "retire-trace-scan"
+	// RetireRecordLookup: a retire-if-unknown answers from the operation's
+	// record or tombstone, under the store lock, and never retires an
+	// operation the store knows.
+	RetireRecordLookup Name = "retire-record-lookup"
+	// RetireWitnessCheck: a retire-if-unknown of an operation with no
+	// record quarantines the store when a witness file, or a VM record
+	// naming it busy, exists.
+	RetireWitnessCheck Name = "retire-witness-check"
+	// RetireSession: a retire-if-unknown is refused unless it names the
+	// store's current attestation session.
+	RetireSession Name = "retire-session"
+	// RetireEnrolmentActive: a retire-if-unknown is refused unless it names
+	// the active enrolment.
+	RetireEnrolmentActive Name = "retire-enrolment-active"
+	// RetireAttemptMark: a retire-if-unknown raises the attempt mark of the
+	// operation's VM and kind, so attempts keep increasing.
+	RetireAttemptMark Name = "retire-attempt-mark"
 )
 
 // All lists every guard, in a fixed order.
@@ -365,5 +386,6 @@ func All() []Name {
 		LedgerGate, AwaitRequest, LedgerBehindCount, LedgerBehindBytes, LedgerMarkSession, LedgerMarkStoreMatch,
 		LedgerMarkNotAhead, LedgerMarkHeadCompare, ExpectKnownRefused, ReceiptOnlyAccepted,
 		AttestRecordFirst, AttestRecordNeverRewritten, AttestRecordReported,
+		RetireTraceScan, RetireRecordLookup, RetireWitnessCheck, RetireSession, RetireEnrolmentActive, RetireAttemptMark,
 	}
 }
