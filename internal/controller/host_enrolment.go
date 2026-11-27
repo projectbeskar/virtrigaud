@@ -1050,11 +1050,19 @@ type HostEnrolmentReconciler struct {
 	// identityIndexed reports that the Client's cache indexes Hosts by
 	// identity (SetupWithManager); otherwise identities are listed live.
 	identityIndexed bool
+	// identityReader replaces the indexed cache for the pre-filter (tests:
+	// a cache that lags).
+	identityReader client.Reader
 }
 
-// identityCache returns the cached reader with the identity index, or nil.
+// identityCache returns the cached reader with the identity index (or
+// identityReader when set), or nil. It only pre-filters: a draw decision
+// lists Hosts live.
 func (r *HostEnrolmentReconciler) identityCache() client.Reader {
-	if r.identityIndexed {
+	switch {
+	case r.identityReader != nil:
+		return r.identityReader
+	case r.identityIndexed:
 		return r.Client
 	}
 	return nil
@@ -1182,6 +1190,15 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 				p, changed = nil, true
 			}
 			draw := ok && (p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID))
+			if draw && !identityInUse && st.Current == nil {
+				// The decision is made on a live List of every Host, never on
+				// the cache index alone (which may lag a Host just created).
+				live, err := hostsWithIdentity(ctx, r.liveReader(), nil, host)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				identityInUse = len(live) > 0
+			}
 			if draw && identityInUse {
 				draw = false
 				if p != nil {

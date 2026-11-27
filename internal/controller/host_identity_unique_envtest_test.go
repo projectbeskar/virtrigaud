@@ -186,4 +186,22 @@ var _ = Describe("Unique host identity at enrolment (envtest)", func() {
 		got, _ = reconcile(a)
 		Expect(condOf(got, HostConditionAgentIdentityDuplicated).Status).To(Equal(metav1.ConditionFalse))
 	})
+
+	It("decides a draw on a live list, not on a cache index that lags", func() {
+		a := newHost(hostNS, "a")
+		newHostWith(otherNS, "b", identity, "ch")
+		hostR.identityReader = staleIdentityCache{Reader: k8sClient}
+		got, st := reconcile(a)
+		Expect(st.Pending).To(BeNil(), "the live list sees the claimant the cache does not")
+		Expect(condOf(got, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).To(Equal(reasonEnrolRefused))
+	})
 })
+
+// staleIdentityCache is a cache that has not seen any Host yet: its lists
+// are empty.
+type staleIdentityCache struct{ client.Reader }
+
+// List implements client.Reader with an empty result.
+func (staleIdentityCache) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return nil
+}
