@@ -51,6 +51,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,8 +62,15 @@ import (
 // DevHostLedgerKeyDirFlagName names the directory holding the host ledger
 // keys (normally a Secret volume mounted only into the manager pod). Only a
 // development build honours it; a release build refuses to start when it is
-// set. It needs per-host agent enrolment.
+// set. It needs per-host agent enrolment and DevHostLedgerKeySecretFlagName.
 const DevHostLedgerKeyDirFlagName = "dev-host-ledger-key-dir"
+
+// DevHostLedgerKeySecretFlagName names, as <namespace>/<name>, the Secret
+// mounted at DevHostLedgerKeyDirFlagName. The manager never reads it through
+// the API: per-host agent enrolment refuses to run while the manager may
+// get, list or watch Secrets in its namespace. It must not be in the
+// enrolment namespace. Development builds only.
+const DevHostLedgerKeySecretFlagName = "dev-host-ledger-key-secret" // #nosec G101 -- a flag name, not a credential
 
 // File names in the host ledger key directory (also the data keys of the
 // Secret mounted there).
@@ -112,8 +120,8 @@ type HostLedgerKeys struct {
 }
 
 // String implements fmt.Stringer without key material.
-func (k *HostLedgerKeys) String() string {
-	if k == nil {
+func (k HostLedgerKeys) String() string {
+	if k.currentID == "" {
 		return "HostLedgerKeys(none)"
 	}
 	if k.previousID == "" {
@@ -123,7 +131,14 @@ func (k *HostLedgerKeys) String() string {
 }
 
 // GoString implements fmt.GoStringer without key material.
-func (k *HostLedgerKeys) GoString() string { return k.String() }
+func (k HostLedgerKeys) GoString() string { return k.String() }
+
+// LogValue implements slog.LogValuer without key material.
+func (k HostLedgerKeys) LogValue() slog.Value { return slog.StringValue(k.String()) }
+
+// Format implements fmt.Formatter, so that no verb (%v, %+v, %#v, %x, %s)
+// reaches the key fields.
+func (k HostLedgerKeys) Format(f fmt.State, _ rune) { _, _ = fmt.Fprint(f, k.String()) }
 
 // hostLedgerKeyID returns the id of a tag key.
 func hostLedgerKeyID(key []byte) string {
@@ -195,18 +210,34 @@ func readHostLedgerKeyFile(dir, name string, optional bool) ([]byte, error) {
 }
 
 // LoadHostLedgerKeys reads the host ledger keys from dir (see the file
-// comment for its layout). An empty dir returns nil and no error (no ledger
-// keys). A release build refuses any dir, and the keys need per-host agent
-// enrolment (enrolment true).
-func LoadHostLedgerKeys(dir string, enrolment bool) (*HostLedgerKeys, error) {
-	if dir == "" {
+// comment for its layout) and records keySecret, the <namespace>/<name> of
+// the Secret mounted there, in cfg, so the Secret access check refuses
+// enrolment while the manager may read it through the API. Empty dir and
+// keySecret return nil and no error (no ledger keys). A release build
+// refuses either; the keys need per-host agent enrolment (cfg not nil) and
+// keySecret, outside the enrolment namespace.
+func LoadHostLedgerKeys(dir, keySecret string, cfg *HostEnrolmentConfig) (*HostLedgerKeys, error) {
+	if dir == "" && keySecret == "" {
 		return nil, nil
 	}
 	if !devgate.Compiled {
-		return nil, fmt.Errorf("--%s cannot be used with a release build: %w", DevHostLedgerKeyDirFlagName, devgate.ErrNotCompiled)
+		return nil, fmt.Errorf("--%s and --%s cannot be used with a release build: %w", DevHostLedgerKeyDirFlagName,
+			DevHostLedgerKeySecretFlagName, devgate.ErrNotCompiled)
 	}
-	if !enrolment {
+	if cfg == nil {
 		return nil, fmt.Errorf("--%s needs per-host agent enrolment (--%s)", DevHostLedgerKeyDirFlagName, DevHostEnrolmentNamespaceFlagName)
+	}
+	if dir == "" || keySecret == "" {
+		return nil, fmt.Errorf("%w: --%s and --%s are set together", errHostLedgerKeys, DevHostLedgerKeyDirFlagName,
+			DevHostLedgerKeySecretFlagName)
+	}
+	ref, err := parseCAKeySecret(keySecret)
+	if err != nil {
+		return nil, fmt.Errorf("%w: --%s: %w", errHostLedgerKeys, DevHostLedgerKeySecretFlagName, err)
+	}
+	if ref.Namespace == cfg.Namespace {
+		return nil, fmt.Errorf("%w: --%s must not be in the enrolment namespace %s, where the manager reads and writes Secrets",
+			errHostLedgerKeys, DevHostLedgerKeySecretFlagName, cfg.Namespace)
 	}
 	current, err := readHostLedgerKeyFile(dir, HostLedgerKeyCurrentFile, false)
 	if err != nil {
@@ -220,7 +251,12 @@ func LoadHostLedgerKeys(dir string, enrolment bool) (*HostLedgerKeys, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewHostLedgerKeys(current, previous, identity)
+	keys, err := NewHostLedgerKeys(current, previous, identity)
+	if err != nil {
+		return nil, err
+	}
+	cfg.LedgerKeySecret = &ref
+	return keys, nil
 }
 
 // CurrentKeyID returns the id of the current tag key, under which every

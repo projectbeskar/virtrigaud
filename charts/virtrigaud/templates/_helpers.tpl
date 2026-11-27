@@ -464,10 +464,12 @@ Returns the name of the host ledger key Secret
 (experimental.hostEnrolment.ledgerKeySecret, development builds only), or ""
 when none is set. It is mounted into the manager pod alone. Rendering fails
 when it is set without experimental.hostEnrolment.enabled, when it is not a
-Secret name, or when the release namespace (where the Secret lives) is listed
-in rbac.secrets.providerNamespaces or workloadNamespaces: those declare
-namespaces whose Secrets other principals write and read, and the tag key
-must stay readable by the manager alone.
+Secret name, when the release namespace (where the Secret lives) is the
+enrolment namespace (whose Role lets the manager read and write every Secret
+there), or when it is listed in rbac.secrets.providerNamespaces or
+workloadNamespaces: those declare namespaces whose Secrets other principals
+write and read, and the tag key must stay readable by the manager's pod
+alone, never through the API.
 */}}
 {{- define "virtrigaud.hostLedgerKeySecret" -}}
 {{- $he := (dig "hostEnrolment" dict (.Values.experimental | default dict)) | default dict -}}
@@ -478,6 +480,9 @@ must stay readable by the manager alone.
 {{- $name := toString . -}}
 {{- if or (gt (len $name) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $name)) -}}
 {{- fail (printf "experimental.hostEnrolment.ledgerKeySecret: %q is not a Secret name" $name) -}}
+{{- end -}}
+{{- if eq (toString $he.namespace) $.Release.Namespace -}}
+{{- fail (printf "experimental.hostEnrolment.ledgerKeySecret: the enrolment namespace %q is the release namespace, where the key Secret lives; the enrolment Role would let the manager read and change it through the API. Install the chart in another namespace than the enrolment namespace" $.Release.Namespace) -}}
 {{- end -}}
 {{- $secrets := (dig "secrets" dict ($.Values.rbac | default dict)) | default dict -}}
 {{- $granted := concat (splitList "," (include "virtrigaud.secretProviderNamespaces" $)) (splitList "," (include "virtrigaud.secretNamespaceList" (dict "value" $secrets.workloadNamespaces "name" "rbac.secrets.workloadNamespaces"))) -}}

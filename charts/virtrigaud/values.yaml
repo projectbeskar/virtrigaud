@@ -369,11 +369,15 @@ experimental:
     # lowercase hexadecimal characters of random bytes; see
     # docs/host-agent-enrolment.md). When set, the chart mounts it read-only
     # into the manager pod, and only there, at
-    # /etc/virtrigaud/host-ledger-key; pass
-    # --dev-host-ledger-key-dir=/etc/virtrigaud/host-ledger-key to the
+    # /etc/virtrigaud/host-ledger-key (mode 0400, readable by the manager
+    # through the pod's fsGroup); pass
+    # --dev-host-ledger-key-dir=/etc/virtrigaud/host-ledger-key and
+    # --dev-host-ledger-key-secret=<release namespace>/<name> to the
     # development manager with the other enrolment flags. The chart grants
     # no principal Secret access in the release namespace for it (the
-    # kubelet mounts it). Development builds only: the manager keeps the
+    # kubelet mounts it). Rendering fails when the release namespace is the
+    # enrolment namespace or is listed in rbac.secrets.providerNamespaces or
+    # workloadNamespaces. Development builds only: the manager keeps the
     # host ledger objects with it, but signs nothing from them yet.
     ledgerKeySecret: ""
   # Inventory Secret watch of the clustered Provider for per-host agents

@@ -30,9 +30,12 @@ import (
 // A release build refuses the host ledger key directory, and loads no keys
 // without one.
 func TestLoadHostLedgerKeys_ReleaseBuild(t *testing.T) {
-	_, err := LoadHostLedgerKeys(t.TempDir(), true)
+	cfg := &HostEnrolmentConfig{Namespace: "host-agent-pki"}
+	_, err := LoadHostLedgerKeys(t.TempDir(), "virtrigaud-system/host-ledger-key", cfg)
 	require.ErrorIs(t, err, devgate.ErrNotCompiled)
-	k, err := LoadHostLedgerKeys("", true)
+	_, err = LoadHostLedgerKeys("", "virtrigaud-system/host-ledger-key", cfg)
+	require.ErrorIs(t, err, devgate.ErrNotCompiled)
+	k, err := LoadHostLedgerKeys("", "", cfg)
 	require.NoError(t, err)
 	assert.Nil(t, k)
 }

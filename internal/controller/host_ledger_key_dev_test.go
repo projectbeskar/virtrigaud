@@ -39,24 +39,36 @@ func TestLoadHostLedgerKeys_DevelopmentBuild(t *testing.T) {
 	write(HostLedgerKeyCurrentFile, cur)
 	write(HostLedgerKeyIdentityFile, ident)
 
-	_, err := LoadHostLedgerKeys(dir, false)
+	cfg := &HostEnrolmentConfig{Namespace: "host-agent-pki"}
+	const ref = "virtrigaud-system/host-ledger-key"
+	_, err := LoadHostLedgerKeys(dir, ref, nil)
 	require.Error(t, err, "the keys need per-host agent enrolment")
+	_, err = LoadHostLedgerKeys(dir, "", cfg)
+	require.ErrorIs(t, err, errHostLedgerKeys, "the key Secret is named with the directory")
+	_, err = LoadHostLedgerKeys("", ref, cfg)
+	require.ErrorIs(t, err, errHostLedgerKeys)
+	_, err = LoadHostLedgerKeys(dir, "host-agent-pki/host-ledger-key", cfg)
+	require.ErrorIs(t, err, errHostLedgerKeys, "never in the enrolment namespace")
+	_, err = LoadHostLedgerKeys(dir, "not a reference", cfg)
+	require.ErrorIs(t, err, errHostLedgerKeys)
 
-	k, err := LoadHostLedgerKeys(dir, true)
+	k, err := LoadHostLedgerKeys(dir, ref, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, hostLedgerKeyID(cur), k.CurrentKeyID())
 	assert.Empty(t, k.PreviousKeyID())
+	require.NotNil(t, cfg.LedgerKeySecret, "the Secret access check reviews the key Secret")
+	assert.Equal(t, ref, cfg.LedgerKeySecret.String())
 
 	write(HostLedgerKeyPreviousFile, prev)
-	k, err = LoadHostLedgerKeys(dir, true)
+	k, err = LoadHostLedgerKeys(dir, ref, cfg)
 	require.NoError(t, err)
 	assert.Equal(t, hostLedgerKeyID(prev), k.PreviousKeyID())
 
 	require.NoError(t, os.Remove(filepath.Join(dir, HostLedgerKeyIdentityFile)))
-	_, err = LoadHostLedgerKeys(dir, true)
+	_, err = LoadHostLedgerKeys(dir, ref, cfg)
 	require.ErrorIs(t, err, errHostLedgerKeys, "the identity key is required")
 
 	write(HostLedgerKeyIdentityFile, cur)
-	_, err = LoadHostLedgerKeys(dir, true)
+	_, err = LoadHostLedgerKeys(dir, ref, cfg)
 	require.ErrorIs(t, err, errHostLedgerKeys, "the identity key must differ from the tag keys")
 }

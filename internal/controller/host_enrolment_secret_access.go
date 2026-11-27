@@ -90,6 +90,11 @@ var secretDataVerbs = []string{"get", "list", "watch", "update", "patch", "delet
 // watch with a metadata.name field selector.
 var namedSecretDataVerbs = []string{"get", "list", "watch", "update", "patch", "delete"}
 
+// ledgerKeyReadVerbs are the verbs reviewed on the host ledger key Secret
+// and on every Secret of its namespace: the manager reads the keys from its
+// mounted volume only, never through the API.
+var ledgerKeyReadVerbs = []string{"get", "list", "watch"}
+
 // namespaceSecretDataVerbs are the verbs reviewed on every Secret of the
 // sub-CA key namespace (a named review already covers get).
 var namespaceSecretDataVerbs = []string{"list", "watch", "update", "patch", "delete", "deletecollection"}
@@ -190,6 +195,13 @@ func hostEnrolmentSecretReviews(cfg *HostEnrolmentConfig) []accessReview {
 		}
 		for _, verb := range podWriteVerbs {
 			reviews = append(reviews, newAccessReview("", podsResource, "", verb, key.Namespace, ""))
+		}
+	}
+	if key := cfg.LedgerKeySecret; key != nil {
+		for _, verb := range ledgerKeyReadVerbs {
+			reviews = append(reviews,
+				newAccessReview("", secretsResource, "", verb, key.Namespace, key.Name),
+				newAccessReview("", secretsResource, "", verb, key.Namespace, ""))
 		}
 	}
 	for _, verb := range nodeProxyVerbs {
@@ -346,6 +358,27 @@ func forbiddenInRules(rules []authorizationv1.ResourceRule, forbidden []forbidde
 	return found
 }
 
+// reviewRulesIn lists the manager's rules in namespace with a
+// SelfSubjectRulesReview and returns the forbidden accesses they grant.
+// Rules that cannot be listed completely are an error
+// (ErrHostEnrolmentRulesIncomplete).
+func reviewRulesIn(ctx context.Context, c client.Client, namespace string, forbidden []forbiddenRule) ([]string, error) {
+	review := &authorizationv1.SelfSubjectRulesReview{Spec: authorizationv1.SelfSubjectRulesReviewSpec{Namespace: namespace}}
+	if err := c.Create(ctx, review); err != nil {
+		return nil, fmt.Errorf("list the manager's RBAC rules in namespace %s: %w", namespace, err)
+	}
+	if review.Status.Incomplete || review.Status.EvaluationError != "" {
+		return nil, fmt.Errorf("%w in namespace %s (incomplete: %t, evaluation error: %q); per-host agent enrolment refuses to run "+
+			"without them, because a grant limited to named objects could go unseen",
+			ErrHostEnrolmentRulesIncomplete, namespace, review.Status.Incomplete, review.Status.EvaluationError)
+	}
+	found := forbiddenInRules(review.Status.ResourceRules, forbidden)
+	for i := range found {
+		found[i] += " in namespace " + namespace
+	}
+	return found, nil
+}
+
 // reviewManagerRules lists the manager's rules with a
 // SelfSubjectRulesReview, in the sub-CA key Secret's namespace or, with no
 // key Secret declared, in the enrolment namespace (cluster-wide rules appear
@@ -405,10 +438,19 @@ func CheckHostEnrolmentSecretAccess(ctx context.Context, c client.Client, cfg *H
 	// With an allowed access already found, the refusal names it even when
 	// the rules could not be listed.
 	allowed = append(allowed, inRules...)
+	if key := cfg.LedgerKeySecret; key != nil {
+		keyRules, kerr := reviewRulesIn(ctx, c, key.Namespace,
+			[]forbiddenRule{{resource: secretsResource, verbs: ledgerKeyReadVerbs}})
+		if kerr != nil && len(allowed) == 0 {
+			return kerr
+		}
+		allowed = append(allowed, keyRules...)
+	}
 	if len(allowed) > 0 {
 		return fmt.Errorf("%w: it may %s; per-host agent enrolment needs the namespaced Secret grant "+
 			"(Helm rbac.secrets.scope=namespaced, see docs/manager-secret-access.md), no Secret access in the sub-CA key's namespace "+
-			"and no grant that lets the manager impersonate, mint tokens, change role bindings or enter pods in that namespace",
+			"no grant that lets the manager impersonate, mint tokens, change role bindings or enter pods in that namespace, "+
+			"and no Secret read in the host ledger key's namespace",
 			ErrHostEnrolmentSecretAccess, strings.Join(allowed, ", "))
 	}
 	return nil
