@@ -395,4 +395,8 @@ func TestReceiptTag_BindsAttempt(t *testing.T) {
 	edited.Receipt = &rc
 	assert.False(t, r.receiptBound(vm, &edited), "edited")
 	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptReceiptTagContext, operation.ReceiptAuthContext)
+	unstamped := *vr
+	unstamped.generation = 0
+	assert.Zero(t, r.recordReceipt(vm, got, &unstamped).LedgerGeneration,
+		"the display generation is left unset for an intent without one")
 }

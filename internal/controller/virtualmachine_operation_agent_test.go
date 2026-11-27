@@ -555,6 +555,81 @@ func TestAgentIdentity_LedgerReplacedHostRebinds(t *testing.T) {
 	assert.Equal(t, infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested, rec.AttestationState)
 }
 
+// A Create whose reply (and receipt) is lost: the agent's verified answer
+// that it accepted the operation, in the ledger's adopted session, is
+// recorded on the marker as its receipt (Accepted, tagged) before the
+// ledger and the mark are raised over it, so a re-send then sets
+// expect_known; the agent runs the Create exactly once.
+func TestAgentIdentity_LostReceiptRecordedFromAnswer(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	e.lie.set(func(l *lyingProvider) { l.dropCreateReply = true })
+	_, err := e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	vm := e.vm(t)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseAccepted, a.Phase, "the accepted answer stands for the lost receipt")
+	require.NotNil(t, a.Receipt)
+	assert.True(t, e.r.receiptBound(vm, a))
+	p, found, err := e.r.loadIntent(ctx, vm, a.OpID, e.provider.Namespace)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.EqualValues(t, p.LedgerGeneration, a.LedgerGeneration, "the display generation mirrors the intent's")
+	ia := identityAttempt{providerCR: e.provider}
+	assert.True(t, e.r.expectKnown(ctx, vm, ia, a, p), "a re-send expects the agent to know the operation")
+	e.waitCreated(t)
+	assert.Equal(t, 1, e.createOps(t))
+}
+
+// A receipt is recorded only for the host's current store, bound to this
+// Host object, not archived, in the ledger's adopted session.
+func TestAgentIdentity_ReceiptOnlyOnTheBoundCurrentLedger(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	ia := identityAttempt{providerCR: e.provider, reader: e.cli}
+	st := e.r.HostAnswers.ledgerOf(e.provider, agentHost)
+	p := contracts.PreparedOperation{LedgerGeneration: st.generation}
+	good := hostidentity.VerifiedReceipt{StoreID: st.store, Seq: 1, AttestationID: st.session}
+	require.NotNil(t, e.r.receiptOnLedger(ctx, ia, agentHost, good, p))
+	otherSession := good
+	otherSession.AttestationID = [16]byte{1}
+	assert.Nil(t, e.r.receiptOnLedger(ctx, ia, agentHost, otherSession, p), "another session")
+	otherStore := good
+	otherStore.StoreID = [16]byte{2}
+	assert.Nil(t, e.r.receiptOnLedger(ctx, ia, agentHost, otherStore, p), "another store")
+	lh, err := e.ledger.resolve(ctx, e.provider, agentHost)
+	require.NoError(t, err)
+	_, err = e.ledger.archive(ctx, lh, st.store, [16]byte{0xff})
+	require.NoError(t, err)
+	assert.Nil(t, e.r.receiptOnLedger(ctx, ia, agentHost, good, p), "an archived ledger")
+}
+
+// For a host the host ledger drives, an operation answer from a session
+// other than the ledger's adopted one (the agent restarted) is no answer;
+// once the agent is attested again, its answers count.
+func TestAgentIdentity_AnswerOutsideAdoptedSessionIsNoAnswer(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	_, err := e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	vm := e.vm(t)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	p, found, err := e.r.loadIntent(ctx, vm, a.OpID, e.provider.Namespace)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NoError(t, e.host.Stop())
+	_, _ = e.host.Wait(10 * time.Second)
+	require.NoError(t, e.host.Restart())
+	ia := identityAttempt{providerCR: e.provider, reader: e.cli}
+	poll := e.r.pollSigned(ctx, vm, ia, refOf(p))
+	assert.Equal(t, answerNone, poll.verdict, "the restarted agent's session is not the adopted one")
+	require.Eventually(t, func() bool {
+		return e.r.pollSigned(ctx, vm, ia, refOf(p)).verdict == answerVerified
+	}, 20*time.Second, 300*time.Millisecond, "answers count again once the agent is attested again")
+}
+
 // A lying Provider that strips the agent's answers and reports an unsigned
 // RETIRED never makes the manager mint a second attempt.
 func TestAgentIdentity_LyingProviderNoSecondAttempt(t *testing.T) {

@@ -121,6 +121,11 @@ func TestVerifyAnswer_LedgerOperationAnswer(t *testing.T) {
 	if _, err := hostidentity.VerifyAnswer(f.signBody(t, a), f.ledgerExp(hostidentity.BodyTypeOperationAnswer)); err == nil {
 		t.Fatal("an accepted head of an operation that is not accepted verified")
 	}
+	a.State = providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED
+	a.AcceptedSeq = 8 // the chain position is 7
+	if _, err := hostidentity.VerifyAnswer(f.signBody(t, a), f.ledgerExp(hostidentity.BodyTypeOperationAnswer)); err == nil {
+		t.Fatal("an accepted sequence number above the chain position verified")
+	}
 }
 
 func (f *answerFixture) challengeAnswer() *providerv1.ChallengeAnswer {

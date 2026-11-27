@@ -117,7 +117,7 @@ func checkLedgerAnswer(out *VerifiedAnswer, exp AnswerExpectation) error {
 		}
 		out.Ledger = l
 	case out.Operation != nil:
-		if err := checkOperationLedger(out.Operation); err != nil {
+		if err := checkOperationLedger(out.Operation, out.Position); err != nil {
 			return err
 		}
 	case out.Challenge != nil:
@@ -185,13 +185,15 @@ func checkLedgerState(l *providerv1.HostLedgerState, c *providerv1.AnswerContext
 
 // checkOperationLedger applies the rules of an operation answer's ledger
 // fields (12 to 14), as the agent does before it signs.
-func checkOperationLedger(a *providerv1.OperationAnswer) error {
+func checkOperationLedger(a *providerv1.OperationAnswer, pos ChainPosition) error {
 	accepted := a.GetState() == providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED
 	switch {
 	case len(a.GetAcceptedHead()) > 0 && (len(a.GetAcceptedHead()) != ledgerHeadLen || a.GetAcceptedSeq() == 0 || !accepted):
 		return refuse("an accepted head without an accepted operation and its sequence number")
 	case a.GetAwaitingRequest() && (a.GetAcceptedSeq() == 0 || !accepted):
 		return refuse("awaiting_request for an operation that is not accepted")
+	case a.GetAcceptedSeq() > pos.Seq:
+		return refuse("the accepted sequence number is above the answer's chain position")
 	case a.GetAcceptedSeq() != 0 && !showsRecordState(a.GetState()):
 		return refuse("an accepted sequence number without a record")
 	}

@@ -209,17 +209,15 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 	if verdict == answerVerified && v.Ready() && showsRecord(v.Operation.GetState()) {
 		r.HostAnswers.setRecordAnchored(ia.providerCR, host, opIDHex, true)
 	}
-	if verdict == answerVerified && hr.ledgerVersion > 0 {
-		// An answer showing the operation accepted, with its acceptance
-		// position, in the ledger's session is as good as its receipt (a
-		// reply that was lost): the ledger and the mark are raised over it.
-		r.HostAnswers.ledgerAccepted(ctx, ia.providerCR, ia.reader, host, v)
-		// An agent that is not attested in the ledger's adopted session (it
-		// restarted) is attested again before anything it answers moves the
+	if verdict == answerVerified && hr.ledgerVersion > 0 && !r.HostAnswers.inLedgerSession(ia.providerCR, host, v) {
+		// A host the host ledger drives answers definitely only from the
+		// ledger's adopted session: an answer from any other session (an
+		// agent that restarted, a session not yet adopted) is no answer, and
+		// the agent is attested again before anything it answers moves the
 		// attempt.
-		if !r.HostAnswers.inLedgerSession(ia.providerCR, host, v) {
-			r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
-		}
+		logger.Info("The host's answer is not from its ledger's adopted session; it is attested again first", "host", host)
+		r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
+		return opPoll{verdict: answerNone, read: read}
 	}
 	return opPoll{verdict: verdict, v: v, read: read}
 }
@@ -257,7 +255,19 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 	switch st := poll.state(); st {
 	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED, providerv1.OperationRecordState_OPERATION_RECORD_STATE_EXECUTING:
 		cur := a
-		if !attemptDelivered(a.Phase) {
+		if vr := r.acceptedAnswerReceipt(ctx, ia, a, prepared, poll); vr != nil {
+			// The answer stands for the operation's receipt (its reply was
+			// lost): it is recorded on the marker first, as a send's receipt
+			// is, then the ledger and the agent's mark are raised over it.
+			if a.Receipt == nil {
+				m, err := r.markSentWith(ctx, vm, a, nil, vr)
+				if err != nil {
+					return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+				}
+				cur = m
+			}
+			r.HostAnswers.ledgerReceipt(ctx, ia.providerCR, ia.reader, a.HostID, vr.receipt)
+		} else if !attemptDelivered(a.Phase) {
 			m, err := r.markSent(ctx, vm, a, nil)
 			if err != nil {
 				return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil

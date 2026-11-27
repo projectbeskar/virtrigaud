@@ -615,6 +615,17 @@ func (h *HostAnswers) DriveHostLedger(ctx context.Context, provider *infravirtri
 	}
 }
 
+// currentStore returns the store the host's last verified host answer
+// named (zero when none).
+func (h *HostAnswers) currentStore(provider *infravirtrigaudiov1beta1.Provider, hostID string) [16]byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := h.hosts[hostAnswerKey(provider, hostID)]; s != nil {
+		return s.hostAnswerStore
+	}
+	return [16]byte{}
+}
+
 // LedgerStamp returns the host ledger (store and generation) a new attempt
 // on the host is prepared under: the one the driver saw the host attested
 // in; ok is false when the host is not ready for grant version 2.

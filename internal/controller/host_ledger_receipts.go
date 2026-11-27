@@ -71,7 +71,10 @@ func receiptMessage(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrig
 		[]byte(rc.StoreID), []byte(strconv.FormatInt(rc.Seq, 10)), []byte(rc.Head), []byte(rc.AttestationID))
 }
 
-// receiptTag is the hex tag binding rc to attempt a of vm.
+// receiptTag is the hex tag binding rc to attempt a of vm. It is an HMAC
+// under the intent key (the operation intent authenticator), separated from
+// intent and task tags by its own context prefix (operation.ReceiptMessage),
+// so a receipt tag never verifies as either, nor the converse.
 func (r *VirtualMachineReconciler) receiptTag(vm *infravirtrigaudiov1beta1.VirtualMachine, a *infravirtrigaudiov1beta1.OperationAttempt,
 	rc *infravirtrigaudiov1beta1.OperationAttemptReceipt) string {
 	return hex.EncodeToString(r.OperationIntentAuth.SealIntent(receiptMessage(vm, a, rc)))
@@ -184,16 +187,54 @@ func (r *VirtualMachineReconciler) acceptReceipt(ctx context.Context, vm *infrav
 		logger.Info("The operation receipt did not verify; it is not recorded", "check", err.Error())
 		return nil
 	}
-	rec, err := l.Load(ctx, ia.providerCR, a.HostID, vr.StoreID)
-	if err != nil || rec.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested ||
-		rec.AttestationID != vr.AttestationID {
-		logger.Info("The operation receipt is not of the host ledger's store and adopted session; it is not recorded")
+	return r.receiptOnLedger(ctx, ia, a.HostID, vr, p)
+}
+
+// receiptOnLedger returns the verified receipt vr of an attempt prepared as
+// p in its marker form, or nil when it is not of the host ledger the host
+// is in now: the ledger of vr's store must be bound to the Host object the
+// host id names, not archived, Attested in vr's session, and of the store
+// the host's last verified host answer named.
+func (r *VirtualMachineReconciler) receiptOnLedger(ctx context.Context, ia identityAttempt, host string,
+	vr hostidentity.VerifiedReceipt, p contracts.PreparedOperation) *verifiedReceipt {
+	rec, err := r.HostAnswers.Ledger.LoadBound(ctx, ia.providerCR, host, vr.StoreID)
+	if err != nil || rec.Archived || rec.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested ||
+		rec.AttestationID != vr.AttestationID || r.HostAnswers.currentStore(ia.providerCR, host) != vr.StoreID {
+		log.FromContext(ctx).Info("The operation receipt is not of the host ledger's bound store and adopted session; it is not recorded",
+			"host", host)
 		return nil
 	}
-	return &verifiedReceipt{receipt: vr, generation: rec.Generation, marker: &infravirtrigaudiov1beta1.OperationAttemptReceipt{
+	// The receipt record keeps what the tag must cover and what deciding
+	// whether it counts as ledgered needs (store, position, session); the
+	// head is kept because the schema requires it, and it is a public chain
+	// digest. The display generation is the one the attempt's authenticated
+	// intent covers, left unset when the intent has none.
+	return &verifiedReceipt{receipt: vr, generation: p.LedgerGeneration, marker: &infravirtrigaudiov1beta1.OperationAttemptReceipt{
 		StoreID: hex.EncodeToString(vr.StoreID[:]), Seq: int64(vr.Seq), // #nosec G115 -- a chain sequence number
 		Head: hex.EncodeToString(vr.Head[:]), AttestationID: hex.EncodeToString(vr.AttestationID[:]),
 	}}
+}
+
+// acceptedAnswerReceipt returns, for attempt a prepared as p, the receipt
+// that a verified operation answer bound to the attempt stands for: the
+// operation ACCEPTED with its acceptance position, in the host ledger's
+// adopted session of the host's current, bound store (a reply whose receipt
+// was lost). nil when the answer is no such evidence.
+func (r *VirtualMachineReconciler) acceptedAnswerReceipt(ctx context.Context, ia identityAttempt,
+	a *infravirtrigaudiov1beta1.OperationAttempt, p contracts.PreparedOperation, poll opPoll) *verifiedReceipt {
+	op := poll.v.Operation
+	if r.HostAnswers.Ledger == nil || poll.verdict != answerVerified || op == nil || !poll.v.Ready() ||
+		op.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED || op.GetAcceptedSeq() == 0 ||
+		len(op.GetAcceptedHead()) != 32 {
+		return nil
+	}
+	session, ok := sessionOf(poll.v.Context)
+	if !ok {
+		return nil
+	}
+	vr := hostidentity.VerifiedReceipt{StoreID: poll.v.Position.StoreID, Seq: op.GetAcceptedSeq(), AttestationID: session}
+	copy(vr.Head[:], op.GetAcceptedHead())
+	return r.receiptOnLedger(ctx, ia, a.HostID, vr, p)
 }
 
 // recordReceipt returns sent with the verified receipt vr recorded and
@@ -212,6 +253,7 @@ func (r *VirtualMachineReconciler) recordReceipt(vm *infravirtrigaudiov1beta1.Vi
 		}
 		sent.Phase = infravirtrigaudiov1beta1.OperationAttemptPhaseAccepted
 	}
+	sent.LedgerGeneration = 0
 	if vr.generation > 0 {
 		sent.LedgerGeneration = int64(vr.generation) // #nosec G115 -- a generation is a Unix time or a small counter
 	}
@@ -235,23 +277,6 @@ func (r *VirtualMachineReconciler) signedSend(ctx context.Context, vm *infravirt
 		p.ExpectKnown = r.expectKnown(ctx, vm, ia, a, *p)
 	}
 	return ia.sender.SendOperation(ctx, *p)
-}
-
-// ledgerAccepted raises the host's ledger and mark over an operation a
-// verified operation answer v shows accepted, with its acceptance position,
-// in the ledger's adopted session (an answer equivalent to the operation's
-// receipt).
-func (h *HostAnswers) ledgerAccepted(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, reader contracts.HostAnswerReader,
-	hostID string, v hostidentity.VerifiedAnswer) {
-	op := v.Operation
-	session, ok := sessionOf(v.Context)
-	if h.Ledger == nil || op == nil || !ok || op.GetAcceptedSeq() == 0 || len(op.GetAcceptedHead()) != 32 ||
-		op.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED {
-		return
-	}
-	vr := hostidentity.VerifiedReceipt{StoreID: v.Position.StoreID, Seq: op.GetAcceptedSeq(), AttestationID: session}
-	copy(vr.Head[:], op.GetAcceptedHead())
-	h.ledgerReceipt(ctx, provider, reader, hostID, vr)
 }
 
 // ledgerReceipt raises the host's ledger to a verified receipt and then the
