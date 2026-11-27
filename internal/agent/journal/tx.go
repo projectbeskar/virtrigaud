@@ -374,6 +374,86 @@ func (t *Tx) RecordEnrolmentActivation(enrolmentID []byte, firstEnrolment bool) 
 	return nil
 }
 
+// StoreAttestation is a store's attestation record: whether the store has
+// ever been attested against a host ledger, and the first attestation's
+// facts. It is written once, by RecordFirstAttestation, and never changed.
+type StoreAttestation struct {
+	// EverAttested is true once the store's first attestation is recorded.
+	EverAttested bool
+	// FirstSeq is the ledger position sequence number of the first
+	// attestation; 0 while EverAttested is false.
+	FirstSeq uint64
+	// FirstEnrolmentID is the active enrolment when the store was first
+	// attested; nil while EverAttested is false or when none was active.
+	FirstEnrolmentID []byte
+	// RecordSeq is the chain sequence number of the transaction that wrote
+	// the record; 0 while EverAttested is false.
+	RecordSeq uint64
+}
+
+// StoreAttestation returns the store's attestation record as recorded in
+// this transaction's snapshot.
+func (t *Tx) StoreAttestation() (StoreAttestation, error) {
+	meta, err := t.storeMeta()
+	if err != nil {
+		return StoreAttestation{}, err
+	}
+	if !meta.GetEverAttested() {
+		return StoreAttestation{}, nil
+	}
+	a := StoreAttestation{EverAttested: true, FirstSeq: meta.GetFirstAttestedSeq(), RecordSeq: meta.GetAttestedRecordSeq()}
+	if len(meta.GetFirstAttestedEnrolmentId()) != 0 {
+		a.FirstEnrolmentID = append([]byte(nil), meta.GetFirstAttestedEnrolmentId()...)
+	}
+	return a, nil
+}
+
+// RecordFirstAttestation records, in this transaction, that the store has
+// been attested: ledgerSeq is the ledger position sequence number of the
+// attestation (at least 1) and enrolmentID the store's active enrolment (16
+// bytes, or empty when none is active). It writes only when the store
+// records no attestation yet, and then reports true; a store that already
+// records one keeps it unchanged (the record is never cleared or
+// rewritten), writes nothing and reports false, so a transaction that does
+// nothing else commits nothing. The record names this transaction's chain
+// sequence number, so a store rolled back below it has lost a commit the
+// anchor log and the manager's ledger know of.
+func (t *Tx) RecordFirstAttestation(ledgerSeq uint64, enrolmentID []byte) (recorded bool, err error) {
+	if !t.writable {
+		return false, errReadOnly
+	}
+	if ledgerSeq == 0 {
+		return false, errors.New("journal: an attestation at ledger position 0")
+	}
+	if len(enrolmentID) != 0 && len(enrolmentID) != len(t.storeID) {
+		return false, fmt.Errorf("journal: attested enrolment id is %d bytes, not %d", len(enrolmentID), len(t.storeID))
+	}
+	meta, err := t.storeMeta()
+	if err != nil {
+		return false, err
+	}
+	if meta.GetEverAttested() && !guard.Off(guard.AttestRecordNeverRewritten) {
+		return false, nil
+	}
+	meta.EverAttested = true
+	meta.FirstAttestedSeq = ledgerSeq
+	meta.FirstAttestedEnrolmentId = append([]byte(nil), enrolmentID...)
+	meta.AttestedRecordSeq = t.seq
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(meta)
+	if err != nil {
+		return false, fmt.Errorf("journal: encode store meta: %w", err)
+	}
+	mb, err := t.bucket(bucketMeta)
+	if err != nil {
+		return false, err
+	}
+	if err := mb.Put(keyStoreMeta, b); err != nil {
+		return false, fmt.Errorf("journal: write store meta: %w", err)
+	}
+	t.writes = append(t.writes, write{op: writePut, bucket: bucketMeta, key: keyStoreMeta, value: b})
+	return true, nil
+}
+
 // storeMeta decodes the store meta of this transaction's snapshot.
 func (t *Tx) storeMeta() (*journalpb.StoreMeta, error) {
 	m := t.btx.Bucket([]byte(bucketMeta))
