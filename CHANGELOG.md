@@ -5,6 +5,39 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-27 21:30] - Host ledger driver: attestation, grant version 2, receipts and ledger marks (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/hostidentity/ledger.go`, `internal/hostidentity/answer.go`: Verification of the host ledger fields of signed answers. An answer to a request that asked for a ledger version must echo it, and its ledger fields must follow the agent's own signing rules. A host answer must carry its ledger state. Challenge and authority answers are verified against the request's purpose, grant kind and grant digest. Operation receipts are verified against the attempt and the grant of the call. `LedgerEvidence` is a typed value only a verified answer yields; it carries the store, request nonce, Provider, host and enrolment.
+- `internal/providers/contracts/host_authority.go`, `internal/transport/grpc/client_authority.go`: `HostAuthorityCaller`. The client asks for attestation challenges, and mints and delivers attestation and ledger mark grants over exactly what an order names. A release build or a client without a signer refuses and sends nothing.
+- `internal/transport/grpc/client_operation.go`, `internal/transport/grpc/client_answer.go`: The signed path sends `ledger_version`, signs at the grant version and `expect_known` chosen for each send, and returns the relayed receipt and the digest of the grant it sent.
+- `internal/controller/host_ledger_driver.go`: The attestation driver. It starts or rebinds a store's ledger from the answer's evidence and challenges an agent that awaits attestation, or one attested in a session the ledger does not hold (at most once a minute). It adopts a pending session on any verified nonce-bound answer and holds a host whose agent reports its store quarantined. Attestation grants are signed only from the ledger record of the manager's own write, after re-reading the object (`sendAttest`). Ledger marks are signed only from the manager's own last write (`sendLedgerMark`). Authority and operation traffic draw from separate token buckets.
+- `internal/controller/host_ledger_receipts.go`: A verified receipt moves the attempt to `Accepted` with a tagged receipt record, raises the ledger and then the agent's mark. An answer showing the operation accepted counts as its receipt. A re-send sets `expect_known` when the recorded receipt counts as ledgered.
+- `internal/controller/host_ledger_evidence.go`: A ledger is started only from the latest observed evidence of the store and the host's current enrolment, younger than the host answer lifetime.
+- `internal/controller/host_ledger_preflight.go`, `cmd/manager/main.go`: The upgrade pre-flight. A stopping manager persists every host's latest verified store position.
+
+### Changed
+- `internal/controller/host_ledger_ops.go`: `Initialise` takes `HostLedgerInit{StoreID, Evidence}` instead of loose origin, continuity and attestation values.
+- `internal/controller/host_answers.go`, `internal/controller/virtualmachine_operation_*.go`: A host whose agent speaks the host ledger protocol gets grant version 2 only while it is attested in the ledger's adopted session, and never version 1. Older agents keep version 1. Without host ledger keys nothing changes.
+- `internal/controller/operation_intent.go`, `internal/operation/intent_auth.go`: An attempt for such a host records the ledger store and generation in its intent Secret, covered by its tag under a second intent message version. Continuity with the ledger is decided on those authenticated values only.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`, `config/crd/bases/infra.virtrigaud.io_virtualmachines.yaml`: Comments only. `Accepted`, `receipt` and `ledgerGeneration` are written by development-build managers with a host ledger.
+- `internal/controller/virtualmachine_operation_agent_test.go`, `test/conformance/clustered/agenttarget/`: The agent identity tests run again against a real agent, with the manager attesting and marking it.
+- `docs/operation-grants-wire-shape.md`, `docs/per-host-agent-development.md`, `docs/host-agent-enrolment.md`, `docs/operation-grants-manager.md`: The manager driver, the upgrade order and the pre-flight.
+
+### Security
+- No ledger start without verifier-built evidence of the store and the latest request. No attestation grant without a ledger object of the store. No ledger mark except from the manager's own write. No grant version 2 for an unattested host. A receipt record can only make a re-send more cautious. Keys, tags, MACs, chain heads and session ids are never logged or put in status or events.
+
+### Why
+The agent side of the host ledger protocol was complete, but no manager signed for it, so a development-build agent ran no operation. This slice makes the manager drive it end to end, within the safety rules of the ledger state that was already merged.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds with host ledger keys only. Release builds and managers without host ledger keys behave as before. Upgrade order: Providers, then agents, then the manager.
+
 ## [2026-11-27 06:00] - Host ledger state: start a ledger only for a store the agent signs was never attested (development builds only, not yet driven)
 **Author:** @wrkode (William Rizzo)
 
