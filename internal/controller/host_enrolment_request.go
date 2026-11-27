@@ -111,6 +111,18 @@ type HostEnrolmentRequestReconciler struct {
 	// server, so a renewal is never denied or withdrawn on a stale cache
 	// (nil: the Client; tests only).
 	APIReader client.Reader
+
+	// identityIndexed reports that the Client's cache indexes Hosts by
+	// identity (SetupWithManager); otherwise identities are listed live.
+	identityIndexed bool
+}
+
+// identityCache returns the cached reader with the identity index, or nil.
+func (r *HostEnrolmentRequestReconciler) identityCache() client.Reader {
+	if r.identityIndexed {
+		return r.Client
+	}
+	return nil
 }
 
 // liveReader returns the APIReader, or the Client when none is set.
@@ -314,14 +326,21 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if host.Spec.Revoked {
 		return r.deny(ctx, cr, host, nil, reasonEnrolHostRevoked, "the Host is revoked")
 	}
-	if others, err := hostsWithIdentity(ctx, r.liveReader(), host); err != nil {
-		return err
-	} else if others > 0 {
-		return r.deny(ctx, cr, host, nil, reasonEnrolIdentityInUse, "another Host that is not revoked carries the same spec.identity")
-	}
 	l, err := loadHostEnrolment(ctx, r.Client, r.Config, host)
 	if err != nil {
 		return err
+	}
+	if l.state.Current == nil {
+		// A Host that holds no enrolment is not enrolled while another live
+		// Host claims its identity (the first holder wins); the denial says
+		// no more than that.
+		dups, err := hostsWithIdentity(ctx, r.liveReader(), r.identityCache(), host)
+		if err != nil {
+			return err
+		}
+		if len(dups) > 0 {
+			return r.deny(ctx, cr, host, nil, reasonEnrolRefused, "no enrolment can be authorised for this Host now")
+		}
 	}
 	if l.reset {
 		// The Host reconciler discards the stale state; until then there is
@@ -631,6 +650,10 @@ func (r *HostEnrolmentRequestReconciler) event(host *infravirtrigaudiov1beta1.Ho
 // manager's cache must restrict CertificateRequests to the enrolment
 // namespace (HostEnrolmentCacheOptions).
 func (r *HostEnrolmentRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexHostIdentity(mgr); err != nil {
+		return err
+	}
+	r.identityIndexed = true
 	inEnrolmentNS := predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetNamespace() == r.Config.Namespace })
 	isPins := predicate.NewPredicateFuncs(func(o client.Object) bool {
 		return o.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent

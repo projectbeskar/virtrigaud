@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -105,24 +106,46 @@ var _ = Describe("Unique host identity at enrolment (envtest)", func() {
 		return got, &l.state
 	}
 
-	It("draws no record while another live Host carries the identity, in any namespace", func() {
+	newHostWith := func(ns, name, ident, provider string) *infravirtrigaudiov1beta1.Host {
+		h := &infravirtrigaudiov1beta1.Host{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: infravirtrigaudiov1beta1.HostSpec{
+				ProviderRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: provider},
+				PoolRef:     infravirtrigaudiov1beta1.LocalObjectReference{Name: "pool"},
+				Endpoint:    "grpc://" + name + ":7443", Identity: ident, Schedulable: true,
+			},
+		}
+		Expect(k8sClient.Create(ctx, h)).To(Succeed())
+		return h
+	}
+
+	condOf := func(h *infravirtrigaudiov1beta1.Host, typ string) *metav1.Condition {
+		return meta.FindStatusCondition(h.Status.Conditions, typ)
+	}
+
+	It("refuses a claimant generically, lets the first holder keep its enrolment, and ignores case and other Provider types", func() {
 		a := newHost(hostNS, "a")
-		b := newHost(otherNS, "b")
+		b := newHostWith(otherNS, "b", strings.ToUpper(identity), "ch")
 		for _, h := range []*infravirtrigaudiov1beta1.Host{a, b} {
 			got, st := reconcile(h)
-			Expect(st.Pending).To(BeNil(), "no record for a duplicated identity")
-			c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled)
+			Expect(st.Pending).To(BeNil(), "no record for a duplicated identity (compared without case)")
+			c := condOf(got, infravirtrigaudiov1beta1.HostConditionAgentEnrolled)
 			Expect(c).NotTo(BeNil())
-			Expect(c.Reason).To(Equal(reasonEnrolIdentityInUse))
-			Expect(c.Message).NotTo(ContainSubstring(identity), "the identity is not echoed")
+			Expect(c.Reason).To(Equal(reasonEnrolRefused))
+			Expect(strings.ToLower(c.Message)).NotTo(ContainSubstring(identity), "the identity is not echoed")
+			Expect(c.Message).NotTo(ContainSubstring("in use"), "a claimant learns nothing about the identity's use")
+			Expect(condOf(got, HostConditionAgentIdentityDuplicated)).To(BeNil(), "not shown to a Host that holds nothing")
 		}
-		found := false
 		for len(rec.Events) > 0 {
 			e := <-rec.Events
-			found = found || strings.Contains(e, reasonEnrolIdentityInUse)
 			Expect(e).NotTo(ContainSubstring(otherNS), "the other Host is not named")
+			Expect(strings.ToLower(e)).NotTo(ContainSubstring(identity))
 		}
-		Expect(found).To(BeTrue())
+
+		// A Host of a Provider that runs no per-host agent does not count.
+		lv := envtestProvider(otherNS, "lv", nil)
+		Expect(k8sClient.Create(ctx, lv)).To(Succeed())
+		newHostWith(otherNS, "libvirt-host", identity, "lv")
 
 		// Revoking one lets the other enrol.
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(b), b)).To(Succeed())
@@ -130,16 +153,37 @@ var _ = Describe("Unique host identity at enrolment (envtest)", func() {
 		Expect(k8sClient.Update(ctx, b)).To(Succeed())
 		got, st := reconcile(a)
 		Expect(st.Pending).NotTo(BeNil())
-		c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.HostConditionAgentEnrolled)
-		Expect(c.Reason).To(Equal(infravirtrigaudiov1beta1.HostReasonAgentAwaitingRequest))
+		Expect(condOf(got, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).To(Equal(infravirtrigaudiov1beta1.HostReasonAgentAwaitingRequest))
 
-		// A later duplicate does not take the drawn record away here (its
-		// request is denied instead); its own reconcile draws nothing.
-		d := newHost(otherNS, "d")
-		_, st = reconcile(d)
-		Expect(st.Pending).To(BeNil())
-		n, err := hostsWithIdentity(ctx, k8sClient, a)
+		// a now holds an enrolment: a later claimant never blocks it, and
+		// a shows the duplicate.
+		prov := &infravirtrigaudiov1beta1.Provider{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: hostNS, Name: "ch"}, prov)).To(Succeed())
+		l, err := loadHostEnrolment(ctx, k8sClient, hostR.Config, got)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(n).To(Equal(1), "the revoked Host does not count")
+		l.state.Current = &currentEnrolment{Record: *l.state.Pending, KeyPins: []string{strings.Repeat("a", 64)},
+			NotAfter: metav1.NewTime(time.Now().Add(time.Hour))}
+		l.state.Pending = nil
+		Expect(saveHostEnrolment(ctx, k8sClient, hostR.Config, got, &l)).To(Succeed())
+		d := newHostWith(otherNS, "d", identity, "ch")
+		_, st = reconcile(d)
+		Expect(st.Pending).To(BeNil(), "the claimant is refused")
+		got, st = reconcile(a)
+		Expect(st.Current).NotTo(BeNil(), "the holder keeps its enrolment")
+		Expect(condOf(got, infravirtrigaudiov1beta1.HostConditionAgentEnrolled).Reason).To(Equal(infravirtrigaudiov1beta1.HostReasonAgentEnrolled))
+		dup := condOf(got, HostConditionAgentIdentityDuplicated)
+		Expect(dup).NotTo(BeNil())
+		Expect(dup.Status).To(Equal(metav1.ConditionTrue))
+		Expect(dup.Message).NotTo(ContainSubstring(otherNS))
+		Expect(strings.ToLower(dup.Message)).NotTo(ContainSubstring(identity))
+
+		others, err := hostsWithIdentity(ctx, k8sClient, nil, got)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(others).To(HaveLen(1), "only d counts: b is revoked and the libvirt Host runs no agent")
+
+		// The claimant goes: the condition clears.
+		Expect(k8sClient.Delete(ctx, d)).To(Succeed())
+		got, _ = reconcile(a)
+		Expect(condOf(got, HostConditionAgentIdentityDuplicated).Status).To(Equal(metav1.ConditionFalse))
 	})
 })
