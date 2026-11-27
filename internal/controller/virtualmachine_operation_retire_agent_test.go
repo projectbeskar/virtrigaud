@@ -33,6 +33,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/test/conformance/clustered/agenttarget"
 )
 
 // readyMessage is the message of vm's Ready condition.
@@ -85,6 +86,54 @@ func TestAgentIdentity_RetireNeverDeliveredOp(t *testing.T) {
 	require.NoError(t, err)
 	for _, ef := range effects {
 		assert.NotEqual(t, first.OpID, ef.OpID, "the retired operation never ran")
+	}
+}
+
+// A Create lost before it reached the agent, whose host then re-enrolled in
+// place (its store keeps the earlier, now frozen, enrolment's records): the
+// agent signs, in the ledger's adopted session, that it holds no record of
+// the operation under the frozen enrolment, and the attempt closes Retired
+// (unknown_to_frozen_enrolment) without any grant; the operation never
+// ran.
+func TestAgentIdentity_FrozenPredecessorClosure(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	e.lie.set(func(l *lyingProvider) { l.dropCreate = true })
+	_, err := e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	a := findAttempt(e.vm(t), contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	require.NotEqual(t, infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal, a.Phase, "the lost Create is in flight")
+	newEnrolment, err := e.tg.ReenrolHost(agentHost, agenttarget.StartEpoch+1)
+	require.NoError(t, err)
+	e.trust.mu.Lock()
+	tr := e.trust.trusts[agentHost]
+	tr.Predecessors = append(tr.Predecessors, tr.Enrolment.EnrolmentID)
+	tr.Enrolment.EnrolmentID = newEnrolment
+	e.trust.trusts[agentHost] = tr
+	e.trust.mu.Unlock()
+	var closed *infravirtrigaudiov1beta1.OperationAttempt
+	ok := assert.Eventually(t, func() bool {
+		if _, err := e.r.Reconcile(ctx, e.req); err != nil {
+			return false
+		}
+		c := findAttempt(e.vm(t), contracts.OperationKindCreate)
+		if c != nil && c.OpID == a.OpID && c.Phase == infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal {
+			closed = c
+			return true
+		}
+		return false
+	}, 30*time.Second, 300*time.Millisecond, "the frozen enrolment's attempt closes")
+	if !ok {
+		vm := e.vm(t)
+		t.Fatalf("not closed: %s: %s", readyReason(vm), readyMessage(vm))
+	}
+	assert.Equal(t, infravirtrigaudiov1beta1.OperationAttemptOutcomeRetired, closed.Outcome)
+	assert.Equal(t, retiredUnknownToFrozenEnrolment, closed.OutcomeReason)
+	effects, err := e.host.Effects()
+	require.NoError(t, err)
+	for _, ef := range effects {
+		assert.NotEqual(t, a.OpID, ef.OpID, "the operation never ran")
 	}
 }
 
