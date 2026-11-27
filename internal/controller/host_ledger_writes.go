@@ -127,15 +127,6 @@ const (
 	// maxLedgerWriteAttempts bounds the read-modify-write attempts of one
 	// write that keeps losing to concurrent writers.
 	maxLedgerWriteAttempts = 5
-	// hostLedgerFirstContactMaxSeq is the highest chain position a store
-	// may show for a first contact. A fresh store holds two commits at its
-	// first attestation (the clock floor and the enrolment), and one more
-	// after a clean stop saved the clock floor; an attestation commits
-	// nothing. An operation that could have had an effect adds at least two
-	// (its acceptance and its first step intent), so a store at or below
-	// this position never ran an operation, and starting a fresh ledger for
-	// it cannot hide one. A store beyond it is never first-contacted.
-	hostLedgerFirstContactMaxSeq = 3
 )
 
 // ErrHostLedgerHeld is wrapped by every *HostLedgerHoldError.

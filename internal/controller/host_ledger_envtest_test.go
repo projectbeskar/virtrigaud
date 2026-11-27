@@ -209,7 +209,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 	// contact under enrolment.
 	firstContact := func(l *HostLedger, h *infravirtrigaudiov1beta1.Host, store [16]byte, enrolment []byte) HostLedgerInitResult {
 		GinkgoHelper()
-		res, err := l.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store, Position: HostLedgerPosition{Seq: 3, Head: head(1)},
+		res, err := l.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store, Position: HostLedgerPosition{Seq: 3, Head: head(1)},
 			Origin: &HostLedgerOrigin{OriginEnrolmentID: enrolment, EnrolmentCount: 1}})
 		Expect(err).NotTo(HaveOccurred())
 		return res
@@ -236,7 +236,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			last := hostidentity.StoreRecord{StoreID: store, EnrolmentID: e, Seq: 3000, Head: head(3), CheckpointSeq: 2048, CheckpointHead: head(2)}
 			Expect(trust.UpdateStoreState(ctx, provider, h.Name, func(st *HostStoreState) { st.Current = last })).To(Succeed())
 
-			in := HostLedgerInit{StoreID: store, Position: HostLedgerPosition{Seq: 3001, Head: head(9)}}
+			in := HostLedgerInit{StoreID: store, Position: HostLedgerPosition{Seq: 3001, Head: head(9)}, Attestation: neverAttested}
 			_, err := ledger.Initialise(ctx, provider, h.Name, in)
 			expectHold(err, LedgerReasonUnconfirmed, false)
 			Expect(sawEvent(LedgerReasonUnconfirmed)).To(BeTrue())
@@ -249,8 +249,12 @@ var _ = Describe("Host ledger (envtest)", func() {
 			in.Origin = &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}
 			_, err = ledger.Initialise(ctx, provider, h.Name, in)
 			expectHold(err, LedgerReasonUnconfirmed, false)
+			in.Attestation = hostidentity.StoreAttestation{}
 
 			in.Continuity = &HostLedgerContinuity{Seq: 3000, Head: head(3)}
+			_, err = ledger.Initialise(ctx, provider, h.Name, in)
+			expectHold(err, LedgerReasonMissing, false) // confirmed, but the agent does not report its record
+			in.Attestation = neverAttested              // an upgraded store that was never attested
 			res, err := ledger.Initialise(ctx, provider, h.Name, in)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.Source).To(Equal(LedgerInitLastPosition))
@@ -306,17 +310,23 @@ var _ = Describe("Host ledger (envtest)", func() {
 				{&HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 2}, 3},
 				{&HostLedgerOrigin{}, 3},
 				{&HostLedgerOrigin{EnrolmentCount: 1}, 3},
-				// A chain beyond a fresh store's commits may have run
-				// operations: never first contact.
-				{&HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}, hostLedgerFirstContactMaxSeq + 1},
 			} {
-				_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store,
+				_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store,
 					Position: HostLedgerPosition{Seq: c.seq, Head: head(5)}, Origin: c.o})
 				expectHold(err, LedgerReasonMissing, false)
 			}
-			res := firstContact(ledger, h, store, e)
+			// An agent that does not report its record: held, recomputed
+			// on every call (an upgraded agent then reports it).
+			_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store,
+				Position: HostLedgerPosition{Seq: 3, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
+			expectHold(err, LedgerReasonMissing, false)
+			// A fresh store whose chain grew through several restarts (clock
+			// floor commits) before its first attestation: first contact.
+			res, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store,
+				Position: HostLedgerPosition{Seq: 9, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
+			Expect(err).NotTo(HaveOccurred())
 			Expect(res.Source).To(Equal(LedgerInitFirstContact))
-			Expect(res.Record.Position).To(Equal(HostLedgerPosition{Seq: 3, Head: head(1)}))
+			Expect(res.Record.Position).To(Equal(HostLedgerPosition{Seq: 9, Head: head(1)}))
 			Expect(ledger.HeldReason(provider, h.Name)).To(BeEmpty(), "a success clears a transient hold")
 		})
 
@@ -327,7 +337,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			firstContact(ledger, h, store, e)
 			Expect(k8sClient.Delete(ctx, ledgerSecret(store))).To(Succeed())
 			// A fresh manager (no memory) refuses: the tagged index names it.
-			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store,
+			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store,
 				Position: HostLedgerPosition{Seq: 3, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
 			expectHold(err, LedgerReasonMissing, false)
 			// The manager that held it sees a regression, persistently.
@@ -351,7 +361,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			_, err := fresh.Load(ctx, provider, h.Name, store)
 			expectHold(err, LedgerReasonTampered, false)
 			e2 := enrol(h)
-			_, err = fresh.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: random16(),
+			_, err = fresh.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: random16(),
 				Position: HostLedgerPosition{Seq: 3, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e2, EnrolmentCount: 1}})
 			expectHold(err, LedgerReasonTampered, false) // nothing is started for a Host whose index is gone
 			// The running manager saw the index: a persistent hold.
@@ -359,7 +369,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			expectHold(err, LedgerReasonTampered, true)
 		})
 
-		It("does not restart the ledger of a store that ran operations after a replayed older index", func() {
+		It("does not restart the ledger of an attested store after a replayed older index", func() {
 			h := newHost("h", "serial")
 			e1 := enrol(h)
 			a := random16()
@@ -375,13 +385,52 @@ var _ = Describe("Host ledger (envtest)", func() {
 			pins.Data[hostStoreStateKey] = oldStore
 			Expect(k8sClient.Update(ctx, pins)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, ledgerSecret(b))).To(Succeed())
-			// A restarted manager: the agent's chain shows b ran operations.
-			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: b,
+			// A restarted manager: the agent signs that store b was attested.
+			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: wasAttested, StoreID: b,
 				Position: HostLedgerPosition{Seq: 2050, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e2, EnrolmentCount: 1}})
-			expectHold(err, LedgerReasonMissing, false)
-			// The running manager held b: a regression.
+			expectHold(err, LedgerReasonMissing, true)
+			// The running manager, which held b, keeps the Host held.
 			_, err = ledger.Load(ctx, provider, h.Name, b)
+			expectHold(err, LedgerReasonMissing, true)
+		})
+
+		It("never restarts the ledger of an attested store whose object and index were deleted, after a restart", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			Expect(k8sClient.Delete(ctx, ledgerSecret(store))).To(Succeed())
+			editStore(h, func(doc map[string]json.RawMessage) { delete(doc, "ledgerIndex") })
+			fresh := newLedger(keys) // no memory of the index or the object
+			_, err := fresh.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: wasAttested, StoreID: store,
+				Position: HostLedgerPosition{Seq: 2050, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
+			expectHold(err, LedgerReasonMissing, true)
+			Expect(storeState(h).RegressedReason).To(Equal(LedgerReasonMissing))
+			// The agent's signed record keeps refusing it, whatever the
+			// Secrets say.
+			editStore(h, func(doc map[string]json.RawMessage) {
+				delete(doc, "ledgerIndex")
+				delete(doc, "regressedReason")
+				delete(doc, "regressedEnrolmentID")
+			})
+			_, err = newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: wasAttested, StoreID: store,
+				Position: HostLedgerPosition{Seq: 2050, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
+			expectHold(err, LedgerReasonMissing, true)
+		})
+
+		It("holds a ledger behind the store's own first attestation", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			ahead := hostidentity.StoreAttestation{Reported: true, EverAttested: true, FirstSeq: 4000, RecordSeq: 4001}
+			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: ahead, StoreID: store,
+				Position: HostLedgerPosition{Seq: 4100, Head: head(1)}})
 			expectHold(err, LedgerReasonRegressed, true)
+			res, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: wasAttested, StoreID: store,
+				Position: HostLedgerPosition{Seq: 2050, Head: head(1)}})
+			Expect(err).To(MatchError(ErrHostLedgerHeld), "the hold is persistent")
+			Expect(res.Record).To(BeNil())
 		})
 
 		It("holds a second store under one enrolment persistently, in the tagged objects too", func() {
@@ -390,7 +439,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			first := random16()
 			firstContact(ledger, h, first, e)
 			other := random16()
-			_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: other, Position: HostLedgerPosition{Seq: 1, Head: head(1)},
+			_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: other, Position: HostLedgerPosition{Seq: 1, Head: head(1)},
 				Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
 			expectHold(err, LedgerReasonStoreMismatch, true)
 			st := storeState(h)
@@ -402,7 +451,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 				delete(doc, "regressedReason")
 				delete(doc, "regressedEnrolmentID")
 			})
-			_, err = newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: other,
+			_, err = newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: other,
 				Position: HostLedgerPosition{Seq: 1, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
 			expectHold(err, LedgerReasonStoreMismatch, true)
 			// A re-enrolment with a fresh store ends it.
@@ -418,7 +467,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			old := firstContact(ledger, h, oldStore, e1).Record
 			e2 := enrol(h)
 			newStore := random16()
-			_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: newStore, Position: HostLedgerPosition{Seq: 1, Head: head(1)},
+			_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: newStore, Position: HostLedgerPosition{Seq: 1, Head: head(1)},
 				Origin: &HostLedgerOrigin{OriginEnrolmentID: e2, EnrolmentCount: 2}})
 			expectHold(err, LedgerReasonMissing, false)
 			Expect(ledgerOf(oldStore).Archived).To(BeFalse(), "nothing archived without evidence")
@@ -448,7 +497,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			newer := newLedger(keys)
 			newer.MinManagerVersion = "9.0.0"
 			newer.ManagerVersion = func() string { return "v9.0.0" }
-			_, err := newer.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store, Position: HostLedgerPosition{Seq: 3, Head: head(1)},
+			_, err := newer.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store, Position: HostLedgerPosition{Seq: 3, Head: head(1)},
 				Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
 			Expect(err).To(MatchError(errManagerTooOld), "this build's pins Secret reader honours the floor too")
 			ledgerSecret(store)
@@ -689,12 +738,12 @@ var _ = Describe("Host ledger (envtest)", func() {
 				doc["ledgerIndex"], _ = json.Marshal(idx)
 			})
 			Expect(k8sClient.Delete(ctx, ledgerSecret(store))).To(Succeed())
-			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store,
+			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store,
 				Position: HostLedgerPosition{Seq: 3, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
 			expectHold(err, LedgerReasonTampered, false)
 
 			editStore(h, func(doc map[string]json.RawMessage) { doc["ledgerIndex"] = json.RawMessage(`"not an index"`) })
-			_, err = newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store,
+			_, err = newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store,
 				Position: HostLedgerPosition{Seq: 3, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
 			expectHold(err, LedgerReasonTampered, false)
 		})
@@ -709,7 +758,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			delete(sec.Labels, LabelHostLedgerEnrolment)
 			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
 			e2 := enrol(h)
-			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: random16(),
+			_, err := newLedger(keys).Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: random16(),
 				Position: HostLedgerPosition{Seq: 3, Head: head(1)}, Origin: &HostLedgerOrigin{OriginEnrolmentID: e2, EnrolmentCount: 1}})
 			expectHold(err, LedgerReasonTampered, false)
 		})
@@ -896,7 +945,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			for _, l := range []*HostLedger{a, b} {
 				go func() {
 					defer GinkgoRecover()
-					res, err := l.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store, Position: HostLedgerPosition{Seq: 3, Head: head(1)},
+					res, err := l.Initialise(ctx, provider, h.Name, HostLedgerInit{Attestation: neverAttested, StoreID: store, Position: HostLedgerPosition{Seq: 3, Head: head(1)},
 						Origin: &HostLedgerOrigin{OriginEnrolmentID: e, EnrolmentCount: 1}})
 					Expect(err).NotTo(HaveOccurred())
 					done <- res
@@ -1101,3 +1150,10 @@ func ledgerCounter(doc []byte) uint64 {
 	_ = json.Unmarshal(doc, &j)
 	return j.WriteCounter
 }
+
+// The store attestation records the agent signs, as decoded from a verified
+// answer: a store never attested, and one first attested at position 3.
+var (
+	neverAttested = hostidentity.StoreAttestation{Reported: true}
+	wasAttested   = hostidentity.StoreAttestation{Reported: true, EverAttested: true, FirstSeq: 3, RecordSeq: 4}
+)

@@ -19,12 +19,12 @@ package controller
 // The host ledger writes (development builds only), in the order an
 // attestation driver uses them:
 //
-//   - Initialise: the first ledger object of a store, from the host's last
-//     verified position once the host confirmed it in a signed answer, or,
-//     for a store the host's agent says was created under the current
-//     enrolment, never held another and never ran an operation, from first
-//     contact. A first contact archives the ledger of the Host's previous
-//     store.
+//   - Initialise: the first ledger object of a store whose agent signs that
+//     it was never attested, from the host's last verified position once
+//     the host confirmed it in a signed answer, or, for a store the host's
+//     agent says was created under the current enrolment and never held
+//     another, from first contact. A first contact archives the ledger of
+//     the Host's previous store.
 //   - Rebind: a ledger object that served an earlier Host object of the same
 //     machine moves to its replacement, once the earlier Host is deleted or
 //     revoked, quiet, and no other Host carries the identity.
@@ -122,8 +122,7 @@ type HostLedgerInit struct {
 	StoreID [16]byte
 	// Position and Checkpoint are the store's chain position and checkpoint
 	// in the verified ChallengeAnswer the origin evidence came from: a first
-	// contact starts the ledger there, and only when Position is at most
-	// three (a store that never ran an operation).
+	// contact starts the ledger there.
 	Position, Checkpoint HostLedgerPosition
 	// Origin is the store-origin evidence of that verified ChallengeAnswer;
 	// nil when none.
@@ -131,6 +130,13 @@ type HostLedgerInit struct {
 	// Continuity is the host's confirmation of the last verified position
 	// (see Initialise); nil when none.
 	Continuity *HostLedgerContinuity
+	// Attestation is the store's attestation record from the HostLedgerState
+	// of a verified answer whose chain position names StoreID, decoded with
+	// hostidentity.StoreAttestationOf (a ChallengeAnswer always carries it;
+	// a HostAnswer only to a request with ledger_version 2 or higher). A
+	// ledger is started only when it is reported and says the store was
+	// never attested; the zero value (not reported) starts none.
+	Attestation hostidentity.StoreAttestation
 }
 
 // HostLedgerInitSource says where Initialise took a ledger from.
@@ -143,8 +149,7 @@ const (
 	// position, confirmed by the host.
 	LedgerInitLastPosition HostLedgerInitSource = "LastPosition"
 	// LedgerInitFirstContact: started from the agent's signed position for
-	// a store created under the current enrolment that never ran an
-	// operation.
+	// a store created under the current enrolment and never attested.
 	LedgerInitFirstContact HostLedgerInitSource = "FirstContact"
 )
 
@@ -236,10 +241,23 @@ func validPosition(pos, cp HostLedgerPosition) error {
 //     after an honest pruning) carrying the same head; otherwise the host
 //     is held (ledger_unconfirmed);
 //   - otherwise only a first contact may start it: in.Origin must show the
-//     store was created under the current enrolment and held no other, and
-//     in.Position must be at most three, so the store never ran an
-//     operation. The ledgers of the Host's earlier stores are then archived
-//     (Archived). Any other case holds the host (ledger_missing).
+//     store was created under the current enrolment and held no other. The
+//     ledgers of the Host's earlier stores are then archived (Archived).
+//     Any other case holds the host (ledger_missing).
+//
+// Either start also needs in.Attestation, signed by the agent, to report
+// that the store was never attested against a host ledger: a store that
+// was attested ran (or could have run) operations under a ledger the
+// manager no longer holds, and a fresh ledger could hide them. A store
+// whose agent does not report its record (an older agent) holds the host
+// until the agent reports it (ledger_missing, recomputed on every call); a
+// store that reports it was attested holds the host persistently
+// (ledger_missing), until a new enrolment with a fresh store.
+//
+// For an existing ledger, a reported first attestation position above the
+// ledger's position means the ledger is behind the store's own first
+// attestation: an older ledger was restored or another replaced it, and
+// the host is held persistently (LedgerRegressed).
 //
 // The store is reserved in the host's ledger index before its object is
 // created, and its write counter recorded after; a new ledger's generation
@@ -287,6 +305,10 @@ func (l *HostLedger) initialiseOnce(ctx context.Context, lh *ledgerHost, in Host
 		if err := requireBound(lh, obj.rec); err != nil {
 			return HostLedgerInitResult{}, false, err
 		}
+		if a := in.Attestation; a.Reported && a.EverAttested && a.FirstSeq > obj.rec.Position.Seq {
+			return HostLedgerInitResult{}, false, l.hold(ctx, lh, LedgerReasonRegressed, prefix, true,
+				"the ledger is behind the position at which the store was first attested", nil)
+		}
 		return HostLedgerInitResult{Record: obj.rec, Source: LedgerInitExisting}, false, nil
 	case !errors.Is(err, ErrHostLedgerNotFound):
 		return HostLedgerInitResult{}, false, err
@@ -310,6 +332,15 @@ func (l *HostLedger) initialiseOnce(ctx context.Context, lh *ledgerHost, in Host
 	if st.LedgerIndex.Names(in.StoreID) {
 		return HostLedgerInitResult{}, false, l.hold(ctx, lh, LedgerReasonMissing, prefix, false,
 			"the store had a ledger and its ledger object is gone; a lost ledger is never restarted", nil)
+	}
+	switch a := in.Attestation; {
+	case !a.Reported:
+		return HostLedgerInitResult{}, false, l.hold(ctx, lh, LedgerReasonMissing, prefix, false,
+			"the store's agent does not report, signed, whether the store was ever attested; no ledger is started", nil)
+	case a.EverAttested:
+		return HostLedgerInitResult{}, false, l.hold(ctx, lh, LedgerReasonMissing, prefix, true,
+			"the store's agent signs that the store was attested against a ledger the manager no longer holds; "+
+				"use the fresh-store procedure", nil)
 	}
 	now := l.now().UTC().Truncate(time.Second)
 	rec := &HostLedgerRecord{StoreID: in.StoreID, HostIdentityMAC: lh.identityMAC, HostUID: lh.uid(),
@@ -341,9 +372,6 @@ func (l *HostLedger) initialiseOnce(ctx context.Context, lh *ledgerHost, in Host
 		case o == nil || o.EnrolmentCount != 1 || !bytes.Equal(o.OriginEnrolmentID, lh.enrolment):
 			return HostLedgerInitResult{}, false, l.hold(ctx, lh, LedgerReasonMissing, prefix, false,
 				"the store has no ledger and its agent does not show it was created under the current enrolment alone", nil)
-		case in.Position.Seq > hostLedgerFirstContactMaxSeq:
-			return HostLedgerInitResult{}, false, l.hold(ctx, lh, LedgerReasonMissing, prefix, false,
-				"the store has no ledger and its chain shows it may have run operations; use the fresh-store procedure", nil)
 		}
 		var pred uint64
 		for _, p := range others {
