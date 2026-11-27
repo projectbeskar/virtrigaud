@@ -732,8 +732,15 @@ a release build.
   anything is read or written. Before such a request the manager persists the host's
   latest verified store position, so the continuity position the request names is the
   one a ledger may start from once the host confirms it.
+- **Binding.** Every step reads the store's ledger bound to the Host object the host
+  id names now, with its identity, and not archived. A ledger that serves an earlier
+  Host object (a Host replaced by a new object of the same name or machine) moves to
+  the new one only under the rebind conditions (the earlier object deleted or revoked,
+  quiet for the host answer lifetime, and no other live Host carrying the identity);
+  it is then Pending and the agent is attested again. An archived ledger is never used.
 - **Attestation.** An agent awaiting attestation is asked for an `ATTEST` challenge;
-  the verified challenge's nonce is begun as a pending session in the ledger, and an
+  the verified challenge's nonce is begun as a pending session in the ledger (which
+  becomes Pending: the agent runs nothing until attested anyway), and an
   attestation grant is signed only from the ledger record that write returned, after
   the ledger object is read again and found unchanged: no ledger object for the store,
   no attestation grant. An agent attested in a session the ledger does not hold (a
@@ -746,7 +753,10 @@ a release build.
 - **Grant version 2.** Such a host gets operation grants at version 2 only, and only
   while the manager saw its last verified host answer `READY` in the ledger's adopted
   session of the store that answer named, with nothing holding the host; otherwise
-  nothing is sent to it. Version 1 is never signed for an agent that implements version
+  nothing is sent to it. That readiness is decided by a fresh read of the bound,
+  unarchived ledger, never by whether a raise was taken or throttled. For such a host,
+  an operation answer from any session other than the adopted one is no answer: the
+  agent is attested again first. Version 1 is never signed for an agent that implements version
   2. Older agents keep version 1, as before.
 - **Receipts.** A receipt in the reply to a version 2 send is verified against the
   host's trust, the attempt's authenticated intent (op_id, kind, attempt, VM, binding,
@@ -754,10 +764,19 @@ a release build.
   ledger: its store must be the ledger's and its session the ledger's adopted one. A
   verified receipt moves the attempt to `Accepted` with the receipt recorded on the
   marker, bound to the attempt by a tag under the intent key, raises the ledger, and
-  then raises the agent's ledger mark. An operation answer that shows the operation
-  accepted with its acceptance position, in the adopted session, counts as its receipt
-  (a lost reply). A receipt that does not verify is "no receipt": the attempt stays
-  `Sent`, and the next raise from a host answer covers the operation.
+  then raises the agent's ledger mark. A receipt counts only for the host's current
+  store, bound to the Host object and not archived. An operation answer bound to the
+  attempt that shows the operation accepted with its acceptance position, in the
+  adopted session, stands for its receipt (a lost reply): it is recorded on the marker
+  the same way, before the ledger and the mark are raised over it. A receipt that does
+  not verify is "no receipt": the attempt stays `Sent`, and the next raise from a host
+  answer covers the operation. The marker records the store, position, head and
+  session: the tag covers them, the store, position and session decide whether the
+  receipt counts as ledgered, and the head is required by the schema (a public chain
+  digest). The receipt tag is an HMAC under the intent key with its own context prefix,
+  so it never verifies as an intent or task tag. The marker's `ledgerGeneration`
+  mirrors the generation the attempt's intent records, and stays unset when it has
+  none.
 - **Ledger marks.** A ledger mark grant is signed only from the record of the
   manager's own last successful write of the store's ledger, while nobody wrote it
   since, in an adopted session. The ledger is raised from the agent's verified chain
@@ -780,13 +799,16 @@ a release build.
   the attempt's enrolment among the generation's enrolments), never on a marker field
   or a timestamp; an intent of the first version counts as generation 0 and is never
   continuous.
-- **Traffic.** Attestation, heartbeat raises and their marks draw from one token bucket
-  (50 per second, burst 100), receipt raises and their marks from another (200 per
-  second, burst 400), so neither can starve the other.
-- **Upgrade pre-flight.** A stopping manager persists every host's latest verified
-  store position (bounded to 10 seconds), so the next manager starts each host ledger
-  from a fresher position and the agent's first attestation needs a checkpoint less
-  often.
+- **Traffic.** Attestation (20 per second, burst 40), heartbeat raises and their marks
+  (50 per second, burst 100) and receipt raises and their marks (200 per second, burst
+  400) draw from separate token buckets, so none can starve another. The per-host
+  heartbeat throttle is checked before a heartbeat token is taken.
+- **Upgrade pre-flight.** A stopping manager that held the leader lease persists every
+  host's latest verified store position (bounded to 10 seconds), so the next manager
+  starts each host ledger from a fresher position and the agent's first attestation
+  needs a checkpoint less often. A replica that never led writes nothing; a stopping
+  leader may already have lost its lease, which is safe because a position is only
+  ever raised, from answers that replica verified.
 
 ## Compatibility
 
