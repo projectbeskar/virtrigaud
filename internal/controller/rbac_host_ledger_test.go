@@ -260,12 +260,11 @@ func keyPathAccesses() (inKeyNamespace, clusterWide []rbacAccess) {
 // rights, documented in docs/host-agent-enrolment.md ("Host ledger keys")
 // as a custody limit shared with the sub-CA key.
 type keyPathException struct {
-	// subjectName is the ServiceAccount's name (any namespace of the
-	// managers passed to the proof).
-	subjectName string
-	group       string
-	resource    string
-	verbs       []string
+	// The holder is always one of the manager identities passed to the
+	// proof.
+	group    string
+	resource string
+	verbs    []string
 	// roleSuffix names the granting ClusterRole by its suffix (the chart's
 	// is <release>-virtrigaud-manager, config/rbac's manager-role).
 	roleSuffixes []string
