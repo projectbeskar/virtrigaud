@@ -84,12 +84,16 @@ const (
 	// ReasonEnrolmentNotActive: a retirement named an enrolment that is
 	// not the store's active one; nothing changed.
 	ReasonEnrolmentNotActive = "enrolment_not_active"
+	// ReasonTraceScanUnavailable: the agent's executor cannot scan its
+	// objects for a trace of the operation, so it retires nothing; asking
+	// again does not change that.
+	ReasonTraceScanUnavailable = "trace_scan_unavailable"
 )
 
 // outcomeReasons is the closed set of outcome_reason values this agent signs.
 var outcomeReasons = []string{ReasonGrantInvalid, ReasonChallengeUnknown, ReasonChallengeExpired, ReasonNotAttested,
 	ReasonAlreadyAttested, ReasonSessionReplaced, ReasonStoreBusy, ReasonStaleAttestation, ReasonOpKnown, ReasonOpTraceFound,
-	ReasonEnrolmentNotActive, string(journal.LostLedgerStoreMismatch),
+	ReasonEnrolmentNotActive, ReasonTraceScanUnavailable, string(journal.LostLedgerStoreMismatch),
 	string(journal.LostLedgerAhead), string(journal.LostLedgerMismatch), string(journal.LostLedgerUnverifiable)}
 
 // ledgerAware reports whether h answers a request of the host ledger

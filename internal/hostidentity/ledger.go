@@ -74,12 +74,22 @@ const (
 	// AuthorityReasonOpTraceFound: a retirement found a trace of the
 	// operation that no record explains; the agent quarantined its store.
 	AuthorityReasonOpTraceFound = "op_trace_found"
+	// AuthorityReasonOpKnown: a retirement named an op_id the store holds
+	// with other identity fields.
+	AuthorityReasonOpKnown = "op_known"
+	// AuthorityReasonEnrolmentNotActive: a retirement named an enrolment
+	// that is not the store's active one.
+	AuthorityReasonEnrolmentNotActive = "enrolment_not_active"
+	// AuthorityReasonTraceScanUnavailable: the agent's executor cannot scan
+	// its objects for traces, so it retires nothing.
+	AuthorityReasonTraceScanUnavailable = "trace_scan_unavailable"
 )
 
-// authorityReasons is the closed set of AuthorityAnswer.outcome_reason.
-var authorityReasons = []string{"grant_invalid", AuthorityReasonStaleAttestation, AuthorityReasonChallengeUnknown,
-	AuthorityReasonChallengeExpired, "not_attested", "already_attested", "session_replaced", "op_known", AuthorityReasonOpTraceFound,
-	"enrolment_not_active", "ledger_mismatch", "ledger_ahead", "ledger_unverifiable", "ledger_store_mismatch", "store_busy"}
+// AuthorityReasons is the closed set of AuthorityAnswer.outcome_reason a
+// manager accepts; it equals the set an agent signs.
+var AuthorityReasons = []string{"grant_invalid", AuthorityReasonStaleAttestation, AuthorityReasonChallengeUnknown,
+	AuthorityReasonChallengeExpired, "not_attested", "already_attested", "session_replaced", AuthorityReasonOpKnown, AuthorityReasonOpTraceFound,
+	AuthorityReasonEnrolmentNotActive, AuthorityReasonTraceScanUnavailable, "ledger_mismatch", "ledger_ahead", "ledger_unverifiable", "ledger_store_mismatch", "store_busy"}
 
 // authorityGrantKinds is the closed set of AuthorityAnswer.grant_kind.
 var authorityGrantKinds = []providerv1.GrantKind{providerv1.GrantKind_GRANT_KIND_ATTEST,
@@ -244,7 +254,7 @@ func checkAuthorityAnswer(a *providerv1.AuthorityAnswer, exp AnswerExpectation, 
 		return refuse("the authority answer names another grant kind than the request's")
 	case a.GetOutcome() == providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_UNSPECIFIED:
 		return refuse("the authority outcome is unspecified")
-	case a.GetOutcomeReason() != "" && !slices.Contains(authorityReasons, a.GetOutcomeReason()):
+	case a.GetOutcomeReason() != "" && !slices.Contains(AuthorityReasons, a.GetOutcomeReason()):
 		return refuse("the outcome reason is outside the closed set")
 	case len(a.GetGrantDigest()) == 0 && a.GetOutcome() != providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED:
 		return refuse("an authority answer that names no grant is not a refusal")

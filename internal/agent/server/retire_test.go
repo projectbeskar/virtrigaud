@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
+	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
@@ -154,4 +155,20 @@ func TestRetire_PerProviderLimitBeforeWork(t *testing.T) {
 	_, found, err := e.store.Lookup(ctx(t), opstore.OpRef{EnrolmentID: other.id.EnrolmentID, OpID: other.id.OpID})
 	require.NoError(t, err)
 	assert.False(t, found, "nothing was retired above the limit")
+}
+
+// noScanExec is an executor that cannot scan its objects for traces.
+type noScanExec struct{ executor.Executor }
+
+// An agent whose executor cannot scan for traces refuses a retirement with
+// its own reason, trace_scan_unavailable, and retires nothing.
+func TestRetire_TraceScanUnavailable(t *testing.T) {
+	e := newAuthEnvWith(t, func(o *opstore.Options) { o.Executor = noScanExec{o.Executor} })
+	c := e.attestAt(t)
+	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
+	wantOutcome(t, e.retire(t, e.retireGrant(t, o, c, nil)), providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED,
+		answer.ReasonTraceScanUnavailable)
+	_, found, err := e.store.Lookup(ctx(t), opstore.OpRef{EnrolmentID: o.id.EnrolmentID, OpID: o.id.OpID})
+	require.NoError(t, err)
+	assert.False(t, found, "nothing was retired")
 }

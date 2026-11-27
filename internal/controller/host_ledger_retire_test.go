@@ -205,3 +205,18 @@ func TestSendRetire_OnlyContinuous(t *testing.T) {
 	_, err = (&HostAnswers{}).sendRetire(context.Background(), auth, good.ledger, good.prepared, retireSession)
 	require.ErrorIs(t, err, errNotRetirable, "no ledger")
 }
+
+// A retirement refusal that asking again does not change is held at the
+// hold re-check interval; any other refusal is asked again soon.
+func TestRetireRefusalHold(t *testing.T) {
+	for _, r := range []string{hostidentity.AuthorityReasonOpKnown, hostidentity.AuthorityReasonEnrolmentNotActive,
+		hostidentity.AuthorityReasonTraceScanUnavailable} {
+		msg, hold := retireRefusalHold(r)
+		assert.True(t, hold, r)
+		assert.NotEmpty(t, msg, r)
+	}
+	for _, r := range []string{"store_busy", "grant_invalid", "not_attested", ""} {
+		_, hold := retireRefusalHold(r)
+		assert.False(t, hold, r)
+	}
+}

@@ -53,3 +53,16 @@ func TestLedgerQuarantineReasonsMatchVerifier(t *testing.T) {
 		}
 	}
 }
+
+// TestAuthorityReasonsMatchVerifier: the outcome reasons the agent signs in
+// an authority answer are exactly the ones the manager's verifier accepts.
+func TestAuthorityReasonsMatchVerifier(t *testing.T) {
+	if len(outcomeReasons) != len(hostidentity.AuthorityReasons) {
+		t.Fatalf("agent reasons %v, verifier reasons %v", outcomeReasons, hostidentity.AuthorityReasons)
+	}
+	for _, r := range outcomeReasons {
+		if !slices.Contains(hostidentity.AuthorityReasons, r) {
+			t.Fatalf("the verifier refuses outcome reason %q", r)
+		}
+	}
+}

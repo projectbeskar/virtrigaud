@@ -328,8 +328,32 @@ func (r *VirtualMachineReconciler) retireAnswer(ctx context.Context, vm *infravi
 		h.DriveHostLedger(ctx, ia.providerCR, ia.reader, a.HostID)
 		return decided(r.noSignedAnswer(ctx, vm, a, "the host's agent is in another attestation session than the one the retirement named"))
 	default:
+		if msg, hold := retireRefusalHold(reason); hold {
+			// A refusal that asking again does not change: held, and asked
+			// again only at the hold re-check, never in a short re-sign loop.
+			return held(r.holdOperation(ctx, vm, k8s.ReasonOperationOutcomeUnknown, fmt.Sprintf("%s attempt %d: %s (%s); %s",
+				a.Kind, a.Attempt, msg, reason, operationHoldRecovery), operationHoldRecheckInterval))
+		}
 		return decided(r.noSignedAnswer(ctx, vm, a, fmt.Sprintf("the host refused its retirement (%s)", reason)))
 	}
+}
+
+// retireRefusalHold returns the hold message of a retirement refusal that
+// asking again does not change (the host holds the op_id with other identity
+// fields, the grant names an enrolment that is not the host's active one, or
+// the host's executor cannot scan for traces); hold is false for a refusal
+// that may pass on a later answer (a busy store, a grant that did not
+// verify), which is asked again soon.
+func retireRefusalHold(reason string) (msg string, hold bool) {
+	switch reason {
+	case hostidentity.AuthorityReasonOpKnown:
+		return "the host holds this op_id with other identity fields, so it is neither retired nor re-sent", true
+	case hostidentity.AuthorityReasonEnrolmentNotActive:
+		return "the retirement named an enrolment that is not the host's active one, so nothing is decided", true
+	case hostidentity.AuthorityReasonTraceScanUnavailable:
+		return "the host's executor cannot scan for traces of the operation, so the host retires nothing", true
+	}
+	return "", false
 }
 
 // errRetirementNotCovered: the host ledger was not raised to the position

@@ -400,3 +400,32 @@ func TestAgentIdentity_RetireCrashBeforeCover(t *testing.T) {
 	h.mu.Unlock()
 	assert.GreaterOrEqual(t, persisted, pos.Seq, "the RETIRED answer's position is persisted")
 }
+
+// A retirement the agent refuses op_known (it holds the op_id with other
+// identity fields) is held at the hold re-check interval, not re-signed in a
+// short loop.
+func TestAgentIdentity_RetireOpKnownHeld(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	_, err := e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	vm := e.vm(t)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	p, found, err := e.r.loadIntent(ctx, vm, a.OpID, e.provider.Namespace)
+	require.NoError(t, err)
+	require.True(t, found)
+	rec, err := e.ledger.LoadBound(ctx, e.provider, agentHost, [16]byte(p.LedgerStoreID))
+	require.NoError(t, err)
+	other := p
+	other.Identity.Attempt++
+	read, err := e.r.HostAnswers.sendRetire(ctx, e.cli, rec, other, rec.AttestationID)
+	require.NoError(t, err)
+	require.NotNil(t, read.Answer)
+	d := e.r.retireAnswer(ctx, vm, identityAttempt{providerCR: e.provider, reader: e.cli}, a, other, read, rec.AttestationID)
+	require.NoError(t, d.err)
+	assert.Equal(t, stepHeld, d.step)
+	assert.Equal(t, operationHoldRecheckInterval, d.res.RequeueAfter)
+	assert.Equal(t, k8s.ReasonOperationOutcomeUnknown, readyReason(e.vm(t)))
+	assert.Contains(t, readyMessage(e.vm(t)), hostidentity.AuthorityReasonOpKnown)
+}
