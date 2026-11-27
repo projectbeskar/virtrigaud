@@ -107,8 +107,8 @@ func CheckStrictRequest(m proto.Message) error {
 //  4. the body decodes, at grant_version LedgerGrantVersion, and its
 //     grant_kind is the one fullMethod carries, checked before any other
 //     field (else GRANT_MISMATCH);
-//  5. the kind's field rules (CheckAttestBody, CheckLedgerMarkBody;
-//     RETIRE_IF_UNKNOWN is not implemented and is refused);
+//  5. the kind's field rules (CheckAttestBody, CheckLedgerMarkBody,
+//     CheckRetireBody);
 //  6. authority_generation, validity, and the installation, Provider, host
 //     and enrolment are the verifier's.
 //
@@ -166,6 +166,10 @@ func (v *Verifier) VerifyAuthority(fullMethod string, req proto.Message, clock C
 		}
 	case providerv1.GrantKind_GRANT_KIND_LEDGER_MARK:
 		if refusal := CheckLedgerMarkBody(body); refusal != nil {
+			return nil, refusal
+		}
+	case providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN:
+		if refusal := CheckRetireBody(body); refusal != nil {
 			return nil, refusal
 		}
 	default:
@@ -299,6 +303,72 @@ func CheckLedgerMarkBody(b *providerv1.GrantBody) *Refusal {
 		return mismatch(RuleMalformedField, "attestation_id is %d bytes, not %d", len(b.GetAttestationId()), AttestationIDLen)
 	}
 	return checkLedgerPosition(b.GetLedger(), "ledger")
+}
+
+// CheckRetireBody applies every rule that a GRANT_KIND_RETIRE_IF_UNKNOWN
+// body at LedgerGrantVersion must satisfy on its own: the common fields (1
+// to 8, 30 and 31) set, counters at least 1 and lengths exact; the identity
+// of the operation it retires (vm_uid set, binding_id and op_id of IDLen
+// bytes, kind a defined operation kind this package implements, attempt at
+// least 1, intent_digest of DigestLen bytes and mint_epoch valid);
+// attestation_id of AttestationIDLen bytes (the session the retirement is
+// for); and every other field unset: digest_salt, expect_known, the
+// challenge nonce, ledger and ledger_checkpoint included. A minter runs it
+// on every retirement body it builds.
+func CheckRetireBody(b *providerv1.GrantBody) *Refusal {
+	if r := walkMessage(b.ProtoReflect(), "GrantBody"); r != nil {
+		return r
+	}
+	if b.GetGrantVersion() != LedgerGrantVersion {
+		return mismatch(RuleGrantVersion, "grant_version %d is not implemented", b.GetGrantVersion())
+	}
+	if b.GetGrantKind() != providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN {
+		return mismatch(RuleGrantKind, "grant_kind %s is not a retirement grant", b.GetGrantKind())
+	}
+	if r := checkCommonFields(b); r != nil {
+		return r
+	}
+	// The identity of the operation (10 to 15 and 17) is required; the salt
+	// (16) and expect_known (18) belong to operation grants only.
+	if len(b.GetDigestSalt()) > 0 || b.GetExpectKnown() {
+		return mismatch(RuleFieldNotForKind, "digest_salt or expect_known is set in a retirement grant")
+	}
+	if b.GetVmUid() == "" {
+		return mismatch(RuleMalformedField, "vm_uid is empty")
+	}
+	if len(b.GetBindingId()) != IDLen || len(b.GetOpId()) != IDLen {
+		return mismatch(RuleMalformedField, "binding_id and op_id must be %d bytes", IDLen)
+	}
+	if b.GetKind() == providerv1.OperationKind_OPERATION_KIND_UNSPECIFIED {
+		return mismatch(RuleUnspecifiedEnum, "kind is UNSPECIFIED")
+	}
+	if _, ok := RowFor(b.GetKind()); !ok {
+		return mismatch(RuleUnknownEnum, "kind %d is not implemented", b.GetKind())
+	}
+	if b.GetAttempt() == 0 {
+		return mismatch(RuleCounterZero, "attempt is 0")
+	}
+	if len(b.GetIntentDigest()) != DigestLen {
+		return mismatch(RuleMalformedField, "intent_digest is %d bytes, not %d", len(b.GetIntentDigest()), DigestLen)
+	}
+	if r := checkEpoch(b.GetMintEpoch(), "mint_epoch"); r != nil {
+		return r
+	}
+	// Fields 20 to 25 belong to administrative grants and the challenge.
+	if b.GetTargetNamespace() != "" || b.GetRequestUid() != "" || b.GetAction() != "" ||
+		len(b.GetSpecDigest()) > 0 || len(b.GetSingleUseNonce()) > 0 || b.GetPrecondition() != nil {
+		return mismatch(RuleFieldNotForKind, "an administrative field (20-25) is set in a retirement grant")
+	}
+	if placeholderSet(b) {
+		return mismatch(RulePlaceholderSet, "a field set aside (26, 28, 29) is set")
+	}
+	if b.GetLedger() != nil || b.GetLedgerCheckpoint() != nil {
+		return mismatch(RuleFieldNotForKind, "ledger or ledger_checkpoint is set in a retirement grant")
+	}
+	if len(b.GetAttestationId()) != AttestationIDLen {
+		return mismatch(RuleMalformedField, "attestation_id is %d bytes, not %d", len(b.GetAttestationId()), AttestationIDLen)
+	}
+	return nil
 }
 
 // checkAuthorityCommon checks what every authority grant kind shares: the
