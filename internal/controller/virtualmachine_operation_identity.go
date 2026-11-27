@@ -80,6 +80,9 @@ const (
 	crashAfterSend operationCrashPoint = "after-send"
 	// crashAfterReply: a signed outcome was read, the marker not Terminal.
 	crashAfterReply operationCrashPoint = "after-reply"
+	// crashBeforeRetireCover: an applied retirement answer was verified,
+	// the host ledger not yet raised over it.
+	crashBeforeRetireCover operationCrashPoint = "before-retire-cover"
 	// crashAfterTerminal: the marker is Terminal, the intent Secret not
 	// deleted.
 	crashAfterTerminal operationCrashPoint = "after-terminal"

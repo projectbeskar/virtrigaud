@@ -297,13 +297,14 @@ func (r *VirtualMachineReconciler) retireAnswer(ctx context.Context, vm *infravi
 		// below the position the manager holds for the store is no answer.
 		// (An authority request names no continuity position, so its answer
 		// is not put through the store continuity check.)
-		if va.Position.StoreID != hr.snapshot.StoreID || va.Position.Seq < hr.snapshot.Seq {
+		if (va.Position.StoreID != hr.snapshot.StoreID || va.Position.Seq < hr.snapshot.Seq) && !mutationOff(guardRetireAnswerPosition) {
 			return decided(r.noSignedAnswer(ctx, vm, a, "the host's answer to its retirement is behind its store's known position"))
 		}
-		raised, err := h.Ledger.Raise(ctx, ia.providerCR, a.HostID, va.Position.StoreID, []HostLedgerRaise{{Session: session,
-			Position: HostLedgerPosition{Seq: va.Position.Seq, Head: va.Position.Head}}})
-		if err != nil || raised == nil || raised.AttestationID != session || raised.Position.Seq < va.Position.Seq {
-			logger.Info("The host's ledger does not cover the retirement; it is asked again", "error", errString(err))
+		if r.operationCrashed(ctx, crashBeforeRetireCover) {
+			return attemptDecision{step: stepWaiting, err: errOperationCrashed}
+		}
+		if err := h.coverRetirement(ctx, ia.providerCR, a.HostID, session, va.Position); err != nil {
+			logger.Info("The host's ledger does not cover the retirement; it is asked again", "error", err.Error())
 			return decided(r.noSignedAnswer(ctx, vm, a, "the host's ledger does not cover its retirement yet"))
 		}
 		return r.closeRetired(ctx, vm, ia, a, read.SignedRead, va, retiredNeverReceived, "retired by the host it was never delivered to")
@@ -329,6 +330,32 @@ func (r *VirtualMachineReconciler) retireAnswer(ctx context.Context, vm *infravi
 	default:
 		return decided(r.noSignedAnswer(ctx, vm, a, fmt.Sprintf("the host refused its retirement (%s)", reason)))
 	}
+}
+
+// errRetirementNotCovered: the host ledger was not raised to the position
+// of a retirement answer.
+var errRetirementNotCovered = errors.New("the host ledger does not cover the retirement answer's position")
+
+// coverRetirement raises the host's ledger to pos, the position of an
+// applied retirement answer in session (at or above the tombstone's
+// commit), and returns an error unless the ledger, in that session, now
+// covers it. A store later rolled back below the tombstone then fails its
+// next attestation, so a late delivery of the op_id cannot run while the
+// manager records the attempt Retired.
+func (h *HostAnswers) coverRetirement(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string, session [16]byte,
+	pos hostidentity.ChainPosition) error {
+	if mutationOff(guardRetireLedgerRaise) {
+		return nil
+	}
+	raised, err := h.Ledger.Raise(ctx, provider, hostID, pos.StoreID, []HostLedgerRaise{{Session: session,
+		Position: HostLedgerPosition{Seq: pos.Seq, Head: pos.Head}}})
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %w", errRetirementNotCovered, err)
+	case raised == nil || raised.AttestationID != session || raised.Position.Seq < pos.Seq:
+		return errRetirementNotCovered
+	}
+	return nil
 }
 
 // closeRetired closes attempt a Retired with reason on the verified answer
