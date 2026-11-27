@@ -73,6 +73,10 @@ type HostTrust struct {
 	HostURI string
 	// HostName is the Host's name.
 	HostName string
+	// HostUID is the UID of the Host object the trust was read for (empty
+	// when the source does not know it): answers are recorded per Host
+	// object, so a replacement of the same name is told apart.
+	HostUID string
 	// Predecessors are earlier enrolments of the host that the host still
 	// holds frozen: an attempt under one may be asked about, never re-sent.
 	// Empty until a re-enrolment records one.
@@ -122,6 +126,11 @@ type HostStoreState struct {
 	// ledgerIndexRaw is the stored ledger index when it could not be
 	// decoded: kept and written back unchanged, and treated as tampered.
 	ledgerIndexRaw json.RawMessage
+	// MinManagerVersion is the document's downgrade floor
+	// (host_state_compat.go): set by the host ledger when it writes the
+	// index, so a manager that does not know the index refuses the Host
+	// rather than drop it. Every write keeps it.
+	MinManagerVersion string
 
 	// unknown are the top-level members of the stored document a newer
 	// manager wrote and this one does not know, and recordUnknown those of
@@ -239,6 +248,7 @@ func (p *PinsHostTrust) HostTrust(ctx context.Context, provider *infravirtrigaud
 		Enrolment: operation.Enrolment{EnrolmentID: rec.EnrolmentID,
 			Epoch: operation.Epoch{Counter: counter, Holder: bytes.Clone(p.Epoch.Holder)}},
 		InstallID: bytes.Clone(p.Config.InstallID), Pins: slices.Clone(cur.KeyPins), Anchors: anchors, HostURI: uri, HostName: h.Name,
+		HostUID: string(h.UID),
 	}
 	for _, s := range l.state.PredecessorEnrolmentIDs {
 		if id, err := hostidentity.DecodeID(s); err == nil {
@@ -277,6 +287,7 @@ type hostStoreStateJSON struct {
 	RegressedReason      string            `json:"regressedReason,omitempty"`
 	RegressedEnrolmentID string            `json:"regressedEnrolmentID,omitempty"`
 	LedgerIndex          json.RawMessage   `json:"ledgerIndex,omitempty"`
+	MinManagerVersion    string            `json:"minManagerVersion,omitempty"`
 	// Unknown are the members a newer manager wrote that this one does
 	// not know, written back unchanged (host_state_compat.go).
 	Unknown unknownMembers `json:"-"`
@@ -364,6 +375,7 @@ func decodeStoreState(data []byte) (HostStoreState, error) {
 		keep(r, p.Unknown)
 	}
 	st.RegressedReason = j.RegressedReason
+	st.MinManagerVersion = j.MinManagerVersion
 	if j.RegressedEnrolmentID != "" {
 		id, err := hostidentity.DecodeID(j.RegressedEnrolmentID)
 		if err != nil {
@@ -392,7 +404,7 @@ func decodeStoreState(data []byte) (HostStoreState, error) {
 // members a newer manager wrote that st carries from decodeStoreState: the
 // top-level ones, and each store record's for the record of the same store.
 func encodeStoreState(st HostStoreState) ([]byte, error) {
-	j := hostStoreStateJSON{RegressedReason: st.RegressedReason, Unknown: st.unknown}
+	j := hostStoreStateJSON{RegressedReason: st.RegressedReason, MinManagerVersion: st.MinManagerVersion, Unknown: st.unknown}
 	if !st.Current.Empty() {
 		c := toStoreJSON(st.Current, st.recordUnknown[st.Current.StoreID])
 		j.Current = &c
@@ -520,6 +532,9 @@ type hostAnswerState struct {
 	// mirroredAt is when the host's ledger mirrors were last refreshed
 	// (mirrorLedger).
 	mirroredAt time.Time
+	// hostAnswerHostUID is the UID of the Host object the last verified
+	// host answer was read for (empty: not known).
+	hostAnswerHostUID string
 }
 
 // HostAnswers is the manager's shared state of signed host answers, used by
@@ -1112,6 +1127,7 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 		s.hostAnswerStore, s.hostGrantVersions = v.Position.StoreID, slices.Clone(v.Host.GetGrantVersions())
 		s.hostAgentState = v.Context.GetAgentState()
 		s.hostAPIVersion = v.Host.GetAgentApiVersion()
+		s.hostAnswerHostUID = hr.trust.HostUID
 	}
 	h.mu.Unlock()
 	return out, nil

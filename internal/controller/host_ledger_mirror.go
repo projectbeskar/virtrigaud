@@ -21,6 +21,7 @@ import (
 	"math"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -68,16 +69,17 @@ func (h *HostAnswers) mirrorLedger(ctx context.Context, provider *infravirtrigau
 	if h.Ledger == nil {
 		return
 	}
-	if reason := h.Ledger.HeldReason(provider, host.Name); reason != "" {
+	m, ok := h.Ledger.mirrorOf(key)
+	prev := meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentLedgerHeld)
+	switch reason := h.Ledger.HeldReason(provider, host.Name); {
+	case reason != "":
 		setHostCondition(host, HostConditionAgentLedgerHeld, metav1.ConditionTrue, reason,
 			"the host's ledger holds the host; nothing new is signed for it from the ledger")
+	case ok || (prev != nil && prev.Status == metav1.ConditionTrue):
+		setHostCondition(host, HostConditionAgentLedgerHeld, metav1.ConditionFalse, reasonLedgerNotHeld, "the host's ledger holds nothing")
 	}
-	m, ok := h.Ledger.mirrorOf(key)
 	if !ok {
 		return
-	}
-	if h.Ledger.HeldReason(provider, host.Name) == "" {
-		setHostCondition(host, HostConditionAgentLedgerHeld, metav1.ConditionFalse, reasonLedgerNotHeld, "the host's ledger verified")
 	}
 	if !fits(m.seq) || !fits(m.checkpoint) || !fits(m.generation) {
 		host.Status.AgentLedger = nil

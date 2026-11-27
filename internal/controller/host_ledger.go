@@ -191,6 +191,11 @@ type HostLedgerRecord struct {
 	Archived         bool
 	SuccessorStoreID [16]byte
 	ArchivedAt       time.Time
+	// HeldReason and HeldEnrolment are a hold of the Host the ledger
+	// serves, decided under that enrolment and kept in the tagged object so
+	// that clearing the pins Secret does not lift it; empty when none.
+	HeldReason    string
+	HeldEnrolment []byte
 	// TagKeyID is the id of the tag key that made Tag.
 	TagKeyID string
 	// Tag is the HMAC tag over the record.
@@ -224,6 +229,7 @@ func (r *HostLedgerRecord) clone() *HostLedgerRecord {
 	c := *r
 	c.PendingSessions = slices.Clone(r.PendingSessions)
 	c.SessionHistory = slices.Clone(r.SessionHistory)
+	c.HeldEnrolment = bytes.Clone(r.HeldEnrolment)
 	c.GenerationEnrolments = make([][]byte, len(r.GenerationEnrolments))
 	for i, e := range r.GenerationEnrolments {
 		c.GenerationEnrolments[i] = bytes.Clone(e)
@@ -278,6 +284,8 @@ type hostLedgerJSON struct {
 	Archived             bool                `json:"archived,omitempty"`
 	SuccessorStoreID     string              `json:"successorStoreID,omitempty"`
 	ArchivedAt           string              `json:"archivedAt,omitempty"`
+	HeldReason           string              `json:"heldReason,omitempty"`
+	HeldEnrolmentID      string              `json:"heldEnrolmentID,omitempty"`
 	TagKeyID             string              `json:"tagKeyID"`
 	Tag                  string              `json:"tag"`
 	// Unknown are members a newer manager wrote (host_state_compat.go).
@@ -418,7 +426,7 @@ func decodeHostLedger(data []byte) (*HostLedgerRecord, error) {
 		}
 		r.AttestationState = s
 	default:
-		return nil, fmt.Errorf("%w: attestationState %q is not Pending or Attested", errLedgerMalformed, j.AttestationState)
+		return nil, fmt.Errorf("%w: attestationState is not Pending or Attested", errLedgerMalformed)
 	}
 	if len(j.PendingSessions) > maxLedgerPendingSessions || len(j.SessionHistory) > maxLedgerSessionHistory {
 		return nil, fmt.Errorf("%w: at most %d pending sessions and %d earlier sessions", errLedgerMalformed,
@@ -480,6 +488,16 @@ func decodeHostLedger(data []byte) (*HostLedgerRecord, error) {
 	case j.SuccessorStoreID != "" || j.ArchivedAt != "":
 		return nil, fmt.Errorf("%w: successorStoreID and archivedAt are set only on an archived ledger", errLedgerMalformed)
 	}
+	if j.HeldReason != "" || j.HeldEnrolmentID != "" {
+		if !heldReasonRE.MatchString(j.HeldReason) {
+			return nil, fmt.Errorf("%w: heldReason is not a hold reason", errLedgerMalformed)
+		}
+		r.HeldReason = j.HeldReason
+		r.HeldEnrolment = make([]byte, hostidentity.IDLen)
+		if err := decodeFixedHex("heldEnrolmentID", j.HeldEnrolmentID, r.HeldEnrolment); err != nil {
+			return nil, err
+		}
+	}
 	if !hex16RE.MatchString(j.TagKeyID) {
 		return nil, fmt.Errorf("%w: tagKeyID must be 16 lowercase hexadecimal characters", errLedgerMalformed)
 	}
@@ -520,6 +538,9 @@ func (r *HostLedgerRecord) toJSON() hostLedgerJSON {
 	if r.Archived {
 		j.SuccessorStoreID = hex.EncodeToString(r.SuccessorStoreID[:])
 		j.ArchivedAt = formatLedgerTime(r.ArchivedAt)
+	}
+	if r.HeldReason != "" {
+		j.HeldReason, j.HeldEnrolmentID = r.HeldReason, hex.EncodeToString(r.HeldEnrolment)
 	}
 	return j
 }
@@ -633,6 +654,8 @@ func (r *HostLedgerRecord) tagInput() []byte {
 	e.field("archived", archived)
 	e.str("successorStoreID", j.SuccessorStoreID)
 	e.str("archivedAt", j.ArchivedAt)
+	e.str("heldReason", j.HeldReason)
+	e.str("heldEnrolmentID", j.HeldEnrolmentID)
 	e.unknown(j.Unknown)
 	return e.buf.Bytes()
 }
@@ -648,16 +671,35 @@ func (r *HostLedgerRecord) verifyTag(keys *HostLedgerKeys) bool {
 	return keys.verifyTag(r.TagKeyID, hostLedgerTagContext, r.tagInput(), r.Tag[:])
 }
 
+// HostLedgerIndexStore is one store named by a ledger index, with the
+// highest write counter of its ledger object seen. A counter of 0 reserves
+// the store: its ledger object is being created and was never confirmed, so
+// a missing object of a reserved store is not a lost ledger.
+type HostLedgerIndexStore struct {
+	// ID is the store id.
+	ID [16]byte
+	// Counter is the highest write counter of the store's ledger seen.
+	Counter uint64
+
+	unknown unknownMembers
+}
+
 // HostLedgerIndex is the ledger index kept in a Host's pins Secret (member
-// ledgerIndex of store.json): the stores that have a ledger object and the
-// highest ledger write counter seen. Neither is ever lowered. It is tagged
-// under the ledger tag key together with the Host's UID, so an index copied
-// from another Host's pins Secret does not verify.
+// ledgerIndex of store.json): the stores that have (or are getting) a
+// ledger object, each with the highest write counter seen, the highest
+// generation any of the Host's ledgers had, and a hold the ledger decided
+// for the Host. None of it is ever lowered. It is tagged under the ledger
+// tag key together with the Host's UID, so an index copied from another
+// Host's pins Secret does not verify.
 type HostLedgerIndex struct {
-	// StoreIDs are the stores that have a ledger object, oldest first.
-	StoreIDs [][16]byte
-	// CounterSeen is the highest ledger write counter seen.
-	CounterSeen uint64
+	// Stores are the stores that have a ledger object, oldest first.
+	Stores []HostLedgerIndexStore
+	// MaxGeneration is the highest generation of the Host's ledgers.
+	MaxGeneration uint64
+	// HeldReason and HeldEnrolment are a hold the ledger decided for the
+	// Host under that enrolment; empty when none.
+	HeldReason    string
+	HeldEnrolment []byte
 	// TagKeyID is the id of the tag key that made Tag.
 	TagKeyID string
 	// Tag is the HMAC tag over the index.
@@ -666,9 +708,35 @@ type HostLedgerIndex struct {
 	unknown unknownMembers
 }
 
-// Names reports whether the index names store.
+// entry returns the index entry of store.
+func (x *HostLedgerIndex) entry(store [16]byte) (HostLedgerIndexStore, bool) {
+	if x == nil {
+		return HostLedgerIndexStore{}, false
+	}
+	for _, s := range x.Stores {
+		if s.ID == store {
+			return s, true
+		}
+	}
+	return HostLedgerIndexStore{}, false
+}
+
+// Names reports whether the index names store with a confirmed ledger
+// (counter above 0).
 func (x *HostLedgerIndex) Names(store [16]byte) bool {
-	return x != nil && slices.Contains(x.StoreIDs, store)
+	e, ok := x.entry(store)
+	return ok && e.Counter > 0
+}
+
+// Reserves reports whether the index names store, confirmed or reserved.
+func (x *HostLedgerIndex) Reserves(store [16]byte) bool {
+	_, ok := x.entry(store)
+	return ok
+}
+
+// HadLedger reports whether the index shows the Host ever had a ledger.
+func (x *HostLedgerIndex) HadLedger() bool {
+	return x != nil && (len(x.Stores) > 0 || x.MaxGeneration > 0)
 }
 
 // clone returns a deep copy (nil for nil).
@@ -677,16 +745,41 @@ func (x *HostLedgerIndex) clone() *HostLedgerIndex {
 		return nil
 	}
 	c := *x
-	c.StoreIDs = slices.Clone(x.StoreIDs)
+	c.Stores = slices.Clone(x.Stores)
+	c.HeldEnrolment = bytes.Clone(x.HeldEnrolment)
 	return &c
+}
+
+// equalContent reports whether two indexes carry the same content (the tag
+// aside).
+func (x *HostLedgerIndex) equalContent(o *HostLedgerIndex) bool {
+	if x == nil || o == nil {
+		return x == o
+	}
+	if len(x.Stores) != len(o.Stores) || x.MaxGeneration != o.MaxGeneration || x.HeldReason != o.HeldReason ||
+		!bytes.Equal(x.HeldEnrolment, o.HeldEnrolment) {
+		return false
+	}
+	for i := range x.Stores {
+		if x.Stores[i].ID != o.Stores[i].ID || x.Stores[i].Counter != o.Stores[i].Counter {
+			return false
+		}
+	}
+	return true
 }
 
 // tagInput returns the bytes the index tag covers, bound to the Host UID.
 func (x *HostLedgerIndex) tagInput(hostUID string) []byte {
 	var e tagEncoder
 	e.str("hostUID", hostUID)
-	e.list("storeIDs", len(x.StoreIDs), func(i int, sub *tagEncoder) { sub.str("id", hex.EncodeToString(x.StoreIDs[i][:])) })
-	e.u64("counterSeen", x.CounterSeen)
+	e.list("stores", len(x.Stores), func(i int, sub *tagEncoder) {
+		sub.str("id", hex.EncodeToString(x.Stores[i].ID[:]))
+		sub.u64("counter", x.Stores[i].Counter)
+		sub.unknown(x.Stores[i].unknown)
+	})
+	e.u64("maxGeneration", x.MaxGeneration)
+	e.str("heldReason", x.HeldReason)
+	e.str("heldEnrolmentID", hex.EncodeToString(x.HeldEnrolment))
 	e.unknown(x.unknown)
 	return e.buf.Bytes()
 }
@@ -701,12 +794,35 @@ func (x *HostLedgerIndex) verifyTag(keys *HostLedgerKeys, hostUID string) bool {
 	return keys.verifyTag(x.TagKeyID, hostLedgerIndexTagContext, x.tagInput(hostUID), x.Tag[:])
 }
 
+// ledgerIndexStoreJSON is the JSON form of a HostLedgerIndexStore.
+type ledgerIndexStoreJSON struct {
+	ID      string `json:"id"`
+	Counter uint64 `json:"counter"`
+	// Unknown are members a newer manager wrote (host_state_compat.go).
+	Unknown unknownMembers `json:"-"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (s *ledgerIndexStoreJSON) UnmarshalJSON(b []byte) (err error) {
+	type plain ledgerIndexStoreJSON
+	s.Unknown, err = decodeKeepingUnknown(b, (*plain)(s))
+	return err
+}
+
+// MarshalJSON implements json.Marshaler.
+func (s ledgerIndexStoreJSON) MarshalJSON() ([]byte, error) {
+	type plain ledgerIndexStoreJSON
+	return encodeWithUnknown(plain(s), s.Unknown)
+}
+
 // ledgerIndexJSON is the JSON form of a HostLedgerIndex.
 type ledgerIndexJSON struct {
-	StoreIDs    []string `json:"storeIDs,omitempty"`
-	CounterSeen uint64   `json:"counterSeen"`
-	TagKeyID    string   `json:"tagKeyID"`
-	Tag         string   `json:"tag"`
+	Stores          []ledgerIndexStoreJSON `json:"stores,omitempty"`
+	MaxGeneration   uint64                 `json:"maxGeneration,omitempty"`
+	HeldReason      string                 `json:"heldReason,omitempty"`
+	HeldEnrolmentID string                 `json:"heldEnrolmentID,omitempty"`
+	TagKeyID        string                 `json:"tagKeyID"`
+	Tag             string                 `json:"tag"`
 	// Unknown are members a newer manager wrote (host_state_compat.go).
 	Unknown unknownMembers `json:"-"`
 }
@@ -729,12 +845,19 @@ func toIndexJSON(x *HostLedgerIndex) *ledgerIndexJSON {
 	if x == nil {
 		return nil
 	}
-	j := &ledgerIndexJSON{CounterSeen: x.CounterSeen, TagKeyID: x.TagKeyID, Tag: hex.EncodeToString(x.Tag[:]), Unknown: x.unknown}
-	for _, s := range x.StoreIDs {
-		j.StoreIDs = append(j.StoreIDs, hex.EncodeToString(s[:]))
+	j := &ledgerIndexJSON{MaxGeneration: x.MaxGeneration, HeldReason: x.HeldReason, TagKeyID: x.TagKeyID,
+		Tag: hex.EncodeToString(x.Tag[:]), Unknown: x.unknown}
+	if len(x.HeldEnrolment) > 0 {
+		j.HeldEnrolmentID = hex.EncodeToString(x.HeldEnrolment)
+	}
+	for _, s := range x.Stores {
+		j.Stores = append(j.Stores, ledgerIndexStoreJSON{ID: hex.EncodeToString(s.ID[:]), Counter: s.Counter, Unknown: s.unknown})
 	}
 	return j
 }
+
+// heldReasonRE bounds a hold reason stored in a ledger or an index.
+var heldReasonRE = regexp.MustCompile(`^[A-Za-z][A-Za-z_]{0,63}$`)
 
 // fromIndexJSON decodes the JSON form of an index. A malformed index is an
 // error; the caller treats it as a tampered one.
@@ -742,16 +865,29 @@ func fromIndexJSON(j *ledgerIndexJSON) (*HostLedgerIndex, error) {
 	if j == nil {
 		return nil, nil
 	}
-	if len(j.StoreIDs) > maxLedgerIndexStores {
+	if len(j.Stores) > maxLedgerIndexStores {
 		return nil, fmt.Errorf("%w: the ledger index names more than %d stores", errLedgerMalformed, maxLedgerIndexStores)
 	}
-	x := &HostLedgerIndex{CounterSeen: j.CounterSeen, TagKeyID: j.TagKeyID, unknown: j.Unknown}
-	for i, s := range j.StoreIDs {
-		var id [16]byte
-		if err := decodeFixedHex(fmt.Sprintf("ledgerIndex.storeIDs[%d]", i), s, id[:]); err != nil {
+	x := &HostLedgerIndex{MaxGeneration: j.MaxGeneration, TagKeyID: j.TagKeyID, unknown: j.Unknown}
+	for i, s := range j.Stores {
+		e := HostLedgerIndexStore{Counter: s.Counter, unknown: s.Unknown}
+		if err := decodeFixedHex(fmt.Sprintf("ledgerIndex.stores[%d].id", i), s.ID, e.ID[:]); err != nil {
 			return nil, err
 		}
-		x.StoreIDs = append(x.StoreIDs, id)
+		if x.Reserves(e.ID) {
+			return nil, fmt.Errorf("%w: the ledger index names a store twice", errLedgerMalformed)
+		}
+		x.Stores = append(x.Stores, e)
+	}
+	if j.HeldReason != "" || j.HeldEnrolmentID != "" {
+		if !heldReasonRE.MatchString(j.HeldReason) {
+			return nil, fmt.Errorf("%w: ledgerIndex.heldReason is not a hold reason", errLedgerMalformed)
+		}
+		x.HeldReason = j.HeldReason
+		x.HeldEnrolment = make([]byte, hostidentity.IDLen)
+		if err := decodeFixedHex("ledgerIndex.heldEnrolmentID", j.HeldEnrolmentID, x.HeldEnrolment); err != nil {
+			return nil, err
+		}
 	}
 	if !hex16RE.MatchString(j.TagKeyID) {
 		return nil, fmt.Errorf("%w: ledgerIndex.tagKeyID must be 16 lowercase hexadecimal characters", errLedgerMalformed)

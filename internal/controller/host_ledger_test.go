@@ -312,18 +312,46 @@ func duplicatePending() []map[string]any {
 
 func TestHostLedgerIndex_TagBindsHost(t *testing.T) {
 	keys := newTestLedgerKeys(t)
-	x := &HostLedgerIndex{StoreIDs: [][16]byte{{1}, {2}}, CounterSeen: 7}
+	x := &HostLedgerIndex{Stores: []HostLedgerIndexStore{{ID: [16]byte{1}, Counter: 7}, {ID: [16]byte{2}, Counter: 0}},
+		MaxGeneration: 9, HeldReason: LedgerReasonFork, HeldEnrolment: bytes.Repeat([]byte{1}, 16)}
 	x.sign(keys, "uid-a")
 	assert.True(t, x.verifyTag(keys, "uid-a"))
 	assert.False(t, x.verifyTag(keys, "uid-b"), "an index copied from another Host's pins Secret does not verify")
-	c := x.clone()
-	c.CounterSeen = 6
-	assert.False(t, c.verifyTag(keys, "uid-a"), "a lowered counter breaks the tag")
-	c = x.clone()
-	c.StoreIDs = c.StoreIDs[1:]
-	assert.False(t, c.verifyTag(keys, "uid-a"), "a removed store breaks the tag")
-	assert.True(t, x.Names([16]byte{2}))
+	for name, edit := range map[string]func(*HostLedgerIndex){
+		"lowered counter":    func(c *HostLedgerIndex) { c.Stores[0].Counter = 6 },
+		"removed store":      func(c *HostLedgerIndex) { c.Stores = c.Stores[1:] },
+		"lowered generation": func(c *HostLedgerIndex) { c.MaxGeneration = 8 },
+		"cleared hold":       func(c *HostLedgerIndex) { c.HeldReason, c.HeldEnrolment = "", nil },
+	} {
+		c := x.clone()
+		edit(c)
+		assert.False(t, c.verifyTag(keys, "uid-a"), "%s breaks the tag", name)
+	}
+	assert.True(t, x.Names([16]byte{1}))
+	assert.False(t, x.Names([16]byte{2}), "a reserved store is not yet named")
+	assert.True(t, x.Reserves([16]byte{2}))
+	assert.True(t, x.HadLedger())
 	assert.False(t, (*HostLedgerIndex)(nil).Names([16]byte{2}))
+	assert.False(t, (*HostLedgerIndex)(nil).HadLedger())
+
+	// Round trip through store.json, with an unknown member per store.
+	j := toIndexJSON(x)
+	j.Stores[0].Unknown = unknownMembers{"future": json.RawMessage(`1`)}
+	back, err := fromIndexJSON(j)
+	require.NoError(t, err)
+	assert.False(t, back.verifyTag(keys, "uid-a"), "a member added without the key breaks the tag")
+	back.sign(keys, "uid-a")
+	raw, err := json.Marshal(toIndexJSON(back))
+	require.NoError(t, err)
+	var j2 ledgerIndexJSON
+	require.NoError(t, json.Unmarshal(raw, &j2))
+	again, err := fromIndexJSON(&j2)
+	require.NoError(t, err)
+	assert.True(t, again.verifyTag(keys, "uid-a"), "members a newer manager added are kept and covered")
+	dup := toIndexJSON(x)
+	dup.Stores = append(dup.Stores, dup.Stores[0])
+	_, err = fromIndexJSON(dup)
+	assert.ErrorIs(t, err, errLedgerMalformed, "a store named twice is malformed")
 }
 
 // The ledger index lives in store.json: every store-state write of the
@@ -331,7 +359,7 @@ func TestHostLedgerIndex_TagBindsHost(t *testing.T) {
 // ledger as tampered), and unknown members around it survive.
 func TestStoreState_KeepsLedgerIndex(t *testing.T) {
 	keys := newTestLedgerKeys(t)
-	x := &HostLedgerIndex{StoreIDs: [][16]byte{{1}}, CounterSeen: 4}
+	x := &HostLedgerIndex{Stores: []HostLedgerIndexStore{{ID: [16]byte{1}, Counter: 4}}}
 	x.sign(keys, "uid-a")
 	st := HostStoreState{Current: hostidentity.StoreRecord{StoreID: [16]byte{1}, EnrolmentID: bytes.Repeat([]byte{1}, 16), Seq: 3,
 		Head: [32]byte{3}}, LedgerIndex: x}
@@ -350,7 +378,7 @@ func TestStoreState_KeepsLedgerIndex(t *testing.T) {
 
 	var doc map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(data, &doc))
-	doc["ledgerIndex"] = json.RawMessage(`{"storeIDs":["zz"],"counterSeen":1,"tagKeyID":"x","tag":"y"}`)
+	doc["ledgerIndex"] = json.RawMessage(`{"stores":[{"id":"zz","counter":1}],"tagKeyID":"x","tag":"y"}`)
 	doc["futureTop"] = json.RawMessage(`[1]`)
 	bad, err := json.Marshal(doc)
 	require.NoError(t, err)
@@ -360,7 +388,7 @@ func TestStoreState_KeepsLedgerIndex(t *testing.T) {
 	assert.NotEmpty(t, st2.ledgerIndexRaw)
 	out, err := encodeStoreState(st2)
 	require.NoError(t, err)
-	assert.Contains(t, string(out), `"storeIDs":["zz"]`, "kept as it is")
+	assert.Contains(t, string(out), `"stores":[{"id":"zz","counter":1}]`, "kept as it is")
 	assert.Contains(t, string(out), "futureTop")
 }
 
