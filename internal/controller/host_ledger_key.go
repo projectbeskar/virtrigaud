@@ -232,12 +232,13 @@ func (k *HostLedgerKeys) PreviousKeyID() string { return k.previousID }
 
 // tagKey returns the tag key named by id, or false for an unknown id.
 func (k *HostLedgerKeys) tagKey(id string) ([]byte, bool) {
-	switch {
-	case id == "":
+	if id == "" {
 		return nil, false
-	case id == k.currentID:
+	}
+	switch id {
+	case k.currentID:
 		return k.current, true
-	case id == k.previousID:
+	case k.previousID:
 		return k.previous, true
 	}
 	return nil, false

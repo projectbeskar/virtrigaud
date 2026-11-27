@@ -868,12 +868,13 @@ func (l *HostLedger) nextGeneration(pred uint64) uint64 {
 
 // headOf returns the head a store record holds at seq.
 func headOf(r hostidentity.StoreRecord, seq uint64) ([32]byte, bool) {
-	switch {
-	case seq == 0:
+	if seq == 0 {
 		return [32]byte{}, false
-	case seq == r.Seq:
+	}
+	switch seq {
+	case r.Seq:
 		return r.Head, true
-	case seq == r.CheckpointSeq:
+	case r.CheckpointSeq:
 		return r.CheckpointHead, true
 	}
 	return [32]byte{}, false
@@ -1275,8 +1276,8 @@ func (l *HostLedger) BeginSession(ctx context.Context, provider *infravirtrigaud
 			return false, fmt.Errorf("store %s: a re-attestation needs an adopted session: %w", r.StorePrefix(), ErrHostLedgerNotAttested)
 		}
 		changed := false
-		if !r.HasPendingSession(session) && !(r.AttestationID == session &&
-			r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested) {
+		current := r.AttestationID == session && r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested
+		if !r.HasPendingSession(session) && !current {
 			r.PendingSessions = append(r.PendingSessions, HostLedgerPendingSession{ID: session, BegunAt: l.now().UTC().Truncate(time.Second)})
 			if n := len(r.PendingSessions); n > maxLedgerPendingSessions {
 				r.PendingSessions = r.PendingSessions[n-maxLedgerPendingSessions:]

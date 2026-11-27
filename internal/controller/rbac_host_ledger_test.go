@@ -148,7 +148,7 @@ func (s *rbacSet) holders(ns, verb, name string, forWrite bool) map[rbacSubject]
 			continue
 		}
 		var rules []rbacv1.PolicyRule
-		known := true
+		var known bool
 		switch b.ref.Kind {
 		case "ClusterRole":
 			cr, ok := s.clusterRoles[b.ref.Name]
@@ -156,8 +156,6 @@ func (s *rbacSet) holders(ns, verb, name string, forWrite bool) map[rbacSubject]
 		case "Role":
 			r, ok := s.roles[b.namespace+"/"+b.ref.Name]
 			rules, known = r.Rules, ok
-		default:
-			known = false
 		}
 		if known && !rulesGrant(rules, verb, name, forWrite) {
 			continue
