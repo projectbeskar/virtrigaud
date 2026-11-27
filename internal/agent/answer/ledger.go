@@ -28,6 +28,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/agent/internal/guard"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -120,6 +121,13 @@ func ledgerState(h Host, requested uint32) *providerv1.HostLedgerState {
 		st.State = providerv1.LedgerSessionState_LEDGER_SESSION_STATE_ATTESTED
 		st.AttestationId = bytes.Clone(h.Attestation.Session)
 		st.Mark = ledgerPosition(h.Attestation.Mark)
+	}
+	if rec := h.View.Attested; st.Version >= hostidentity.StoreAttestedLedgerVersion && rec.EverAttested &&
+		!guard.Off(guard.AttestRecordReported) {
+		st.StoreEverAttested = true
+		st.StoreFirstAttestedSeq = rec.FirstSeq
+		st.StoreFirstAttestedEnrolmentId = bytes.Clone(rec.FirstEnrolmentID)
+		st.StoreAttestedRecordSeq = rec.RecordSeq
 	}
 	return st
 }
@@ -276,7 +284,7 @@ func checkLedgerFields(body proto.Message) error {
 		if b.GetContext().GetLedgerVersionEcho() != 0 {
 			return fmt.Errorf("%w: a challenge answer echoes a ledger version", errLedgerField)
 		}
-		return nil
+		return checkStoreAttestation(b.GetLedger())
 	case *providerv1.AuthorityAnswer:
 		if b.GetContext().GetLedgerVersionEcho() != 0 {
 			return fmt.Errorf("%w: an authority answer echoes a ledger version", errLedgerField)
@@ -286,6 +294,11 @@ func checkLedgerFields(body proto.Message) error {
 		ctx = b.GetContext()
 		if l := b.GetLedger(); l != nil && (ctx.GetLedgerVersionEcho() == 0 || l.GetRequestedVersion() != ctx.GetLedgerVersionEcho()) {
 			return fmt.Errorf("%w: a host answer carries a ledger state the request did not ask for", errLedgerField)
+		}
+		if l := b.GetLedger(); l != nil {
+			if err := checkStoreAttestation(l); err != nil {
+				return err
+			}
 		}
 	case *providerv1.OperationAnswer:
 		ctx = b.GetContext()
@@ -298,6 +311,16 @@ func checkLedgerFields(body proto.Message) error {
 	if journal.IsLedgerReason(journal.LostReason(ctx.GetStateReason())) && ctx.GetLedgerVersionEcho() == 0 &&
 		!guard.Off(guard.LedgerReasonsGated) {
 		return fmt.Errorf("%w: a ledger loss reason in an answer to a request that did not ask for it", errLedgerField)
+	}
+	return nil
+}
+
+// checkStoreAttestation applies the field rules of the store's attestation
+// record in a ledger state (hostidentity.StoreAttestationOf, the manager's
+// rules), so that the agent never signs a state the manager refuses.
+func checkStoreAttestation(l *providerv1.HostLedgerState) error {
+	if _, err := hostidentity.StoreAttestationOf(l); err != nil {
+		return fmt.Errorf("%w: %w", errLedgerField, err)
 	}
 	return nil
 }

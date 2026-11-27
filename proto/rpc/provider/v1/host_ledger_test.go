@@ -53,16 +53,20 @@ func fullLedgerPosition(b byte) *LedgerPosition {
 
 func fullHostLedgerState() *HostLedgerState {
 	return &HostLedgerState{
-		RequestedVersion:         1,
-		Version:                  1,
-		State:                    LedgerSessionState_LEDGER_SESSION_STATE_ATTESTED,
-		AttestationId:            fill(0x41, 16),
-		Mark:                     fullLedgerPosition(0x42),
-		PendingReceipts:          3,
-		StoreOriginEnrolmentId:   fill(0x44, 16),
-		StoreEnrolmentCount:      2,
-		ParkedRequestBytes:       1 << 20,
-		ParkedRequestBudgetBytes: 256 << 20,
+		RequestedVersion:              1,
+		Version:                       1,
+		State:                         LedgerSessionState_LEDGER_SESSION_STATE_ATTESTED,
+		AttestationId:                 fill(0x41, 16),
+		Mark:                          fullLedgerPosition(0x42),
+		PendingReceipts:               3,
+		StoreOriginEnrolmentId:        fill(0x44, 16),
+		StoreEnrolmentCount:           2,
+		ParkedRequestBytes:            1 << 20,
+		ParkedRequestBudgetBytes:      256 << 20,
+		StoreEverAttested:             true,
+		StoreFirstAttestedSeq:         17,
+		StoreFirstAttestedEnrolmentId: fill(0x44, 16),
+		StoreAttestedRecordSeq:        18,
 	}
 }
 
@@ -153,6 +157,10 @@ func TestHostLedger_FieldNumbersPinned(t *testing.T) {
 		{"store_enrolment_count", 8, protoreflect.Uint32Kind, "", false},
 		{"parked_request_bytes", 9, protoreflect.Uint64Kind, "", false},
 		{"parked_request_budget_bytes", 10, protoreflect.Uint64Kind, "", false},
+		{"store_ever_attested", 11, protoreflect.BoolKind, "", false},
+		{"store_first_attested_seq", 12, protoreflect.Uint64Kind, "", false},
+		{"store_first_attested_enrolment_id", 13, protoreflect.BytesKind, "", false},
+		{"store_attested_record_seq", 14, protoreflect.Uint64Kind, "", false},
 	}, true)
 	checkFields(t, (&OperationReceipt{}).ProtoReflect().Descriptor(), []fieldSpec{
 		{"receipt_version", 1, protoreflect.Uint32Kind, "", false},

@@ -47,7 +47,11 @@ limitations under the License.
 //     attested: when the store's active enrolment is not the one the host
 //     certificate carries, continuity is established, the clock floor
 //     committed and the store enrolled (step 6) before the attestation; no
-//     operation step runs and recovery still waits for it. An attestation
+//     operation step runs and recovery still waits for it. The first
+//     attestation a store ever receives commits too, once its ledger
+//     position passed the checks: the store's attestation record, preceded,
+//     when continuity is not established yet, by step 6 up to recovery (see
+//     attestation.Attest). An attestation
 //     that quarantines the store ends the start-up as a quarantine. A
 //     release build does not take part in the ledger protocol and runs
 //     steps 6 to 8 at once.
