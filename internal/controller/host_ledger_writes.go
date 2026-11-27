@@ -256,6 +256,7 @@ type HostLedger struct {
 	goneSince      map[string]time.Time
 	heartbeatAt    map[string]time.Time
 	indexPersisted map[string]time.Time
+	observed       map[string]observedEvidence
 }
 
 // NewHostLedger returns the host ledger library of a manager with host
