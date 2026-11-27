@@ -64,6 +64,9 @@ type HostView struct {
 	// EnrolmentActivations is how many enrolments were activated in the
 	// store; 0 when it records no origin.
 	EnrolmentActivations uint32
+	// Attested is the store's attestation record: whether it was ever
+	// attested, and the first attestation's facts.
+	Attested journal.StoreAttestation
 }
 
 // HostView reads the active enrolment, the committed chain position, the
@@ -105,6 +108,9 @@ func hostViewTx(tx *journal.Tx, continuitySeq uint64) (HostView, error) {
 	}
 	v.LastStartEpoch = m.GetLastStartEpoch()
 	if v.OriginEnrolmentID, v.EnrolmentActivations, err = tx.StoreOrigin(); err != nil {
+		return HostView{}, err
+	}
+	if v.Attested, err = tx.StoreAttestation(); err != nil {
 		return HostView{}, err
 	}
 	e, err := activeEnrolment(tx)

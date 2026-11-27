@@ -28,7 +28,8 @@ import (
 
 // Attestation is the agent's current attestation session against the
 // manager's host ledger. It is held in memory only: every start begins
-// without one, awaiting attestation.
+// without one, awaiting attestation. That the store was ever attested is
+// durable (the store's attestation record, see Store.Attest).
 type Attestation struct {
 	// Session is the 16-byte attestation id: the challenge nonce of the last
 	// attestation applied since the store opened.
@@ -66,12 +67,27 @@ type AttestResult struct {
 	// Quarantined is the lost reason the attestation recorded; empty when it
 	// was applied.
 	Quarantined journal.LostReason
+	// Recorded is true when this attestation committed the store's
+	// attestation record (the store's first attestation ever).
+	Recorded bool
 }
 
 // ErrAttestState is returned for a first attestation while the store is
 // attested, or a re-attestation while it awaits its first one. Nothing is
 // changed.
 var ErrAttestState = errors.New("the attestation does not match the store's attestation state")
+
+// ErrContinuityPending is returned for the first attestation of a store that
+// records no attestation yet while its journal has not established
+// continuity: the attestation record cannot be committed. The ledger
+// position passed the checks and nothing was changed; the caller
+// establishes continuity (and commits what must precede any other commit)
+// and attests again.
+var ErrContinuityPending = errors.New("the store's continuity is not established; its attestation record cannot be committed")
+
+// errLedgerVerdict aborts the transaction that records the attestation when
+// the ledger position no longer passes the checks.
+var errLedgerVerdict = errors.New("the attested ledger position does not pass the checks")
 
 // Attestation returns the store's current attestation session; ok is false
 // while the store awaits its first attestation. It does not wait for the
@@ -96,9 +112,19 @@ func (s *Store) Attestation() (a Attestation, ok bool) {
 //     checkpoint at or below the position whose head the store holds and
 //     equals passes, a held checkpoint head that differs is ledger_mismatch,
 //     and anything else is ledger_unverifiable;
-//   - when it passes, the mark becomes the position on a first attestation
-//     and the higher of the old mark and the position on a re-attestation,
-//     and no checkpoint prunes the chain at or above the mark from then on.
+//   - when it passes and the store records no attestation yet (its first
+//     attestation ever, which is never a re-attestation: a re-attestation
+//     needs a session, and a session exists only after the record), the
+//     store's attestation record (journal.Tx.RecordFirstAttestation: the
+//     ledger position's sequence number and the active enrolment) is
+//     committed, the checks repeated in the same transaction, before
+//     anything else changes. When that commit fails no session is created
+//     and the error is returned; when the journal has not established
+//     continuity yet it returns ErrContinuityPending. A store that records
+//     one commits nothing;
+//   - then the mark becomes the position on a first attestation and the
+//     higher of the old mark and the position on a re-attestation, and no
+//     checkpoint prunes the chain at or above the mark from then on.
 //
 // A quarantine is returned in AttestResult.Quarantined, not as an error. A
 // store that is already lost returns an error wrapping journal.ErrLost; a
@@ -119,19 +145,33 @@ func (s *Store) Attest(ctx context.Context, r AttestRequest) (AttestResult, erro
 	}
 	var verdict journal.LostReason
 	var detail string
+	var rec journal.StoreAttestation
 	if err := s.j.View(ctx, func(tx *journal.Tx) error {
 		pos, ok := tx.CommittedPosition()
 		if !ok {
 			return errors.New("store position unreadable")
 		}
 		verdict, detail = checkLedger(tx, pos, r)
-		return nil
+		var err error
+		rec, err = tx.StoreAttestation()
+		return err
 	}); err != nil {
 		return AttestResult{}, fmt.Errorf("attest: %w", err)
 	}
 	if verdict != "" {
 		s.j.Quarantine(verdict, detail)
 		return AttestResult{Quarantined: verdict}, nil
+	}
+	recorded := false
+	if !rec.EverAttested && !guard.Off(guard.AttestRecordFirst) {
+		var err error
+		if recorded, verdict, detail, err = s.recordFirstAttestationLocked(ctx, r); err != nil {
+			return AttestResult{}, fmt.Errorf("attest: %w", err)
+		}
+		if verdict != "" {
+			s.j.Quarantine(verdict, detail)
+			return AttestResult{Quarantined: verdict}, nil
+		}
 	}
 	next := &Attestation{Session: bytes.Clone(r.Session), Mark: r.Ledger}
 	if cur != nil && cur.Mark.Seq > r.Ledger.Seq && !guard.Off(guard.AttestMarkMax) {
@@ -148,7 +188,45 @@ func (s *Store) Attest(ctx context.Context, r AttestRequest) (AttestResult, erro
 		s.parkMu.Unlock()
 	}
 	s.wakeParked()
-	return AttestResult{First: cur == nil, Attestation: Attestation{Session: bytes.Clone(next.Session), Mark: next.Mark}}, nil
+	return AttestResult{First: cur == nil, Attestation: Attestation{Session: bytes.Clone(next.Session), Mark: next.Mark}, Recorded: recorded}, nil
+}
+
+// recordFirstAttestationLocked commits the store's attestation record for
+// the attestation r, repeating the ledger checks in the same transaction. It
+// returns whether it committed the record, or the lost reason and detail
+// when the position no longer passes the checks (nothing is written then).
+// A journal that has not established continuity returns
+// ErrContinuityPending. The caller holds s.mu.
+func (s *Store) recordFirstAttestationLocked(ctx context.Context, r AttestRequest) (recorded bool, verdict journal.LostReason, detail string, err error) {
+	if st, _ := s.j.State(); st != journal.StateReady {
+		return false, "", "", ErrContinuityPending
+	}
+	_, err = s.j.Update(ctx, func(tx *journal.Tx) error {
+		pos, ok := tx.CommittedPosition()
+		if !ok {
+			return errors.New("store position unreadable")
+		}
+		if verdict, detail = checkLedger(tx, pos, r); verdict != "" {
+			return errLedgerVerdict
+		}
+		e, err := activeEnrolment(tx)
+		if err != nil {
+			return err
+		}
+		var enrolment []byte
+		if e != nil {
+			enrolment = e.GetEnrolmentId()
+		}
+		recorded, err = tx.RecordFirstAttestation(r.Ledger.Seq, enrolment)
+		return err
+	})
+	switch {
+	case errors.Is(err, errLedgerVerdict):
+		return false, verdict, detail, nil
+	case err != nil:
+		return false, "", "", fmt.Errorf("record the store's first attestation: %w", err)
+	}
+	return recorded, "", "", nil
 }
 
 // checkLedger compares the ledger position of r with the store's chain at
