@@ -733,7 +733,7 @@ var _ = Describe("Host ledger (envtest)", func() {
 			res, err := rotated.RetagSweep(ctx)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res.Ledgers).To(Equal(2), "archived ledgers are re-tagged too")
-			Expect(res.Indexes).To(Equal(1))
+			Expect(res.Indexes).To(BeNumerically("<=", 1), "an index is re-tagged by the ledger pass that records its counter, or by its own")
 			Expect(res.Remaining).To(BeZero())
 			Expect(ledgerOf(oldStore).TagKeyID).To(Equal(rotatedKeys.CurrentKeyID()))
 			Expect(ledgerOf(store).TagKeyID).To(Equal(rotatedKeys.CurrentKeyID()))
@@ -753,6 +753,54 @@ var _ = Describe("Host ledger (envtest)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			_, err = newLedger(dropped).Load(ctx, provider, h.Name, store)
 			expectHold(err, LedgerReasonTampered, false)
+		})
+
+		It("re-tags nothing that a read would refuse: a restored older copy under the previous key holds its Host", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			snapshot := ledgerSecret(store).Data[hostLedgerDataKey] // under the old key, counter N-1
+			_, err := ledger.Raise(ctx, provider, h.Name, store, []HostLedgerRaise{{Session: s, Position: HostLedgerPosition{Seq: 2100}}})
+			Expect(err).NotTo(HaveOccurred())
+			x, _ := storeState(h).LedgerIndex.entry(store)
+			Expect(x.Counter).To(Equal(ledgerCounter(snapshot) + 1)) // the index says N
+			sec := ledgerSecret(store)
+			sec.Data[hostLedgerDataKey] = snapshot
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+
+			rotatedKeys, err := NewHostLedgerKeys(randomLedgerKey(GinkgoT()), keys.current, rawIdentity)
+			Expect(err).NotTo(HaveOccurred())
+			res, err := newLedger(rotatedKeys).RetagSweep(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Ledgers).To(BeZero())
+			Expect(res.Remaining).To(BeNumerically(">=", 1), "the sweep refuses the restored copy")
+			Expect(ledgerOf(store).TagKeyID).To(Equal(keys.CurrentKeyID()), "not laundered under the current key")
+			Expect(ledgerCounter(ledgerSecret(store).Data[hostLedgerDataKey])).NotTo(BeNumerically(">=", x.Counter),
+				"its counter is not raised past the index")
+			Expect(storeState(h).RegressedReason).To(Equal(LedgerReasonRegressed), "and the Host is held, persistently")
+		})
+
+		It("re-tags a ledger whose Host is gone only when its last index does not refuse it", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			snapshot := ledgerSecret(store).Data[hostLedgerDataKey]
+			_, err := ledger.Raise(ctx, provider, h.Name, store, []HostLedgerRaise{{Session: s, Position: HostLedgerPosition{Seq: 2100}}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(h), h)).To(Succeed())
+			h.Spec.Revoked = true
+			Expect(k8sClient.Update(ctx, h)).To(Succeed())
+			sec := ledgerSecret(store)
+			sec.Data[hostLedgerDataKey] = snapshot
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+			rotatedKeys, err := NewHostLedgerKeys(randomLedgerKey(GinkgoT()), keys.current, rawIdentity)
+			Expect(err).NotTo(HaveOccurred())
+			res, err := newLedger(rotatedKeys).RetagSweep(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Remaining).To(BeNumerically(">=", 1))
+			Expect(ledgerOf(store).TagKeyID).To(Equal(keys.CurrentKeyID()))
 		})
 
 		It("detects a restored older ledger in this process and after a restart", func() {

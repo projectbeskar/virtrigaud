@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -29,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 )
 
@@ -50,8 +52,10 @@ type HostLedgerRetagResult struct {
 // RetagSweep re-tags under the current tag key every ledger object in the
 // enrolment namespace, archived ones included, and every ledger index in
 // the pins Secrets there, that is tagged under the previous key. Each is
-// verified under the key it names first and written with the
-// resourceVersion it was read with (a conflict is read again). Writes are
+// verified under the key it names first, a ledger object is checked as a
+// read of it would be (retagChecked: a restored older copy is refused, and
+// holds its Host), and each is written with the resourceVersion it was read
+// with (a conflict is read again). Writes are
 // paced by RetagInterval. Objects that verify under no key are counted as
 // remaining and left as they are. The result is logged and published on
 // virtrigaud_manager_host_ledger_retag_remaining.
@@ -111,7 +115,8 @@ func (l *HostLedger) RetagSweep(ctx context.Context) (HostLedgerRetagResult, err
 	return res, nil
 }
 
-// retagLedger re-tags one ledger object if it is under the previous key.
+// retagLedger re-tags one ledger object if it is under the previous key,
+// after the checks of retagChecked.
 func (l *HostLedger) retagLedger(ctx context.Context, name string, pace func() error) (bool, error) {
 	for range maxLedgerWriteAttempts {
 		sec := &corev1.Secret{}
@@ -131,16 +136,137 @@ func (l *HostLedger) retagLedger(ctx context.Context, name string, pace func() e
 		if err := pace(); err != nil {
 			return false, err
 		}
-		m := l.storeLock(rec.StoreID)
-		m.Lock()
-		_, err = l.writeObject(ctx, nil, sec, rec.clone(), nil, false)
-		m.Unlock()
+		done, err := l.retagChecked(ctx, rec)
 		if apierrors.IsConflict(err) {
 			continue
 		}
-		return err == nil, err
+		return done, err
 	}
 	return false, errHostLedgerConflict
+}
+
+// retagChecked re-tags one ledger object after the checks a read of it gets.
+// When the Host it serves resolves, the object is read again through
+// readRecord for that Host (its index, write counter, stored hold and guard;
+// a regression holds the Host, persistently) and the new counter is recorded
+// in the Host's index. Otherwise the object is compared with the index in
+// the pins Secret of the Host it names, when that Secret is still the
+// Host's; a counter below the index is refused, and the re-tagged object
+// does not seed this process's guard.
+func (l *HostLedger) retagChecked(ctx context.Context, rec *HostLedgerRecord) (bool, error) {
+	m := l.storeLock(rec.StoreID)
+	m.Lock()
+	defer m.Unlock()
+	if lh := l.retagHost(ctx, rec); lh != nil {
+		st, err := l.storeState(ctx, lh, rec.StoreID)
+		if err != nil {
+			return false, err
+		}
+		obj, err := l.readRecord(ctx, lh, rec.StoreID, st.LedgerIndex)
+		if err != nil {
+			return false, err
+		}
+		if obj.rec.TagKeyID == l.Keys.CurrentKeyID() {
+			return false, nil
+		}
+		got, err := l.writeObject(ctx, lh, obj.sec, obj.rec.clone(), nil, false)
+		if err != nil {
+			return false, err
+		}
+		if got.HostUID == lh.uid() && st.LedgerIndex.Reserves(got.StoreID) {
+			if err := l.persistIndex(ctx, lh, indexChange{stores: map[[16]byte]uint64{got.StoreID: got.WriteCounter}}); err != nil {
+				return true, fmt.Errorf("record store %s in the host's ledger index: %w", got.StorePrefix(), err)
+			}
+		}
+		return true, nil
+	}
+	// The Host does not resolve (deleted, revoked, without an enrolment):
+	// compare with its index if its pins Secret is still its own.
+	sec := &corev1.Secret{}
+	if err := l.APIReader.Get(ctx, types.NamespacedName{Namespace: l.Config.Namespace, Name: hostLedgerSecretName(rec.StoreID)}, sec); err != nil {
+		return false, err
+	}
+	fresh, err := l.verifySecret(ctx, sec, rec.StoreID)
+	if err != nil {
+		return false, err
+	}
+	if fresh.TagKeyID == l.Keys.CurrentKeyID() {
+		return false, nil
+	}
+	if idx, err := l.pinsIndexOf(ctx, fresh); err != nil {
+		return false, err
+	} else if e, ok := idx.entry(fresh.StoreID); ok && fresh.WriteCounter < e.Counter {
+		return false, fmt.Errorf("store %s: the ledger's write counter is below its Host's index: an older copy was restored; "+
+			"it is not re-tagged: %w", fresh.StorePrefix(), errLedgerMalformed)
+	}
+	next := fresh.clone()
+	data, err := l.prepare(next)
+	if err != nil {
+		return false, err
+	}
+	out := sec.DeepCopy()
+	out.Data[hostLedgerDataKey] = data
+	setLedgerLabels(out, next, nil)
+	if err := l.Client.Update(ctx, out); err != nil {
+		return false, err
+	}
+	if _, err := l.verifySecret(ctx, out, rec.StoreID); err != nil {
+		return false, fmt.Errorf("verify the host ledger of store %s as written: %w", rec.StorePrefix(), err)
+	}
+	return true, nil
+}
+
+// retagHost resolves the Host a ledger serves for the sweep: the Host named
+// by its HostKey, of the same UID, resolvable as a ledger Host (its
+// Provider's, not revoked, with an identity and a current enrolment). It
+// returns nil otherwise.
+func (l *HostLedger) retagHost(ctx context.Context, rec *HostLedgerRecord) *ledgerHost {
+	ns, name, ok := strings.Cut(rec.HostKey, "/")
+	if !ok {
+		return nil
+	}
+	h := &infravirtrigaudiov1beta1.Host{}
+	if err := l.APIReader.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, h); err != nil || string(h.UID) != rec.HostUID {
+		return nil
+	}
+	p := &infravirtrigaudiov1beta1.Provider{}
+	if err := l.APIReader.Get(ctx, types.NamespacedName{Namespace: ns, Name: h.Spec.ProviderRef.Name}, p); err != nil {
+		return nil
+	}
+	lh, err := l.resolve(ctx, p, name)
+	if err != nil || lh.uid() != rec.HostUID {
+		return nil
+	}
+	return lh
+}
+
+// pinsIndexOf returns the verified ledger index in the pins Secret of the
+// Host a ledger names, when that Secret is still that Host's (nil when there
+// is none). An index that fails its tag is an error.
+func (l *HostLedger) pinsIndexOf(ctx context.Context, rec *HostLedgerRecord) (*HostLedgerIndex, error) {
+	ns, name, ok := strings.Cut(rec.HostKey, "/")
+	if !ok {
+		return nil, nil
+	}
+	sec := &corev1.Secret{}
+	if err := l.APIReader.Get(ctx, types.NamespacedName{Namespace: l.Config.Namespace, Name: hostEnrolmentSecretName(ns, name)}, sec); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var enrol hostEnrolmentState
+	if err := json.Unmarshal(sec.Data[hostEnrolmentStateKey], &enrol); err != nil || enrol.HostUID != rec.HostUID {
+		return nil, nil //nolint:nilerr // another Host's (or no) state: no index of this Host to compare with
+	}
+	st, err := decodeStoreState(sec.Data[hostStoreStateKey])
+	if err != nil {
+		return nil, err
+	}
+	if len(st.ledgerIndexRaw) > 0 || (st.LedgerIndex != nil && !st.LedgerIndex.verifyTag(l.Keys, rec.HostUID)) {
+		return nil, fmt.Errorf("the ledger index of Host %s fails its tag or form: %w", rec.HostKey, errLedgerMalformed)
+	}
+	return st.LedgerIndex, nil
 }
 
 // retagIndex re-tags the ledger index of one pins Secret if it is under the

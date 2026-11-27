@@ -405,7 +405,9 @@ type ledgerObject struct {
 
 // hold holds the host lh for reason: in memory, by an Event when the reason
 // changed, and, when persistent, written (into obj when not nil, the index
-// and the pins Secret). It returns the hold error, joined with the error of
+// and the pins Secret). obj is nil for a ledger found regressed or changed
+// behind this manager's back: such a copy is left untouched as evidence
+// (rewriting it would re-tag it and raise its counter). It returns the hold error, joined with the error of
 // a persistent hold that could not be written.
 func (l *HostLedger) hold(ctx context.Context, lh *ledgerHost, reason, storePrefix string, persistent bool, detail string,
 	obj *ledgerObject) error {
@@ -601,14 +603,14 @@ func (l *HostLedger) readRecord(ctx context.Context, lh *ledgerHost, store [16]b
 	}
 	if e, ok := idx.entry(store); ok && rec.WriteCounter < e.Counter {
 		return nil, l.hold(ctx, lh, LedgerReasonRegressed, prefix, true,
-			"the ledger's write counter is below the highest the manager recorded: an older copy was restored", obj)
+			"the ledger's write counter is below the highest the manager recorded: an older copy was restored", nil)
 	}
 	if rec.HostUID == lh.uid() && !idx.Reserves(store) {
 		return nil, l.hold(ctx, lh, LedgerReasonTampered, prefix, false,
 			"the ledger serves this Host but the Host's ledger index does not name it", nil)
 	}
 	if reason, detail := l.checkGuard(rec); reason != "" {
-		return nil, l.hold(ctx, lh, reason, prefix, true, detail, obj)
+		return nil, l.hold(ctx, lh, reason, prefix, true, detail, nil)
 	}
 	return obj, nil
 }

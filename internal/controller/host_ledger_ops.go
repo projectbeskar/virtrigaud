@@ -436,11 +436,11 @@ func (l *HostLedger) relatedLedgers(ctx context.Context, lh *ledgerHost, store [
 			return err
 		}
 		if reason, detail := l.checkGuard(rec); reason != "" {
-			return l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, &ledgerObject{rec: rec, sec: sec})
+			return l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, nil)
 		}
 		if e, ok := idx.entry(rec.StoreID); ok && rec.WriteCounter < e.Counter {
 			return l.hold(ctx, lh, LedgerReasonRegressed, rec.StorePrefix(), true,
-				"a related ledger's write counter is below the highest the manager recorded", &ledgerObject{rec: rec, sec: sec})
+				"a related ledger's write counter is below the highest the manager recorded", nil)
 		}
 		out = append(out, relatedLedger{rec: rec, sec: sec, enrolmentLabel: sec.Labels[LabelHostLedgerEnrolment]})
 		return nil
@@ -506,7 +506,7 @@ func (l *HostLedger) archive(ctx context.Context, lh *ledgerHost, store, success
 			return nil, err
 		}
 		if reason, detail := l.checkGuard(rec); reason != "" {
-			return nil, l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, &ledgerObject{rec: rec, sec: sec})
+			return nil, l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, nil)
 		}
 		if rec.Archived {
 			return rec, nil
