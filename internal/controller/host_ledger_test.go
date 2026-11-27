@@ -175,18 +175,22 @@ func TestHostLedgerRecord_RoundTripAndTag(t *testing.T) {
 
 	// Every tagged field is covered; updatedAt is not.
 	for name, edit := range map[string]func(*HostLedgerRecord){
-		"seq":                  func(r *HostLedgerRecord) { r.Position.Seq++ },
-		"head":                 func(r *HostLedgerRecord) { r.Position.Head[0] ^= 1 },
-		"checkpoint":           func(r *HostLedgerRecord) { r.Checkpoint.Head[0] ^= 1 },
-		"store":                func(r *HostLedgerRecord) { r.StoreID[15] ^= 1 },
-		"identity":             func(r *HostLedgerRecord) { r.HostIdentityMAC[0] ^= 1 },
-		"host uid":             func(r *HostLedgerRecord) { r.HostUID = "uid-2" },
-		"host key":             func(r *HostLedgerRecord) { r.HostKey = "ns/other" },
-		"provider":             func(r *HostLedgerRecord) { r.ProviderUID = "other" },
-		"attestation":          func(r *HostLedgerRecord) { r.AttestationID[0] ^= 1 },
-		"state":                func(r *HostLedgerRecord) { r.AttestationState = infravirtrigaudiov1beta1.HostAgentLedgerAttestationPending },
-		"pending":              func(r *HostLedgerRecord) { r.PendingSessions = nil },
-		"pending time":         func(r *HostLedgerRecord) { r.PendingSessions[0].BegunAt = r.PendingSessions[0].BegunAt.Add(time.Second) },
+		"seq":         func(r *HostLedgerRecord) { r.Position.Seq++ },
+		"head":        func(r *HostLedgerRecord) { r.Position.Head[0] ^= 1 },
+		"checkpoint":  func(r *HostLedgerRecord) { r.Checkpoint.Head[0] ^= 1 },
+		"store":       func(r *HostLedgerRecord) { r.StoreID[15] ^= 1 },
+		"identity":    func(r *HostLedgerRecord) { r.HostIdentityMAC[0] ^= 1 },
+		"host uid":    func(r *HostLedgerRecord) { r.HostUID = "uid-2" },
+		"host key":    func(r *HostLedgerRecord) { r.HostKey = "ns/other" },
+		"provider":    func(r *HostLedgerRecord) { r.ProviderUID = "other" },
+		"attestation": func(r *HostLedgerRecord) { r.AttestationID[0] ^= 1 },
+		"state": func(r *HostLedgerRecord) {
+			r.AttestationState = infravirtrigaudiov1beta1.HostAgentLedgerAttestationPending
+		},
+		"pending": func(r *HostLedgerRecord) { r.PendingSessions = nil },
+		"pending time": func(r *HostLedgerRecord) {
+			r.PendingSessions[0].BegunAt = r.PendingSessions[0].BegunAt.Add(time.Second)
+		},
 		"history":              func(r *HostLedgerRecord) { r.SessionHistory[0].FencedAt++ },
 		"generation":           func(r *HostLedgerRecord) { r.Generation++ },
 		"generation started":   func(r *HostLedgerRecord) { r.GenerationStartedAt = r.GenerationStartedAt.Add(time.Hour) },

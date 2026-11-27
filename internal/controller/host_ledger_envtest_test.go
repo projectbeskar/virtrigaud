@@ -271,10 +271,10 @@ var _ = Describe("Host ledger (envtest)", func() {
 			e := enrol(h)
 			store := random16()
 			for name, o := range map[string]*HostLedgerOrigin{
-				"no evidence":            nil,
-				"another enrolment":      {OriginEnrolmentID: bytes.Repeat([]byte{9}, 16), EnrolmentCount: 1},
-				"two enrolments":         {OriginEnrolmentID: e, EnrolmentCount: 2},
-				"predates the record":    {},
+				"no evidence":             nil,
+				"another enrolment":       {OriginEnrolmentID: bytes.Repeat([]byte{9}, 16), EnrolmentCount: 1},
+				"two enrolments":          {OriginEnrolmentID: e, EnrolmentCount: 2},
+				"predates the record":     {},
 				"count without enrolment": {EnrolmentCount: 1},
 			} {
 				_, err := ledger.Initialise(ctx, provider, h.Name, HostLedgerInit{StoreID: store,
