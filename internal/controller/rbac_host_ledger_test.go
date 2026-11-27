@@ -43,10 +43,12 @@ import (
 //  2. get, list and watch on the host ledger key Secret are granted to no
 //     principal at all, the manager included (the kubelet mounts it);
 //  3. no principal holds a path to the key through a workload in the key's
-//     namespace (create, update or patch of pods, deployments, statefulsets,
-//     daemonsets, replicasets, jobs or cronjobs; pods/exec or pods/attach;
-//     serviceaccounts/token), or anywhere through impersonation or bind or
-//     escalate on roles, except the entries of keyPathExceptions: the
+//     namespace (create, update or patch of pods, replicationcontrollers,
+//     deployments, statefulsets, daemonsets, replicasets, jobs or cronjobs;
+//     pods/exec, pods/attach or pods/ephemeralcontainers;
+//     serviceaccounts/token), or anywhere through nodes/proxy (the kubelet
+//     API), impersonation or bind or escalate on roles, except the entries
+//     of keyPathExceptions: the
 //     manager's own pre-existing workload rights, which expose the sub-CA
 //     key in the same way and are a stated custody limit;
 //  4. no role that nothing binds, and no role aggregated into the built-in
@@ -228,7 +230,7 @@ var secretReadVerbs = []string{"get", "list", "watch"}
 func keyPathAccesses() (inKeyNamespace, clusterWide []rbacAccess) {
 	writes := []string{"create", "update", "patch"}
 	for _, w := range []struct{ group, resource string }{
-		{"", "pods"}, {"apps", "deployments"}, {"apps", "statefulsets"}, {"apps", "daemonsets"},
+		{"", "pods"}, {"", "replicationcontrollers"}, {"apps", "deployments"}, {"apps", "statefulsets"}, {"apps", "daemonsets"},
 		{"apps", "replicasets"}, {"batch", "jobs"}, {"batch", "cronjobs"},
 	} {
 		for _, v := range writes {
@@ -239,6 +241,14 @@ func keyPathAccesses() (inKeyNamespace, clusterWide []rbacAccess) {
 		for _, v := range []string{"create", "get"} {
 			inKeyNamespace = append(inKeyNamespace, rbacAccess{resource: sub, verb: v, anyName: true})
 		}
+	}
+	for _, v := range []string{"update", "patch"} {
+		inKeyNamespace = append(inKeyNamespace, rbacAccess{resource: "pods/ephemeralcontainers", verb: v, anyName: true})
+	}
+	// nodes/proxy reaches the kubelet API, and through it exec in every pod
+	// of the node; each HTTP method maps to a verb.
+	for _, v := range []string{"get", "create", "update", "patch", "delete"} {
+		clusterWide = append(clusterWide, rbacAccess{resource: "nodes/proxy", verb: v, anyName: true})
 	}
 	inKeyNamespace = append(inKeyNamespace, rbacAccess{resource: "serviceaccounts/token", verb: "create", anyName: true},
 		rbacAccess{resource: "serviceaccounts", verb: "impersonate", anyName: true})
@@ -591,6 +601,12 @@ subjects: [{kind: Group, name: ops}]`},
 			role: &rbacv1.ClusterRole{Rules: []rbacv1.PolicyRule{{APIGroups: []string{"apps"}, Resources: []string{"deployments"}, Verbs: []string{"patch"}}}}},
 		"exec into pods": {extra: binding("r", "ClusterRole", "r", "[{kind: Group, name: ops}]"),
 			role: &rbacv1.ClusterRole{Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"*/exec"}, Verbs: []string{"create"}}}}},
+		"replication controllers": {extra: binding("r", "ClusterRole", "r", "[{kind: Group, name: ops}]"),
+			role: &rbacv1.ClusterRole{Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"replicationcontrollers"}, Verbs: []string{"patch"}}}}},
+		"ephemeral containers": {extra: binding("r", "ClusterRole", "r", "[{kind: Group, name: ops}]"),
+			role: &rbacv1.ClusterRole{Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods/ephemeralcontainers"}, Verbs: []string{"update"}}}}},
+		"the kubelet through nodes/proxy": {extra: binding("r", "ClusterRole", "r", "[{kind: ServiceAccount, name: mgr, namespace: sys}]"),
+			role: &rbacv1.ClusterRole{Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"nodes/proxy"}, Verbs: []string{"get"}}}}},
 		"service account tokens": {extra: binding("r", "ClusterRole", "r", "[{kind: Group, name: ops}]"),
 			role: &rbacv1.ClusterRole{Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, Verbs: []string{"create"}}}}},
 		"impersonation": {extra: binding("r", "ClusterRole", "r", "[{kind: ServiceAccount, name: mgr, namespace: sys}]"),
