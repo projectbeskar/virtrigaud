@@ -78,21 +78,45 @@ func (h *HostAnswers) PreflightRaisePositions(ctx context.Context) (int, error) 
 }
 
 // PreflightRunnable returns the runnable that runs PreflightRaisePositions
-// when the manager stops (nil for a manager without a host ledger). It runs
-// on every replica, leader or not: a position is only ever raised.
-func PreflightRunnable(h *HostAnswers) manager.Runnable {
+// when the manager stops (nil for a manager without a host ledger), but
+// only on a replica that held the leader lease at some point: elected is
+// the manager's election channel (closed once this replica leads, or at
+// once when leader election is off). A replica that never led wrote no
+// position and writes none on stop.
+func PreflightRunnable(h *HostAnswers, elected <-chan struct{}) manager.Runnable {
 	if h == nil || h.Ledger == nil {
 		return nil
 	}
-	return preflightRunnable{h: h}
+	return preflightRunnable{h: h, elected: elected}
 }
 
 // preflightRunnable runs the pre-flight on stop.
-type preflightRunnable struct{ h *HostAnswers }
+type preflightRunnable struct {
+	h       *HostAnswers
+	elected <-chan struct{}
+}
 
-// Start waits for the manager to stop, then runs the pre-flight.
+// led reports whether this replica held the leader lease at some point.
+func (p preflightRunnable) led() bool {
+	if p.elected == nil {
+		return false
+	}
+	select {
+	case <-p.elected:
+		return true
+	default:
+		return false
+	}
+}
+
+// Start waits for the manager to stop, then runs the pre-flight if this
+// replica led.
 func (p preflightRunnable) Start(ctx context.Context) error {
 	<-ctx.Done()
+	if !p.led() {
+		log.FromContext(ctx).Info("The upgrade pre-flight is skipped: this replica never held the leader lease")
+		return nil
+	}
 	stop, cancel := context.WithTimeout(context.WithoutCancel(ctx), preflightTimeout)
 	defer cancel()
 	n, err := p.h.PreflightRaisePositions(stop)
@@ -105,5 +129,8 @@ func (p preflightRunnable) Start(ctx context.Context) error {
 	return nil
 }
 
-// NeedLeaderElection reports false: the pre-flight runs on every replica.
+// NeedLeaderElection reports false: the runnable starts on every replica
+// and writes only on one that led (a stopping leader may already have lost
+// its lease when it runs; a position is only ever raised, from answers this
+// replica verified, so the write is safe).
 func (preflightRunnable) NeedLeaderElection() bool { return false }

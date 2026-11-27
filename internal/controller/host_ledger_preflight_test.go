@@ -60,6 +60,13 @@ func TestPreflightRaisePositions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n, "nothing above the persisted position is left")
 
-	assert.Nil(t, PreflightRunnable(&HostAnswers{}), "no pre-flight without a host ledger")
-	assert.NotNil(t, PreflightRunnable(&HostAnswers{Ledger: &HostLedger{}}))
+	assert.Nil(t, PreflightRunnable(&HostAnswers{}, nil), "no pre-flight without a host ledger")
+	open := make(chan struct{})
+	never, ok := PreflightRunnable(&HostAnswers{Ledger: &HostLedger{}}, open).(preflightRunnable)
+	require.True(t, ok)
+	assert.False(t, never.led(), "a replica that never led writes nothing")
+	close(open)
+	assert.True(t, never.led(), "a replica that led writes on stop")
+	nilElected, _ := PreflightRunnable(&HostAnswers{Ledger: &HostLedger{}}, nil).(preflightRunnable)
+	assert.False(t, nilElected.led())
 }

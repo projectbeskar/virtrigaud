@@ -624,7 +624,7 @@ func main() {
 		// The upgrade pre-flight: a stopping manager persists the hosts'
 		// latest verified store positions, which its successor starts
 		// their ledgers from.
-		if r := controller.PreflightRunnable(hostAnswers); r != nil {
+		if r := controller.PreflightRunnable(hostAnswers, mgr.Elected()); r != nil {
 			if err := mgr.Add(r); err != nil {
 				setupLog.Error(err, "unable to add the host ledger upgrade pre-flight")
 				os.Exit(1)
