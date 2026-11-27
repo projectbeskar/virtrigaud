@@ -489,3 +489,17 @@ func TestRetire_SessionRecheckedUnderTheLock(t *testing.T) {
 		t.Fatal("a stale retirement committed a tombstone")
 	}
 }
+
+// A store above its size threshold commits no tombstone, as admission
+// commits no record then.
+func TestRetire_StoreFullWritesNothing(t *testing.T) {
+	h, c := gateHarness(t, func(o *opstore.Options) { o.MaxStoreBytes = 1 })
+	r := reqP(h, "vm-1", rid(), kCreate, 1)
+	before := h.s.Position()
+	if _, err := retire(t, h, c, r); !errors.Is(err, opstore.ErrStoreFull) {
+		t.Fatalf("a full store: %v, want ErrStoreFull", err)
+	}
+	if h.tombstoned(r) || h.s.Position() != before {
+		t.Fatal("a full store committed a tombstone")
+	}
+}

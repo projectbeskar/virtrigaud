@@ -42,6 +42,11 @@ const auditRetired = "retired"
 // an enrolment that is not the store's active one. Nothing is changed.
 var ErrEnrolmentNotActive = errors.New("the operation's enrolment is not the store's active enrolment")
 
+// ErrStoreFull is returned by RetireIfUnknown when the store's live size is
+// above its threshold, as admission refuses a new operation then: nothing
+// is written, and the retirement may pass once compaction frees space.
+var ErrStoreFull = errors.New("the operation store is above its size threshold")
+
 // ErrNoTraceScan is returned by RetireIfUnknown when the executor cannot
 // scan its objects for a trace of the operation (it implements no
 // executor.TraceScanner, or the scan failed). Nothing is changed: the store
@@ -125,8 +130,10 @@ type RetireResult struct {
 //     RetireAlreadyApplied for this call's own earlier tombstone), with
 //     other identity fields RetireOpKnown; a witness file of the
 //     operation, or a VM record naming it busy, quarantines the store
-//     (inconsistent_store); otherwise the RETIRED tombstone and the raised
-//     attempt mark are committed and anchored, and RetireApplied returned.
+//     (inconsistent_store); a store above its size threshold returns
+//     ErrStoreFull, as admission refuses then; otherwise the RETIRED
+//     tombstone and the raised attempt mark are committed and anchored, and
+//     RetireApplied returned.
 //
 // A delivery racing the call is decided by the lock: either it was admitted
 // first (its record exists, and the retirement is not applicable) or it
@@ -318,6 +325,9 @@ func (s *Store) retireLocked(ctx context.Context, r RetireRequest) (RetireResult
 	}
 	if known {
 		return res, nil
+	}
+	if s.j.LiveSize() > s.opts.MaxStoreBytes {
+		return RetireResult{}, fmt.Errorf("retire: %w", ErrStoreFull)
 	}
 	buf := s.newAuditBuf()
 	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
