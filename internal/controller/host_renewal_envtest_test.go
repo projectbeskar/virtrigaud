@@ -258,7 +258,7 @@ var _ = Describe("Per-host agent certificate renewal (envtest)", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "host-a", Namespace: e.hostNS},
 			Spec: infravirtrigaudiov1beta1.HostSpec{ProviderRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "ch"},
 				PoolRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "pool"}, Endpoint: "grpc://host-a:7443",
-				Identity: "serial-a", Schedulable: true},
+				Identity: "serial-a-" + e.hostNS, Schedulable: true},
 		}
 		Expect(k8sClient.Create(ctx, h)).To(Succeed())
 		uri, err := hostidentity.HostURI(enrolTestTrustDomain, e.hostNS, "host-a")
