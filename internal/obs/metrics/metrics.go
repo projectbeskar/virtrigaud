@@ -167,7 +167,22 @@ var (
 		},
 		[]string{"state"},
 	)
+
+	// hostLedgerRetagRemaining is the number of host ledger objects and
+	// ledger indexes the last re-tag sweep left under a tag key other than
+	// the current one (development builds only): 0 means the previous host
+	// ledger key may be removed.
+	hostLedgerRetagRemaining = registerer.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "virtrigaud_manager_host_ledger_retag_remaining",
+			Help: "Host ledger objects and indexes the last re-tag sweep left under a tag key other than the current one (development builds only); 0 means the previous host ledger key may be removed.",
+		},
+	)
 )
+
+// SetHostLedgerRetagRemaining publishes the outcome of a host ledger re-tag
+// sweep on virtrigaud_manager_host_ledger_retag_remaining.
+func SetHostLedgerRetagRemaining(n int) { hostLedgerRetagRemaining.Set(float64(n)) }
 
 // CRD security-feature states (the "state" label of
 // virtrigaud_manager_vm_crd_security_features).
