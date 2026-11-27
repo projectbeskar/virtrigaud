@@ -19,6 +19,7 @@ package server_test
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"testing"
 	"time"
 
@@ -168,6 +169,26 @@ func TestRetire_TraceScanUnavailable(t *testing.T) {
 	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
 	wantOutcome(t, e.retire(t, e.retireGrant(t, o, c, nil)), providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED,
 		answer.ReasonTraceScanUnavailable)
+	_, found, err := e.store.Lookup(ctx(t), opstore.OpRef{EnrolmentID: o.id.EnrolmentID, OpID: o.id.OpID})
+	require.NoError(t, err)
+	assert.False(t, found, "nothing was retired")
+}
+
+// failingScanExec is an executor whose trace scan fails.
+type failingScanExec struct{ executor.Executor }
+
+func (failingScanExec) Traces(context.Context, executor.Operation) (executor.Trace, error) {
+	return executor.Trace{}, errors.New("the scan failed")
+}
+
+// A trace scan that failed is store_busy (asked again soon), not
+// trace_scan_unavailable, and retires nothing.
+func TestRetire_TraceScanFailedIsStoreBusy(t *testing.T) {
+	e := newAuthEnvWith(t, func(o *opstore.Options) { o.Executor = failingScanExec{o.Executor} })
+	c := e.attestAt(t)
+	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
+	wantOutcome(t, e.retire(t, e.retireGrant(t, o, c, nil)), providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED,
+		answer.ReasonStoreBusy)
 	_, found, err := e.store.Lookup(ctx(t), opstore.OpRef{EnrolmentID: o.id.EnrolmentID, OpID: o.id.OpID})
 	require.NoError(t, err)
 	assert.False(t, found, "nothing was retired")

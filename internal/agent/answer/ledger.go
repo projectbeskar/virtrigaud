@@ -70,7 +70,9 @@ const (
 	// ReasonSessionReplaced: an applied re-attestation replaced the
 	// session.
 	ReasonSessionReplaced = "session_replaced"
-	// ReasonStoreBusy: the store could not be read; nothing changed.
+	// ReasonStoreBusy: the store could not be read or written now (also a
+	// failed trace scan, or a full store for a retirement); nothing changed,
+	// and a later call may pass.
 	ReasonStoreBusy = "store_busy"
 	// ReasonStaleAttestation: a ledger mark or a retirement named another
 	// attestation session than the agent's current one; nothing changed.
@@ -84,9 +86,10 @@ const (
 	// ReasonEnrolmentNotActive: a retirement named an enrolment that is
 	// not the store's active one; nothing changed.
 	ReasonEnrolmentNotActive = "enrolment_not_active"
-	// ReasonTraceScanUnavailable: the agent's executor cannot scan its
-	// objects for a trace of the operation, so it retires nothing; asking
-	// again does not change that.
+	// ReasonTraceScanUnavailable: the agent's executor has no trace scanner
+	// (it can never scan its objects for a trace of an operation), so it
+	// retires nothing; asking again does not change that. A scan that
+	// failed is ReasonStoreBusy.
 	ReasonTraceScanUnavailable = "trace_scan_unavailable"
 )
 

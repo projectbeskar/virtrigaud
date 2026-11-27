@@ -40,9 +40,8 @@ var errNoExecutor = errors.New("this agent build has no executor")
 type Executor struct{}
 
 var (
-	_ executor.Executor     = Executor{}
-	_ executor.Stopper      = Executor{}
-	_ executor.TraceScanner = Executor{}
+	_ executor.Executor = Executor{}
+	_ executor.Stopper  = Executor{}
 )
 
 // Plan implements executor.Executor: every kind is unsupported.
@@ -63,13 +62,6 @@ func (Executor) Inspect(context.Context, executor.Operation, executor.Step) (exe
 // Goal implements executor.Executor: never observed.
 func (Executor) Goal(context.Context, executor.Operation, executor.Step) (bool, error) {
 	return false, errNoExecutor
-}
-
-// Traces implements executor.TraceScanner: this executor cannot see what
-// another build's executor left on the host, so it never says there is no
-// trace, and nothing is retired on it.
-func (Executor) Traces(context.Context, executor.Operation) (executor.Trace, error) {
-	return executor.Trace{}, errNoExecutor
 }
 
 // StopAll implements executor.Stopper: nothing runs.

@@ -47,11 +47,18 @@ var ErrEnrolmentNotActive = errors.New("the operation's enrolment is not the sto
 // is written, and the retirement may pass once compaction frees space.
 var ErrStoreFull = errors.New("the operation store is above its size threshold")
 
-// ErrNoTraceScan is returned by RetireIfUnknown when the executor cannot
-// scan its objects for a trace of the operation (it implements no
-// executor.TraceScanner, or the scan failed). Nothing is changed: the store
-// never retires what it cannot scan for.
-var ErrNoTraceScan = errors.New("the executor's objects cannot be scanned for a trace of the operation")
+// ErrNoTraceScanner is returned by RetireIfUnknown when the executor
+// implements no executor.TraceScanner: it can never scan its objects for a
+// trace, so the store retires nothing on it, and asking again does not
+// change that.
+var ErrNoTraceScanner = errors.New("the executor cannot scan its objects for a trace of an operation")
+
+// ErrTraceScanFailed is returned (wrapping the scan's error) by
+// RetireIfUnknown when the executor's trace scan failed (an I/O error, a
+// cancelled context, an object that does not decode). Nothing is changed:
+// the store never retires what it could not scan for; a later retirement
+// may pass.
+var ErrTraceScanFailed = errors.New("the executor's trace scan failed")
 
 // RetireOutcome is what a retire-if-unknown did.
 type RetireOutcome int
@@ -117,8 +124,8 @@ type RetireResult struct {
 //  2. without the store lock, an operation the store already holds a
 //     record or tombstone of is not scanned for (one read; step 3 decides);
 //     otherwise the executor's objects are scanned for a trace of the
-//     operation (executor.TraceScanner; ErrNoTraceScan when it
-//     cannot be scanned). A trace is explained when the store holds a
+//     operation (executor.TraceScanner; ErrNoTraceScanner when the
+//     executor has none, ErrTraceScanFailed when its scan fails). A trace is explained when the store holds a
 //     record or tombstone of the op_id, or (for a placement trace of a
 //     Create) a VM record of the placement: every such object is made only
 //     after its record is committed, and records are never removed while
@@ -224,11 +231,11 @@ func (s *Store) retireTraceScan(ctx context.Context, r Request) (RetireResult, b
 	}
 	scanner, ok := s.exec.(executor.TraceScanner)
 	if !ok {
-		return RetireResult{}, false, fmt.Errorf("retire: %w", ErrNoTraceScan)
+		return RetireResult{}, false, fmt.Errorf("retire: %w", ErrNoTraceScanner)
 	}
 	tr, err := scanner.Traces(ctx, executorOp(r))
 	if err != nil {
-		return RetireResult{}, false, fmt.Errorf("retire: %w: %w", ErrNoTraceScan, err)
+		return RetireResult{}, false, fmt.Errorf("retire: %w: %w", ErrTraceScanFailed, err)
 	}
 	s.retirePoint(retirePointScanned)
 	if !tr.Found() {

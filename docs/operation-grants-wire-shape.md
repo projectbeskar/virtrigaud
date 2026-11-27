@@ -634,8 +634,9 @@ with attestation but without receipts, ledger marks or the ledger gate.
   object stamped with the op_id, or, for a Create, a VM of the operation's placement.
   A trace that no record of the op_id (and, for a placement, no VM record of the
   placement) explains quarantines the store (`unknown_op_trace`) and is `REFUSED`
-  `op_trace_found`; an executor that cannot scan, or whose scan fails, retires
-  nothing (`REFUSED` `trace_scan_unavailable`). An executor creates an object stamped
+  `op_trace_found`; an executor with no trace scanner (the release `none` executor)
+  retires nothing (`REFUSED` `trace_scan_unavailable`, held by the manager), and a
+  scan that fails retires nothing this time (`REFUSED` `store_busy`, asked again). An executor creates an object stamped
   with an op_id only after the operation's record is committed, and its scan does not
   block the operations it runs. Then, under the store lock (which serialises every
   admission) and in one transaction: a record or tombstone of the op_id with the same

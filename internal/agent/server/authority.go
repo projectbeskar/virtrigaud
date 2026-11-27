@@ -337,9 +337,10 @@ func (s *Server) ledgerMark(ctx context.Context, req *providerv1.LedgerMarkReque
 //     operation with no record QUARANTINES the store (inconsistent_store),
 //     and otherwise the RETIRED tombstone (never_received) is committed and
 //     the answer is APPLIED with state RETIRED (ALREADY_APPLIED for a
-//     retirement already committed). A store whose executor cannot scan
-//     for traces is REFUSED trace_scan_unavailable, one that cannot be read
-//     REFUSED store_busy: nothing is retired.
+//     retirement already committed). A store whose executor has no trace
+//     scanner is REFUSED trace_scan_unavailable; a scan that failed, a full
+//     store or a store that cannot be read is REFUSED store_busy: nothing
+//     is retired.
 //
 // The answer echoes the grant's op_id once the grant verified.
 func (a *authorityService) RetireIfUnknown(ctx context.Context, req *providerv1.RetireIfUnknownRequest) (*providerv1.AuthorityResponse, error) {
@@ -430,9 +431,12 @@ func (s *Server) retireVerified(ctx context.Context, b *providerv1.GrantBody) re
 		return refused(answer.ReasonNotAttested)
 	case errors.Is(err, opstore.ErrEnrolmentNotActive):
 		return refused(answer.ReasonEnrolmentNotActive)
-	case errors.Is(err, opstore.ErrNoTraceScan):
-		s.opts.Log.Info("a retirement was refused: the executor cannot scan for traces", "error", err.Error())
+	case errors.Is(err, opstore.ErrNoTraceScanner):
+		s.opts.Log.Info("a retirement was refused: the executor cannot scan for traces")
 		return refused(answer.ReasonTraceScanUnavailable)
+	case errors.Is(err, opstore.ErrTraceScanFailed):
+		s.logNoAnswer(err, "a retirement's trace scan failed")
+		return refused(answer.ReasonStoreBusy)
 	case err != nil:
 		s.logNoAnswer(err, "the retirement could not be decided")
 		return refused(answer.ReasonStoreBusy)

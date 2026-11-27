@@ -80,8 +80,9 @@ const (
 	// AuthorityReasonEnrolmentNotActive: a retirement named an enrolment
 	// that is not the store's active one.
 	AuthorityReasonEnrolmentNotActive = "enrolment_not_active"
-	// AuthorityReasonTraceScanUnavailable: the agent's executor cannot scan
-	// its objects for traces, so it retires nothing.
+	// AuthorityReasonTraceScanUnavailable: the agent's executor has no
+	// trace scanner, so it retires nothing; asking again does not change
+	// that (a scan that failed is store_busy).
 	AuthorityReasonTraceScanUnavailable = "trace_scan_unavailable"
 )
 

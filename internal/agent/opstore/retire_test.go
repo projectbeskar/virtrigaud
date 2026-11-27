@@ -268,17 +268,18 @@ func TestRetire_WitnessOrBusyVMQuarantines(t *testing.T) {
 // noScanExec is an executor that cannot scan its objects.
 type noScanExec struct{ executor.Executor }
 
-// A store whose executor cannot scan for traces, or whose scan fails,
-// retires nothing.
+// A store whose executor cannot scan for traces (ErrNoTraceScanner), or
+// whose scan fails (ErrTraceScanFailed), retires nothing; the two are told
+// apart.
 func TestRetire_NoTraceScanRetiresNothing(t *testing.T) {
 	h, c := gateHarness(t, func(o *opstore.Options) { o.Executor = noScanExec{o.Executor} })
 	r := reqP(h, "vm-1", rid(), kCreate, 1)
-	if _, err := retire(t, h, c, r); !errors.Is(err, opstore.ErrNoTraceScan) {
+	if _, err := retire(t, h, c, r); !errors.Is(err, opstore.ErrNoTraceScanner) || errors.Is(err, opstore.ErrTraceScanFailed) {
 		t.Fatalf("no scanner: %v", err)
 	}
 	f, fc := gateHarness(t, nil)
 	f.exec.traceErr = errors.New("scan failed")
-	if _, err := retire(t, f, fc, r); !errors.Is(err, opstore.ErrNoTraceScan) {
+	if _, err := retire(t, f, fc, r); !errors.Is(err, opstore.ErrTraceScanFailed) || errors.Is(err, opstore.ErrNoTraceScanner) {
 		t.Fatalf("a failed scan: %v", err)
 	}
 	if h.tombstoned(r) || f.tombstoned(r) {
