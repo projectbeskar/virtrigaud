@@ -483,12 +483,14 @@ records every operation a host's agent accepted, from a host-signed receipt, bef
 the agent starts it, and attests the agent's operation store against that record after
 each agent start.
 
-**Implemented in development builds only, except retire-if-unknown.** The
-development-build agent implements attestation, receipts and ledger marks (see
+**Implemented in development builds only.** The development-build agent implements
+attestation, receipts, ledger marks and retire-if-unknown (see
 [Agent attestation](#agent-attestation-development-builds) below), and a
 development-build manager with host ledger keys drives them (see
-[Manager driver](#manager-driver-development-builds) below); retire-if-unknown is not
-implemented by anyone yet. A manager without host ledger keys, and every release
+[Manager driver](#manager-driver-development-builds) below). The `.proto` comments
+of `HostAuthority` and `AuthorityAnswer` still say "reserved; not yet implemented":
+the shape is frozen, and this page describes what development builds do with it. A
+manager without host ledger keys, and every release
 build, behaves as before: it sends no `ledger_version`, signs no grant at version 2,
 calls no `HostAuthority` method, ignores `operation_receipt`, and its host answer
 verifier refuses an answer to a request without a `ledger_version` that sets a ledger
@@ -545,7 +547,7 @@ addressed host's agent, relaying requests and answers unchanged (see
 [Host authority service](clustered-agent-provider-development.md#host-authority-service));
 no other bundled provider registers it, so gRPC answers each of its methods
 `Unimplemented` there. A provider author does not implement it. The development-build
-agent serves `Challenge`, `Attest` and `LedgerMark` (below).
+agent serves `Challenge`, `Attest`, `LedgerMark` and `RetireIfUnknown` (below).
 
 The Kubernetes API reserves the matching status fields, all optional: the `Accepted`
 phase and the `receipt` and `ledgerGeneration` fields of
@@ -614,7 +616,35 @@ with attestation but without receipts, ledger marks or the ledger gate.
   `io_error`) or `REFUSED` `store_busy`, and no session exists. Every outcome is a signed `AuthorityAnswer`
   whose context names the session after the grant and whose `grant_digest` is
   SHA-256(be32(len(body)) ‖ body ‖ signature) of the delivered grant.
-  `RetireIfUnknown` is `Unimplemented`.
+- **`RetireIfUnknown`.** After the request rules, the grant must verify at grant
+  version 2 as a `GRANT_KIND_RETIRE_IF_UNKNOWN` grant (the kind first) for the agent's
+  host, Provider, installation and certificate enrolment, naming the operation's
+  identity (VM, binding, op_id, kind, attempt, intent digest and mint epoch, fields 10
+  to 15 and 17) and a 16-byte `attestation_id`, with every other field unset, the
+  digest salt and `expect_known` included (else `REFUSED` `grant_invalid`). Then: a
+  quarantined store is `QUARANTINED`; an agent that is not `READY` or awaits its first
+  attestation is `REFUSED` `not_attested`; another session is `REFUSED`
+  `stale_attestation`, an enrolment other than the store's active one `REFUSED`
+  `enrolment_not_active` (neither changes anything). The store first scans the
+  objects its executor owns for a trace of the operation, without the store lock: an
+  object stamped with the op_id, or, for a Create, a VM of the operation's placement.
+  A trace that no record of the op_id (and, for a placement, no VM record of the
+  placement) explains quarantines the store (`unknown_op_trace`) and is `REFUSED`
+  `op_trace_found`; an executor that cannot scan, or whose scan fails, retires
+  nothing (`REFUSED` `store_busy`). Then, under the store lock (which serialises every
+  admission) and in one transaction: a record or tombstone of the op_id with the same
+  identity is `NOT_APPLICABLE` with its state (`ALREADY_APPLIED` with `RETIRED` for a
+  tombstone an earlier retirement committed), with other identity fields `REFUSED`
+  `op_known`; a witness file of the operation, or a VM record naming it busy, without
+  its record quarantines the store (`inconsistent_store`, `QUARANTINED`); otherwise a
+  `RETIRED` tombstone with reason `never_received` is committed and anchored, the
+  attempt mark of the operation's VM and kind is raised to its attempt, and the answer
+  is `APPLIED` with `op_state` `RETIRED`. A later delivery of the op_id meets the
+  tombstone and is answered `RETIRED`, never run; a delivery with other identity
+  fields is `OP_ID_CONFLICT`. A delivery racing the retirement is decided by the
+  store lock: either its record exists first (the retirement is not applicable) or it
+  meets the tombstone. The answer echoes the op_id once the grant verified and carries
+  no mark.
 - **Receipts.** Every operation the agent accepts while attested is answered with an
   `operation_receipt` in its `CreateResponse` or `TaskResponse`: a host-signed
   `provider.v1.OperationReceipt` (receipt version 1) naming the Provider, host,
@@ -669,10 +699,12 @@ with attestation but without receipts, ledger marks or the ledger gate.
   set while the operation is accepted and the store holds that head, and
   `awaiting_request` while it is accepted, covered by the mark and waiting for its
   request bytes. An answer to a request without `ledger_version` sets none of them.
-- **Ledger loss reasons.** A quarantine an attestation recorded keeps its reason
-  (`ledger_store_mismatch`, `ledger_ahead`, `ledger_mismatch`, `ledger_unverifiable`)
-  only in an answer to a request with `ledger_version` ≥ 1 and in host authority
-  answers; every other answer says `rolled_back`, which every manager knows.
+- **Ledger loss reasons.** A quarantine the ledger protocol recorded keeps its reason
+  (`ledger_store_mismatch`, `ledger_ahead`, `ledger_mismatch`, `ledger_unverifiable`,
+  and `unknown_op_trace` from a retirement) only in an answer to a request with
+  `ledger_version` ≥ 1 and in host authority answers; every other answer says
+  `rolled_back`, which every manager knows. The manager's verifier accepts those
+  reasons only in such answers.
 - **Origin evidence.** The store records the enrolment under which it was first
   enrolled and how many enrolments were activated in it since, in the activation
   transaction itself. A store enrolled before this record existed reports none and
@@ -792,6 +824,59 @@ a release build.
   is an earlier one and its position is at or below where that session was replaced,
   or its session or store is one the ledger does not know (the cautious direction); a
   receipt whose tag fails, or of an attempt not continuous with the ledger, counts too.
+- **Retire-if-unknown.** For such a host, a verified answer from its `READY` agent in
+  the ledger's adopted session that it holds no record of an attempt's operation
+  under its active enrolment (`NO_RECORD`) leads to a retirement when every
+  precondition holds: the attempt is `Prepared`, `Sent` or `Accepted`; its marker
+  holds no receipt that counts as ledgered (a recorded receipt whose tag does not
+  verify holds the attempt as `OperationStateLost`); the store's ledger is bound,
+  current, not archived and `Attested` in that session; and the attempt is
+  continuous with the ledger (the store and generation its authenticated intent
+  records are the ledger's, and its enrolment is one of the generation's). A
+  retire-if-unknown grant naming the attempt's identity and that session is then
+  signed in exactly one place and sent through the Provider. `APPLIED`, or
+  `ALREADY_APPLIED` with `RETIRED`, for this op_id in this session, closes the
+  attempt `Retired` with reason `never_received`, after the ledger is raised to the
+  answer's position (so a later rollback of the store below the tombstone fails its
+  next attestation); a new attempt follows after the usual backoff of a not-performed
+  attempt. `NOT_APPLICABLE` (the host holds a record now) leaves the attempt in
+  flight and asks again; `REFUSED` `stale_attestation` attests the agent again and
+  asks again; `QUARANTINED`, or `REFUSED` `op_trace_found`, holds the host and the VM
+  (`OperationOutcomeUnknown`); any other refusal, or no verified answer, asks again.
+  An attempt prepared without a ledger (an intent of the first version, generation
+  0), or under another store or generation (for example an intent recreated after a
+  new ledger generation started), is never retired.
+- **Re-sends and retirement.** One `NO_RECORD` never leads to both: an attempt whose
+  receipt counts as ledgered is re-sent with `expect_known` and never retired; an
+  attempt with no ledgered receipt that is continuous with the ledger is retired and
+  never re-sent; an attempt that is not continuous with the ledger is never retired
+  and keeps the re-send rules it had before.
+- **Frozen enrolment closure.** A verified `NO_RECORD`, in the adopted session from a
+  `READY` agent, about an attempt prepared under an earlier enrolment of the host
+  whose records the store still holds (a frozen enrolment: an agent answers
+  `UNKNOWN_TO_AGENT` for one it does not hold) closes the attempt `Retired` with
+  reason `unknown_to_frozen_enrolment`, without any grant, when its marker holds no
+  ledgered receipt, the earlier enrolment is one of the ledger generation's
+  enrolments, and the attempt's authenticated store and generation are the ledger's.
+  A frozen enrolment admits no new operation, and a record whose acceptance the
+  ledger covered could not have been lost without failing an attestation. A
+  `RETIRED` about such an attempt stays non-definite (a freeze can retire a record
+  whose step was lost).
+- **Store replaced.** When a new store under a new enrolment archives a host's earlier
+  stores, every attempt still in flight whose authenticated intent names an archived
+  store is held as `OperationOutcomeUnknown` with reason `store_lost` when it is next
+  reconciled: what it did in the lost store can never be learned, so it is neither
+  re-sent nor retired.
+- **Quarantined answers.** A verified answer from such a host's agent that says its
+  store is quarantined (with any reason, a ledger loss reason included) holds the host
+  and reaches the attempt's quarantine hold with the agent's reason, rather than being
+  read as "no answer".
+- **VM answers.** A `Describe` to such a host carries `ledger_version`, and its signed
+  answer that a placement is deleted counts only from a `READY` agent in the ledger's
+  adopted session, as every operation answer does. A deleted placement is read from
+  its VM tombstone, which no rollback can create, so this costs only liveness (a Delete
+  waits for the agent's attestation to be adopted); it is applied so that nothing such
+  a host answers counts outside the adopted session.
 - **Intent version 2.** An attempt prepared for such a host records, in its
   operation-intent Secret, the ledger store and generation it was prepared under, and
   its tag covers them under a second intent message version. Continuity with the

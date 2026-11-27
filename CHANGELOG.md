@@ -5,6 +5,36 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-27 23:30] - Host ledger: retire-if-unknown and the frozen enrolment closure (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/operation/grantverify/authority.go`, `internal/operation/grant_attest.go`: `CheckRetireBody`, the retire-if-unknown branch of `VerifyAuthority`, and `MintRetireGrant`. A retirement grant names the operation's identity (fields 10 to 15 and 17) and the session (34), and nothing else: no digest salt, no `expect_known`, no ledger position.
+- `internal/agent/opstore/retire.go`: `Store.RetireIfUnknown`. It scans the executor's objects for a trace of the operation without the store lock, and quarantines the store (`unknown_op_trace`) on a trace no record explains. Then, under the store lock and in one transaction, a known operation is not retired, a witness or a busy VM without its record quarantines the store (`inconsistent_store`), and otherwise a `RETIRED` tombstone (`never_received`) is committed and the attempt mark raised. Six new mutation guards, each killed by a test.
+- `internal/agent/executor/executor.go`, `internal/agent/executor/fake/traces.go`, `internal/agent/executor/none/none.go`: `TraceScanner`. The fake executor scans its intent and effect logs, effect files and VM files. The release `none` executor never says "no trace", so nothing is retired on it.
+- `internal/agent/server/authority.go`, `internal/agent/answer/ledger.go`, `internal/agent/daemon/daemon.go`: The agent serves `RetireIfUnknown` with a signed `AuthorityAnswer` that echoes the op_id and names its state.
+- `internal/providers/contracts/host_authority.go`, `internal/transport/grpc/client_authority.go`: `HostAuthorityCaller.RetireIfUnknown` mints and delivers a retirement grant over exactly what a `RetireOrder` names.
+- `internal/controller/host_ledger_retire.go`: The manager retires an attempt whose host signs `NO_RECORD` in the ledger's adopted session, when its marker holds no ledgered receipt and its authenticated intent is continuous with the ledger. The grant is signed in one place only (`sendRetire`, covered by `TestLedgerGrantSites`). An applied retirement raises the ledger over the answer's position, then closes the attempt `Retired` (`never_received`). A `NO_RECORD` under a frozen earlier enrolment closes the attempt `Retired` (`unknown_to_frozen_enrolment`) without a grant, under the same preconditions.
+- `test/conformance/clustered/agenttarget/target.go`: `ReenrolHost` re-enrols a real agent in place, for the frozen enrolment closure test.
+
+### Changed
+- `internal/controller/virtualmachine_operation_answers.go`: For a ledger-driven host, a verified answer from a quarantined agent holds the host and reaches the quarantine hold with the agent's reason, instead of "no verified signed answer". A deleted-placement answer counts only from the ledger's adopted session. An attempt prepared under a store that a new store archived is held as outcome unknown (`store_lost`).
+- `internal/hostidentity/answer.go`, `internal/hostidentity/ledger.go`, `internal/agent/journal/reasons.go`: The verifier accepts the ledger quarantine reasons (now including `unknown_op_trace`) in answers to ledger-aware requests. Before, it refused them, so a ledger-quarantined host looked like "no answer". A retirement answer must name a 16-byte op_id, and an applied one the state `RETIRED`.
+- `docs/operation-grants-wire-shape.md`, `docs/per-host-agent-development.md`, `docs/operation-grants-manager.md`: Retire-if-unknown, the frozen enrolment closure, the re-send and retirement rule, and the follow-ups above.
+
+### Security
+- Retirement fails closed. Any doubt asks the host again or holds the attempt; it never closes it. The doubts are: a receipt that counts as ledgered or whose tag fails, an answer outside the adopted session or from an agent that is not `READY`, an intent of another store or generation or without one, an untraceable executor, or an answer about another operation or session. Keys, tags, MACs and session ids are never logged or put in status or events.
+
+### Why
+An operation that a host never received used to stay in flight under the host ledger, or be re-sent with no way to know it was never run. The ledger now proves which operations never started, so the manager can retire them definitely, and a later delivery can never run them.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds with host ledger keys only. Release builds and managers without host ledger keys behave as before. No proto or CRD change.
+
 ## [2026-11-27 21:30] - Host ledger driver: attestation, grant version 2, receipts and ledger marks (development builds only)
 **Author:** @wrkode (William Rizzo)
 
