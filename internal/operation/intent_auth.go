@@ -31,6 +31,18 @@ import (
 // this purpose and version only.
 const IntentAuthContext = "virtrigaud.io/operation-intent/v1\x00"
 
+// LedgerIntentAuthContext is the domain-separation prefix of the message an
+// intent tag covers when the intent also records the host ledger it was
+// prepared under (its store and generation): version 2 of the intent
+// message. It differs from IntentAuthContext, so a version 1 tag never
+// verifies over version 2 fields, nor the converse.
+const LedgerIntentAuthContext = "virtrigaud.io/operation-intent/v2\x00"
+
+// ReceiptAuthContext is the domain-separation prefix of the message a
+// receipt tag covers (ReceiptMessage): an operation attempt's record of the
+// host's receipt for it.
+const ReceiptAuthContext = "virtrigaud.io/operation-receipt/v1\x00"
+
 // TaskAuthContext is the domain-separation prefix of the message that binds an
 // attempt's task reference to the attempt (TaskMessage). It differs from
 // IntentAuthContext, so a task tag and an intent tag under the same key never
@@ -162,6 +174,19 @@ func TaskMessage(fields ...[]byte) []byte {
 // its bytes, so no two field lists encode alike.
 func IntentMessage(fields ...[]byte) []byte {
 	return framedMessage(IntentAuthContext, fields)
+}
+
+// LedgerIntentMessage is the canonical message a version 2 intent tag
+// covers: LedgerIntentAuthContext followed by each field as in
+// IntentMessage.
+func LedgerIntentMessage(fields ...[]byte) []byte {
+	return framedMessage(LedgerIntentAuthContext, fields)
+}
+
+// ReceiptMessage is the canonical message a receipt tag covers:
+// ReceiptAuthContext followed by each field as in IntentMessage.
+func ReceiptMessage(fields ...[]byte) []byte {
+	return framedMessage(ReceiptAuthContext, fields)
 }
 
 // RedactedIntentMessage is the canonical message a redacted intent tag

@@ -548,9 +548,9 @@ const (
 	// OperationAttemptPhaseAccepted: like Sent, and the host's agent also
 	// returned a signed receipt that it accepted the operation at a position
 	// of its operation store (status.operationAttempts[].receipt); its
-	// outcome is not known yet. Reserved for development builds: no
-	// released manager writes it yet, and one that reads it treats it as
-	// Sent.
+	// outcome is not known yet. Written only by development-build
+	// managers with a host ledger; a manager that does not know it treats
+	// it as Sent.
 	OperationAttemptPhaseAccepted OperationAttemptPhase = "Accepted"
 	// OperationAttemptPhaseTerminal: the attempt's outcome is known
 	// (status.operationAttempts[].outcome).
@@ -665,16 +665,17 @@ type OperationAttempt struct {
 
 	// Receipt is the host agent's receipt for the attempt: where in its
 	// operation store the agent accepted it. A mirror of a signed receipt
-	// the operator verified, bound to the attempt by ReceiptTag. Reserved
-	// for development builds: not populated yet, and never read to decide
-	// anything.
+	// the operator verified, bound to the attempt by ReceiptTag. Written
+	// only by development-build managers with a host ledger; it can only
+	// make a re-send of the attempt more cautious, never let one through.
 	// +optional
 	Receipt *OperationAttemptReceipt `json:"receipt,omitempty"`
 
 	// LedgerGeneration is, for display only, the generation of the host's
 	// ledger the attempt was prepared under; the value the operator acts on
 	// is the one covered by the attempt's authenticated intent, never this
-	// field. Reserved for development builds: not populated yet.
+	// field. Written only by development-build managers with a host
+	// ledger.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	LedgerGeneration int64 `json:"ledgerGeneration,omitempty"`
@@ -686,15 +687,15 @@ type OperationAttempt struct {
 // OperationAttemptReceiptTagContext is the domain-separation prefix of the
 // message an OperationAttemptReceipt's ReceiptTag covers: an HMAC-SHA256 tag
 // under an operator key, so a receipt copied onto another attempt, or edited,
-// does not verify. Reserved for development builds; no tag is computed or
-// verified yet.
+// does not verify. Computed and verified only by development-build
+// managers with a host ledger.
 const OperationAttemptReceiptTagContext = "virtrigaud.io/operation-receipt/v1\x00"
 
 // OperationAttemptReceipt records where the host's agent accepted an
 // operation attempt: the store, the position (sequence number and chain head)
 // and the attestation session it answered in. Every value is a public
-// identifier or digest, never key material. Reserved for development builds:
-// not populated yet, and never read to decide anything.
+// identifier or digest, never key material. Written only by
+// development-build managers with a host ledger.
 type OperationAttemptReceipt struct {
 	// StoreID identifies the agent's operation store: 32 lowercase
 	// hexadecimal characters.

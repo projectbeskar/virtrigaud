@@ -118,6 +118,20 @@ type PreparedOperation struct {
 	RequestBytes []byte
 	// DigestSalt is the attempt's random digest salt.
 	DigestSalt []byte
+	// GrantVersion is the grant version to sign the send at (0: the
+	// original version). It is chosen for each send from the host's signed
+	// answers and never stored.
+	GrantVersion uint32
+	// ExpectKnown marks a re-send of an operation the host acknowledged
+	// with a receipt the host ledger covers (grant version 2 only). Chosen
+	// for each send and never stored.
+	ExpectKnown bool
+	// LedgerStoreID and LedgerGeneration name the host ledger (its store
+	// and generation) the attempt was prepared under; empty and 0 when it
+	// was prepared without one. They are stored with the attempt's intent
+	// and covered by its authentication tag.
+	LedgerStoreID    []byte
+	LedgerGeneration uint64
 }
 
 // String implements fmt.Stringer without the request bytes or the salt.
@@ -177,6 +191,13 @@ type OperationAnswer struct {
 	RestartRequired bool
 	// Honest is ReconfigureResult.Honest (Reconfigure).
 	Honest bool
+	// Receipt is the host's signed operation receipt the response carried
+	// (nil: none). It is the Provider's relay of a host-signed value and is
+	// trusted only once the caller verified it.
+	Receipt *SignedAnswer
+	// GrantDigest is the digest of the grant this send minted (the value a
+	// receipt or an authority answer binds to).
+	GrantDigest []byte
 }
 
 // OperationSender is an optional capability of a Provider client: it sends

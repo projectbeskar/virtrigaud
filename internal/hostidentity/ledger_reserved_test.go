@@ -138,9 +138,9 @@ func TestVerifyAnswer_WithoutReservedLedgerFieldsAsBefore(t *testing.T) {
 	}
 }
 
-// TestVerifyAnswer_RefusesReservedBodyTypes: the body types reserved for the
-// host ledger protocol are outside the closed set, whatever the request
-// expected.
+// TestVerifyAnswer_RefusesReservedBodyTypes: a receipt is never an answer,
+// and a challenge or authority answer is refused when the request expected
+// another body type or the body breaks its rules.
 func TestVerifyAnswer_RefusesReservedBodyTypes(t *testing.T) {
 	f := newAnswerFixture(t)
 	bodies := map[string]proto.Message{

@@ -434,13 +434,15 @@ func TestHostAnswers_NewManagerAnchorsBeforeSigning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, answerNone, verdict, "a host answer whose position cannot be persisted does not count")
 	enrol := stub.signed.host.trust.Enrolment.EnrolmentID
-	require.Error(t, fresh.grantReady(p, "host-alpha", enrol))
+	_, err = fresh.grantReady(p, "host-alpha", enrol)
+	require.Error(t, err)
 
 	now = now.Add(storeWriteBackoffMax)
 	_, _, verdict, err = fresh.RefreshHostAnswer(ctx, p, stub, "host-alpha")
 	require.NoError(t, err)
 	require.Equal(t, answerVerified, verdict)
-	require.NoError(t, fresh.grantReady(p, "host-alpha", enrol))
+	_, err = fresh.grantReady(p, "host-alpha", enrol)
+	require.NoError(t, err)
 	inner.mu.Lock()
 	persisted := inner.stores["host-alpha"].Current.Seq
 	inner.mu.Unlock()

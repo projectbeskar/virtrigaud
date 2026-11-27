@@ -353,8 +353,8 @@ func TestHostInventory_InvalidBackoff(t *testing.T) {
 		requireCond(t, h, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, metav1.ConditionFalse,
 			infravirtrigaudiov1beta1.HostReasonInventoryInvalid)
 		requireCond(t, h, HostConditionAgentAnswer, metav1.ConditionTrue, reasonHostAnswerVerified)
-		require.NoError(t, f.r.HostAnswers.grantReady(f.provider, "host-alpha", f.signed.host.trust.Enrolment.EnrolmentID),
-			"new operations may still be signed")
+		_, gerr := f.r.HostAnswers.grantReady(f.provider, "host-alpha", f.signed.host.trust.Enrolment.EnrolmentID)
+		require.NoError(t, gerr, "new operations may still be signed")
 		f.clock.advance(time.Second)
 	}
 	// The agent is fixed: the next heartbeat asks, verifies, and the host is
@@ -398,7 +398,8 @@ func TestHostInventory_AnswerWithoutInventory(t *testing.T) {
 	h := f.reconcile(t)
 	assert.EqualValues(t, 1, f.lastQuery(t).InventoryVersion)
 	requireCond(t, h, HostConditionAgentAnswer, metav1.ConditionTrue, reasonHostAnswerVerified)
-	require.NoError(t, f.r.HostAnswers.grantReady(f.provider, "host-alpha", f.signed.host.trust.Enrolment.EnrolmentID))
+	_, gerr := f.r.HostAnswers.grantReady(f.provider, "host-alpha", f.signed.host.trust.Enrolment.EnrolmentID)
+	require.NoError(t, gerr)
 	requireCond(t, h, infravirtrigaudiov1beta1.HostConditionAgentInventoryVerified, metav1.ConditionFalse,
 		infravirtrigaudiov1beta1.HostReasonInventoryMissing)
 	assert.Equal(t, infravirtrigaudiov1beta1.HostHealthNotReady, h.Status.Health)

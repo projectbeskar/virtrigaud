@@ -69,7 +69,7 @@ func (c *Client) OperationAnswer(ctx context.Context, q contracts.OperationAnswe
 	ctx, cancel := context.WithTimeout(ctx, taskStatusCallTimeout)
 	defer cancel()
 	resp, err := c.client.TaskStatus(ctx, &providerv1.TaskStatusRequest{AnswerNonce: nonce, OpId: q.OpID,
-		OpEnrolmentId: q.OpEnrolmentID, TargetHostId: q.HostID, ContinuitySeq: q.ContinuitySeq})
+		OpEnrolmentId: q.OpEnrolmentID, TargetHostId: q.HostID, ContinuitySeq: q.ContinuitySeq, LedgerVersion: q.LedgerVersion})
 	if err != nil {
 		read.Answer = answerFromStatus(err)
 		return contracts.TaskStatus{}, read, c.mapGRPCError("taskStatus", err)
@@ -89,7 +89,7 @@ func (c *Client) VMAnswer(ctx context.Context, q contracts.VMAnswerQuery) (contr
 	ctx, cancel := context.WithTimeout(ctx, describeCallTimeout)
 	defer cancel()
 	resp, err := c.client.Describe(ctx, &providerv1.DescribeRequest{Id: q.VM.ID, TargetHostId: q.VM.HostID, Owner: vmOwner(q.VM),
-		AnswerNonce: nonce, BindingId: q.BindingID, ContinuitySeq: q.ContinuitySeq})
+		AnswerNonce: nonce, BindingId: q.BindingID, ContinuitySeq: q.ContinuitySeq, LedgerVersion: q.LedgerVersion})
 	if err != nil {
 		read.Answer = answerFromStatus(err)
 		return contracts.DescribeResponse{}, read, c.mapGRPCError("describe", err)
@@ -112,7 +112,7 @@ func (c *Client) HostAnswer(ctx context.Context, q contracts.HostAnswerQuery) (c
 	defer cancel()
 	resp, err := c.client.GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: q.HostID, AnswerNonce: nonce,
 		ContinuitySeq: q.ContinuitySeq, InventoryVersion: q.InventoryVersion, RenewalVersion: q.RenewalVersion,
-		StoreCapacityVersion: q.StoreCapacityVersion})
+		StoreCapacityVersion: q.StoreCapacityVersion, LedgerVersion: q.LedgerVersion})
 	if err != nil {
 		read.Answer = answerFromStatus(err)
 		return contracts.HostInfo{}, read, c.mapGRPCError("getHostInfo", err)

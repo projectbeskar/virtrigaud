@@ -535,6 +535,11 @@ type hostAnswerState struct {
 	// hostAnswerHostUID is the UID of the Host object the last verified
 	// host answer was read for (empty: not known).
 	hostAnswerHostUID string
+	// hostSession is the attestation session the last verified host answer
+	// named (zero: none, or the request asked for no ledger state).
+	hostSession [16]byte
+	// provider is the Provider the host was last read for (a copy).
+	provider *infravirtrigaudiov1beta1.Provider
 }
 
 // HostAnswers is the manager's shared state of signed host answers, used by
@@ -553,9 +558,13 @@ type HostAnswers struct {
 	Inventory *HostInventoryPolicy
 
 	// Ledger is the host ledger of a manager with host ledger keys (nil:
-	// none); set it with AttachLedger. Nothing signed reads it yet; the
+	// none); set it with AttachLedger. The attestation driver runs on it
+	// (host_ledger_driver.go), grant version 2 is signed from it, and the
 	// heartbeat mirrors it into Host.status.agentLedger.
 	Ledger *HostLedger
+	// AttestRetryInterval is the least time between two attestation
+	// challenges of one host awaiting attestation (zero: 2 seconds).
+	AttestRetryInterval time.Duration
 
 	mu    sync.Mutex
 	hosts map[string]*hostAnswerState
@@ -573,6 +582,13 @@ type HostAnswers struct {
 	// (checkFreezeDiscards), keyed by provider, host and enrolment id. The
 	// zero value is ready.
 	freezeProbes sync.Map
+
+	// lmu guards ledgers, the attestation driver's state of each host
+	// (host_ledger_driver.go).
+	lmu     sync.Mutex
+	ledgers map[string]hostLedgerState
+	// buckets are the host ledger's split token buckets.
+	buckets ledgerBuckets
 }
 
 // hostWriter serialises the store-state writes of one host and paces them
@@ -619,6 +635,9 @@ func (h *HostAnswers) state(ctx context.Context, provider *infravirtrigaudiov1be
 	if s == nil {
 		s = &hostAnswerState{}
 		h.hosts[k] = s
+	}
+	if s.provider == nil || s.provider.ResourceVersion != provider.ResourceVersion {
+		s.provider = provider.DeepCopy()
 	}
 	if !s.loaded {
 		st, err := h.Trust.LoadStoreState(ctx, provider, hostID)
@@ -751,6 +770,8 @@ type hostRead struct {
 	// storeCapacityVersion is the store capacity version a GetHostInfo read
 	// sent (0: none).
 	storeCapacityVersion uint32
+	// ledgerVersion is the host ledger version the read sent (0: none).
+	ledgerVersion uint32
 }
 
 // errHostTrust wraps begin's failures to read the manager's own trust or
@@ -816,6 +837,7 @@ func (h *HostAnswers) verify(ctx context.Context, provider *infravirtrigaudiov1b
 	exp.InventoryVersion = hr.inventoryVersion
 	exp.RenewalVersion = hr.renewalVersion
 	exp.StoreCapacityVersion = hr.storeCapacityVersion
+	exp.LedgerVersion, exp.ContinuitySeq = hr.ledgerVersion, hr.snapshot.ContinuitySeq()
 	v, err := hostidentity.VerifyAnswer(blobOf(read.Answer), exp)
 	if err != nil {
 		log.FromContext(ctx).Info("No signed host answer; nothing is concluded", "host", hostID, "check", err.Error())
@@ -1003,27 +1025,35 @@ func (h *HostAnswers) RegressedReason(ctx context.Context, provider *infravirtri
 // verified host answer.
 var errNoHostAnswer = errors.New("no recent verified host answer")
 
-// grantReady reports whether new operations may be signed for the host: a
-// verified host answer under its current enrolment, younger than
-// hostAnswerTTL, from a READY agent that implements the manager's grant
-// version.
-func (h *HostAnswers) grantReady(provider *infravirtrigaudiov1beta1.Provider, hostID string, enrolment []byte) error {
+// grantReady reports whether new operations may be signed for the host,
+// and at which grant version: a verified host answer under its current
+// enrolment, younger than hostAnswerTTL, from a READY agent. A manager with
+// a host ledger signs grant version 2 for an agent that implements it, and
+// only while the agent is attested in the ledger's adopted session
+// (ledgerGrantReady): never version 1 to such an agent. Otherwise it signs
+// version 1 for an agent that implements it, as before.
+func (h *HostAnswers) grantReady(provider *infravirtrigaudiov1beta1.Provider, hostID string, enrolment []byte) (uint32, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s := h.hosts[hostAnswerKey(provider, hostID)]
 	switch {
 	case s == nil || s.hostAnswerAt.IsZero() || h.now().Sub(s.hostAnswerAt) > hostAnswerTTL:
-		return errNoHostAnswer
+		return 0, errNoHostAnswer
 	case !bytes.Equal(s.hostAnswerEnrol, enrolment):
-		return fmt.Errorf("%w under the host's current enrolment", errNoHostAnswer)
+		return 0, fmt.Errorf("%w under the host's current enrolment", errNoHostAnswer)
 	case !s.anchored:
-		return errors.New("no verified position of the host is persisted yet by this manager")
+		return 0, errors.New("no verified position of the host is persisted yet by this manager")
 	case s.hostAgentState != providerv1.AgentState_AGENT_STATE_READY:
-		return fmt.Errorf("the host's agent is %s", s.hostAgentState)
+		return 0, fmt.Errorf("the host's agent is %s", s.hostAgentState)
+	case h.Ledger != nil && s.hostAPIVersion >= ledgerAgentAPIVersion && slices.Contains(s.hostGrantVersions, grantverify.LedgerGrantVersion):
+		if err := h.ledgerGrantReady(provider, hostID, s); err != nil {
+			return 0, err
+		}
+		return grantverify.LedgerGrantVersion, nil
 	case !slices.Contains(s.hostGrantVersions, grantverify.GrantVersion):
-		return fmt.Errorf("the host's agent implements no grant version this manager signs")
+		return 0, fmt.Errorf("the host's agent implements no grant version this manager signs")
 	}
-	return nil
+	return grantverify.GrantVersion, nil
 }
 
 // RefreshHostAnswer asks the host for a signed host answer through reader
@@ -1069,6 +1099,16 @@ type hostRefresh struct {
 // starts or extends the host's inventory backoff.
 func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, reader contracts.HostAnswerReader,
 	hostID string) (hostRefresh, error) {
+	ledgerVersion := h.ledgerAsk(provider, hostID)
+	if ledgerVersion > 0 && !h.ledgerOf(provider, hostID).ready {
+		// The position this request names for continuity is the persisted
+		// one, so that a host ledger can be started from it once the host
+		// confirms it.
+		if err := h.persistPosition(ctx, provider, hostID); err != nil {
+			log.FromContext(ctx).Info("Cannot persist the host's store position before a ledger answer", "host", hostID,
+				"error", err.Error())
+		}
+	}
 	hr, err := h.begin(ctx, provider, hostID)
 	if err != nil {
 		if errors.Is(err, errHostRegressed) {
@@ -1079,9 +1119,11 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 	hr.inventoryVersion = h.inventoryAsk(provider, hostID)
 	hr.renewalVersion = h.renewalAsk(provider, hostID)
 	hr.storeCapacityVersion = hostidentity.StoreCapacityVersion
+	hr.ledgerVersion = ledgerVersion
 	out := hostRefresh{asked: hr.inventoryVersion, inventoryBackoff: hr.inventoryVersion == 0}
 	info, read, rerr := reader.HostAnswer(ctx, contracts.HostAnswerQuery{HostID: hostID, ContinuitySeq: hr.snapshot.ContinuitySeq(),
-		InventoryVersion: hr.inventoryVersion, RenewalVersion: hr.renewalVersion, StoreCapacityVersion: hr.storeCapacityVersion})
+		InventoryVersion: hr.inventoryVersion, RenewalVersion: hr.renewalVersion, StoreCapacityVersion: hr.storeCapacityVersion,
+		LedgerVersion: hr.ledgerVersion})
 	out.info, out.read = info, read
 	if rerr != nil {
 		out.verdict = answerNone
@@ -1128,8 +1170,12 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 		s.hostAgentState = v.Context.GetAgentState()
 		s.hostAPIVersion = v.Host.GetAgentApiVersion()
 		s.hostAnswerHostUID = hr.trust.HostUID
+		s.hostSession, _ = sessionOf(v.Context)
 	}
 	h.mu.Unlock()
+	if hr.ledgerVersion > 0 && h.Ledger != nil {
+		h.driveLedger(ctx, provider, reader, hostID, hr, v)
+	}
 	return out, nil
 }
 

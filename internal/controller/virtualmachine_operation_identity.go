@@ -36,6 +36,7 @@ import (
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
+	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -644,6 +645,14 @@ func (r *VirtualMachineReconciler) startAttempt(ctx context.Context, vm *infravi
 	if len(prepared.RequestBytes) > maxIntentRequestBytes {
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationRequestTooLarge, msgOperationRequestTooLarge, operationHoldRecheckInterval), nil
 	}
+	// An attempt on a host the host ledger drives records, in its
+	// authenticated intent, the ledger (store and generation) it is
+	// prepared under.
+	if v, _ := r.HostAnswers.sendVersion(ia.providerCR, host); v == grantverify.LedgerGrantVersion {
+		if store, gen, ok := r.HostAnswers.LedgerStamp(ia.providerCR, host); ok {
+			prepared.LedgerStoreID, prepared.LedgerGeneration = bytes.Clone(store[:]), gen
+		}
+	}
 	if err := r.storeIntent(ctx, ia.providerCR, vm, prepared); err != nil {
 		logger.Error(err, "Cannot store the operation's intent; nothing is sent", "kind", opReq.Kind)
 		if errors.Is(err, errIntentTooLarge) {
@@ -990,11 +999,17 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 		// Only a full intent can be sent; never an empty or partial request.
 		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationIntentLost, msgOperationIntentLost, operationHoldRecheckInterval), nil
 	}
-	answer, err := ia.sender.SendOperation(ctx, prepared)
+	answer, err := r.signedSend(ctx, vm, ia, a, &prepared, first)
+	if errors.Is(err, errLedgerNotAttested) {
+		return stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationHostAnswerUnavailable,
+			fmt.Sprintf("host %s is not attested in its host ledger (%s); nothing is sent to it", a.HostID, err.Error()),
+			operationHoldRecheckInterval), nil
+	}
 	if r.operationCrashed(ctx, crashAfterSend) {
 		return stepWaiting, ctrl.Result{}, errOperationCrashed
 	}
 	var sentAnswer *contracts.OperationAnswer
+	var receipt *verifiedReceipt
 	if err != nil {
 		log.FromContext(ctx).Info("The operation was not accepted; the host is asked about its op_id", "kind", a.Kind,
 			"attempt", a.Attempt, "first", first, "error", providerFailureDetail(err))
@@ -1005,11 +1020,15 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 	} else {
 		ia.noteResult(nil, &answer)
 		sentAnswer = &answer
+		receipt = r.acceptReceipt(ctx, vm, ia, a, prepared, answer)
 	}
-	sent, werr := r.markSent(ctx, vm, a, sentAnswer)
+	sent, werr := r.markSentWith(ctx, vm, a, sentAnswer, receipt)
 	if werr != nil {
 		log.FromContext(ctx).Info("The Sent marker was not written; the host is asked about the attempt again", "error", werr.Error())
 		return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+	}
+	if receipt != nil {
+		r.HostAnswers.ledgerReceipt(ctx, ia.providerCR, ia.reader, a.HostID, receipt.receipt)
 	}
 	if err != nil && repeatableKind(contracts.OperationKind(a.Kind)) {
 		// A host-level answer (an unavailable host, a VM missing on its host
@@ -1040,6 +1059,14 @@ func (r *VirtualMachineReconciler) sendAttempt(ctx context.Context, vm *infravir
 // value is not cleared by a send that was not answered.
 func (r *VirtualMachineReconciler) markSent(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	a *infravirtrigaudiov1beta1.OperationAttempt, answer *contracts.OperationAnswer) (*infravirtrigaudiov1beta1.OperationAttempt, error) {
+	return r.markSentWith(ctx, vm, a, answer, nil)
+}
+
+// markSentWith is markSent that also records a verified receipt of the send
+// (nil: none), moving the marker to Accepted in the same write.
+func (r *VirtualMachineReconciler) markSentWith(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	a *infravirtrigaudiov1beta1.OperationAttempt, answer *contracts.OperationAnswer,
+	receipt *verifiedReceipt) (*infravirtrigaudiov1beta1.OperationAttempt, error) {
 	sent := *a
 	if !attemptDelivered(sent.Phase) {
 		sent.Phase, sent.LastTransitionTime = infravirtrigaudiov1beta1.OperationAttemptPhaseSent, metav1.NewTime(r.now())
@@ -1056,6 +1083,7 @@ func (r *VirtualMachineReconciler) markSent(ctx context.Context, vm *infravirtri
 		}
 	}
 	sent.TaskTag = r.taskTag(vm, &sent, sent.TaskRef)
+	sent = r.recordReceipt(vm, sent, receipt)
 	if sent == *a {
 		return a, nil
 	}

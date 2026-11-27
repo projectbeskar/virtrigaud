@@ -31,7 +31,7 @@ that falls back to an in-memory `/var`, provision a persistent volume for
 | `spec.identity` | The host's identity anchor (TPM endorsement-key hash, hardware serial, administrator-assigned UUID). Required before the host can enrol. Set once: a CEL rule refuses changing or removing it. A replaced machine is a new identity (a new Host object), and never inherits the old host's pins. |
 | `spec.revoked` | When `true`, the manager retires the host's enrolment id, removes its pinned keys and any pending or authorised record, never approves a request for it again, and renders it as unroutable. A CEL rule refuses clearing it: enrol a replacement as a new Host. Revoking the certificate at the CA is not done by this manager yet. |
 | `status.agent` | A mirror of the pins Secret (see below): `mode`, `enrolmentID`, `pendingEnrolmentID`, `requestURIs`, `keyPins`, `certificateExpiry`. Public identifiers only. |
-| `status.agentLedger` | Development builds with host ledger keys only (see [Host ledger state](#host-ledger-state)); empty until the manager holds a ledger for the host's store, which nothing creates yet outside tests. A display mirror of the manager's ledger of the host's agent operation store: `storeIDPrefix` (the first 8 hexadecimal characters of the store id only), `seq`, `checkpointSeq`, `attestationState` (`Pending` or `Attested`), `attestedAt`, `ledgerGeneration` and `updatedAt`. It never carries the full store id, a chain head or a session id, is outside `status.agent` (so writing it does not re-render the Provider's inventory), and nothing reads it back to decide. Refreshed at most every 30 seconds. |
+| `status.agentLedger` | Development builds with host ledger keys only (see [Host ledger state](#host-ledger-state)); empty until the manager holds a ledger for the host's store (it starts one when it first attests the host's agent). A display mirror of the manager's ledger of the host's agent operation store: `storeIDPrefix` (the first 8 hexadecimal characters of the store id only), `seq`, `checkpointSeq`, `attestationState` (`Pending` or `Attested`), `attestedAt`, `ledgerGeneration` and `updatedAt`. It never carries the full store id, a chain head or a session id, is outside `status.agent` (so writing it does not re-render the Provider's inventory), and nothing reads it back to decide. Refreshed at most every 30 seconds. |
 | `status.agentLastStore` | A display mirror of the last store position the manager verified in a signed answer of the host's agent: `storeIDPrefix`, `seq`, `checkpointSeq` and `updatedAt`, refreshed at most every 30 seconds by the heartbeat after a verified answer. The authoritative position stays in the pins Secret (`store.json`); nothing reads this mirror back to decide. A position above the field's 64-bit signed range is not mirrored. |
 | condition `AgentEnrolled` | `True`/`Enrolled` once a key is pinned. `False` with `IdentityMissing`, `Revoked`, `CertificateExpired`, `AwaitingCertificateRequest`, `AwaitingCertificate`, `CertificateRequestDenied`, `CertificateRejected` or `EnrolmentRefused` (another live Host claims the same `spec.identity`; the reason says no more: see [One live Host per identity](#one-live-host-per-identity)). |
 | condition `AgentIdentityDuplicated` | On an enrolled Host only: `True`/`DuplicateIdentityClaimed` while another live Host claims its identity (that Host is not enrolled), `False`/`Unique` once none does. It names neither the other Host nor the identity. |
@@ -889,10 +889,11 @@ The checks do not cover these paths:
 ## Host ledger state
 
 > Development builds only, and only with host ledger keys
-> (`--dev-host-ledger-key-dir`). The manager does not yet sign grant version
-> 2, attest an agent, verify operation receipts or send ledger marks: nothing
-> in a running manager creates or changes a ledger object yet. What exists is
-> the durable state those steps will use, its checks, and the status mirror.
+> (`--dev-host-ledger-key-dir`). The manager attests the host's agent, verifies
+> operation receipts, sends ledger marks and signs grant version 2 from this
+> state (see
+> [Manager driver](operation-grants-wire-shape.md#manager-driver-development-builds)).
+> This section describes the durable state, its checks, and the status mirror.
 
 The host ledger is what the manager knows durably about one host agent
 operation store: the highest position of the store's chain the manager has
@@ -1371,10 +1372,10 @@ enrolment record) is described in
 A predecessor's freeze is confirmed and the predecessor removed as described
 in [Confirming a predecessor's freeze](#confirming-a-predecessors-freeze).
 
-The host ledger exists as durable state only (see
-[Host ledger state](#host-ledger-state)): the manager does not yet attest an
-agent, verify operation receipts, send ledger marks or sign grant version 2,
-so a development-build agent still runs no operation. Removing a ledger
+A manager with host ledger keys attests a development-build agent and signs
+its operations at grant version 2 (see
+[Host ledger state](#host-ledger-state)); any other manager signs nothing for
+it, so the agent runs no operation. Removing a ledger
 object of a store that no longer exists needs an operator tool that is not
 written yet; until then ledger Secrets accumulate (about 1.5 KB per store
 ever seen).

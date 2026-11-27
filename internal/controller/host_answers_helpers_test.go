@@ -46,6 +46,14 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
+// ledgerTestT is what the test host helpers need of a test: a *testing.T or
+// GinkgoT().
+type ledgerTestT interface {
+	hostidentitytest.T
+	Errorf(format string, args ...any)
+	FailNow()
+}
+
 // testTrustDomain is the trust domain of the test host identities.
 const testTrustDomain = "example.test"
 
@@ -67,7 +75,7 @@ type testHost struct {
 
 // newTestHost enrols host hostID of provider (namespace = the Provider's)
 // with enrolment id enrol and grant epoch epoch.
-func newTestHost(t testing.TB, provider *infravirtrigaudiov1beta1.Provider, hostID string, enrol []byte, epoch operation.Epoch) *testHost {
+func newTestHost(t ledgerTestT, provider *infravirtrigaudiov1beta1.Provider, hostID string, enrol []byte, epoch operation.Epoch) *testHost {
 	t.Helper()
 	ca := hostidentitytest.NewCA(t)
 	key := hostidentitytest.NewKey(t)
@@ -124,7 +132,7 @@ func (h *testHost) sign(t testing.TB, body proto.Message) *contracts.SignedAnswe
 
 // signRaw signs body as a host would, without the agent's checks of what it
 // signs.
-func (h *testHost) signRaw(t testing.TB, body proto.Message) *contracts.SignedAnswer {
+func (h *testHost) signRaw(t ledgerTestT, body proto.Message) *contracts.SignedAnswer {
 	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

@@ -58,6 +58,10 @@ type OperationAnswerQuery struct {
 	// ContinuitySeq is the store sequence number at which the manager holds a
 	// verified chain head (0: none).
 	ContinuitySeq uint64
+	// LedgerVersion asks for the host ledger fields of the answer: the
+	// highest host ledger version the caller implements, or 0 for none.
+	// Sent only to an agent known to implement it.
+	LedgerVersion uint32
 }
 
 // HostAnswerQuery names one host for a GetHostInfo that asks for a signed
@@ -80,6 +84,9 @@ type HostAnswerQuery struct {
 	// implements, or 0 for none. An agent older than the field ignores it and
 	// answers without one.
 	StoreCapacityVersion uint32
+	// LedgerVersion asks for the host's ledger state in the signed answer
+	// (development builds), as in OperationAnswerQuery.
+	LedgerVersion uint32
 }
 
 // VMAnswerQuery names one VM placement for a Describe that asks for a signed
@@ -92,6 +99,8 @@ type VMAnswerQuery struct {
 	BindingID []byte
 	// ContinuitySeq is as in OperationAnswerQuery.
 	ContinuitySeq uint64
+	// LedgerVersion is as in OperationAnswerQuery.
+	LedgerVersion uint32
 }
 
 // HostAnswerReader is an optional capability of a Provider client: reads that

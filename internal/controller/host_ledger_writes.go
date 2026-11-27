@@ -256,6 +256,10 @@ type HostLedger struct {
 	goneSince      map[string]time.Time
 	heartbeatAt    map[string]time.Time
 	indexPersisted map[string]time.Time
+	observed       map[string]observedEvidence
+	// own is, per store, the record of this process's last successful
+	// write of the store's ledger (what a ledger mark is signed from).
+	own map[[16]byte]*HostLedgerRecord
 }
 
 // NewHostLedger returns the host ledger library of a manager with host
@@ -779,7 +783,26 @@ func (l *HostLedger) written(ctx context.Context, lh *ledgerHost, sec *corev1.Se
 		return nil, fmt.Errorf("verify the host ledger of store %s as written: %w", storeIDPrefix(store), err)
 	}
 	l.remember(lh, rec, adopted)
+	l.mu.Lock()
+	if l.own == nil {
+		l.own = map[[16]byte]*HostLedgerRecord{}
+	}
+	if prev := l.own[store]; prev == nil || rec.WriteCounter >= prev.WriteCounter {
+		l.own[store] = rec.clone()
+	}
+	l.mu.Unlock()
 	return rec, nil
+}
+
+// ownRecord returns a copy of the record of this process's last successful
+// write of a store's ledger (nil: none).
+func (l *HostLedger) ownRecord(store [16]byte) *HostLedgerRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if r := l.own[store]; r != nil {
+		return r.clone()
+	}
+	return nil
 }
 
 // updateOptions are the options of one update.
@@ -895,6 +918,37 @@ func (l *HostLedger) Load(ctx context.Context, provider *infravirtrigaudiov1beta
 	l.remember(lh, obj.rec, false)
 	l.clearHold(lh)
 	return obj.rec, nil
+}
+
+// LoadBound is Load for a ledger that must serve the host hostID of
+// provider now: a ledger that serves another Host object returns its record
+// with ErrHostLedgerNotBound (Rebind moves it), an archived one its record
+// with ErrHostLedgerArchived. Only a nil error means the record is bound to
+// the Host object the host id names, with the same identity, and not
+// archived.
+func (l *HostLedger) LoadBound(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string,
+	store [16]byte) (*HostLedgerRecord, error) {
+	lh, err := l.resolve(ctx, provider, hostID)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := l.Load(ctx, provider, hostID, store)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireBound(lh, rec); err != nil {
+		return rec, err
+	}
+	return rec, nil
+}
+
+// heartbeatDue reports whether a heartbeat-only raise of the host would be
+// taken now (the last one is at least ledgerHeartbeatRaiseInterval ago).
+func (l *HostLedger) heartbeatDue(provider *infravirtrigaudiov1beta1.Provider, hostID string) bool {
+	l.mu.Lock()
+	at := l.heartbeatAt[hostAnswerKey(provider, hostID)]
+	l.mu.Unlock()
+	return at.IsZero() || l.now().Sub(at) >= ledgerHeartbeatRaiseInterval
 }
 
 // indexChange is a change of a ledger index: store counters to raise (0

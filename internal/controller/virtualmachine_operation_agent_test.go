@@ -195,11 +195,18 @@ func (l *lyingProvider) Create(ctx context.Context, req *providerv1.CreateReques
 // agentEnv is one VM of a clustered cloudhypervisor Provider whose host
 // host-a is a real agent process.
 type agentEnv struct {
-	tg   *agenttarget.Target
-	lie  *lyingProvider
-	r    *VirtualMachineReconciler
-	req  ctrl.Request
-	host *agenttarget.Host
+	tg  *agenttarget.Target
+	lie *lyingProvider
+	r   *VirtualMachineReconciler
+	// provider, cli, trust, ledger and enrol are the manager side of the
+	// host (ledger nil without host ledger keys).
+	provider *infravirtrigaudiov1beta1.Provider
+	cli      *grpcClient.Client
+	trust    *staticTrust
+	ledger   *HostLedger
+	enrol    []byte
+	req      ctrl.Request
+	host     *agenttarget.Host
 }
 
 // agentTLS is a server and client TLS configuration for 127.0.0.1.
@@ -228,29 +235,45 @@ func agentTLS(t *testing.T) (*tls.Config, *tls.Config) {
 		&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}
 }
 
-// skipUntilManagerSignsLedgerGrants skips a test that needs the manager to
-// run an operation on a real agent. The development-build agent speaks the
-// host ledger protocol (agent API version 5) and accepts grant version 2
-// only; the manager signs grant version 1 only, so by design it signs
-// nothing for such an agent (TestAgentIdentity_ManagerSignsNothingForALedgerAgent
-// pins that). These tests come back when the manager side of the host
-// ledger lands.
-func skipUntilManagerSignsLedgerGrants(t *testing.T) {
-	t.Helper()
-	t.Skip("the manager signs grant version 1 only and the development-build agent accepts version 2 only " +
-		"until the manager side of the host ledger lands")
+// lyingAuthority forwards the host authority service of the Target's
+// Provider unchanged.
+type lyingAuthority struct {
+	providerv1.UnimplementedHostAuthorityServer
+	inner providerv1.HostAuthorityClient
 }
 
+func (l *lyingAuthority) Challenge(ctx context.Context, req *providerv1.ChallengeRequest) (*providerv1.ChallengeResponse, error) {
+	return l.inner.Challenge(ctx, req)
+}
+
+func (l *lyingAuthority) Attest(ctx context.Context, req *providerv1.AttestRequest) (*providerv1.AuthorityResponse, error) {
+	return l.inner.Attest(ctx, req)
+}
+
+func (l *lyingAuthority) LedgerMark(ctx context.Context, req *providerv1.LedgerMarkRequest) (*providerv1.AuthorityResponse, error) {
+	return l.inner.LedgerMark(ctx, req)
+}
+
+// newAgentEnv is one VM on a real agent whose attestation and ledger marks
+// are the manager's own: the manager holds host ledger keys, attests the
+// agent through the Provider's host authority relay (the Target never
+// does), signs grant version 2 once it is attested, and raises the agent's
+// ledger mark over each operation it accepted.
 func newAgentEnv(t *testing.T) *agentEnv {
 	t.Helper()
-	skipUntilManagerSignsLedgerGrants(t)
-	return newAgentEnvAny(t)
+	return newAgentEnvWith(t, true)
 }
 
-// newAgentEnvAny is newAgentEnv without the skip.
+// newAgentEnvAny is one VM on a real agent whose manager holds no host
+// ledger keys (the Target attests the agent itself).
 func newAgentEnvAny(t *testing.T) *agentEnv {
 	t.Helper()
-	tg, err := agenttarget.New(t, agenttarget.Config{Hosts: []string{agentHost}})
+	return newAgentEnvWith(t, false)
+}
+
+func newAgentEnvWith(t *testing.T, managerLedger bool) *agentEnv {
+	t.Helper()
+	tg, err := agenttarget.New(t, agenttarget.Config{Hosts: []string{agentHost}, ManagerLedger: managerLedger})
 	require.NoError(t, err)
 	cfg := tg.OperationIdentity()
 	// The Provider's own gRPC server (its interceptor records the task
@@ -270,6 +293,7 @@ func newAgentEnvAny(t *testing.T) *agentEnv {
 	require.NoError(t, err)
 	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)))
 	providerv1.RegisterProviderServer(srv, lie)
+	providerv1.RegisterHostAuthorityServer(srv, &lyingAuthority{inner: providerv1.NewHostAuthorityClient(providerConn)})
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	ctx := context.Background()
@@ -289,6 +313,8 @@ func newAgentEnvAny(t *testing.T) *agentEnv {
 	require.Equal(t, cfg.ProviderUID, string(providerCR.UID), "the agents are enrolled with this Provider")
 	pool := hostPoolCR("pool-a", ns, providerCR.Name)
 	host := readyHost(agentHost, ns, pool.Name, providerCR.Name)
+	host.Spec.Identity = "serial-" + agentHost
+	host.UID = "5e1f0c2a-2222-4333-8444-955566667777"
 	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: ownerFilterClient{Client: cli}}, vm, providerCR, pool, host,
 		smallVMClass(ns), minimalVMImage(ns))
 	r.OperationIntentAuth = operation.IntentAuthenticatorOf(cfg.Signer)
@@ -306,12 +332,38 @@ func newAgentEnvAny(t *testing.T) *agentEnv {
 	trustSrc := &staticTrust{trusts: map[string]HostTrust{agentHost: {
 		Enrolment: operation.Enrolment{EnrolmentID: cfg.Enrolments[agentHost], Epoch: cfg.Epoch},
 		InstallID: cfg.Signer.InstallID(), Pins: []string{pin}, Anchors: tg.HostAnswerRoots(), HostURI: uri, HostName: agentHost,
+		HostUID: string(host.UID),
 	}}}
 	r.HostAnswers = &HostAnswers{Trust: trustSrc}
 	_, _, verdict, err := r.HostAnswers.RefreshHostAnswer(ctx, providerCR, cli, agentHost)
 	require.NoError(t, err)
 	require.Equal(t, answerVerified, verdict, "the real agent's host answer verifies")
-	return &agentEnv{tg: tg, lie: lie, r: r, req: ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}, host: h}
+	if managerLedger {
+		// A ledger object names the floor of the manager that may read it;
+		// the test build stands for a release above it.
+		prev := buildVersion
+		buildVersion = func() string { return "v0.5.0" }
+		t.Cleanup(func() { buildVersion = prev })
+		keys, err := NewHostLedgerKeys(randomLedgerKey(t), nil, randomLedgerKey(t))
+		require.NoError(t, err)
+		ledger := NewHostLedger(r.Client, r.Client, trustSrc, keys,
+			&HostEnrolmentConfig{Namespace: "virtrigaud-enrolment", InstallID: cfg.Signer.InstallID()}, nil)
+		r.HostAnswers.AttachLedger(ledger)
+		r.HostAnswers.AttestRetryInterval = time.Millisecond
+		// The manager attests the agent, as its Host heartbeat would.
+		require.Eventually(t, func() bool {
+			r.HostAnswers.DriveHostLedger(ctx, providerCR, cli, agentHost)
+			_, err := r.HostAnswers.grantReady(providerCR, agentHost, cfg.Enrolments[agentHost])
+			return err == nil
+		}, 20*time.Second, 50*time.Millisecond, "the manager attests the agent and signs grant version 2 for it")
+		rec, err := ledger.Load(ctx, providerCR, agentHost, r.HostAnswers.ledgerOf(providerCR, agentHost).store)
+		require.NoError(t, err)
+		require.Equal(t, infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested, rec.AttestationState)
+	}
+	env := &agentEnv{tg: tg, lie: lie, r: r, req: ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}, host: h,
+		provider: providerCR, cli: cli, trust: trustSrc, enrol: cfg.Enrolments[agentHost]}
+	env.ledger = r.HostAnswers.Ledger
+	return env
 }
 
 // step reconciles once and lets every operation the agent started finish.
@@ -367,9 +419,10 @@ func (e *agentEnv) markDeleted(t *testing.T) {
 	require.NoError(t, e.r.Delete(context.Background(), e.vm(t)))
 }
 
-// The manager signs no operation for an agent that reports grant versions
-// [2] (the host ledger protocol): it has no grant version in common with it,
-// so the agent executes nothing and the VM waits.
+// A manager without host ledger keys signs no operation for an agent that
+// reports grant versions [2] (the host ledger protocol): it never signs
+// version 2 without a ledger, so the agent executes nothing and the VM
+// waits.
 func TestAgentIdentity_ManagerSignsNothingForALedgerAgent(t *testing.T) {
 	e := newAgentEnvAny(t)
 	e.step(t, 8)
@@ -398,6 +451,183 @@ func TestAgentIdentity_CreateAndDeleteOnSignedAnswers(t *testing.T) {
 	}
 	assert.Nil(t, e.vm(t), "released on the agent's signed Delete")
 	assert.Equal(t, 1, e.createOps(t))
+}
+
+// A Create sent at grant version 2 comes back with the agent's receipt: the
+// attempt is Accepted with the receipt recorded and bound to it, prepared
+// under the ledger its intent records, the ledger covers the receipt, and
+// the agent runs the operation exactly once.
+func TestAgentIdentity_ReceiptAcceptedAndLedgered(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	_, err := e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	vm := e.vm(t)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseAccepted, a.Phase, "the receipt moved the attempt to Accepted")
+	require.NotNil(t, a.Receipt)
+	assert.True(t, e.r.receiptBound(vm, a), "the recorded receipt is bound to the attempt")
+	assert.Positive(t, a.LedgerGeneration)
+	provider := &infravirtrigaudiov1beta1.Provider{}
+	require.NoError(t, e.r.Get(ctx, client.ObjectKey{Namespace: trusttest.HostNS, Name: "prov-cluster"}, provider))
+	p, found, err := e.r.loadIntent(ctx, vm, a.OpID, provider.Namespace)
+	require.NoError(t, err)
+	require.True(t, found)
+	rec, err := e.r.HostAnswers.Ledger.Load(ctx, provider, agentHost, [16]byte(p.LedgerStoreID))
+	require.NoError(t, err)
+	assert.True(t, ledgerContinuous(p, rec), "the intent records the ledger it was prepared under")
+	assert.EqualValues(t, rec.Generation, a.LedgerGeneration)
+	assert.GreaterOrEqual(t, int64(rec.Position.Seq), a.Receipt.Seq, "the ledger covers the receipt")
+	assert.True(t, receiptLedgered(rec, a.Receipt))
+	e.waitCreated(t)
+	assert.Equal(t, 1, e.createOps(t))
+}
+
+// driveReady drives the host's ledger once and reports whether grant
+// version 2 may be signed for it.
+func (e *agentEnv) driveReady() bool {
+	e.r.HostAnswers.DriveHostLedger(context.Background(), e.provider, e.cli, agentHost)
+	_, err := e.r.HostAnswers.grantReady(e.provider, agentHost, e.enrol)
+	return err == nil
+}
+
+// driveReady is paced by its callers below the agent's signed answer rate
+// (ten a second).
+//
+// A ledger that is archived never makes its host ready for grant version 2,
+// even right after a heartbeat raise (the raise is throttled and returns a
+// read): the ready check reads the ledger bound and not archived, whatever
+// the throttle or the token buckets say.
+func TestAgentIdentity_LedgerArchivedStoreNotReady(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	store := e.r.HostAnswers.ledgerOf(e.provider, agentHost).store
+	lh, err := e.ledger.resolve(ctx, e.provider, agentHost)
+	require.NoError(t, err)
+	_, err = e.ledger.archive(ctx, lh, store, [16]byte{0xff})
+	require.NoError(t, err)
+	require.Never(t, e.driveReady, time.Second, 300*time.Millisecond, "an archived ledger never makes the host ready")
+	_, ok := e.r.HostAnswers.sendVersion(e.provider, agentHost)
+	assert.False(t, ok, "nothing is sent to the host")
+	_, err = e.ledger.LoadBound(ctx, e.provider, agentHost, store)
+	require.ErrorIs(t, err, ErrHostLedgerArchived)
+}
+
+// A Host replaced by a new object of the same name (the agent keeps its
+// session): the ledger bound to the earlier object never makes the new one
+// ready, and moves to it only once the rebind conditions hold (the earlier
+// object gone and quiet for the answer lifetime); the agent is then
+// attested again and the new Host becomes ready.
+func TestAgentIdentity_LedgerReplacedHostRebinds(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	store := e.r.HostAnswers.ledgerOf(e.provider, agentHost).store
+	old := &infravirtrigaudiov1beta1.Host{}
+	require.NoError(t, e.r.Get(ctx, client.ObjectKey{Namespace: trusttest.HostNS, Name: agentHost}, old))
+	oldUID := string(old.UID)
+	old.Finalizers = nil
+	require.NoError(t, e.r.Update(ctx, old))
+	require.NoError(t, e.r.Delete(ctx, old))
+	replacement := old.DeepCopy()
+	replacement.ResourceVersion, replacement.DeletionTimestamp = "", nil
+	replacement.UID = "5e1f0c2a-2222-4333-8444-955566668888"
+	require.NoError(t, e.r.Create(ctx, replacement))
+	// The pins Secret of a new Host object starts afresh (no ledger index).
+	e.trust.mu.Lock()
+	tr := e.trust.trusts[agentHost]
+	tr.HostUID = string(replacement.UID)
+	e.trust.trusts[agentHost] = tr
+	delete(e.trust.stores, agentHost)
+	e.trust.mu.Unlock()
+
+	require.Never(t, e.driveReady, time.Second, 300*time.Millisecond,
+		"a ledger bound to the earlier Host object never makes the replacement ready")
+	rec, err := e.ledger.Load(ctx, e.provider, agentHost, store)
+	require.NoError(t, err)
+	assert.Equal(t, oldUID, rec.HostUID, "no rebind while the earlier object was released less than the answer lifetime ago")
+
+	e.ledger.Now = func() time.Time { return time.Now().Add(2 * hostAnswerTTL) }
+	require.Eventually(t, e.driveReady, 20*time.Second, 300*time.Millisecond, "the replacement is attested and ready after the rebind")
+	rec, err = e.ledger.LoadBound(ctx, e.provider, agentHost, store)
+	require.NoError(t, err)
+	assert.Equal(t, string(replacement.UID), rec.HostUID)
+	assert.Equal(t, infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested, rec.AttestationState)
+}
+
+// A Create whose reply (and receipt) is lost: the agent's verified answer
+// that it accepted the operation, in the ledger's adopted session, is
+// recorded on the marker as its receipt (Accepted, tagged) before the
+// ledger and the mark are raised over it, so a re-send then sets
+// expect_known; the agent runs the Create exactly once.
+func TestAgentIdentity_LostReceiptRecordedFromAnswer(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	e.lie.set(func(l *lyingProvider) { l.dropCreateReply = true })
+	_, err := e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	vm := e.vm(t)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	require.Equal(t, infravirtrigaudiov1beta1.OperationAttemptPhaseAccepted, a.Phase, "the accepted answer stands for the lost receipt")
+	require.NotNil(t, a.Receipt)
+	assert.True(t, e.r.receiptBound(vm, a))
+	p, found, err := e.r.loadIntent(ctx, vm, a.OpID, e.provider.Namespace)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.EqualValues(t, p.LedgerGeneration, a.LedgerGeneration, "the display generation mirrors the intent's")
+	ia := identityAttempt{providerCR: e.provider}
+	assert.True(t, e.r.expectKnown(ctx, vm, ia, a, p), "a re-send expects the agent to know the operation")
+	e.waitCreated(t)
+	assert.Equal(t, 1, e.createOps(t))
+}
+
+// A receipt is recorded only for the host's current store, bound to this
+// Host object, not archived, in the ledger's adopted session.
+func TestAgentIdentity_ReceiptOnlyOnTheBoundCurrentLedger(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	ia := identityAttempt{providerCR: e.provider, reader: e.cli}
+	st := e.r.HostAnswers.ledgerOf(e.provider, agentHost)
+	p := contracts.PreparedOperation{LedgerGeneration: st.generation}
+	good := hostidentity.VerifiedReceipt{StoreID: st.store, Seq: 1, AttestationID: st.session}
+	require.NotNil(t, e.r.receiptOnLedger(ctx, ia, agentHost, good, p))
+	otherSession := good
+	otherSession.AttestationID = [16]byte{1}
+	assert.Nil(t, e.r.receiptOnLedger(ctx, ia, agentHost, otherSession, p), "another session")
+	otherStore := good
+	otherStore.StoreID = [16]byte{2}
+	assert.Nil(t, e.r.receiptOnLedger(ctx, ia, agentHost, otherStore, p), "another store")
+	lh, err := e.ledger.resolve(ctx, e.provider, agentHost)
+	require.NoError(t, err)
+	_, err = e.ledger.archive(ctx, lh, st.store, [16]byte{0xff})
+	require.NoError(t, err)
+	assert.Nil(t, e.r.receiptOnLedger(ctx, ia, agentHost, good, p), "an archived ledger")
+}
+
+// For a host the host ledger drives, an operation answer from a session
+// other than the ledger's adopted one (the agent restarted) is no answer;
+// once the agent is attested again, its answers count.
+func TestAgentIdentity_AnswerOutsideAdoptedSessionIsNoAnswer(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	_, err := e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	vm := e.vm(t)
+	a := findAttempt(vm, contracts.OperationKindCreate)
+	require.NotNil(t, a)
+	p, found, err := e.r.loadIntent(ctx, vm, a.OpID, e.provider.Namespace)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.NoError(t, e.host.Stop())
+	_, _ = e.host.Wait(10 * time.Second)
+	require.NoError(t, e.host.Restart())
+	ia := identityAttempt{providerCR: e.provider, reader: e.cli}
+	poll := e.r.pollSigned(ctx, vm, ia, refOf(p))
+	assert.Equal(t, answerNone, poll.verdict, "the restarted agent's session is not the adopted one")
+	require.Eventually(t, func() bool {
+		return e.r.pollSigned(ctx, vm, ia, refOf(p)).verdict == answerVerified
+	}, 20*time.Second, 300*time.Millisecond, "answers count again once the agent is attested again")
 }
 
 // A lying Provider that strips the agent's answers and reports an unsigned

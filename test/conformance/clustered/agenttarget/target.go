@@ -80,6 +80,9 @@ type Config struct {
 	// ProviderAPIVersion is the agent API version the Provider speaks; zero
 	// uses the Provider's own. A test sets it to stand for another release.
 	ProviderAPIVersion uint32
+	// ManagerLedger leaves attestation and ledger marks to the manager under
+	// test: the target never attests an agent nor raises its mark.
+	ManagerLedger bool
 }
 
 // fatalT adapts a clustered.T to the test helpers that need Fatalf.
@@ -92,14 +95,16 @@ func (f fatalT) Fatalf(format string, args ...any) {
 
 // Target is a clustered.Target over real per-host agent processes.
 type Target struct {
-	t          clustered.T
-	hosts      []*Host
-	byName     map[string]*Host
-	signer     *operation.DevSigner
-	epoch      operation.Epoch
-	hostCA     *hostidentitytest.CA
-	placements *clustered.Placements
-	deadline   time.Duration
+	t      clustered.T
+	hosts  []*Host
+	byName map[string]*Host
+	signer *operation.DevSigner
+	epoch  operation.Epoch
+	// managerLedger: the manager attests and marks, never the target.
+	managerLedger bool
+	hostCA        *hostidentitytest.CA
+	placements    *clustered.Placements
+	deadline      time.Duration
 
 	clientCert tls.Certificate
 	apiVersion uint32
@@ -158,7 +163,8 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 	tg := &Target{t: t, byName: map[string]*Host{}, signer: sg, epoch: operation.Epoch{Counter: StartEpoch, Holder: holder},
 		hostCA: hostidentitytest.NewConstrainedCA(ft, trusttest.TrustDomain), placements: clustered.NewPlacements(), deadline: cfg.StepDeadline,
 		apiVersion: cfg.ProviderAPIVersion, inv: hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion},
-		proxies: map[string]*proxy{}, tasks: map[string][]string{}, scripts: map[string]fake.Script{}, seeded: map[string]string{}}
+		proxies: map[string]*proxy{}, tasks: map[string][]string{}, scripts: map[string]fake.Script{}, seeded: map[string]string{},
+		managerLedger: cfg.ManagerLedger}
 	providerCA := hostidentitytest.NewCA(ft)
 	clientTLS, err := tg.providerTLS(ft, providerCA)
 	if err != nil {
@@ -188,7 +194,10 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		if err != nil {
 			return nil, err
 		}
-		h.attest = tg.attestHost
+		if !cfg.ManagerLedger {
+			h.attest = tg.attestHost
+		}
+		h.managerAttests = cfg.ManagerLedger
 		tg.hosts = append(tg.hosts, h)
 		tg.byName[name] = h
 		tg.scripts[name] = fake.Script{CreateStopped: true}
@@ -210,7 +219,7 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		if err := h.Start(); err != nil {
 			return nil, err
 		}
-		if h.State() != providerv1.AgentState_AGENT_STATE_READY {
+		if h.State() != providerv1.AgentState_AGENT_STATE_READY && !cfg.ManagerLedger {
 			return nil, fmt.Errorf("the agent %s started %s, not ready\n%s", name, h.State(), h.tail())
 		}
 		if err := tg.front(t, h, hostURI, key); err != nil {

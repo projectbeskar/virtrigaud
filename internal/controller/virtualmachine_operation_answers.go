@@ -89,7 +89,14 @@ func (r *VirtualMachineReconciler) grantEnrolment(ctx context.Context, vm *infra
 		return operation.Enrolment{}, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationEnrolmentUnavailable,
 			fmt.Sprintf("no operation-identity enrolment is configured for host %s; nothing is sent", host), operationHoldRecheckInterval), false
 	}
-	if err := r.HostAnswers.grantReady(ia.providerCR, host, hr.trust.Enrolment.EnrolmentID); err != nil {
+	_, err = r.HostAnswers.grantReady(ia.providerCR, host, hr.trust.Enrolment.EnrolmentID)
+	if err != nil && ia.reader != nil && r.HostAnswers.ledgerAsk(ia.providerCR, host) > 0 {
+		// A host the host ledger drives is attested on demand (the Host
+		// heartbeat drives it too), then asked again.
+		r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
+		_, err = r.HostAnswers.grantReady(ia.providerCR, host, hr.trust.Enrolment.EnrolmentID)
+	}
+	if err != nil {
 		return operation.Enrolment{}, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationHostAnswerUnavailable,
 			fmt.Sprintf("host %s has no recent verified signed host answer (%s); nothing new is signed for it", host, err.Error()),
 			operationHoldRecheckInterval), false
@@ -171,8 +178,9 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 		logger.Info("Cannot ask the host about the attempt", "host", host, "error", err.Error())
 		return opPoll{verdict: answerNone}
 	}
+	hr.ledgerVersion = r.HostAnswers.ledgerAsk(ia.providerCR, host)
 	_, read, rerr := ia.reader.OperationAnswer(ctx, contracts.OperationAnswerQuery{OpID: p.Identity.OpID,
-		OpEnrolmentID: p.Identity.EnrolmentID, HostID: host, ContinuitySeq: hr.snapshot.ContinuitySeq()})
+		OpEnrolmentID: p.Identity.EnrolmentID, HostID: host, ContinuitySeq: hr.snapshot.ContinuitySeq(), LedgerVersion: hr.ledgerVersion})
 	if rerr != nil && read.Answer == nil {
 		logger.Info("The host was not asked about the attempt, or did not answer", "host", host, "error", providerFailureDetail(rerr))
 		return opPoll{verdict: answerNone, read: read}
@@ -200,6 +208,16 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 	}
 	if verdict == answerVerified && v.Ready() && showsRecord(v.Operation.GetState()) {
 		r.HostAnswers.setRecordAnchored(ia.providerCR, host, opIDHex, true)
+	}
+	if verdict == answerVerified && hr.ledgerVersion > 0 && !r.HostAnswers.inLedgerSession(ia.providerCR, host, v) {
+		// A host the host ledger drives answers definitely only from the
+		// ledger's adopted session: an answer from any other session (an
+		// agent that restarted, a session not yet adopted) is no answer, and
+		// the agent is attested again before anything it answers moves the
+		// attempt.
+		logger.Info("The host's answer is not from its ledger's adopted session; it is attested again first", "host", host)
+		r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
+		return opPoll{verdict: answerNone, read: read}
 	}
 	return opPoll{verdict: verdict, v: v, read: read}
 }
@@ -237,7 +255,19 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 	switch st := poll.state(); st {
 	case providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED, providerv1.OperationRecordState_OPERATION_RECORD_STATE_EXECUTING:
 		cur := a
-		if !attemptDelivered(a.Phase) {
+		if vr := r.acceptedAnswerReceipt(ctx, ia, a, prepared, poll); vr != nil {
+			// The answer stands for the operation's receipt (its reply was
+			// lost): it is recorded on the marker first, as a send's receipt
+			// is, then the ledger and the agent's mark are raised over it.
+			if a.Receipt == nil {
+				m, err := r.markSentWith(ctx, vm, a, nil, vr)
+				if err != nil {
+					return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
+				}
+				cur = m
+			}
+			r.HostAnswers.ledgerReceipt(ctx, ia.providerCR, ia.reader, a.HostID, vr.receipt)
+		} else if !attemptDelivered(a.Phase) {
 			m, err := r.markSent(ctx, vm, a, nil)
 			if err != nil {
 				return stepWaiting, ctrl.Result{RequeueAfter: providerErrorRetryInterval}, nil
@@ -310,7 +340,7 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 func (r *VirtualMachineReconciler) learnCreateID(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation, noSend bool) (attemptStep, ctrl.Result, error) {
 	if !noSend && len(prepared.RequestBytes) > 0 {
-		answer, err := ia.sender.SendOperation(ctx, prepared)
+		answer, err := r.signedSend(ctx, vm, ia, a, &prepared, false)
 		if err == nil && answer.ID != "" {
 			if _, werr := r.markSent(ctx, vm, a, &answer); werr == nil {
 				return stepWaiting, ctrl.Result{RequeueAfter: operationPollInterval}, nil

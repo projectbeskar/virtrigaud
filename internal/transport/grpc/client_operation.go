@@ -25,8 +25,10 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
+	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/resilience"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -218,6 +220,7 @@ func (c *Client) SendOperation(ctx context.Context, p contracts.PreparedOperatio
 		return contracts.OperationAnswer{}, fmt.Errorf("send %s operation: %w", p.Kind, err)
 	}
 	env := &providerv1.OperationEnvelope{Request: p.RequestBytes, Grant: grant}
+	answer.GrantDigest = grantverify.GrantDigest(grant)
 
 	defer c.recordVMOp(spec.metricOp, &retErr)
 	ctx, cancel := context.WithTimeout(ctx, spec.timeout)
@@ -232,25 +235,26 @@ func (c *Client) SendOperation(ctx context.Context, p contracts.PreparedOperatio
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("create", err)
 		}
-		answer.ID, task = resp.GetId(), resp.GetTask()
+		answer.ID, task, answer.Receipt = resp.GetId(), resp.GetTask(), receiptFromField(resp.GetOperationReceipt())
 	case providerv1.Provider_Delete_FullMethodName:
 		resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{OperationEnvelope: env})
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("delete", err)
 		}
-		task = resp.GetTask()
+		task, answer.Receipt = resp.GetTask(), receiptFromField(resp.GetOperationReceipt())
 	case providerv1.Provider_Reconfigure_FullMethodName:
 		resp, err := c.client.Reconfigure(ctx, &providerv1.ReconfigureRequest{OperationEnvelope: env})
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("reconfigure", err)
 		}
 		answer.RestartRequired, answer.Honest, task = resp.GetRestartRequired(), resp.GetHonestResult(), resp.GetTask()
+		answer.Receipt = receiptFromField(resp.GetOperationReceipt())
 	case providerv1.Provider_Power_FullMethodName:
 		resp, err := c.client.Power(ctx, &providerv1.PowerRequest{OperationEnvelope: env})
 		if err != nil {
 			return contracts.OperationAnswer{}, c.mapGRPCError("power", err)
 		}
-		task = resp.GetTask()
+		task, answer.Receipt = resp.GetTask(), receiptFromField(resp.GetOperationReceipt())
 	default:
 		return contracts.OperationAnswer{}, fmt.Errorf("send %s operation: %w", p.Kind, contracts.ErrOperationIdentityNotImplemented)
 	}
@@ -319,10 +323,23 @@ func mintRequest(p contracts.PreparedOperation, kind providerv1.OperationKind, n
 			Attempt:     id.Attempt,
 			MintEpoch:   operation.Epoch{Counter: id.MintEpoch.Counter, Holder: id.MintEpoch.Holder},
 		},
-		DigestSalt: p.DigestSalt,
-		Request:    p.RequestBytes,
-		IssuedAt:   now,
+		DigestSalt:   p.DigestSalt,
+		Request:      p.RequestBytes,
+		IssuedAt:     now,
+		GrantVersion: p.GrantVersion,
+		ExpectKnown:  p.ExpectKnown,
 	}
+}
+
+// receiptFromField extracts an operation receipt relayed in a response
+// field: nil when absent, over its size bound, carrying unknown fields or of
+// another body type. It is the Provider's relay; the caller verifies it.
+func receiptFromField(blob *providerv1.SignedBlob) *contracts.SignedAnswer {
+	a := answerFromField(blob)
+	if a == nil || a.BodyType != hostidentity.BodyTypeOperationReceipt {
+		return nil
+	}
+	return a
 }
 
 // copyIdentity deep-copies the byte fields of id, so a PreparedOperation does

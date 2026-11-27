@@ -223,9 +223,9 @@ func (s *receiptServer) Delete(_ context.Context, _ *providerv1.DeleteRequest) (
 	return &providerv1.TaskResponse{Task: &providerv1.TaskRef{Id: "task-delete"}, OperationReceipt: s.receipt()}, nil
 }
 
-// TestSignedAnswerFields_ManagerIgnoresOperationReceipt: the reserved
-// operation_receipt on an accept response changes nothing the client returns
-// (the manager predates the host ledger protocol and never reads it).
+// TestSignedAnswerFields_ManagerIgnoresOperationReceipt: an
+// operation_receipt on an accept response changes nothing the unsigned
+// methods return (only the signed path, SendOperation, relays a receipt).
 func TestSignedAnswerFields_ManagerIgnoresOperationReceipt(t *testing.T) {
 	run := func(srv *receiptServer) (contracts.CreateResponse, string) {
 		c := newTestClientForVMOps(t, srv, "libvirt", "receipt-guard")

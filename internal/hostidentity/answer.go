@@ -59,24 +59,25 @@ const (
 	BodyTypeHostAnswer = "provider.v1.HostAnswer"
 )
 
-// Body types reserved for the host ledger protocol. Reserved; not yet
-// implemented: they are outside the closed set, so VerifyAnswer refuses
-// them, and an agent never signs them.
+// Body types of the host ledger protocol (development builds).
+// VerifyAnswer accepts a ChallengeAnswer and an AuthorityAnswer when the
+// expectation names them; an OperationReceipt is not an answer to a request
+// (it carries no nonce) and is verified only by VerifyReceipt.
 const (
-	// BodyTypeOperationReceipt is reserved for a host's receipt for an
-	// accepted operation (CreateResponse and TaskResponse
-	// operation_receipt).
+	// BodyTypeOperationReceipt is a host's receipt for an accepted
+	// operation (CreateResponse and TaskResponse operation_receipt).
 	BodyTypeOperationReceipt = "provider.v1.OperationReceipt"
-	// BodyTypeChallengeAnswer is reserved for a host's answer to an
-	// attestation challenge request (ChallengeResponse.host_answer).
+	// BodyTypeChallengeAnswer is a host's answer to an attestation
+	// challenge request (ChallengeResponse.host_answer).
 	BodyTypeChallengeAnswer = "provider.v1.ChallengeAnswer"
-	// BodyTypeAuthorityAnswer is reserved for a host's answer to an
-	// authority grant (AuthorityResponse.host_answer).
+	// BodyTypeAuthorityAnswer is a host's answer to an authority grant
+	// (AuthorityResponse.host_answer).
 	BodyTypeAuthorityAnswer = "provider.v1.AuthorityAnswer"
 )
 
-// ReservedBodyTypes are the body types reserved for the host ledger
-// protocol, none of which a verifier accepts yet.
+// ReservedBodyTypes are the body types of the host ledger protocol that
+// VerifyAnswer refuses unless the expectation names one of the two answer
+// types among them; an OperationReceipt is always refused by VerifyAnswer.
 var ReservedBodyTypes = []string{BodyTypeOperationReceipt, BodyTypeChallengeAnswer, BodyTypeAuthorityAnswer}
 
 // Size limits of a signed host answer.
@@ -114,8 +115,9 @@ var QuarantineReasons = []string{
 // any of them as "no answer": never negative, never positive.
 var ErrAnswer = errors.New("host answer refused")
 
-// answerBodyTypes is the closed set.
-var answerBodyTypes = []string{BodyTypeOperationAnswer, BodyTypeVMAnswer, BodyTypeHostAnswer}
+// answerBodyTypes is the closed set of answers to a request.
+var answerBodyTypes = []string{BodyTypeOperationAnswer, BodyTypeVMAnswer, BodyTypeHostAnswer, BodyTypeChallengeAnswer,
+	BodyTypeAuthorityAnswer}
 
 // AnswerSignatureInput returns the exact bytes a host signs for body of
 // bodyType: AnswerDomainSeparator, the length of bodyType as a 2-byte
@@ -176,6 +178,24 @@ type AnswerExpectation struct {
 	// it: a store capacity is allowed only when it is at least 1, and must
 	// pass VerifyStoreCapacity.
 	StoreCapacityVersion uint32
+	// LedgerVersion is the host ledger version the manager sent in the
+	// request (0: it asked for none). With 0, an operation, VM or host answer
+	// that sets any host ledger field is refused; with 1 or more, the answer
+	// must echo it and its ledger fields must follow their rules (a host
+	// answer must carry its ledger state). A challenge or authority answer
+	// always follows the ledger rules and echoes 0.
+	LedgerVersion uint32
+	// ContinuitySeq is the continuity_seq the request named (0: none). It is
+	// recorded with the answer's continuity head in the ledger evidence.
+	ContinuitySeq uint64
+	// ChallengePurpose is the purpose a challenge request asked for; only a
+	// ChallengeAnswer uses it.
+	ChallengePurpose providerv1.ChallengePurpose
+	// GrantKind is the grant kind the authority request carried, and
+	// GrantDigest its grantverify.GrantDigest; only an AuthorityAnswer uses
+	// them.
+	GrantKind   providerv1.GrantKind
+	GrantDigest []byte
 	// Now is the manager's clock.
 	Now time.Time
 }
@@ -203,6 +223,20 @@ type VerifiedAnswer struct {
 	VM *providerv1.VMAnswer
 	// Host is the body of a HostAnswer.
 	Host *providerv1.HostAnswer
+	// Challenge is the body of a ChallengeAnswer.
+	Challenge *providerv1.ChallengeAnswer
+	// Authority is the body of an AuthorityAnswer.
+	Authority *providerv1.AuthorityAnswer
+	// Ledger is the host ledger state of a HostAnswer to a request that
+	// asked for it, or of a ChallengeAnswer; nil otherwise.
+	Ledger *providerv1.HostLedgerState
+	// Attestation is the store's attestation record decoded from Ledger
+	// (zero when Ledger is nil or does not report it).
+	Attestation StoreAttestation
+	// ContinuitySeq is the continuity_seq of the request (exp's).
+	ContinuitySeq uint64
+	// VerifiedAt is the manager's clock when the answer verified (exp's).
+	VerifiedAt time.Time
 	// Renewal is the host's pending renewal request of a HostAnswer that
 	// carried one (VerifyRenewal passed); nil when it carried none.
 	Renewal *VerifiedRenewal
@@ -213,6 +247,12 @@ type VerifiedAnswer struct {
 	// BlobSHA256 is the SHA-256 of the deterministic encoding of the
 	// SignedBlob (for audit).
 	BlobSHA256 [32]byte
+
+	// verified is set only by VerifyAnswer: a VerifiedAnswer built any other
+	// way yields no ledger evidence.
+	verified bool
+	// nonce is the request nonce the answer carried (exp's).
+	nonce []byte
 }
 
 // Ready reports whether the answer's agent state is READY: only such an
@@ -290,6 +330,12 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	case BodyTypeVMAnswer:
 		out.VM = &providerv1.VMAnswer{}
 		body = out.VM
+	case BodyTypeChallengeAnswer:
+		out.Challenge = &providerv1.ChallengeAnswer{}
+		body = out.Challenge
+	case BodyTypeAuthorityAnswer:
+		out.Authority = &providerv1.AuthorityAnswer{}
+		body = out.Authority
 	default:
 		out.Host = &providerv1.HostAnswer{}
 		body = out.Host
@@ -307,16 +353,23 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	if canon, err := (proto.MarshalOptions{Deterministic: true}).Marshal(body); err != nil || !bytes.Equal(canon, blob.GetBody()) {
 		return VerifiedAnswer{}, refuse("the body is not canonically encoded")
 	}
-	// The fields reserved for the host ledger protocol are known to the
-	// decoder but implemented by nobody: set means refused.
-	if err := CheckNoLedgerFields(body); err != nil {
-		return VerifiedAnswer{}, err
+	// The host ledger fields: refused when the request asked for none,
+	// checked against their rules otherwise (ledger.go).
+	ledgerAware := exp.LedgerVersion >= 1 || out.Challenge != nil || out.Authority != nil
+	if !ledgerAware {
+		if err := CheckNoLedgerFields(body); err != nil {
+			return VerifiedAnswer{}, err
+		}
 	}
 	switch {
 	case out.Operation != nil:
 		out.Context, err = out.Operation.GetContext(), checkOperationAnswer(out.Operation)
 	case out.VM != nil:
 		out.Context, err = out.VM.GetContext(), checkVMAnswer(out.VM)
+	case out.Challenge != nil:
+		out.Context = out.Challenge.GetContext()
+	case out.Authority != nil:
+		out.Context = out.Authority.GetContext()
 	default:
 		out.Context, err = out.Host.GetContext(), checkHostAnswer(out.Host)
 	}
@@ -328,6 +381,11 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		return VerifiedAnswer{}, err
 	}
 	out.Position = pos
+	if ledgerAware {
+		if err := checkLedgerAnswer(&out, exp); err != nil {
+			return VerifiedAnswer{}, err
+		}
+	}
 	// Nonce.
 	if len(exp.Nonce) != AnswerNonceLen || subtle.ConstantTimeCompare(out.Context.GetNonce(), exp.Nonce) != 1 {
 		return VerifiedAnswer{}, refuse("the answer does not carry this request's nonce")
@@ -375,6 +433,8 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 		return VerifiedAnswer{}, refuse("encode the signed answer")
 	}
 	out.BlobSHA256 = sha256.Sum256(enc)
+	out.ContinuitySeq, out.VerifiedAt = exp.ContinuitySeq, exp.Now
+	out.nonce, out.verified = bytes.Clone(exp.Nonce), true
 	return out, nil
 }
 
