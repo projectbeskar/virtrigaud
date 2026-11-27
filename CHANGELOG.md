@@ -5,6 +5,37 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-27 06:00] - Host ledger state: start a ledger only for a store the agent signs was never attested (development builds only, not yet driven)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/host_ledger_ops.go`: A new field, `HostLedgerInit.Attestation`, carries the store's attestation record from a verified answer, decoded with `hostidentity.StoreAttestationOf`. Both ways of starting a ledger, from the last verified position and from first contact, now need the agent to sign that the store was never attested.
+  - When the agent signs that the store was attested, the host is held persistently (`ledger_missing`), however the enrolment namespace's Secrets were changed (deleted ledger object, removed or replayed index).
+  - When the agent does not report the record (an older agent), the host is held, re-evaluated on every attempt.
+- `internal/controller/host_ledger_ops.go`: For an existing ledger, a signed first attestation position above the ledger's position holds the host persistently (`LedgerRegressed`). The record's own sequence number is not compared, because the ledger legitimately stays below it until it is raised.
+
+### Removed
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger_ops.go`: The rule that a first contact needs a chain position of at most 3. A fresh store whose chain grew through restarts before its first attestation now starts its ledger.
+
+### Changed
+- `internal/controller/host_ledger_envtest_test.go`: Tests for the new rule:
+  - an attested store whose object and index were deleted, after a manager restart;
+  - an agent that does not report the record;
+  - a fresh store with a longer chain;
+  - an upgraded store started from its last position;
+  - a ledger behind the store's first attestation.
+- `docs/host-agent-enrolment.md`: Ledger starts and the holds above.
+
+### Why
+The chain-position bound was a stand-in for evidence the agent did not sign: it could not prove a store never ran an operation, and it wedged fresh stores that had restarted before their first attestation. The agent now signs whether its store was ever attested, which a principal that can write Secrets cannot erase.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only; changes nothing the manager signs. Needs the agent's attestation record (merge after the change that adds it).
+
 ## [2026-11-27 04:30] - Host ledger state: re-review fixes (development builds only, not yet driven)
 **Author:** @wrkode (William Rizzo)
 

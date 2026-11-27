@@ -963,22 +963,31 @@ write.
 
 | Write | When | Change |
 |---|---|---|
-| Initialise | The store has no ledger object. From the host's last verified position in `store.json`, only once the host has confirmed it: a verified answer to a request that named that position carrying the same head. Otherwise only on first contact: the agent shows, signed, that the store was created under the current enrolment and held no other enrolment, its signed chain position is at most 3, and no other store has a ledger under that enrolment. | A new object; the store is added to the index. |
+| Initialise | The store has no ledger object and its agent signs, in the ledger state of a verified answer (a challenge answer, or a host answer to a request with ledger version 2), that the store was never attested. From the host's last verified position in `store.json`, only once the host has confirmed it: a verified answer to a request that named that position carrying the same head. Otherwise only on first contact: the agent shows, signed, that the store was created under the current enrolment and held no other enrolment, and no other store has a ledger under that enrolment. | A new object; the store is added to the index. |
 | Archive | First contact with a new store under a new enrolment while the machine's previous store has a ledger. | The old ledger is marked archived with its successor and never written again; the new ledger's generation is above it. |
 | Rebind | A new Host object for the same machine (same identity MAC), once the Host the ledger served is deleted or revoked, has had no verified answer for twice the heartbeat interval (answers are recorded per Host object, so a replacement of the same name does not count), has been seen released by this manager for that long (so a restart waits again), and no other Host that is not revoked carries the identity. | The ledger serves the new Host; position, generation and sessions are kept (never a fresh start), and it becomes `Pending`: the new Host's agent is attested again. |
 | Begin session | An attestation challenge for the agent. | The session is added to the pending sessions (oldest of more than four evicted). For an agent awaiting attestation the ledger becomes `Pending`; a re-attestation of an attested agent keeps the working session current until the new one is adopted. |
 | Raise | Verified positions of the current session. | The position and checkpoint rise to the highest; positions of any other session are dropped; positions from heartbeats raise the ledger at most once per 30 seconds per host. |
 | Adopt | A verified nonce-bound answer (never an operation receipt) names a pending session. | That session becomes current and `Attested`; the previous one moves to the history with the position at which it was replaced. |
 
-A first contact needs the agent's signed chain position to be at most 3. A
-fresh store holds two commits at its first attestation (the clock floor and
-the enrolment) and one more after a clean stop; an attestation commits
-nothing; an operation that could have had an effect adds at least two (its
-acceptance and its first step). So a first contact never starts a fresh
-ledger for a store that ran an operation, even when its ledger object and
-the index were deleted or replaced by an older copy. Nothing signed proves
-more than that: a store that was restarted cleanly more than once before its
-first attestation needs the fresh-store procedure.
+Every start of a ledger needs the agent's signed record of whether its store
+was ever attested against a host ledger (the agent keeps it in the store,
+from its first attestation on). A store that was attested ran, or could have
+run, operations under a ledger the manager no longer holds, so a fresh ledger
+for it could hide them: whatever the Secrets in the enrolment namespace say
+(a deleted ledger object, a removed or replayed index), the manager holds the
+host (`ledger_missing`, persistent) and never starts one; the exit is the
+fresh-store procedure. An agent that does not report the record (an older
+agent) holds the host too, re-evaluated on every attempt, until it is
+upgraded. A store that was never attested starts its ledger however long its
+chain grew before (clock-floor commits of restarts, say).
+
+For an existing ledger, a store whose signed first attestation position is
+above the ledger's position shows that the ledger is behind the store's own
+history (an older ledger restored, or another put in its place): the host is
+held (`LedgerRegressed`, persistent). The record's own sequence number is not
+compared with the ledger: the ledger legitimately stays below it until it is
+raised.
 
 A generation is a number never handed out twice for a store: a fresh ledger
 starts at the largest of one above its predecessor's, one above the highest
@@ -997,7 +1006,7 @@ it. The reasons:
 |---|---|---|
 | `LedgerTampered` | A ledger object or the index fails its tag or form or names an unknown tag key; the index is missing or does not name a ledger that serves the Host; an indexed store lost its object or its labels; or a ledger's sessions changed in a write this manager did not make while it ran. | The object is fixed; a change seen while running, and an index that disappeared after it was seen, are persistent (below). |
 | `LedgerRegressed` | A ledger went back: a lower position or write counter than this manager wrote, a write counter below the index's (an older copy restored), or the ledger object this manager held is gone. | Persistent. |
-| `ledger_missing` | The store has no ledger object and may not get one: the index names it (its object was lost), or no evidence allows first contact. | The fresh-store procedure: take the VMs off the host, reinstall the agent's state and re-key the Host, which gives a first contact. A lost ledger is never restarted from an operator's word. |
+| `ledger_missing` | The store has no ledger object and may not get one: the index names it (its object was lost); the agent signs that the store was attested (persistent); the agent does not report whether it was (re-evaluated on every attempt); or no evidence allows first contact. | The fresh-store procedure: take the VMs off the host, reinstall the agent's state and re-key the Host, which gives a first contact. A lost ledger is never restarted from an operator's word. |
 | `ledger_unconfirmed` | The host has not confirmed the last position the ledger would start from. | A confirming answer. |
 | `ledger_ahead` | The ledger is above the host's chain tip. | Investigation; nothing is signed. |
 | `ledger_fork` | Two verified positions of one sequence number carry different heads. | Persistent. |
