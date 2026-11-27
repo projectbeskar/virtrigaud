@@ -502,7 +502,9 @@ it and holds the host.
   of the operation, without the store lock (the fake executor's intent and effect
   logs and effect files, and for a Create its VM file of that placement); a trace no
   record explains quarantines the store `unknown_op_trace`. An executor that cannot
-  scan (the release `none` executor) retires nothing. Then, under the store lock and
+  scan (the release `none` executor) retires nothing (`trace_scan_unavailable`). An
+  operation the store already knows is not scanned for, and each Provider may ask for
+  at most 2 retirements a second (burst 10), checked before any work. Then, under the store lock and
   in one transaction, a record or tombstone of the op_id makes the retirement not
   applicable (or `op_known` with other identity fields), and a witness file or a VM
   record naming the operation busy without its record quarantines the store

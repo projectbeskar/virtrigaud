@@ -616,7 +616,10 @@ with attestation but without receipts, ledger marks or the ledger gate.
   `io_error`) or `REFUSED` `store_busy`, and no session exists. Every outcome is a signed `AuthorityAnswer`
   whose context names the session after the grant and whose `grant_digest` is
   SHA-256(be32(len(body)) ‖ body ‖ signature) of the delivered grant.
-- **`RetireIfUnknown`.** After the request rules, the grant must verify at grant
+- **`RetireIfUnknown`.** After the request rules, a per-Provider limit (2 a second,
+  burst 10) is checked before anything else: a call above it is `RESOURCE_EXHAUSTED`
+  and decides nothing, so a replayed grant cannot keep the agent verifying and
+  scanning. Then the grant must verify at grant
   version 2 as a `GRANT_KIND_RETIRE_IF_UNKNOWN` grant (the kind first) for the agent's
   host, Provider, installation and certificate enrolment, naming the operation's
   identity (VM, binding, op_id, kind, attempt, intent digest and mint epoch, fields 10
@@ -625,18 +628,22 @@ with attestation but without receipts, ledger marks or the ledger gate.
   quarantined store is `QUARANTINED`; an agent that is not `READY` or awaits its first
   attestation is `REFUSED` `not_attested`; another session is `REFUSED`
   `stale_attestation`, an enrolment other than the store's active one `REFUSED`
-  `enrolment_not_active` (neither changes anything). The store first scans the
-  objects its executor owns for a trace of the operation, without the store lock: an
+  `enrolment_not_active` (neither changes anything). An operation the store already
+  holds a record or tombstone of is not scanned for (one read; the locked step below
+  decides). Otherwise the store scans the objects its executor owns for a trace of the operation, without the store lock: an
   object stamped with the op_id, or, for a Create, a VM of the operation's placement.
   A trace that no record of the op_id (and, for a placement, no VM record of the
   placement) explains quarantines the store (`unknown_op_trace`) and is `REFUSED`
   `op_trace_found`; an executor that cannot scan, or whose scan fails, retires
-  nothing (`REFUSED` `store_busy`). Then, under the store lock (which serialises every
+  nothing (`REFUSED` `trace_scan_unavailable`). An executor creates an object stamped
+  with an op_id only after the operation's record is committed, and its scan does not
+  block the operations it runs. Then, under the store lock (which serialises every
   admission) and in one transaction: a record or tombstone of the op_id with the same
   identity is `NOT_APPLICABLE` with its state (`ALREADY_APPLIED` with `RETIRED` for a
   tombstone an earlier retirement committed), with other identity fields `REFUSED`
   `op_known`; a witness file of the operation, or a VM record naming it busy, without
-  its record quarantines the store (`inconsistent_store`, `QUARANTINED`); otherwise a
+  its record quarantines the store (`inconsistent_store`, `QUARANTINED`); a store above
+  its size threshold writes nothing (`REFUSED` `store_busy`), as admission; otherwise a
   `RETIRED` tombstone with reason `never_received` is committed and anchored, the
   attempt mark of the operation's VM and kind is raised to its attempt, and the answer
   is `APPLIED` with `op_state` `RETIRED`. A later delivery of the op_id meets the
@@ -842,7 +849,14 @@ a release build.
   attempt. `NOT_APPLICABLE` (the host holds a record now) leaves the attempt in
   flight and asks again; `REFUSED` `stale_attestation` attests the agent again and
   asks again; `QUARANTINED`, or `REFUSED` `op_trace_found`, holds the host and the VM
-  (`OperationOutcomeUnknown`); any other refusal, or no verified answer, asks again.
+  (`OperationOutcomeUnknown`); `REFUSED` `op_known`, `enrolment_not_active` or
+  `trace_scan_unavailable`, which asking again does not change, holds the VM
+  (`OperationOutcomeUnknown`) and is asked again only at the hold re-check interval;
+  any other refusal, or no verified answer, asks again. A manager that stops between
+  the agent's answer and the ledger raise leaves the attempt in flight: the next poll
+  reads the tombstone as a signed `RETIRED`, a definite answer whose position is
+  persisted in the host's store record before the attempt closes, so a later rollback
+  below it fails the store's continuity check.
   An attempt prepared without a ledger (an intent of the first version, generation
   0), or under another store or generation (for example an intent recreated after a
   new ledger generation started), is never retired.
