@@ -89,9 +89,16 @@ a certificate request for it is denied with the same reason. None of these
 names the other Host or echoes the identity, and the claimant's reason does
 not say why, so a Host's author does not learn which identities are in use.
 Revoke or delete one of the Hosts to resolve it. A record drawn before the
-duplicate appeared is not withdrawn, but its request is denied. The manager
-finds candidates through an index of its cache and confirms each with a live
-read. Admission does not check this yet (a validating webhook is later work).
+duplicate appeared is not withdrawn, but its request is denied. The decision
+to draw a record or approve a request lists every Host live; the cache index
+only pre-filters. Admission does not check this yet (a validating webhook is
+later work).
+
+Accepted limit: the first holder wins, so a Host created on a per-host agent
+Provider can claim an identity before the real machine's Host enrols, and the
+real Host is then refused until the claimant is revoked or deleted. Creating
+Hosts is a privileged, audited action; the admission check that would refuse
+the claimant at creation is a follow-up.
 The host ledger relies on this: it follows a machine from one Host object to
 its replacement only while no two live Hosts claim the machine.
 
@@ -921,7 +928,9 @@ to four pending sessions with when each was begun; up to eight earlier
 sessions with the ledger position at which each was replaced; the generation,
 when it started, and up to sixteen enrolments under which it was continuous;
 a write counter (+1 per write); `minManagerVersion` (the downgrade floor, see
-[State written by a newer manager](#state-written-by-a-newer-manager));
+[State written by a newer manager](#state-written-by-a-newer-manager); it is
+`0.4.2-0` while the format is in development builds only, and is raised to
+the first release that ships the format);
 `updatedAt`; for an archived ledger, the successor store and when; a hold of
 the Host it serves with the enrolment it was decided under (see
 [Holds](#holds)); the tag key id; and the tag: an HMAC-SHA256 under the ledger tag key over a
@@ -997,9 +1006,11 @@ it. The reasons:
 | `ledger_store_bound` | The ledger serves another Host that is live, not revoked, answering, recently released, or whose identity another live Host carries. | When the rebind conditions hold. |
 
 A persistent hold ends only with a new enrolment of the host. It is written
-into the tagged ledger object (when there is one), into the tagged ledger
-index, and as the store-regression hold of the pins Secret (condition
-`AgentStoreRegressed`), so clearing the pins Secret's hold does not lift it.
+into the tagged ledger index and as the store-regression hold of the pins
+Secret (condition `AgentStoreRegressed`), and, for a fork or a store mismatch,
+into the tagged ledger object too, so clearing the pins Secret's hold does not
+lift it. A ledger object found regressed or changed behind the manager's back
+is left untouched, as evidence.
 A persistent hold that cannot be written is returned as an error with the
 hold, and the manager keeps holding the host in memory; it is never lifted by
 a later call. The `AgentLedgerHeld` condition returns to `False`/`NotHeld`
@@ -1040,7 +1051,12 @@ verify. With a previous key configured, the leader runs a re-tag sweep at
 start: every ledger object (archived ones included) and every ledger index in
 the enrolment namespace tagged under the previous key is verified under it and
 written again under the current key (with its `resourceVersion`, a few writes
-per second). It logs the outcome and publishes
+per second). A ledger object is first checked as a read of it would be: when
+the Host it serves resolves, against that Host's index, write counter, stored
+hold and the manager's memory, holding the Host on a regression, and its new
+counter is recorded in the index; otherwise against the index left in that
+Host's pins Secret. A restored older copy is never re-tagged and counts as
+remaining. It logs the outcome and publishes
 `virtrigaud_manager_host_ledger_retag_remaining`: once that is 0 (the log says
 the previous key may be removed), drop `previous` and restart. A tag under a
 key the manager no longer holds is `LedgerTampered`. Never change `identity`:
@@ -1060,10 +1076,14 @@ replicasets, jobs or cronjobs, `pods/exec`, `pods/attach`,
 `serviceaccounts/token`), impersonation, or `bind` or `escalate` on roles,
 except one named exception: the manager's own pre-existing right to create
 and change Deployments in every namespace (the provider controller needs it).
+The paths it covers also include replicationcontrollers, ephemeral containers
+and `nodes/proxy` (the kubelet API).
 
 Custody limit, stated plainly: a stolen manager ServiceAccount can create a
 Deployment in the manager's namespace that mounts the key Secret, and so read
-the key, exactly as it could mount the sub-CA key Secret. Until the keys are
+the key, exactly as it could mount the sub-CA key Secret. This is accepted and
+is not checked at runtime (the manager's startup check covers API reads of the
+key only); the RBAC proof accepts this one right by name. Until the keys are
 held by a custody service, the tag protects the ledger against principals
 other than the manager, not against the manager's own identity. Keep every
 role you add within the proof.

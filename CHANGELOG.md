@@ -5,6 +5,42 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-27 04:30] - Host ledger state: re-review fixes (development builds only, not yet driven)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/host_ledger_retag.go`: The re-tag sweep checks a ledger object the way a read of it would be checked before re-tagging it, so a restored older copy is never laundered under the current key.
+  - When the Host the object serves resolves, the sweep checks the object against that Host's index, write counter, stored hold and this process's memory. A regression holds the Host persistently, and the new counter is recorded in the Host's index in the same pass.
+  - Otherwise the sweep checks the object against the index left in that Host's pins Secret, and the re-tagged object does not seed this process's memory.
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger_ops.go`: A ledger object found regressed or changed behind the manager's back is no longer rewritten to record the hold; it is left as evidence. Such holds are written to the tagged index and the pins Secret only.
+- `internal/controller/host_enrolment.go`, `internal/controller/host_enrolment_request.go`: The decision to draw an enrolment record or approve a request now lists every Host live. The cache index only pre-filters.
+- `internal/controller/rbac_host_ledger_test.go`: The RBAC proof also treats these as key paths, with negative cases:
+  - core `replicationcontrollers` create, update and patch, and `pods/ephemeralcontainers` update and patch, in the key's namespace;
+  - cluster-scoped `nodes/proxy` (the kubelet API).
+
+### Added
+- `internal/controller/host_ledger_envtest_test.go`, `internal/controller/host_identity_unique_envtest_test.go`: Tests for:
+  - the sweep refusing a restored previous-key copy whose counter is below the index, while the Host resolves and after it is revoked;
+  - an identity decision made against a cache that lags.
+
+### Changed
+- `docs/host-agent-enrolment.md`: The docs now state the accepted limits plainly:
+  - the manager's own Deployment right is a custody limit that is not checked at runtime;
+  - an unenrolled Host on a per-host agent Provider can pre-empt an identity (creating Hosts is privileged; the admission check is a follow-up);
+  - the downgrade floor is raised at the first release that ships the format.
+
+  They also say where persistent holds are kept and what the sweep checks.
+
+### Why
+A re-review found that the re-tag sweep could re-tag a restored older copy, which made a one-step rollback look current. It also found that a lagging cache could decide an identity check, and that three key paths were missing from the RBAC proof.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only; changes nothing the manager signs.
+
 ## [2026-11-27 03:00] - Host ledger state: security review fixes (development builds only, not yet driven)
 **Author:** @wrkode (William Rizzo)
 
