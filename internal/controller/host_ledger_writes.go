@@ -257,6 +257,9 @@ type HostLedger struct {
 	heartbeatAt    map[string]time.Time
 	indexPersisted map[string]time.Time
 	observed       map[string]observedEvidence
+	// own is, per store, the record of this process's last successful
+	// write of the store's ledger (what a ledger mark is signed from).
+	own map[[16]byte]*HostLedgerRecord
 }
 
 // NewHostLedger returns the host ledger library of a manager with host
@@ -780,7 +783,26 @@ func (l *HostLedger) written(ctx context.Context, lh *ledgerHost, sec *corev1.Se
 		return nil, fmt.Errorf("verify the host ledger of store %s as written: %w", storeIDPrefix(store), err)
 	}
 	l.remember(lh, rec, adopted)
+	l.mu.Lock()
+	if l.own == nil {
+		l.own = map[[16]byte]*HostLedgerRecord{}
+	}
+	if prev := l.own[store]; prev == nil || rec.WriteCounter >= prev.WriteCounter {
+		l.own[store] = rec.clone()
+	}
+	l.mu.Unlock()
 	return rec, nil
+}
+
+// ownRecord returns a copy of the record of this process's last successful
+// write of a store's ledger (nil: none).
+func (l *HostLedger) ownRecord(store [16]byte) *HostLedgerRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if r := l.own[store]; r != nil {
+		return r.clone()
+	}
+	return nil
 }
 
 // updateOptions are the options of one update.

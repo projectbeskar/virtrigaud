@@ -126,6 +126,12 @@ type PreparedOperation struct {
 	// with a receipt the host ledger covers (grant version 2 only). Chosen
 	// for each send and never stored.
 	ExpectKnown bool
+	// LedgerStoreID and LedgerGeneration name the host ledger (its store
+	// and generation) the attempt was prepared under; empty and 0 when it
+	// was prepared without one. They are stored with the attempt's intent
+	// and covered by its authentication tag.
+	LedgerStoreID    []byte
+	LedgerGeneration uint64
 }
 
 // String implements fmt.Stringer without the request bytes or the salt.

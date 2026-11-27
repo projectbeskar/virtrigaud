@@ -89,7 +89,14 @@ func (r *VirtualMachineReconciler) grantEnrolment(ctx context.Context, vm *infra
 		return operation.Enrolment{}, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationEnrolmentUnavailable,
 			fmt.Sprintf("no operation-identity enrolment is configured for host %s; nothing is sent", host), operationHoldRecheckInterval), false
 	}
-	if err := r.HostAnswers.grantReady(ia.providerCR, host, hr.trust.Enrolment.EnrolmentID); err != nil {
+	_, err = r.HostAnswers.grantReady(ia.providerCR, host, hr.trust.Enrolment.EnrolmentID)
+	if errors.Is(err, errLedgerNotAttested) && ia.reader != nil {
+		// A host the host ledger drives is attested on demand (the Host
+		// heartbeat drives it too), then asked again.
+		r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
+		_, err = r.HostAnswers.grantReady(ia.providerCR, host, hr.trust.Enrolment.EnrolmentID)
+	}
+	if err != nil {
 		return operation.Enrolment{}, stepHeld, r.holdOperation(ctx, vm, k8s.ReasonOperationHostAnswerUnavailable,
 			fmt.Sprintf("host %s has no recent verified signed host answer (%s); nothing new is signed for it", host, err.Error()),
 			operationHoldRecheckInterval), false
@@ -310,7 +317,7 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 func (r *VirtualMachineReconciler) learnCreateID(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation, noSend bool) (attemptStep, ctrl.Result, error) {
 	if !noSend && len(prepared.RequestBytes) > 0 {
-		answer, err := ia.sender.SendOperation(ctx, prepared)
+		answer, err := r.signedSend(ctx, vm, ia, a, &prepared, false)
 		if err == nil && answer.ID != "" {
 			if _, werr := r.markSent(ctx, vm, a, &answer); werr == nil {
 				return stepWaiting, ctrl.Result{RequeueAfter: operationPollInterval}, nil

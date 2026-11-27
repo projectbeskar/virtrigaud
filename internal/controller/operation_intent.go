@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +80,12 @@ const (
 	// intentKeyTag is the intent's authentication tag
 	// (operation.IntentAuthenticator).
 	intentKeyTag = "tag"
+	// intentKeyLedgerStore and intentKeyLedgerGeneration record the host
+	// ledger (store id in hex, generation in decimal) the attempt was
+	// prepared under; present together or not at all. With them the tag
+	// covers the version 2 intent message.
+	intentKeyLedgerStore      = "ledgerStore"
+	intentKeyLedgerGeneration = "ledgerGeneration"
 
 	// maxIntentRequestBytes caps the request bytes of one attempt well below
 	// the 1 MiB Secret limit; a larger request is held
@@ -137,6 +144,16 @@ func (r *VirtualMachineReconciler) intentReader() client.Reader {
 // and name, the VM it is for (namespace, name, UID label), and the exact
 // identity, salt and request bytes it stores (operation.IntentMessage).
 func intentMAC(s *corev1.Secret) []byte {
+	store, hasStore := s.Data[intentKeyLedgerStore]
+	gen, hasGen := s.Data[intentKeyLedgerGeneration]
+	if hasStore || hasGen {
+		return operation.LedgerIntentMessage(
+			[]byte(s.Namespace), []byte(s.Name),
+			[]byte(s.Annotations[operationIntentVMNamespaceAnnotation]), []byte(s.Annotations[operationIntentVMNameAnnotation]),
+			[]byte(s.Labels[operationIntentVMUIDLabel]), []byte(s.Labels[operationIntentKindLabel]),
+			s.Data[intentKeyIdentity], s.Data[intentKeySalt], s.Data[intentKeyRequest], store, gen,
+		)
+	}
 	return operation.IntentMessage(
 		[]byte(s.Namespace), []byte(s.Name),
 		[]byte(s.Annotations[operationIntentVMNamespaceAnnotation]), []byte(s.Annotations[operationIntentVMNameAnnotation]),
@@ -183,6 +200,13 @@ func buildIntentSecret(provider *infravirtrigaudiov1beta1.Provider, vm *infravir
 			intentKeySalt:     append([]byte(nil), p.DigestSalt...),
 			intentKeyIdentity: ident,
 		},
+	}
+	if len(p.LedgerStoreID) > 0 || p.LedgerGeneration > 0 {
+		if len(p.LedgerStoreID) != operation.IDLen || p.LedgerGeneration == 0 {
+			return nil, fmt.Errorf("%w: a ledger stamp needs a 16-byte store and a generation", errIntentTampered)
+		}
+		s.Data[intentKeyLedgerStore] = []byte(hex.EncodeToString(p.LedgerStoreID))
+		s.Data[intentKeyLedgerGeneration] = []byte(strconv.FormatUint(p.LedgerGeneration, 10))
 	}
 	s.Data[intentKeyTag] = auth.SealIntent(intentMAC(s))
 	if err := controllerutil.SetControllerReference(provider, s, scheme); err != nil {
@@ -315,6 +339,14 @@ func (l intentLoader) openIntentSecret(vm *infravirtrigaudiov1beta1.VirtualMachi
 		Identity:     ident.Identity,
 		RequestBytes: s.Data[intentKeyRequest],
 		DigestSalt:   s.Data[intentKeySalt],
+	}
+	if store, ok := s.Data[intentKeyLedgerStore]; ok {
+		id, derr := hex.DecodeString(string(store))
+		gen, perr := strconv.ParseUint(string(s.Data[intentKeyLedgerGeneration]), 10, 64)
+		if derr != nil || len(id) != operation.IDLen || perr != nil || gen == 0 {
+			return p, fmt.Errorf("the ledger stamp: %w", errIntentTampered)
+		}
+		p.LedgerStoreID, p.LedgerGeneration = id, gen
 	}
 	return p, nil
 }
