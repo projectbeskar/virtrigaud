@@ -38,8 +38,15 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 )
 
+// ledgerTB is what the ledger test helpers need of a test (testing.TB or
+// GinkgoT()).
+type ledgerTB interface {
+	require.TestingT
+	Helper()
+}
+
 // randomLedgerKey returns 32 random bytes.
-func randomLedgerKey(t testing.TB) []byte {
+func randomLedgerKey(t ledgerTB) []byte {
 	t.Helper()
 	k := make([]byte, hostLedgerKeyLen)
 	_, err := rand.Read(k)
@@ -49,7 +56,7 @@ func randomLedgerKey(t testing.TB) []byte {
 
 // newTestLedgerKeys returns ledger keys with random tag and identity keys
 // and the raw current key.
-func newTestLedgerKeys(t testing.TB) *HostLedgerKeys {
+func newTestLedgerKeys(t ledgerTB) *HostLedgerKeys {
 	t.Helper()
 	k, err := NewHostLedgerKeys(randomLedgerKey(t), nil, randomLedgerKey(t))
 	require.NoError(t, err)
