@@ -261,7 +261,7 @@ answers.
 
 The development-build per-host agent makes `OperationAnswer` and `VMAnswer` as
 follows (see [`per-host-agent-development.md`](per-host-agent-development.md#operations)).
-No manager verifies them yet.
+A development-build manager verifies them before it uses them.
 
 - It signs only for a request with a 16-byte `answer_nonce`, and only while its
   store's active enrolment is the one its certificate names; otherwise the read is
