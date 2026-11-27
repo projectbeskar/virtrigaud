@@ -51,7 +51,25 @@ What is granted, and nothing more:
   `list`, `watch` on `certificaterequests` (`create` and `delete` for the
   manager's own certificate renewal requests), `update` on `certificaterequests/status` (to
   set `Approved`/`Denied`, and `Ready` on the external-PKI path), and the
-  pins Secrets (`create`, `delete`, `get`, `list`, `update`, `watch`).
+  pins Secrets and the host ledger Secrets (`create`, `delete`, `get`,
+  `list`, `update`, `watch`).
+
+Host ledger keys (optional, development builds only; the manager does not yet
+sign grant version 2 or drive the ledger, see `docs/host-agent-enrolment.md`,
+"Host ledger state"): create a Secret in the manager's namespace with data
+keys `current` and `identity` (each `openssl rand -hex 32`), mount it into the
+manager pod alone, and pass `--dev-host-ledger-key-dir=<mount path>` and
+`--dev-host-ledger-key-secret=<namespace>/<name>`. No role here grants access
+to it, and none may: the ledger objects' tag defends only while no principal
+other than the manager may write Secrets in the enrolment namespace, and no
+principal may read the key Secret through the API or reach it through a
+workload in its namespace. The manager refuses enrolment while it may read the
+key Secret through the API (replace the all-namespaces Secret grant of
+`config/rbac/role.yaml` first, as above). Its pre-existing right to create
+Deployments in every namespace remains a path to the key, as to the sub-CA
+key: a custody limit, not a configuration to fix here.
+`internal/controller/rbac_host_ledger_test.go` proves both over these
+manifests and `config/rbac`; keep it passing for every role you add.
 
 The manager creates only renewal requests, under its own identity, for a
 renewal the host signed with its pinned key; it approves a renewal request

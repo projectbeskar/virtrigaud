@@ -318,6 +318,18 @@ func (r *HostEnrolmentRequestReconciler) decide(ctx context.Context, cr *unstruc
 	if err != nil {
 		return err
 	}
+	if l.state.Current == nil {
+		// A Host that holds no enrolment is not enrolled while another live
+		// Host claims its identity (the first holder wins); the denial says
+		// no more than that. The decision lists every Host live.
+		dups, err := hostsWithIdentity(ctx, r.liveReader(), nil, host)
+		if err != nil {
+			return err
+		}
+		if len(dups) > 0 {
+			return r.deny(ctx, cr, host, nil, reasonEnrolRefused, "no enrolment can be authorised for this Host now")
+		}
+	}
 	if l.reset {
 		// The Host reconciler discards the stale state; until then there is
 		// no pending record for this Host object.

@@ -119,6 +119,9 @@ func (r *HostReconciler) getHostInfo(ctx context.Context, host *infravirtrigaudi
 			setHostCondition(host, HostConditionAgentStoreRegressed, metav1.ConditionFalse, reasonHostStoreNotRegressed, "")
 		}
 		r.applyStoreCapacity(host, v.Host.GetStoreCapacity())
+		// Display mirrors of the store position and the host ledger,
+		// refreshed at most every 30 s; nothing reads them back.
+		r.HostAnswers.mirrorLedger(ctx, provider, host)
 		// A renewal advances on a verified answer of this manager's own
 		// request: recorded, the new key pinned, the old key unpinned.
 		for _, ev := range r.HostAnswers.checkRenewal(ctx, provider, host.Name, v) {

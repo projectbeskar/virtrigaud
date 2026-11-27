@@ -52,6 +52,8 @@ import (
 	"github.com/blang/semver/v4"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
 	"github.com/projectbeskar/virtrigaud/internal/version"
@@ -96,6 +98,12 @@ func parseManagerVersion(s string) (semver.Version, error) {
 // so a pre-release or a build described from a tag (v1.2.3-4-gabcdef) is
 // below the release it names.
 func checkManagerFloor(what string, doc []byte) error {
+	return checkManagerFloorFor(what, doc, buildVersion())
+}
+
+// checkManagerFloorFor is checkManagerFloor for a manager of version
+// ownVersion.
+func checkManagerFloorFor(what string, doc []byte, ownVersion string) error {
 	trimmed := bytes.TrimSpace(doc)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return nil
@@ -116,10 +124,10 @@ func checkManagerFloor(what string, doc []byte) error {
 	if err != nil {
 		return fmt.Errorf("%s: %s %q is not a semantic version: %w", what, minManagerVersionMember, floorText, errManagerTooOld)
 	}
-	own, err := parseManagerVersion(buildVersion())
+	own, err := parseManagerVersion(ownVersion)
 	if err != nil {
 		return fmt.Errorf("%s requires manager %s or later and this manager's version %q is not a semantic version: %w",
-			what, floor, buildVersion(), errManagerTooOld)
+			what, floor, ownVersion, errManagerTooOld)
 	}
 	if own.LT(floor) {
 		return fmt.Errorf("%s requires manager %s or later; this manager is %s: %w", what, floor, own, errManagerTooOld)
@@ -162,6 +170,42 @@ func checkHostLedgerFloors(ctx context.Context, c client.Reader, cfg *HostEnrolm
 		}
 	}
 	return nil
+}
+
+// ledgerFloors returns the downgrade floor member of each data value of a
+// Secret, by data key ("" when a value names none or is not an object).
+func ledgerFloors(sec *corev1.Secret) map[string]string {
+	out := map[string]string{}
+	for k, v := range sec.Data {
+		var top map[string]json.RawMessage
+		if json.Unmarshal(v, &top) != nil {
+			out[k] = ""
+			continue
+		}
+		out[k] = string(top[minManagerVersionMember])
+	}
+	return out
+}
+
+// ledgerFloorChanged passes every event except an update of a host ledger
+// Secret that leaves every downgrade floor in it as it was: the manager's
+// own ledger writes (one per batch of a host) would otherwise reconcile the
+// Host's enrolment each time, and only a floor matters to it.
+var ledgerFloorChanged = predicate.Funcs{
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldSec, ok1 := e.ObjectOld.(*corev1.Secret)
+		newSec, ok2 := e.ObjectNew.(*corev1.Secret)
+		if !ok1 || !ok2 {
+			return true
+		}
+		if _, ledger := newSec.GetLabels()[LabelHostLedger]; !ledger || newSec.GetLabels()[k8sLabelComponent] == hostEnrolmentComponent {
+			return true
+		}
+		if !maps.Equal(oldSec.GetAnnotations(), newSec.GetAnnotations()) || !maps.Equal(oldSec.GetLabels(), newSec.GetLabels()) {
+			return true
+		}
+		return !maps.Equal(ledgerFloors(oldSec), ledgerFloors(newSec))
+	},
 }
 
 // unknownMembers are the members of a JSON object that the record type

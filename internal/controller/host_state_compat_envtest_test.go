@@ -85,7 +85,7 @@ var _ = Describe("Per-host state written by a newer manager (envtest)", func() {
 			Spec: infravirtrigaudiov1beta1.HostSpec{
 				ProviderRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "ch"},
 				PoolRef:     infravirtrigaudiov1beta1.LocalObjectReference{Name: "pool"},
-				Endpoint:    "grpc://" + name + ":7443", Identity: "serial-" + name, Schedulable: true,
+				Endpoint:    "grpc://" + name + ":7443", Identity: "serial-" + name + "-" + hostNS, Schedulable: true,
 			},
 		}
 		Expect(k8sClient.Create(ctx, h)).To(Succeed())

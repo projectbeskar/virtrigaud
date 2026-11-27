@@ -5,6 +5,127 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-27 06:00] - Host ledger state: start a ledger only for a store the agent signs was never attested (development builds only, not yet driven)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/host_ledger_ops.go`: A new field, `HostLedgerInit.Attestation`, carries the store's attestation record from a verified answer, decoded with `hostidentity.StoreAttestationOf`. Both ways of starting a ledger, from the last verified position and from first contact, now need the agent to sign that the store was never attested.
+  - When the agent signs that the store was attested, the host is held persistently (`ledger_missing`), however the enrolment namespace's Secrets were changed (deleted ledger object, removed or replayed index).
+  - When the agent does not report the record (an older agent), the host is held, re-evaluated on every attempt.
+- `internal/controller/host_ledger_ops.go`: For an existing ledger, a signed first attestation position above the ledger's position holds the host persistently (`LedgerRegressed`). The record's own sequence number is not compared, because the ledger legitimately stays below it until it is raised.
+
+### Removed
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger_ops.go`: The rule that a first contact needs a chain position of at most 3. A fresh store whose chain grew through restarts before its first attestation now starts its ledger.
+
+### Changed
+- `internal/controller/host_ledger_envtest_test.go`: Tests for the new rule:
+  - an attested store whose object and index were deleted, after a manager restart;
+  - an agent that does not report the record;
+  - a fresh store with a longer chain;
+  - an upgraded store started from its last position;
+  - a ledger behind the store's first attestation.
+- `docs/host-agent-enrolment.md`: Ledger starts and the holds above.
+
+### Why
+The chain-position bound was a stand-in for evidence the agent did not sign: it could not prove a store never ran an operation, and it wedged fresh stores that had restarted before their first attestation. The agent now signs whether its store was ever attested, which a principal that can write Secrets cannot erase.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only; changes nothing the manager signs. Needs the agent's attestation record (merge after the change that adds it).
+
+## [2026-11-27 04:30] - Host ledger state: re-review fixes (development builds only, not yet driven)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/host_ledger_retag.go`: The re-tag sweep checks a ledger object the way a read of it would be checked before re-tagging it, so a restored older copy is never laundered under the current key.
+  - When the Host the object serves resolves, the sweep checks the object against that Host's index, write counter, stored hold and this process's memory. A regression holds the Host persistently, and the new counter is recorded in the Host's index in the same pass.
+  - Otherwise the sweep checks the object against the index left in that Host's pins Secret, and the re-tagged object does not seed this process's memory.
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger_ops.go`: A ledger object found regressed or changed behind the manager's back is no longer rewritten to record the hold; it is left as evidence. Such holds are written to the tagged index and the pins Secret only.
+- `internal/controller/host_enrolment.go`, `internal/controller/host_enrolment_request.go`: The decision to draw an enrolment record or approve a request now lists every Host live. The cache index only pre-filters.
+- `internal/controller/rbac_host_ledger_test.go`: The RBAC proof also treats these as key paths, with negative cases:
+  - core `replicationcontrollers` create, update and patch, and `pods/ephemeralcontainers` update and patch, in the key's namespace;
+  - cluster-scoped `nodes/proxy` (the kubelet API).
+
+### Added
+- `internal/controller/host_ledger_envtest_test.go`, `internal/controller/host_identity_unique_envtest_test.go`: Tests for:
+  - the sweep refusing a restored previous-key copy whose counter is below the index, while the Host resolves and after it is revoked;
+  - an identity decision made against a cache that lags.
+
+### Changed
+- `docs/host-agent-enrolment.md`: The docs now state the accepted limits plainly:
+  - the manager's own Deployment right is a custody limit that is not checked at runtime;
+  - an unenrolled Host on a per-host agent Provider can pre-empt an identity (creating Hosts is privileged; the admission check is a follow-up);
+  - the downgrade floor is raised at the first release that ships the format.
+
+  They also say where persistent holds are kept and what the sweep checks.
+
+### Why
+A re-review found that the re-tag sweep could re-tag a restored older copy, which made a one-step rollback look current. It also found that a lagging cache could decide an identity check, and that three key paths were missing from the RBAC proof.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only; changes nothing the manager signs.
+
+## [2026-11-27 03:00] - Host ledger state: security review fixes (development builds only, not yet driven)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `charts/virtrigaud/templates/_helpers.tpl`: Rendering the host ledger key Secret fails when the enrolment namespace is the release namespace. There, the enrolment Role would let the manager read and change the key through the API.
+- `internal/controller/host_ledger_key.go`, `internal/controller/host_enrolment.go`, `internal/controller/host_enrolment_secret_access.go`, `cmd/manager/main.go`: New flag `--dev-host-ledger-key-secret` names the mounted key Secret. Enrolment refuses to run, and suspends approvals on a re-check, while the manager may get, list or watch that Secret or any Secret in its namespace. This covers SelfSubjectAccessReviews and rules limited to named objects.
+- `internal/controller/rbac_host_ledger_test.go`: The RBAC proof now also proves:
+  - no principal, the manager included, may read the key Secret through the API;
+  - no principal may reach the key through a workload in its namespace (pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, `pods/exec`, `pods/attach`, `serviceaccounts/token`), through impersonation, or through `bind` or `escalate`.
+  - The only accepted path is a named exception for the manager's pre-existing right to create and change Deployments in every namespace. The docs state this as a custody limit.
+- `internal/controller/host_ledger_ops.go`, `internal/controller/host_ledger_writes.go`: A lost ledger can no longer be restarted by deleting the ledger object and the index, or by replaying an older index.
+  - A ledger object that this process held and that is now gone is a persistent `LedgerRegressed`.
+  - First contact also requires the agent's signed chain position to be at most 3, so the store never ran an operation.
+  - The index records the highest generation and a per-store write counter, and a store is reserved in it before its object is created.
+  - An index that disappears after it was seen, or a Host-bound ledger the index does not name, holds the host as `LedgerTampered`.
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger.go`: Persistent holds are written into the tagged ledger object and the tagged index as well as the pins Secret, so clearing the pins Secret's hold does not lift them. A hold that cannot be written is returned as an error and kept in memory. A persistent hold is never cleared by a later call.
+- `internal/controller/host_ledger_ops.go`: Initialise also reads, by name, every store the tagged index lists. If such a store is missing, or the labels no longer find it, the host is held.
+- `internal/controller/host_identity_unique.go`, `internal/controller/host_enrolment.go`, `internal/controller/host_enrolment_request.go`: Identity uniqueness changes:
+  - Identities are compared without regard to case.
+  - Only Hosts of per-host agent Providers count.
+  - The first holder wins: a Host with a current enrolment is never blocked, and shows `AgentIdentityDuplicated`.
+  - A claimant is refused with the generic reason `EnrolmentRefused`.
+  - Candidates come from a cache index and are confirmed with live reads.
+- `internal/controller/host_ledger.go`, `internal/controller/host_ledger_key.go`: Log and event details never echo a value from a ledger document. `HostLedgerKeys` formats and logs as its key ids only, with value receivers.
+
+### Added
+- `internal/controller/host_ledger_retag.go`, `internal/obs/metrics/metrics.go`: With a previous tag key configured, the leader runs a re-tag sweep at start. The sweep re-tags every ledger object, archived ones included, and every index under the current key: each is verified first, written with its resourceVersion, and the writes are paced. The outcome is logged and published on `virtrigaud_manager_host_ledger_retag_remaining`; 0 means the previous key may be removed.
+- `internal/controller/host_ledger_secret_access_test.go`, `internal/controller/host_ledger_envtest_test.go`, `internal/controller/host_identity_unique_envtest_test.go`, `internal/controller/host_ledger_test.go`: New tests cover:
+  - a removed index, a replayed index, a deleted object while held, and first contact above position 3;
+  - holds kept in tagged objects, and a hold that could not be persisted;
+  - an indexed store missing from the label results;
+  - the re-tag sweep;
+  - a same-name replacement rebind, and the new Host working the ledger after a rebind;
+  - the held condition clearing;
+  - identity first-holder-wins, case and Provider types;
+  - the key Secret self-check.
+
+### Changed
+- `internal/controller/host_answers.go`, `internal/controller/host_ledger_writes.go`: Verified host answers are recorded per Host object, so the answers of a replacement with the same name no longer keep the old binding fresh and block a rebind.
+- `internal/controller/host_ledger_ops.go`: Rebind leaves the ledger `Pending`; the new Host's agent must be attested again.
+- `internal/controller/host_ledger_writes.go`: The index is written at once on every session-changing write and receipt raise; only heartbeat raises are paced. An unchanged index is not written. Writing the index sets the format's downgrade floor in `store.json`.
+- `internal/controller/host_ledger_ops.go`: A ledger served by another Host, or an archived one, is returned by Initialise without a record.
+- `docs/host-agent-enrolment.md`, `config/rbac/host-enrolment/README.md`, `charts/virtrigaud/values.yaml`: Updated the docs for all of the above. They also cover the linkability of the identity MAC label, the fsGroup dependency of the 0400 key mount, and the fact that admission does not check identity uniqueness yet.
+
+### Why
+An independent security review found two high-severity gaps: the tag key was reachable through the API in one chart configuration, and a lost ledger could be restarted. It also found holds that could be lifted, writer-controlled lookups, an identity check that blocked the rightful holder, a rotation that could never finish, and same-name replacements that could never rebind.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only, and still changes nothing the manager signs. The ledger index format in `store.json` changed (per-store counters), and the `IdentityInUse` reason was replaced by `EnrolmentRefused` and `AgentIdentityDuplicated`; neither was ever in a release. With host ledger keys, the manager now also needs `--dev-host-ledger-key-secret`.
+
 ## [2026-11-27 02:30] - The per-host agent records durably that its store was attested and reports it in the signed ledger state (development builds only, not wired to the manager)
 **Author:** @wrkode (William Rizzo)
 
@@ -29,6 +150,35 @@ A manager must be able to tell, from host-signed evidence that someone who can w
 - [ ] Config change only
 - [ ] Documentation only
 - Development builds only. Additive on the wire: old managers ignore the new fields, and a version 1 ledger state is unchanged.
+
+## [2026-11-27 01:00] - The manager keeps a tagged host ledger per agent store, with its index, holds and status mirror (development builds only, not yet driven)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/host_ledger_key.go`, `cmd/manager/main.go`: Host ledger keys, loaded from `--dev-host-ledger-key-dir` (files `current`, optional `previous`, `identity`; 64 lowercase hexadecimal characters each). They are random keys of their own, not derived from the operation signer or the intent key. Each tag key has a 16-hexadecimal id derived from it. Tags verify under the current or the previous key, and every write tags with the current one, so a rotation never fails a tag. Only key ids are logged. A release build refuses the flag, and the flag needs per-host agent enrolment.
+- `internal/controller/host_ledger.go`: The host ledger object: one Secret per agent store, `virtrigaud-ledger-<store id>`, in the enrolment namespace. It has no owner reference and is never deleted by a controller. It holds the ledger position and checkpoint, the attestation sessions (current, up to four pending, up to eight earlier with the position at which each was replaced), the generation and its enrolments, a write counter, a downgrade floor, and an HMAC-SHA256 tag over every member except `updatedAt` and the key id. Members a newer manager adds are kept and covered by the tag. The Host it serves is bound by an identity MAC (an HMAC of `spec.identity` under the identity key), never by the identity itself.
+- `internal/controller/host_answers.go`: The pins Secret's `store.json` carries a tagged `ledgerIndex` (the stores that have a ledger, the highest write counter seen, bound to the Host UID). Every other store-state write keeps it, and keeps a malformed one as it is.
+- `internal/controller/host_ledger_writes.go`: `HostLedger`, the library a later change will drive: `Load`, `Initialise` (from the last verified position once the host confirms it in a signed answer, or from first contact for a store created under the current enrolment alone; archives the machine's previous store's ledger), `Rebind` (a replacement Host of the same machine, only once the previous Host is deleted or revoked, quiet for twice the heartbeat interval, and no other live Host carries the identity), `BeginSession`, `Raise` (batched, current session only, fork detection, heartbeat raises at most every 30 seconds) and `Adopt` (only on nonce-bound answer evidence). Reads are uncached, and writes carry the read `resourceVersion`, so a write is retried and never overwrites. A record is returned only after its tag verified, or as the object of the manager's own write. Failed checks hold the host with an `AgentLedgerHeld` event, and regressions, foreign session changes, forks and store mismatches are persisted as a store-regression hold. A per-store guard in memory and the index's write counter detect a restored older ledger.
+- `internal/controller/host_ledger_mirror.go`, `internal/controller/host_controller_answer.go`: The heartbeat writes `Host.status.agentLastStore` (from the verified store position) and, with host ledger keys, `Host.status.agentLedger` and the `AgentLedgerHeld` condition. These are refreshed at most every 30 seconds per host, carry a store id prefix and counters only, and are never read to decide anything. A value above the int64 range is not mirrored.
+- `internal/controller/host_identity_unique.go`, `internal/controller/host_enrolment.go`, `internal/controller/host_enrolment_request.go`: No enrolment record is drawn, and no certificate request approved, for a Host whose `spec.identity` another Host that is not revoked or deleting carries, in any namespace. It names neither the other Host nor the identity (reasons revised in the entry above).
+- `charts/virtrigaud/values.yaml`, `charts/virtrigaud/templates/manager-deployment.yaml`, `charts/virtrigaud/templates/_helpers.tpl`: `experimental.hostEnrolment.ledgerKeySecret` mounts the host ledger key Secret, read-only with mode 0400, into the manager pod and no other. Rendering fails without enrolment, for an invalid name, or when the release namespace is listed in `rbac.secrets.providerNamespaces` or `workloadNamespaces`.
+- `internal/controller/rbac_host_ledger_test.go`: An RBAC proof over every Role, ClusterRole, RoleBinding and ClusterRoleBinding the chart renders and `config/rbac` ships. Only the manager ServiceAccount may write Secrets in the enrolment namespace, and no other principal may read the key Secret. Unbound and aggregated roles grant neither, a binding to a role outside the set counts as granting everything, and a negative test shows the proof fails on each violation.
+- `internal/controller/host_ledger_test.go`, `internal/controller/host_ledger_envtest_test.go`, `internal/controller/host_identity_unique_envtest_test.go`, `internal/controller/host_ledger_key_dev_test.go`, `internal/controller/host_ledger_key_release_test.go`: Tests for every write and hold, tag tampering, forged and unknown keys, key rotation, regression and partial restore (in process and after a restart), resourceVersion conflicts, concurrent initialisation, each rebind condition, the mirror and identity uniqueness.
+
+### Changed
+- `internal/controller/host_state_compat.go`, `internal/controller/host_enrolment.go`: The enrolment reconciler is no longer woken by a ledger write that leaves every downgrade floor unchanged.
+- `api/infra.virtrigaud.io/v1beta1/host_types.go`, `config/crd/bases/infra.virtrigaud.io_hosts.yaml`: The descriptions of `status.agentLedger` and `status.agentLastStore` say when they are written. The schema is unchanged.
+- `docs/host-agent-enrolment.md`, `docs/operation-grants-wire-shape.md`, `docs/README.md`, `config/rbac/host-enrolment/README.md`: Host ledger state (objects, index, writes, holds, keys and rotation, RBAC), one live Host per identity, the new flag and condition.
+
+### Why
+A development-build agent runs an accepted operation only once the manager's ledger covers it, so the manager needs a ledger it can trust after restarts, Host replacements, Secret writes by others and restores. Keying it by store, tagging it under a key only the manager can read, and indexing it per Host keeps it from being reset or forged. The later change that drives attestation and receipts needs this state first.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only. This changes nothing the manager signs: it still signs only grant version 1, and nothing in a running manager creates or changes a ledger object yet. A development manager now writes `status.agentLastStore`, and refuses to enrol a second live Host with an identity already in use.
 
 ## [2026-11-26 23:30] - The per-host agent answers accepted operations with signed receipts and runs none before the manager's host ledger covers it (development builds only, not wired to the manager)
 **Author:** @wrkode (William Rizzo)

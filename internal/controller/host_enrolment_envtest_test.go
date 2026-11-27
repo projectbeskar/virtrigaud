@@ -125,7 +125,14 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		return e
 	}
 
+	// createHost creates a Host. A non-empty identity is made unique to the
+	// env (suffixed with its Host namespace): the manager enrols no Host
+	// whose identity another live Host in any namespace carries, and envtest
+	// never removes the objects of earlier specs.
 	createHost := func(e *env, name, identity, providerName string) *infravirtrigaudiov1beta1.Host {
+		if identity != "" {
+			identity += "-" + e.hostNS
+		}
 		h := &infravirtrigaudiov1beta1.Host{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: e.hostNS},
 			Spec: infravirtrigaudiov1beta1.HostSpec{
@@ -1080,7 +1087,7 @@ var _ = Describe("Per-host agent enrolment (envtest)", func() {
 		st, sec := loadState(e, "host-a")
 		Expect(st.Current).To(BeNil())
 		Expect(st.HostUID).To(Equal(string(h.UID)))
-		Expect(st.Identity).To(Equal("serial-0002"))
+		Expect(st.Identity).To(Equal("serial-0002-" + e.hostNS))
 		Expect(sec.Data[hostEnrolmentStateKey]).NotTo(ContainSubstring(oldPin))
 		_, reason := resolveHostAgentTLS(ctx, k8sClient, e.cfg, h, time.Now())
 		Expect(reason).NotTo(BeEmpty(), "the replaced host renders no agent credentials")

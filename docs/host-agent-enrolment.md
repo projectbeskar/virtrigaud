@@ -31,9 +31,11 @@ that falls back to an in-memory `/var`, provision a persistent volume for
 | `spec.identity` | The host's identity anchor (TPM endorsement-key hash, hardware serial, administrator-assigned UUID). Required before the host can enrol. Set once: a CEL rule refuses changing or removing it. A replaced machine is a new identity (a new Host object), and never inherits the old host's pins. |
 | `spec.revoked` | When `true`, the manager retires the host's enrolment id, removes its pinned keys and any pending or authorised record, never approves a request for it again, and renders it as unroutable. A CEL rule refuses clearing it: enrol a replacement as a new Host. Revoking the certificate at the CA is not done by this manager yet. |
 | `status.agent` | A mirror of the pins Secret (see below): `mode`, `enrolmentID`, `pendingEnrolmentID`, `requestURIs`, `keyPins`, `certificateExpiry`. Public identifiers only. |
-| `status.agentLedger` | Reserved for the host ledger protocol, **not populated yet**. A display mirror of the manager's ledger of the host's agent operation store: `storeIDPrefix` (the first 8 hexadecimal characters of the store id only), `seq`, `checkpointSeq`, `attestationState` (`Pending` or `Attested`), `attestedAt`, `ledgerGeneration` and `updatedAt`. It never carries the full store id, a chain head or a session id, is outside `status.agent` (so writing it does not re-render the Provider's inventory), and nothing reads it back to decide. |
-| `status.agentLastStore` | Reserved, **not populated yet**. A display mirror of the last store position the manager verified in a signed answer of the host's agent: `storeIDPrefix`, `seq`, `checkpointSeq` and `updatedAt`. The authoritative position stays in the pins Secret (`store.json`); nothing reads this mirror back to decide. |
-| condition `AgentEnrolled` | `True`/`Enrolled` once a key is pinned. `False` with `IdentityMissing`, `Revoked`, `CertificateExpired`, `AwaitingCertificateRequest`, `AwaitingCertificate`, `CertificateRequestDenied` or `CertificateRejected`. |
+| `status.agentLedger` | Development builds with host ledger keys only (see [Host ledger state](#host-ledger-state)); empty until the manager holds a ledger for the host's store, which nothing creates yet outside tests. A display mirror of the manager's ledger of the host's agent operation store: `storeIDPrefix` (the first 8 hexadecimal characters of the store id only), `seq`, `checkpointSeq`, `attestationState` (`Pending` or `Attested`), `attestedAt`, `ledgerGeneration` and `updatedAt`. It never carries the full store id, a chain head or a session id, is outside `status.agent` (so writing it does not re-render the Provider's inventory), and nothing reads it back to decide. Refreshed at most every 30 seconds. |
+| `status.agentLastStore` | A display mirror of the last store position the manager verified in a signed answer of the host's agent: `storeIDPrefix`, `seq`, `checkpointSeq` and `updatedAt`, refreshed at most every 30 seconds by the heartbeat after a verified answer. The authoritative position stays in the pins Secret (`store.json`); nothing reads this mirror back to decide. A position above the field's 64-bit signed range is not mirrored. |
+| condition `AgentEnrolled` | `True`/`Enrolled` once a key is pinned. `False` with `IdentityMissing`, `Revoked`, `CertificateExpired`, `AwaitingCertificateRequest`, `AwaitingCertificate`, `CertificateRequestDenied`, `CertificateRejected` or `EnrolmentRefused` (another live Host claims the same `spec.identity`; the reason says no more: see [One live Host per identity](#one-live-host-per-identity)). |
+| condition `AgentIdentityDuplicated` | On an enrolled Host only: `True`/`DuplicateIdentityClaimed` while another live Host claims its identity (that Host is not enrolled), `False`/`Unique` once none does. It names neither the other Host nor the identity. |
+| condition `AgentLedgerHeld` | Development builds with host ledger keys only. `True` with the hold's reason while the host's ledger holds the host, `False`/`NotHeld` once the ledger verified with no hold. See [Holds](#holds). |
 | condition `AgentStorePressure` | Set by the heartbeat from each verified signed host answer that reports the agent's operation store capacity: `False`/`StoreCapacityOK` below three quarters of the store's size threshold, `True`/`StoreNearlyFull` from there, `True`/`StoreFull` above it (the agent refuses new operations); once `True`, `False` again only below 70% of the threshold (an `Unknown` or absent condition resets this). `Unknown` with `StoreCapacityNotMeasured` (the agent cannot measure its store), `StoreCapacityNotReported` (an older agent stopped reporting) or `StoreCapacityStale` (a heartbeat got no verified answer while it was `False`; a `True` is kept). Absent until an agent reports it. Removed when the Host is no longer polled for, or cannot be checked with, signed answers: its Provider no longer requires operation identity, is gone, is not clustered or does not implement `GetHostInfo`; the manager has no host answer verification configured, or the Provider's client cannot ask for signed answers; the manager holds no trust state for the Host (no Host or no current enrolment; a trust state that cannot be read for a moment counts as a failed heartbeat); the Host's store regressed; or the Host is revoked or its agent certificate expired. See [Store size](per-host-agent-development.md#store-size). |
 
 Libvirt hosts are unchanged: they get no `status.agent`, none of these
@@ -72,6 +74,33 @@ the request is deleted or fails), its record is retired and a new one drawn,
 so a CA-valid certificate that was never pinned never shares a record with the
 one that is. A new request must then be built from the new
 `status.agent.requestURIs`.
+
+### One live Host per identity
+
+`spec.identity` names one machine. Identities are compared without regard to
+case, among Hosts in every namespace that are neither revoked nor being
+deleted and whose Provider runs per-host agents. The first holder wins: a Host
+that already holds a current enrolment is never blocked by a later claimant,
+and shows the duplicate in its `AgentIdentityDuplicated` condition. A Host
+that holds no enrolment is not enrolled while another live Host claims its
+identity: no record is drawn, its `AgentEnrolled` condition is
+`False`/`EnrolmentRefused`, an `EnrolmentRefused` Warning event is emitted and
+a certificate request for it is denied with the same reason. None of these
+names the other Host or echoes the identity, and the claimant's reason does
+not say why, so a Host's author does not learn which identities are in use.
+Revoke or delete one of the Hosts to resolve it. A record drawn before the
+duplicate appeared is not withdrawn, but its request is denied. The decision
+to draw a record or approve a request lists every Host live; the cache index
+only pre-filters. Admission does not check this yet (a validating webhook is
+later work).
+
+Accepted limit: the first holder wins, so a Host created on a per-host agent
+Provider can claim an identity before the real machine's Host enrols, and the
+real Host is then refused until the claimant is revoked or deleted. Creating
+Hosts is a privileged, audited action; the admission check that would refuse
+the claimant at creation is a follow-up.
+The host ledger relies on this: it follows a machine from one Host object to
+its replacement only while no two live Hosts claim the machine.
 
 ## Authorisation rules
 
@@ -857,6 +886,217 @@ The checks do not cover these paths:
   The deny-only admission policy and approver-policy narrow what such a
   holder can request.
 
+## Host ledger state
+
+> Development builds only, and only with host ledger keys
+> (`--dev-host-ledger-key-dir`). The manager does not yet sign grant version
+> 2, attest an agent, verify operation receipts or send ledger marks: nothing
+> in a running manager creates or changes a ledger object yet. What exists is
+> the durable state those steps will use, its checks, and the status mirror.
+
+The host ledger is what the manager knows durably about one host agent
+operation store: the highest position of the store's chain the manager has
+acknowledged (with the checkpoint used at attestation), the agent's
+attestation sessions, and the store's generation. A development-build agent
+runs an accepted operation only once a ledger mark covers it (see
+[Agent attestation](operation-grants-wire-shape.md#agent-attestation-development-builds));
+the ledger is where the manager will keep the marks it has given.
+
+### Ledger objects
+
+One Secret per store in the enrolment namespace, named
+`virtrigaud-ledger-<store id, 32 hexadecimal characters>`, with data key
+`ledger.json`. It is keyed by the store, not by the Host: it has no owner
+reference, deleting or replacing a Host or resetting its pins Secret does not
+touch it, no controller ever deletes it, and no older manager reads or writes
+it. Labels (lookup hints only; every decision reads the tagged body):
+`app.kubernetes.io/component: host-ledger`,
+`app.kubernetes.io/managed-by: virtrigaud`, `virtrigaud.io/host-ledger: v1`,
+`virtrigaud.io/enrolment: <current enrolment id>` and
+`virtrigaud.io/host-identity-mac: <first 32 hexadecimal characters of the
+identity MAC>`; the annotation `enrolment.virtrigaud.io/host` names the Host
+it serves.
+
+`ledger.json` holds: the store id; the host identity MAC (an HMAC of
+`spec.identity` under the identity key, so a low-entropy serial number cannot
+be recovered from a Secret listing; the label carries a prefix of it, which
+lets whoever can list Secrets in the enrolment namespace link the ledgers of
+one machine across Host objects and stores, without learning the identity); the Host UID, `namespace/name` and
+Provider UID it serves; the ledger position (`seq`, `head`) and checkpoint;
+the current attestation session and its state (`Pending` or `Attested`); up
+to four pending sessions with when each was begun; up to eight earlier
+sessions with the ledger position at which each was replaced; the generation,
+when it started, and up to sixteen enrolments under which it was continuous;
+a write counter (+1 per write); `minManagerVersion` (the downgrade floor, see
+[State written by a newer manager](#state-written-by-a-newer-manager); it is
+`0.4.2-0` while the format is in development builds only, and is raised to
+the first release that ships the format);
+`updatedAt`; for an archived ledger, the successor store and when; a hold of
+the Host it serves with the enrolment it was decided under (see
+[Holds](#holds)); the tag key id; and the tag: an HMAC-SHA256 under the ledger tag key over a
+length-prefixed encoding of every member except `updatedAt` and the tag key
+id, including members a newer manager added (a rewrite keeps them).
+
+The pins Secret's `store.json` gains a member `ledgerIndex`: the stores that
+have (or are getting) a ledger object, up to eight, each with the highest
+write counter of its ledger seen; the highest generation any of the Host's
+ledgers had; a hold of the Host; and a tag under the same key bound to the
+Host UID (an index copied from another Host's pins Secret does not verify).
+None of it is ever lowered. Writing the index also sets the format's
+downgrade floor as `store.json`'s `minManagerVersion`. Every other write of
+`store.json` keeps both as they are. A store is reserved in the index before
+its ledger object is created and its counter recorded after; every
+session-changing write and every raise from receipts records its counter at
+once, a raise from heartbeats at most every 30 seconds.
+
+The manager refuses a ledger that serves a Host whose index does not name it,
+an index that disappeared after the manager saw it, and a store the index
+names whose object is gone or no longer carries the Host's labels.
+
+### Writes
+
+Every read is uncached, and every change is one update that carries the
+`resourceVersion` it read: a concurrent writer makes it fail, and it is
+retried from a fresh read, never overwritten. The manager uses a ledger only
+after its tag verified, or as the object the API server returned for its own
+write.
+
+| Write | When | Change |
+|---|---|---|
+| Initialise | The store has no ledger object and its agent signs, in the ledger state of a verified answer (a challenge answer, or a host answer to a request with ledger version 2), that the store was never attested. From the host's last verified position in `store.json`, only once the host has confirmed it: a verified answer to a request that named that position carrying the same head. Otherwise only on first contact: the agent shows, signed, that the store was created under the current enrolment and held no other enrolment, and no other store has a ledger under that enrolment. | A new object; the store is added to the index. |
+| Archive | First contact with a new store under a new enrolment while the machine's previous store has a ledger. | The old ledger is marked archived with its successor and never written again; the new ledger's generation is above it. |
+| Rebind | A new Host object for the same machine (same identity MAC), once the Host the ledger served is deleted or revoked, has had no verified answer for twice the heartbeat interval (answers are recorded per Host object, so a replacement of the same name does not count), has been seen released by this manager for that long (so a restart waits again), and no other Host that is not revoked carries the identity. | The ledger serves the new Host; position, generation and sessions are kept (never a fresh start), and it becomes `Pending`: the new Host's agent is attested again. |
+| Begin session | An attestation challenge for the agent. | The session is added to the pending sessions (oldest of more than four evicted). For an agent awaiting attestation the ledger becomes `Pending`; a re-attestation of an attested agent keeps the working session current until the new one is adopted. |
+| Raise | Verified positions of the current session. | The position and checkpoint rise to the highest; positions of any other session are dropped; positions from heartbeats raise the ledger at most once per 30 seconds per host. |
+| Adopt | A verified nonce-bound answer (never an operation receipt) names a pending session. | That session becomes current and `Attested`; the previous one moves to the history with the position at which it was replaced. |
+
+Every start of a ledger needs the agent's signed record of whether its store
+was ever attested against a host ledger (the agent keeps it in the store,
+from its first attestation on). A store that was attested ran, or could have
+run, operations under a ledger the manager no longer holds, so a fresh ledger
+for it could hide them: whatever the Secrets in the enrolment namespace say
+(a deleted ledger object, a removed or replayed index), the manager holds the
+host (`ledger_missing`, persistent) and never starts one; the exit is the
+fresh-store procedure. An agent that does not report the record (an older
+agent) holds the host too, re-evaluated on every attempt, until it is
+upgraded. A store that was never attested starts its ledger however long its
+chain grew before (clock-floor commits of restarts, say).
+
+For an existing ledger, a store whose signed first attestation position is
+above the ledger's position shows that the ledger is behind the store's own
+history (an older ledger restored, or another put in its place): the host is
+held (`LedgerRegressed`, persistent). The record's own sequence number is not
+compared with the ledger: the ledger legitimately stays below it until it is
+raised.
+
+A generation is a number never handed out twice for a store: a fresh ledger
+starts at the largest of one above its predecessor's, one above the highest
+generation the Host's index recorded, and the current Unix time in seconds,
+so a ledger restarted after its object was lost never matches an earlier
+generation.
+
+### Holds
+
+A check that fails holds the host: an `AgentLedgerHeld` Warning event names
+the reason and the first 8 hexadecimal characters of the store id (no key,
+store id, chain head or session id), and the `AgentLedgerHeld` condition shows
+it. The reasons:
+
+| Reason | Meaning | Ends |
+|---|---|---|
+| `LedgerTampered` | A ledger object or the index fails its tag or form or names an unknown tag key; the index is missing or does not name a ledger that serves the Host; an indexed store lost its object or its labels; or a ledger's sessions changed in a write this manager did not make while it ran. | The object is fixed; a change seen while running, and an index that disappeared after it was seen, are persistent (below). |
+| `LedgerRegressed` | A ledger went back: a lower position or write counter than this manager wrote, a write counter below the index's (an older copy restored), or the ledger object this manager held is gone. | Persistent. |
+| `ledger_missing` | The store has no ledger object and may not get one: the index names it (its object was lost); the agent signs that the store was attested (persistent); the agent does not report whether it was (re-evaluated on every attempt); or no evidence allows first contact. | The fresh-store procedure: take the VMs off the host, reinstall the agent's state and re-key the Host, which gives a first contact. A lost ledger is never restarted from an operator's word. |
+| `ledger_unconfirmed` | The host has not confirmed the last position the ledger would start from. | A confirming answer. |
+| `ledger_ahead` | The ledger is above the host's chain tip. | Investigation; nothing is signed. |
+| `ledger_fork` | Two verified positions of one sequence number carry different heads. | Persistent. |
+| `ledger_store_mismatch` | The host shows another store under an enrolment that already has a ledger. | Persistent. |
+| `ledger_store_foreign` | The ledger is bound to another machine. | None automatic. |
+| `ledger_store_bound` | The ledger serves another Host that is live, not revoked, answering, recently released, or whose identity another live Host carries. | When the rebind conditions hold. |
+
+A persistent hold ends only with a new enrolment of the host. It is written
+into the tagged ledger index and as the store-regression hold of the pins
+Secret (condition `AgentStoreRegressed`), and, for a fork or a store mismatch,
+into the tagged ledger object too, so clearing the pins Secret's hold does not
+lift it. A ledger object found regressed or changed behind the manager's back
+is left untouched, as evidence.
+A persistent hold that cannot be written is returned as an error with the
+hold, and the manager keeps holding the host in memory; it is never lifted by
+a later call. The `AgentLedgerHeld` condition returns to `False`/`NotHeld`
+when a transient hold clears.
+
+### Host ledger keys
+
+The tag and identity keys are random keys of their own, not derived from the
+operation signer or the intent key. Create a Secret in the manager's
+namespace with three data keys, each 64 lowercase hexadecimal characters of
+random bytes:
+
+```bash
+kubectl -n virtrigaud-system create secret generic host-ledger-key \
+  --from-literal=current="$(openssl rand -hex 32)" \
+  --from-literal=identity="$(openssl rand -hex 32)"
+```
+
+Mount it into the manager pod alone (the chart does this with
+`experimental.hostEnrolment.ledgerKeySecret`, at
+`/etc/virtrigaud/host-ledger-key` with mode 0400; the manager, which does not
+run as root, reads it through the pod's `fsGroup`, which the kubelet applies
+to Secret volumes) and pass `--dev-host-ledger-key-dir=<mount path>` and
+`--dev-host-ledger-key-secret=<namespace>/<name>`. The manager logs only the
+key ids (the first 8 bytes of a SHA-256 of each key, as 16 hexadecimal
+characters) and refuses to start with a malformed, all-zero or repeated key,
+or a key Secret in the enrolment namespace. A release manager refuses both
+flags; they need `--dev-host-enrolment-namespace`. The manager never reads the
+key Secret through the API: per-host agent enrolment refuses to run (and
+suspends approvals on a later re-check) while the manager may get, list or
+watch it or any Secret of its namespace, through a review or a rule limited to
+named objects, as for the sub-CA key. The chart refuses to render the key
+Secret when the enrolment namespace is the release namespace.
+
+To rotate the tag key, move `current` to `previous`, put a new key in
+`current`, and restart the manager. Tags made with the previous key still
+verify. With a previous key configured, the leader runs a re-tag sweep at
+start: every ledger object (archived ones included) and every ledger index in
+the enrolment namespace tagged under the previous key is verified under it and
+written again under the current key (with its `resourceVersion`, a few writes
+per second). A ledger object is first checked as a read of it would be: when
+the Host it serves resolves, against that Host's index, write counter, stored
+hold and the manager's memory, holding the Host on a regression, and its new
+counter is recorded in the index; otherwise against the index left in that
+Host's pins Secret. A restored older copy is never re-tagged and counts as
+remaining. It logs the outcome and publishes
+`virtrigaud_manager_host_ledger_retag_remaining`: once that is 0 (the log says
+the previous key may be removed), drop `previous` and restart. A tag under a
+key the manager no longer holds is `LedgerTampered`. Never change `identity`:
+the identity MACs stored in the ledgers are computed with it.
+
+The tag defends against a principal that can write Secrets in the enrolment
+namespace but cannot read the key Secret, and nothing more. The chart grants
+no principal Secret access in the manager's namespace for it, and refuses
+`ledgerKeySecret` when that namespace is listed in
+`rbac.secrets.providerNamespaces` or `workloadNamespaces`. A test enumerates
+every role and binding the chart renders and `config/rbac` ships and proves
+that only the manager's ServiceAccount may write Secrets in the enrolment
+namespace; that no principal, the manager included, may read the key Secret
+through the API; and that no principal may reach it through a workload in its
+namespace (creating or changing pods, deployments, statefulsets, daemonsets,
+replicasets, jobs or cronjobs, `pods/exec`, `pods/attach`,
+`serviceaccounts/token`), impersonation, or `bind` or `escalate` on roles,
+except one named exception: the manager's own pre-existing right to create
+and change Deployments in every namespace (the provider controller needs it).
+The paths it covers also include replicationcontrollers, ephemeral containers
+and `nodes/proxy` (the kubelet API).
+
+Custody limit, stated plainly: a stolen manager ServiceAccount can create a
+Deployment in the manager's namespace that mounts the key Secret, and so read
+the key, exactly as it could mount the sub-CA key Secret. This is accepted and
+is not checked at runtime (the manager's startup check covers API reads of the
+key only); the RBAC proof accepts this one right by name. Until the keys are
+held by a custody service, the tag protects the ledger against principals
+other than the manager, not against the manager's own identity. Keep every
+role you add within the proof.
+
 ## CLI
 
 ```
@@ -900,6 +1140,8 @@ requester fields are always left to cert-manager's webhook.
 | `--dev-host-enrolment-trust-domain` | Trust domain of host URI identities. |
 | `--dev-host-enrolment-ca-bundle-file` | PEM file of the subordinate CA issued certificates must chain to. |
 | `--dev-host-enrolment-ca-key-secret` | `<namespace>/<name>` of the Secret that holds the subordinate CA's key. Required with `--dev-host-enrolment-issuer`. With an external PKI alone it is optional, and you must set it whenever that signer keeps its key in this cluster. Enrolment refuses to run while the manager may read that Secret ([details](#the-manager-must-not-read-the-sub-ca-key)). It must not be in the enrolment namespace. Only a development build defines this flag. A release build stops at flag parsing when it is set. |
+| `--dev-host-ledger-key-dir` | Directory of the host ledger keys (files `current`, optional `previous`, `identity`), normally the key Secret mounted into the manager pod alone ([details](#host-ledger-keys)). Optional; needs `--dev-host-enrolment-namespace` and `--dev-host-ledger-key-secret`. A release build refuses to start when it is set. |
+| `--dev-host-ledger-key-secret` | `<namespace>/<name>` of the Secret mounted at `--dev-host-ledger-key-dir`, outside the enrolment namespace. Enrolment refuses to run while the manager may get, list or watch Secrets in its namespace through the API. A release build refuses to start when it is set. |
 
 At least one issuer is required, and the development operation signer
 (`--dev-operation-signer-key-file`) must be loaded: its install id goes into
@@ -947,7 +1189,15 @@ They grant exactly:
   `list`, `watch` on `certificaterequests` (`create` and `delete` for the
   manager's own renewal requests, see [Certificate renewal](#certificate-renewal)), `update` on
   `certificaterequests/status`, and `create`, `delete`, `get`, `list`,
-  `update`, `watch` on Secrets (the pins Secrets, and `list` of the host ledger Secrets, see [State written by a newer manager](#state-written-by-a-newer-manager)).
+  `update`, `watch` on Secrets (the pins Secrets and the host ledger Secrets, see [Host ledger state](#host-ledger-state)).
+
+`experimental.hostEnrolment.ledgerKeySecret` grants nothing: it mounts the
+host ledger key Secret into the manager pod alone (see
+[Host ledger keys](#host-ledger-keys)). The tag on the ledger objects is only
+as strong as two properties, which a test proves over every role and binding
+the chart renders and `config/rbac` ships: only the manager's ServiceAccount
+may create, update, patch or delete Secrets in the enrolment namespace, and no
+other principal may read the key Secret. Roles you add must keep both.
 
 The manager creates (and deletes) only renewal requests, under its own
 identity. Its identity is read with a `SelfSubjectReview`, which every
@@ -1120,3 +1370,11 @@ enrolment record) is described in
 [`per-host-agent-development.md`](per-host-agent-development.md#enrolment).
 A predecessor's freeze is confirmed and the predecessor removed as described
 in [Confirming a predecessor's freeze](#confirming-a-predecessors-freeze).
+
+The host ledger exists as durable state only (see
+[Host ledger state](#host-ledger-state)): the manager does not yet attest an
+agent, verify operation receipts, send ledger marks or sign grant version 2,
+so a development-build agent still runs no operation. Removing a ledger
+object of a store that no longer exists needs an operator tool that is not
+written yet; until then ledger Secrets accumulate (about 1.5 KB per store
+ever seen).

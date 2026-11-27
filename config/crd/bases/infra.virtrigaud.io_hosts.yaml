@@ -554,8 +554,8 @@ spec:
                   AgentLastStore is a display mirror of the last store position the
                   manager verified in a signed answer of the host's agent, for
                   operators. An output only: nothing reads it back to decide; the
-                  manager keeps the authoritative position in its pins Secret. Reserved
-                  for development builds: not populated yet.
+                  manager keeps the authoritative position in its pins Secret.
+                  Development builds only.
                 properties:
                   checkpointSeq:
                     description: |-
@@ -585,7 +585,8 @@ spec:
                 description: |-
                   AgentLedger is a display mirror of the manager's ledger of the host's
                   agent operation store, for operators. An output only: nothing reads it
-                  back to decide. Reserved for development builds: not populated yet.
+                  back to decide. Development builds only, with host ledger keys; not
+                  set until the manager holds a ledger for the host's store.
                 properties:
                   attestationState:
                     description: |-

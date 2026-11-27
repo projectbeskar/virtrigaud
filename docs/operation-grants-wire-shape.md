@@ -543,12 +543,15 @@ no other bundled provider registers it, so gRPC answers each of its methods
 `Unimplemented` there. A provider author does not implement it. The development-build
 agent serves `Challenge`, `Attest` and `LedgerMark` (below).
 
-The Kubernetes API reserves the matching status fields, all optional and none populated
-yet: the `Accepted` phase and the `receipt` and `ledgerGeneration` fields of
+The Kubernetes API reserves the matching status fields, all optional: the `Accepted`
+phase and the `receipt` and `ledgerGeneration` fields of
 `VirtualMachine.status.operationAttempts[]` (see
 [Attempt markers](operation-grants-manager.md#attempt-markers-statusoperationattempts)),
-and `Host.status.agentLedger` and `Host.status.agentLastStore` (see
-[Host fields](host-agent-enrolment.md#host-fields)).
+not populated yet, and the display mirrors `Host.status.agentLedger` and
+`Host.status.agentLastStore` (see [Host fields](host-agent-enrolment.md#host-fields)),
+which development builds write. The manager's durable ledger state is described in
+[Host ledger state](host-agent-enrolment.md#host-ledger-state); the manager does not
+yet drive it or sign grant version 2.
 
 ### Agent attestation (development builds)
 

@@ -139,6 +139,13 @@ spec:
           mountPath: /tmp/k8s-webhook-server/serving-certs
           readOnly: true
         {{- end }}
+        {{- with (include "virtrigaud.hostLedgerKeySecret" .) }}
+        # Development builds only: the host ledger keys, mounted into this
+        # pod alone (--dev-host-ledger-key-dir).
+        - name: host-ledger-key
+          mountPath: /etc/virtrigaud/host-ledger-key
+          readOnly: true
+        {{- end }}
         {{- with .Values.manager.volumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -149,6 +156,12 @@ spec:
       - name: webhook-certs
         secret:
           secretName: {{ .Values.webhooks.certificates.secretName }}
+      {{- end }}
+      {{- with (include "virtrigaud.hostLedgerKeySecret" .) }}
+      - name: host-ledger-key
+        secret:
+          secretName: {{ . }}
+          defaultMode: 0400
       {{- end }}
       {{- with .Values.manager.volumes }}
       {{- toYaml . | nindent 6 }}

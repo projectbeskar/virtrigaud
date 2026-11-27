@@ -251,6 +251,11 @@ type HostEnrolmentConfig struct {
 	// kept in this cluster is the operator's responsibility.
 	// The manager must not be able to read it; it is never read here.
 	CAKeySecret *types.NamespacedName
+	// LedgerKeySecret is the Secret holding the host ledger keys, mounted
+	// into the manager pod (LoadHostLedgerKeys); nil without host ledger
+	// keys. The manager must not be able to read it through the API: the
+	// Secret access check refuses enrolment while it can.
+	LedgerKeySecret *types.NamespacedName
 	// InstallID is the 16-byte install identifier (from the development
 	// operation signer).
 	InstallID []byte
@@ -1042,6 +1047,25 @@ type HostEnrolmentReconciler struct {
 	// freezeWaits counts, per Host, the consecutive checks a predecessor
 	// stayed blocked (the recheck backoff). The zero value is ready.
 	freezeWaits sync.Map
+	// identityIndexed reports that the Client's cache indexes Hosts by
+	// identity (SetupWithManager); otherwise identities are listed live.
+	identityIndexed bool
+	// identityReader replaces the indexed cache for the pre-filter (tests:
+	// a cache that lags).
+	identityReader client.Reader
+}
+
+// identityCache returns the cached reader with the identity index (or
+// identityReader when set), or nil. It only pre-filters: a draw decision
+// lists Hosts live.
+func (r *HostEnrolmentReconciler) identityCache() client.Reader {
+	switch {
+	case r.identityReader != nil:
+		return r.identityReader
+	case r.identityIndexed:
+		return r.Client
+	}
+	return nil
 }
 
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
@@ -1097,6 +1121,18 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 			"host", req.String())
 	}
 	st := &l.state
+	// One machine, one live Host: a Host whose identity another live Host
+	// of a per-host agent Provider carries is not enrolled, unless it holds
+	// a current enrolment already (the first holder wins and only shows
+	// the duplicate).
+	var dups []*infravirtrigaudiov1beta1.Host
+	if !host.Spec.Revoked {
+		if dups, err = hostsWithIdentity(ctx, r.liveReader(), r.identityCache(), host); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	identityInUse := len(dups) > 0 && st.Current == nil
+	identityDuplicated := len(dups) > 0 && st.Current != nil
 	switch {
 	case host.Spec.Revoked:
 		if st.Current != nil || st.Pending != nil || st.Authorised != nil {
@@ -1153,7 +1189,25 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 				st.retireOpenRecords()
 				p, changed = nil, true
 			}
-			if ok && (p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID)) {
+			draw := ok && (p == nil || p.ProviderUID != string(provider.UID) || p.InstallID != hex.EncodeToString(r.Config.InstallID))
+			if draw && !identityInUse && st.Current == nil {
+				// The decision is made on a live List of every Host, never on
+				// the cache index alone (which may lag a Host just created).
+				live, err := hostsWithIdentity(ctx, r.liveReader(), nil, host)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				identityInUse = len(live) > 0
+			}
+			if draw && identityInUse {
+				draw = false
+				if p != nil {
+					st.retireOpenRecords()
+					changed = true
+				}
+				r.event(host, corev1.EventTypeWarning, reasonEnrolRefused, "no enrolment record can be drawn for this Host now")
+			}
+			if draw {
 				if p != nil {
 					st.retireOpenRecords()
 				}
@@ -1219,7 +1273,7 @@ func (r *HostEnrolmentReconciler) reconcile(ctx context.Context, req ctrl.Reques
 			}
 		}
 	}
-	return res, r.mirror(ctx, host, st, string(provider.UID))
+	return res, r.mirrorWith(ctx, host, st, string(provider.UID), identityInUse, identityDuplicated)
 }
 
 // requeueOnConflict returns the result of an enrolment reconcile: one that
@@ -1371,6 +1425,16 @@ func (r *HostEnrolmentReconciler) drawEnrolmentID(retired []string) (string, err
 // Host's Provider now. The patch carries the read resourceVersion, so it
 // never overwrites a concurrent status writer.
 func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState, providerUID string) error {
+	return r.mirrorWith(ctx, host, st, providerUID, false, false)
+}
+
+// mirrorWith is mirror for a Host whose spec.identity another live Host
+// carries: refused (identityInUse, not enrolled: AgentEnrolled reason
+// EnrolmentRefused, which says no more) or holding it (identityDuplicated,
+// enrolled: the AgentIdentityDuplicated condition is True). Neither names
+// the other Host or echoes the identity.
+func (r *HostEnrolmentReconciler) mirrorWith(ctx context.Context, host *infravirtrigaudiov1beta1.Host, st *hostEnrolmentState, providerUID string,
+	identityInUse, identityDuplicated bool) error {
 	base := host.DeepCopy()
 	cond := metav1.Condition{Type: infravirtrigaudiov1beta1.HostConditionAgentEnrolled, Status: metav1.ConditionFalse, ObservedGeneration: host.Generation}
 	var agent *infravirtrigaudiov1beta1.HostAgentStatus
@@ -1416,6 +1480,8 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 			if st.rekeyOpen(r.now()) {
 				cond.Message += "; a re-key window is open until " + st.Rekey.Until.UTC().Format(time.RFC3339)
 			}
+		case identityInUse:
+			cond.Reason, cond.Message = reasonEnrolRefused, "no enrolment record can be drawn for this Host now"
 		case st.Authorised != nil:
 			cond.Reason, cond.Message = infravirtrigaudiov1beta1.HostReasonAgentAwaitingCertificate,
 				fmt.Sprintf("certificate request %s is authorised; waiting for the issued certificate", st.Authorised.Request)
@@ -1436,6 +1502,16 @@ func (r *HostEnrolmentReconciler) mirror(ctx context.Context, host *infravirtrig
 		r.event(host, corev1.EventTypeWarning, eventReasonAgentRenewalOverdue, cond.Message)
 	}
 	meta.SetStatusCondition(&host.Status.Conditions, cond)
+	switch {
+	case identityDuplicated:
+		meta.SetStatusCondition(&host.Status.Conditions, metav1.Condition{Type: HostConditionAgentIdentityDuplicated,
+			Status: metav1.ConditionTrue, ObservedGeneration: host.Generation, Reason: reasonIdentityDuplicated,
+			Message: "another live Host claims this Host's identity; it is not enrolled while this Host holds it"})
+	case meta.FindStatusCondition(host.Status.Conditions, HostConditionAgentIdentityDuplicated) != nil:
+		meta.SetStatusCondition(&host.Status.Conditions, metav1.Condition{Type: HostConditionAgentIdentityDuplicated,
+			Status: metav1.ConditionFalse, ObservedGeneration: host.Generation, Reason: reasonIdentityUnique,
+			Message: "no other live Host claims this Host's identity"})
+	}
 	if equality.Semantic.DeepEqual(base.Status, host.Status) {
 		return nil
 	}
@@ -1474,6 +1550,10 @@ func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexPlacementProvider(mgr); err != nil {
 		return err
 	}
+	if err := indexHostIdentity(mgr); err != nil {
+		return err
+	}
+	r.identityIndexed = true
 	inEnrolmentNS := predicate.NewPredicateFuncs(func(o client.Object) bool { return o.GetNamespace() == r.Config.Namespace })
 	isPins := predicate.NewPredicateFuncs(func(o client.Object) bool {
 		_, ledger := o.GetLabels()[LabelHostLedger]
@@ -1482,7 +1562,7 @@ func (r *HostEnrolmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Host{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.hostRequestFromAnnotation),
-			builder.WithPredicates(inEnrolmentNS, isPins)).
+			builder.WithPredicates(inEnrolmentNS, isPins, ledgerFloorChanged)).
 		Watches(certrequest.NewObject(), handler.EnqueueRequestsFromMapFunc(r.hostRequestFromAnnotation),
 			builder.WithPredicates(inEnrolmentNS)).
 		Named("host-enrolment").
