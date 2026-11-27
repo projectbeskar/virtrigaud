@@ -287,15 +287,20 @@ func (r *VirtualMachineReconciler) retireAnswer(ctx context.Context, vm *infravi
 			au.GetOpState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_RETIRED {
 			return decided(r.noSignedAnswer(ctx, vm, a, "the host's answer to its retirement is not about this operation in this session"))
 		}
-		// The answer decides the attempt: its position is persisted first,
-		// as for every definite answer, so a store rolled back below it
-		// fails continuity.
-		_, verdict := h.finishVerified(ctx, ia.providerCR, a.HostID, hr, va, func(hostidentity.VerifiedAnswer) bool { return true })
-		switch verdict {
-		case answerRegressed:
-			return held(r.holdOperation(ctx, vm, k8s.ReasonOperationHostStoreRegressed, msgHostStoreRegressed, operationHoldRecheckInterval))
-		case answerNone:
-			return decided(r.noSignedAnswer(ctx, vm, a, "the host's answer to its retirement could not be recorded"))
+		// The answer decides the attempt. Its position (at or above the
+		// tombstone's commit) is first covered by the ledger, so a store
+		// later rolled back below the tombstone fails its next attestation
+		// instead of letting a late delivery of the op_id run. An answer
+		// below the position the manager holds for the store is no answer.
+		// (An authority request names no continuity position, so its answer
+		// is not put through the store continuity check.)
+		if va.Position.StoreID != hr.snapshot.StoreID || va.Position.Seq < hr.snapshot.Seq {
+			return decided(r.noSignedAnswer(ctx, vm, a, "the host's answer to its retirement is behind its store's known position"))
+		}
+		if _, err := h.Ledger.Raise(ctx, ia.providerCR, a.HostID, va.Position.StoreID, []HostLedgerRaise{{Session: session,
+			Position: HostLedgerPosition{Seq: va.Position.Seq, Head: va.Position.Head}}}); err != nil {
+			logger.Info("The host's ledger was not raised over the retirement; it is asked again", "error", err.Error())
+			return decided(r.noSignedAnswer(ctx, vm, a, "the host's ledger was not raised over its retirement"))
 		}
 		return r.closeRetired(ctx, vm, ia, a, read.SignedRead, va, retiredNeverReceived, "retired by the host it was never delivered to")
 	case providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE:

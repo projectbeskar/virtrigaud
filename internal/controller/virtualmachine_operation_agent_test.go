@@ -88,6 +88,8 @@ type lyingProvider struct {
 	dropCreateReply bool
 	// corruptGrant flips a bit of every grant signature.
 	corruptGrant bool
+	// dropCreate loses the next Create before it reaches the agent.
+	dropCreate bool
 }
 
 func (l *lyingProvider) flags() (strip, retired, drop, corrupt bool) {
@@ -179,6 +181,13 @@ func (l *lyingProvider) Describe(ctx context.Context, req *providerv1.DescribeRe
 
 func (l *lyingProvider) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
 	_, _, drop, corrupt := l.flags()
+	l.mu.Lock()
+	lose := l.dropCreate
+	l.dropCreate = false
+	l.mu.Unlock()
+	if lose {
+		return nil, status.Error(codes.Unavailable, "the request was lost")
+	}
 	if corrupt && req.GetOperationEnvelope().GetGrant() != nil {
 		req = proto.CloneOf(req)
 		sig := req.OperationEnvelope.Grant.Signature
@@ -252,6 +261,10 @@ func (l *lyingAuthority) Attest(ctx context.Context, req *providerv1.AttestReque
 
 func (l *lyingAuthority) LedgerMark(ctx context.Context, req *providerv1.LedgerMarkRequest) (*providerv1.AuthorityResponse, error) {
 	return l.inner.LedgerMark(ctx, req)
+}
+
+func (l *lyingAuthority) RetireIfUnknown(ctx context.Context, req *providerv1.RetireIfUnknownRequest) (*providerv1.AuthorityResponse, error) {
+	return l.inner.RetireIfUnknown(ctx, req)
 }
 
 // newAgentEnv is one VM on a real agent whose attestation and ledger marks
@@ -403,10 +416,21 @@ func (e *agentEnv) createOps(t *testing.T) int {
 
 func (e *agentEnv) waitCreated(t *testing.T) *infravirtrigaudiov1beta1.VirtualMachine {
 	t.Helper()
+	skew := time.Duration(0)
+	defer func() { e.r.clock = nil }()
 	for i := 0; i < 20; i++ {
 		e.step(t, 1)
-		if vm := e.vm(t); vm != nil && vm.Status.ID != "" {
+		vm := e.vm(t)
+		if vm != nil && vm.Status.ID != "" {
 			return vm
+		}
+		if vm != nil && readyReason(vm) == k8s.ReasonOperationRetryBackoff {
+			// A not-performed attempt (for example one the host retired
+			// because it never received it) is followed by a new attempt
+			// after its backoff: the manager's clock moves past it.
+			skew += blockedRetryMax
+			at := skew
+			e.r.clock = func() time.Time { return time.Now().Add(at) }
 		}
 	}
 	vm := e.vm(t)
