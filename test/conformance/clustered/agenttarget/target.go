@@ -95,16 +95,16 @@ func (f fatalT) Fatalf(format string, args ...any) {
 
 // Target is a clustered.Target over real per-host agent processes.
 type Target struct {
-	t          clustered.T
-	hosts      []*Host
-	byName     map[string]*Host
-	signer     *operation.DevSigner
-	epoch      operation.Epoch
+	t      clustered.T
+	hosts  []*Host
+	byName map[string]*Host
+	signer *operation.DevSigner
+	epoch  operation.Epoch
 	// managerLedger: the manager attests and marks, never the target.
 	managerLedger bool
-	hostCA     *hostidentitytest.CA
-	placements *clustered.Placements
-	deadline   time.Duration
+	hostCA        *hostidentitytest.CA
+	placements    *clustered.Placements
+	deadline      time.Duration
 
 	clientCert tls.Certificate
 	apiVersion uint32
