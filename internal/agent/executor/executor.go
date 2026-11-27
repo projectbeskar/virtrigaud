@@ -170,6 +170,18 @@ func (t Trace) Found() bool { return t.Op || t.Placement }
 // store lost a record whose operation left an effect. An executor that does
 // not implement it, or whose scan fails, gives no retirement: the store
 // never retires what it cannot scan for.
+//
+// Hard rules for an implementation:
+//
+//   - every object it stamps with an op_id (an effect, a log of an effect
+//     begun) is created only after the operation's record is committed:
+//     the store reads its records after the scan and treats a trace no
+//     record explains as a lost record, so an object created before its
+//     record would quarantine a healthy store;
+//   - a scan must not block the operations it runs for long: it reads
+//     without holding the locks its steps take (or holds them only for
+//     bounded, short reads), because a Provider may ask for retirements as
+//     often as the agent's per-Provider retirement limit allows.
 type TraceScanner interface {
 	// Traces scans every object the executor owns for op (its OpID, and for
 	// a Create its VMUID and BindingID). It reads only; it never changes an

@@ -27,3 +27,10 @@ const (
 // SetCrashHook makes e call hook at each crash point of an effect; an error
 // stops the step there, as a crash would.
 func SetCrashHook(e *Executor, hook func(point string) error) { e.crashAt = hook }
+
+// HoldLock takes the executor's lock and returns its release, for a test of
+// a caller that must not wait for it.
+func HoldLock(e *Executor) (release func()) {
+	e.mu.Lock()
+	return e.mu.Unlock
+}

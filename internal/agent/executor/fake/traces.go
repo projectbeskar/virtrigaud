@@ -35,13 +35,14 @@ var _ executor.TraceScanner = (*Executor)(nil)
 // Traces implements executor.TraceScanner over everything the fake owns:
 // an intent or effect line, or an effect file, stamped with op's op_id is
 // an operation trace; for a Create, a fake VM with op's UID and binding is
-// a placement trace. It reads only.
+// a placement trace. It reads only, and never takes the executor's lock, so
+// a scan never stalls a step: the logs are append-only (a torn last line is
+// skipped), effect files are created whole, and a VM file is replaced by a
+// rename.
 func (e *Executor) Traces(ctx context.Context, op executor.Operation) (executor.Trace, error) {
 	if err := ctx.Err(); err != nil {
 		return executor.Trace{}, fmt.Errorf("fake executor trace scan: %w", err)
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	opHex := hex.EncodeToString(op.OpID)
 	var t executor.Trace
 	for _, name := range []string{IntentsLog, EffectsLog} {

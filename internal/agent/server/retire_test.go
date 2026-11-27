@@ -24,10 +24,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/answer"
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/agent/opstore"
+	"github.com/projectbeskar/virtrigaud/internal/agent/server"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -127,4 +130,28 @@ func TestRetire_TraceFound(t *testing.T) {
 	st, reason := e.store.Journal().State()
 	assert.Equal(t, journal.StateLost, st)
 	assert.Equal(t, journal.LostUnknownOpTrace, reason)
+}
+
+// The per-Provider retirement limit is applied before the grant is
+// verified or anything scanned: a call above it is RESOURCE_EXHAUSTED and
+// decides nothing.
+func TestRetire_PerProviderLimitBeforeWork(t *testing.T) {
+	e := newAuthEnvWith(t, nil, func(o *server.Options) { o.RetiresPerSecond, o.RetireBurst = 0.001, 1 })
+	c := e.attestAt(t)
+	o := e.newOp(kCreate, "vm-1", randID(), 1, createReq("vm-1", nil))
+	wantOutcome(t, e.retire(t, e.retireGrant(t, o, c, nil)), providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, "")
+	e.exec.mu.Lock()
+	before := e.exec.traceCalls
+	e.exec.mu.Unlock()
+	other := e.newOp(kCreate, "vm-2", randID(), 1, createReq("vm-2", nil))
+	_, err := e.ha.RetireIfUnknown(ctx(t), &providerv1.RetireIfUnknownRequest{TargetHostId: trusttest.HostName,
+		AnswerNonce: nonce(0x37), Grant: e.retireGrant(t, other, c, nil)})
+	require.Equal(t, codes.ResourceExhausted, status.Code(err), "%v", err)
+	e.exec.mu.Lock()
+	after := e.exec.traceCalls
+	e.exec.mu.Unlock()
+	assert.Equal(t, before, after, "nothing was scanned above the limit")
+	_, found, err := e.store.Lookup(ctx(t), opstore.OpRef{EnrolmentID: other.id.EnrolmentID, OpID: other.id.OpID})
+	require.NoError(t, err)
+	assert.False(t, found, "nothing was retired above the limit")
 }

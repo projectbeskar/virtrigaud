@@ -436,3 +436,33 @@ func TestRetire_ConcurrentDeliveries(t *testing.T) {
 	}
 	h.verifyChain()
 }
+
+// scans is the number of trace scans h's executor ran.
+func scans(h *harness) int {
+	h.exec.mu.Lock()
+	defer h.exec.mu.Unlock()
+	return h.exec.traceCalls
+}
+
+// An operation the store already holds a record or tombstone of is not
+// scanned for: a replayed retirement grant costs one read, never a scan.
+func TestRetire_KnownOperationIsNotScanned(t *testing.T) {
+	h, c := gateHarness(t, nil)
+	known := reqP(h, "vm-1", rid(), kCreate, 1)
+	h.mustAccept(known)
+	wantRetire(t, h, c, known, opstore.RetireNotApplicable)
+	if n := scans(h); n != 0 {
+		t.Fatalf("a known operation was scanned for (%d scans)", n)
+	}
+	lost := reqP(h, "vm-2", rid(), kCreate, 1)
+	wantRetire(t, h, c, lost, opstore.RetireApplied)
+	if n := scans(h); n != 1 {
+		t.Fatalf("an unknown operation: %d scans, want 1", n)
+	}
+	for range 5 {
+		wantRetire(t, h, c, lost, opstore.RetireAlreadyApplied)
+	}
+	if n := scans(h); n != 1 {
+		t.Fatalf("replayed retirements scanned again (%d scans)", n)
+	}
+}

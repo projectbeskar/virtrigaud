@@ -109,8 +109,10 @@ type RetireResult struct {
 //     ready (recovery pending, a freeze unfinished) ErrAttestState, an
 //     enrolment other than the active one ErrEnrolmentNotActive: nothing is
 //     changed and nothing is quarantined;
-//  2. without the store lock, the executor's objects are scanned for a
-//     trace of the operation (executor.TraceScanner; ErrNoTraceScan when it
+//  2. without the store lock, an operation the store already holds a
+//     record or tombstone of is not scanned for (one read; step 3 decides);
+//     otherwise the executor's objects are scanned for a trace of the
+//     operation (executor.TraceScanner; ErrNoTraceScan when it
 //     cannot be scanned). A trace is explained when the store holds a
 //     record or tombstone of the op_id, or (for a placement trace of a
 //     Create) a VM record of the placement: every such object is made only
@@ -202,6 +204,17 @@ func (s *Store) retireTraceScan(ctx context.Context, r Request) (RetireResult, b
 	if guard.Off(guard.RetireTraceScan) {
 		return RetireResult{}, false, nil
 	}
+	// A cheap read first: an operation the store already holds a record or
+	// tombstone of (known, or retired before) is not scanned for; the locked
+	// step answers from its record. A replayed retirement grant then costs
+	// one read, never a scan.
+	known, err := s.retireKnownCheap(ctx, r)
+	if err != nil {
+		return RetireResult{}, false, fmt.Errorf("retire: %w", err)
+	}
+	if known {
+		return RetireResult{}, false, nil
+	}
 	scanner, ok := s.exec.(executor.TraceScanner)
 	if !ok {
 		return RetireResult{}, false, fmt.Errorf("retire: %w", ErrNoTraceScan)
@@ -244,6 +257,27 @@ func (s *Store) retireTraceScan(ctx context.Context, r Request) (RetireResult, b
 	s.emitNonStored(AuditEvent{Event: "quarantined", Ref: OpRef{EnrolmentID: r.EnrolmentID, OpID: r.OpID}, VMUID: r.VMUID,
 		Kind: r.Kind, Reason: string(journal.LostUnknownOpTrace)})
 	return RetireResult{Outcome: RetireTraceFound, Quarantined: journal.LostUnknownOpTrace}, true, nil
+}
+
+// retireKnownCheap reports, in one read without the store lock, whether the
+// store holds a record or tombstone of r's op_id.
+func (s *Store) retireKnownCheap(ctx context.Context, r Request) (bool, error) {
+	known := false
+	err := s.j.View(ctx, func(tx *journal.Tx) error {
+		key := opKey(r.EnrolmentID, r.OpID)
+		for _, b := range []string{bucketOps, bucketTombstones} {
+			ok, err := has(tx, b, key)
+			if err != nil {
+				return err
+			}
+			known = known || ok
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("read the operation before the trace scan: %w", err)
+	}
+	return known, nil
 }
 
 // retireLocked is step 3 of RetireIfUnknown. s.mu is held.

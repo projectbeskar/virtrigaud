@@ -319,7 +319,9 @@ func (s *Server) ledgerMark(ctx context.Context, req *providerv1.LedgerMarkReque
 
 // RetireIfUnknown applies a retire-if-unknown grant, in this order:
 //
-//  1. the request rules (strict path, this host, a 16-byte answer_nonce);
+//  1. the request rules (strict path, this host, a 16-byte answer_nonce),
+//     then the per-Provider retirement limit (RESOURCE_EXHAUSTED above it,
+//     before any verification or scan);
 //  2. the grant verifies at grant version 2 as a retirement grant for this
 //     host, Provider, installation and the certificate's enrolment, at the
 //     clock floor (else REFUSED grant_invalid);
@@ -343,6 +345,12 @@ func (a *authorityService) RetireIfUnknown(ctx context.Context, req *providerv1.
 	s := a.s
 	if err := s.checkAuthorityRequest(req, req.GetTargetHostId(), req.GetAnswerNonce()); err != nil {
 		return nil, err
+	}
+	// The per-Provider retirement limit comes before anything costly (the
+	// grant's verification, the store reads and the executor's trace scan):
+	// a retirement grant can be replayed within its session and lifetime.
+	if id := peerIdentity(ctx); id == "" || !s.retires.allow(id, s.opts.Now()) {
+		return nil, status.Error(codes.ResourceExhausted, "above this Provider's retire-if-unknown rate; nothing was decided")
 	}
 	d := s.retire(ctx, req)
 	digest := decodedGrantDigest(req.GetGrant())

@@ -60,6 +60,8 @@ type testExec struct {
 	vms     map[string]bool
 	running map[string]bool
 	gate    chan struct{}
+	// traceCalls counts the Traces calls.
+	traceCalls int
 }
 
 func newTestExec() *testExec {
@@ -122,6 +124,7 @@ func (x *testExec) Inspect(_ context.Context, op executor.Operation, st executor
 func (x *testExec) Traces(_ context.Context, op executor.Operation) (executor.Trace, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	x.traceCalls++
 	var t executor.Trace
 	prefix := hex.EncodeToString(op.OpID) + "/"
 	for k, n := range x.effects {

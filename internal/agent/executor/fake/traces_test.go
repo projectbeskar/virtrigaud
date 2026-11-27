@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/fake"
@@ -63,5 +64,30 @@ func TestTraces(t *testing.T) {
 	otherPlacement.OpID, otherPlacement.BindingID = other.OpID, bytes.Repeat([]byte{4}, 16)
 	if tr, err := e.Traces(ctx, otherPlacement); err != nil || tr.Found() {
 		t.Fatalf("a Create of another placement: %+v %v", tr, err)
+	}
+}
+
+// A trace scan never waits for the executor's lock: it does not stall a
+// step that holds it.
+func TestTraces_DoNotTakeTheLock(t *testing.T) {
+	e, err := fake.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := fake.HoldLock(e)
+	defer release()
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.Traces(t.Context(), executor.Operation{OpID: bytes.Repeat([]byte{1}, 16), VMUID: "vm-1",
+			BindingID: bytes.Repeat([]byte{2}, 16), Kind: providerv1.OperationKind_OPERATION_KIND_CREATE, Attempt: 1})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the trace scan waited for the executor's lock")
 	}
 }

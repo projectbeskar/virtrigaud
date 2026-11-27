@@ -70,6 +70,8 @@ type testExec struct {
 	traceHook func()
 	// traceErr, when set, fails Traces.
 	traceErr error
+	// traceCalls counts the Traces calls.
+	traceCalls int
 }
 
 func newTestExec() *testExec {
@@ -85,6 +87,7 @@ func placementKey(vm string, binding []byte) string { return fmt.Sprintf("%s/%x"
 func (e *testExec) Traces(_ context.Context, op executor.Operation) (executor.Trace, error) {
 	e.mu.Lock()
 	hook, err := e.traceHook, e.traceErr
+	e.traceCalls++
 	e.mu.Unlock()
 	if hook != nil {
 		hook()
