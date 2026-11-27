@@ -158,12 +158,15 @@ func TestSendOperation_Answers(t *testing.T) {
 	require.NoError(t, err)
 	a, err := cli.SendOperation(ctx, p)
 	require.NoError(t, err)
+	assert.Len(t, a.GrantDigest, 32, "the digest of the grant this send minted")
+	a.GrantDigest = nil
 	assert.Equal(t, contracts.OperationAnswer{ID: "vm-id-1", TaskRef: "task-create"}, a)
 
 	p, err = cli.BuildOperation(ctx, opTestIdentity(), opTestRequest(contracts.OperationKindReconfigure))
 	require.NoError(t, err)
 	a, err = cli.SendOperation(ctx, p)
 	require.NoError(t, err)
+	a.GrantDigest = nil
 	assert.Equal(t, contracts.OperationAnswer{RestartRequired: true, Honest: true}, a)
 }
 
