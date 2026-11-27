@@ -188,18 +188,44 @@ func TestLedgerGrantSites(t *testing.T) {
 	}
 }
 
-// Authority traffic and operation traffic draw from separate buckets: one
-// exhausted never refuses the other.
+// Attestation, heartbeat and operation traffic draw from separate buckets:
+// one exhausted never refuses another.
 func TestLedgerBuckets_Split(t *testing.T) {
-	var b ledgerBuckets
 	now := time.Unix(1000, 0)
-	for b.allow(trafficAuthority, now) {
+	all := []ledgerTraffic{trafficAttest, trafficHeartbeat, trafficOperation}
+	for _, drained := range all {
+		var b ledgerBuckets
+		for b.allow(drained, now) {
+		}
+		for _, other := range all {
+			if other != drained {
+				assert.True(t, b.allow(other, now), "traffic %d is not starved by traffic %d", other, drained)
+			}
+		}
+		assert.False(t, b.allow(drained, now))
+		assert.True(t, b.allow(drained, now.Add(time.Second)), "the bucket refills")
 	}
-	assert.True(t, b.allow(trafficOperation, now), "operation traffic is not starved by authority traffic")
-	for b.allow(trafficOperation, now) {
+}
+
+// A heartbeat raise is checked against the per-host throttle before it
+// takes a heartbeat token: a throttled host drains nothing.
+func TestHeartbeatThrottleBeforeToken(t *testing.T) {
+	provider := ledgerTestProvider()
+	now := time.Unix(5000, 0)
+	l := &HostLedger{Now: func() time.Time { return now }}
+	l.heartbeatAt = map[string]time.Time{hostAnswerKey(provider, "h"): now}
+	assert.False(t, l.heartbeatDue(provider, "h"), "raised just now")
+	var b ledgerBuckets
+	for range 10 * heartbeatBucketBurst {
+		if l.heartbeatDue(provider, "h") {
+			b.allow(trafficHeartbeat, now)
+		}
 	}
-	assert.False(t, b.allow(trafficAuthority, now))
-	assert.True(t, b.allow(trafficAuthority, now.Add(time.Second)), "the bucket refills")
+	for range heartbeatBucketBurst {
+		require.True(t, b.allow(trafficHeartbeat, now), "the throttled host took no token")
+	}
+	now = now.Add(ledgerHeartbeatRaiseInterval)
+	assert.True(t, l.heartbeatDue(provider, "h"))
 }
 
 // A host whose agent speaks the host ledger protocol gets grant version 2

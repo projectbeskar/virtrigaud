@@ -195,11 +195,18 @@ func (l *lyingProvider) Create(ctx context.Context, req *providerv1.CreateReques
 // agentEnv is one VM of a clustered cloudhypervisor Provider whose host
 // host-a is a real agent process.
 type agentEnv struct {
-	tg   *agenttarget.Target
-	lie  *lyingProvider
-	r    *VirtualMachineReconciler
-	req  ctrl.Request
-	host *agenttarget.Host
+	tg  *agenttarget.Target
+	lie *lyingProvider
+	r   *VirtualMachineReconciler
+	// provider, cli, trust, ledger and enrol are the manager side of the
+	// host (ledger nil without host ledger keys).
+	provider *infravirtrigaudiov1beta1.Provider
+	cli      *grpcClient.Client
+	trust    *staticTrust
+	ledger   *HostLedger
+	enrol    []byte
+	req      ctrl.Request
+	host     *agenttarget.Host
 }
 
 // agentTLS is a server and client TLS configuration for 127.0.0.1.
@@ -325,6 +332,7 @@ func newAgentEnvWith(t *testing.T, managerLedger bool) *agentEnv {
 	trustSrc := &staticTrust{trusts: map[string]HostTrust{agentHost: {
 		Enrolment: operation.Enrolment{EnrolmentID: cfg.Enrolments[agentHost], Epoch: cfg.Epoch},
 		InstallID: cfg.Signer.InstallID(), Pins: []string{pin}, Anchors: tg.HostAnswerRoots(), HostURI: uri, HostName: agentHost,
+		HostUID: string(host.UID),
 	}}}
 	r.HostAnswers = &HostAnswers{Trust: trustSrc}
 	_, _, verdict, err := r.HostAnswers.RefreshHostAnswer(ctx, providerCR, cli, agentHost)
@@ -352,7 +360,10 @@ func newAgentEnvWith(t *testing.T, managerLedger bool) *agentEnv {
 		require.NoError(t, err)
 		require.Equal(t, infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested, rec.AttestationState)
 	}
-	return &agentEnv{tg: tg, lie: lie, r: r, req: ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}, host: h}
+	env := &agentEnv{tg: tg, lie: lie, r: r, req: ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}, host: h,
+		provider: providerCR, cli: cli, trust: trustSrc, enrol: cfg.Enrolments[agentHost]}
+	env.ledger = r.HostAnswers.Ledger
+	return env
 }
 
 // step reconciles once and lets every operation the agent started finish.
@@ -471,6 +482,77 @@ func TestAgentIdentity_ReceiptAcceptedAndLedgered(t *testing.T) {
 	assert.True(t, receiptLedgered(rec, a.Receipt))
 	e.waitCreated(t)
 	assert.Equal(t, 1, e.createOps(t))
+}
+
+// driveReady drives the host's ledger once and reports whether grant
+// version 2 may be signed for it.
+func (e *agentEnv) driveReady() bool {
+	e.r.HostAnswers.DriveHostLedger(context.Background(), e.provider, e.cli, agentHost)
+	_, err := e.r.HostAnswers.grantReady(e.provider, agentHost, e.enrol)
+	return err == nil
+}
+
+// driveReady is paced by its callers below the agent's signed answer rate
+// (ten a second).
+//
+// A ledger that is archived never makes its host ready for grant version 2,
+// even right after a heartbeat raise (the raise is throttled and returns a
+// read): the ready check reads the ledger bound and not archived, whatever
+// the throttle or the token buckets say.
+func TestAgentIdentity_LedgerArchivedStoreNotReady(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	store := e.r.HostAnswers.ledgerOf(e.provider, agentHost).store
+	lh, err := e.ledger.resolve(ctx, e.provider, agentHost)
+	require.NoError(t, err)
+	_, err = e.ledger.archive(ctx, lh, store, [16]byte{0xff})
+	require.NoError(t, err)
+	require.Never(t, e.driveReady, time.Second, 300*time.Millisecond, "an archived ledger never makes the host ready")
+	_, ok := e.r.HostAnswers.sendVersion(e.provider, agentHost)
+	assert.False(t, ok, "nothing is sent to the host")
+	_, err = e.ledger.LoadBound(ctx, e.provider, agentHost, store)
+	require.ErrorIs(t, err, ErrHostLedgerArchived)
+}
+
+// A Host replaced by a new object of the same name (the agent keeps its
+// session): the ledger bound to the earlier object never makes the new one
+// ready, and moves to it only once the rebind conditions hold (the earlier
+// object gone and quiet for the answer lifetime); the agent is then
+// attested again and the new Host becomes ready.
+func TestAgentIdentity_LedgerReplacedHostRebinds(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	store := e.r.HostAnswers.ledgerOf(e.provider, agentHost).store
+	old := &infravirtrigaudiov1beta1.Host{}
+	require.NoError(t, e.r.Get(ctx, client.ObjectKey{Namespace: trusttest.HostNS, Name: agentHost}, old))
+	oldUID := string(old.UID)
+	old.Finalizers = nil
+	require.NoError(t, e.r.Update(ctx, old))
+	require.NoError(t, e.r.Delete(ctx, old))
+	replacement := old.DeepCopy()
+	replacement.ResourceVersion, replacement.DeletionTimestamp = "", nil
+	replacement.UID = "5e1f0c2a-2222-4333-8444-955566668888"
+	require.NoError(t, e.r.Create(ctx, replacement))
+	// The pins Secret of a new Host object starts afresh (no ledger index).
+	e.trust.mu.Lock()
+	tr := e.trust.trusts[agentHost]
+	tr.HostUID = string(replacement.UID)
+	e.trust.trusts[agentHost] = tr
+	delete(e.trust.stores, agentHost)
+	e.trust.mu.Unlock()
+
+	require.Never(t, e.driveReady, time.Second, 300*time.Millisecond,
+		"a ledger bound to the earlier Host object never makes the replacement ready")
+	rec, err := e.ledger.Load(ctx, e.provider, agentHost, store)
+	require.NoError(t, err)
+	assert.Equal(t, oldUID, rec.HostUID, "no rebind while the earlier object was released less than the answer lifetime ago")
+
+	e.ledger.Now = func() time.Time { return time.Now().Add(2 * hostAnswerTTL) }
+	require.Eventually(t, e.driveReady, 20*time.Second, 300*time.Millisecond, "the replacement is attested and ready after the rebind")
+	rec, err = e.ledger.LoadBound(ctx, e.provider, agentHost, store)
+	require.NoError(t, err)
+	assert.Equal(t, string(replacement.UID), rec.HostUID)
+	assert.Equal(t, infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested, rec.AttestationState)
 }
 
 // A lying Provider that strips the agent's answers and reports an unsigned

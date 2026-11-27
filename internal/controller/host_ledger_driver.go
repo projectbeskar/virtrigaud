@@ -80,12 +80,15 @@ const (
 	reattestInterval = time.Minute
 )
 
-// Token bucket rates of the host ledger's API and agent traffic: authority
-// traffic (attestation, heartbeat raises and their marks) and operation
-// traffic (receipt raises and their marks) have a bucket each.
+// Token bucket rates of the host ledger's API and agent traffic:
+// attestation (challenges and attestation grants), heartbeat raises and
+// their marks, and operation traffic (receipt raises and their marks) have a
+// bucket each, so none can starve another.
 const (
-	authorityBucketRate  = 50
-	authorityBucketBurst = 100
+	attestBucketRate     = 20
+	attestBucketBurst    = 40
+	heartbeatBucketRate  = 50
+	heartbeatBucketBurst = 100
 	operationBucketRate  = 200
 	operationBucketBurst = 400
 )
@@ -135,8 +138,10 @@ func (b *tokenBucket) allow(now time.Time) bool {
 type ledgerTraffic int
 
 const (
-	// trafficAuthority: attestation, heartbeat raises and their marks.
-	trafficAuthority ledgerTraffic = iota
+	// trafficAttest: attestation challenges and attestation grants.
+	trafficAttest ledgerTraffic = iota
+	// trafficHeartbeat: heartbeat raises and their marks.
+	trafficHeartbeat
 	// trafficOperation: receipt raises and their marks.
 	trafficOperation
 )
@@ -144,20 +149,25 @@ const (
 // ledgerBuckets are the split token buckets of the host ledger.
 type ledgerBuckets struct {
 	once      sync.Once
-	authority tokenBucket
+	attest    tokenBucket
+	heartbeat tokenBucket
 	operation tokenBucket
 }
 
 // allow takes a token of traffic t at now.
 func (b *ledgerBuckets) allow(t ledgerTraffic, now time.Time) bool {
 	b.once.Do(func() {
-		b.authority.rate, b.authority.burst = authorityBucketRate, authorityBucketBurst
+		b.attest.rate, b.attest.burst = attestBucketRate, attestBucketBurst
+		b.heartbeat.rate, b.heartbeat.burst = heartbeatBucketRate, heartbeatBucketBurst
 		b.operation.rate, b.operation.burst = operationBucketRate, operationBucketBurst
 	})
-	if t == trafficOperation {
+	switch t {
+	case trafficOperation:
 		return b.operation.allow(now)
+	case trafficHeartbeat:
+		return b.heartbeat.allow(now)
 	}
-	return b.authority.allow(now)
+	return b.attest.allow(now)
 }
 
 // hostLedgerState is what the driver knows about one host: whether its
@@ -268,7 +278,7 @@ func (h *HostAnswers) driveLedger(ctx context.Context, provider *infravirtrigaud
 	l.Observe(provider, hostID, ev)
 	auth, _ := reader.(contracts.HostAuthorityCaller)
 	store := v.Position.StoreID
-	rec, err := l.Load(ctx, provider, hostID, store)
+	rec, err := l.LoadBound(ctx, provider, hostID, store)
 	switch {
 	case errors.Is(err, ErrHostLedgerNotFound):
 		var res HostLedgerInitResult
@@ -278,6 +288,9 @@ func (h *HostAnswers) driveLedger(ctx context.Context, provider *infravirtrigaud
 			logger.Info("A new store replaced the host's earlier stores; their attempts stay as they are", "archived", len(res.Archived))
 		}
 	case errors.Is(err, ErrHostLedgerNotBound):
+		// The ledger serves an earlier Host object of this name or machine:
+		// it moves to this one only under the rebind conditions, and is
+		// Pending afterwards (the agent is attested again).
 		rec, err = l.Rebind(ctx, provider, hostID, store)
 	}
 	if err != nil || rec == nil {
@@ -315,7 +328,9 @@ func (h *HostAnswers) inSession(ctx context.Context, provider *infravirtrigaudio
 	hostID string, t HostTrust, rec *HostLedgerRecord, v hostidentity.VerifiedAnswer, ev hostidentity.LedgerEvidence) {
 	logger := log.FromContext(ctx).WithValues("host", hostID)
 	l := h.Ledger
-	if h.buckets.allow(trafficAuthority, h.now()) {
+	// The per-host throttle is checked before a heartbeat token is taken, so
+	// throttled hosts never drain the bucket.
+	if l.heartbeatDue(provider, hostID) && h.buckets.allow(trafficHeartbeat, h.now()) {
 		pos, cp := positionOf(v)
 		got, err := l.Raise(ctx, provider, hostID, rec.StoreID, []HostLedgerRaise{{Session: rec.AttestationID, Position: pos, Checkpoint: cp,
 			Heartbeat: true}})
@@ -326,11 +341,27 @@ func (h *HostAnswers) inSession(ctx context.Context, provider *infravirtrigaudio
 		rec = got
 	}
 	if markSeq, _ := ev.Mark(); markSeq < rec.Position.Seq && auth != nil {
-		if err := h.markHost(ctx, provider, auth, hostID, t, rec, trafficAuthority); err != nil {
+		if err := h.markHost(ctx, provider, auth, hostID, t, rec, trafficHeartbeat); err != nil {
 			logger.Info("The host's ledger mark was not raised", "error", err.Error())
 		}
 	}
-	if !v.Ready() || l.HeldReason(provider, hostID) != "" {
+	h.markReady(ctx, provider, hostID, rec.StoreID, v)
+}
+
+// markReady marks the host ready for grant version 2 only after an explicit
+// check, independent of any bucket or throttle: a fresh bound read of the
+// store's ledger (bound to the Host object the host id names, with its
+// identity, not archived), Attested in the session the verified answer v
+// names, v READY, and nothing holding the host.
+func (h *HostAnswers) markReady(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string, store [16]byte,
+	v hostidentity.VerifiedAnswer) {
+	session, ok := sessionOf(v.Context)
+	if !ok || !v.Ready() || v.Position.StoreID != store {
+		return
+	}
+	rec, err := h.Ledger.LoadBound(ctx, provider, hostID, store)
+	if err != nil || rec.Archived || rec.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested ||
+		rec.AttestationID != session || h.Ledger.HeldReason(provider, hostID) != "" {
 		return
 	}
 	h.updateLedger(provider, hostID, func(st *hostLedgerState) {
@@ -346,7 +377,7 @@ func (h *HostAnswers) attest(ctx context.Context, provider *infravirtrigaudiov1b
 	hostID string, t HostTrust, rec *HostLedgerRecord, purpose providerv1.ChallengePurpose) {
 	logger := log.FromContext(ctx).WithValues("host", hostID, "purpose", purpose.String())
 	l := h.Ledger
-	if !h.buckets.allow(trafficAuthority, h.now()) {
+	if !h.buckets.allow(trafficAttest, h.now()) {
 		return
 	}
 	read, err := auth.Challenge(ctx, contracts.ChallengeQuery{HostID: hostID, Purpose: purpose})
@@ -386,8 +417,14 @@ func (h *HostAnswers) attest(ctx context.Context, provider *infravirtrigaudiov1b
 	}
 	var nonce [16]byte
 	copy(nonce[:], ch.GetChallengeNonce())
+	// An agent awaiting attestation begins a session that makes the ledger
+	// Pending (it runs nothing until attested anyway). A re-attestation of
+	// an attested agent keeps the ledger's current session current and
+	// Attested until the new one is adopted; a ledger that is Pending (a
+	// rebind) stays Pending.
 	ledgerPurpose := LedgerSessionAttest
-	if rec.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested {
+	if purpose == providerv1.ChallengePurpose_CHALLENGE_PURPOSE_REATTEST &&
+		rec.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested {
 		ledgerPurpose = LedgerSessionReattest
 	}
 	begun, err := l.BeginSession(ctx, provider, hostID, rec.StoreID, nonce, ledgerPurpose,

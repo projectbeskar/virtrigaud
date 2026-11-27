@@ -920,6 +920,37 @@ func (l *HostLedger) Load(ctx context.Context, provider *infravirtrigaudiov1beta
 	return obj.rec, nil
 }
 
+// LoadBound is Load for a ledger that must serve the host hostID of
+// provider now: a ledger that serves another Host object returns its record
+// with ErrHostLedgerNotBound (Rebind moves it), an archived one its record
+// with ErrHostLedgerArchived. Only a nil error means the record is bound to
+// the Host object the host id names, with the same identity, and not
+// archived.
+func (l *HostLedger) LoadBound(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string,
+	store [16]byte) (*HostLedgerRecord, error) {
+	lh, err := l.resolve(ctx, provider, hostID)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := l.Load(ctx, provider, hostID, store)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireBound(lh, rec); err != nil {
+		return rec, err
+	}
+	return rec, nil
+}
+
+// heartbeatDue reports whether a heartbeat-only raise of the host would be
+// taken now (the last one is at least ledgerHeartbeatRaiseInterval ago).
+func (l *HostLedger) heartbeatDue(provider *infravirtrigaudiov1beta1.Provider, hostID string) bool {
+	l.mu.Lock()
+	at := l.heartbeatAt[hostAnswerKey(provider, hostID)]
+	l.mu.Unlock()
+	return at.IsZero() || l.now().Sub(at) >= ledgerHeartbeatRaiseInterval
+}
+
 // indexChange is a change of a ledger index: store counters to raise (0
 // reserves a store not yet named), a generation to raise the high-water
 // mark to, and a hold to record under the current enrolment.

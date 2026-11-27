@@ -728,7 +728,7 @@ func (l *HostLedger) Raise(ctx context.Context, provider *infravirtrigaudiov1bet
 		at := l.heartbeatAt[lh.key]
 		l.mu.Unlock()
 		if !at.IsZero() && l.now().Sub(at) < ledgerHeartbeatRaiseInterval {
-			return l.Load(ctx, provider, hostID, store)
+			return l.LoadBound(ctx, provider, hostID, store)
 		}
 	}
 	rec, err := l.update(ctx, lh, store, updateOptions{enrolment: lh.enrolment, lazyIndex: heartbeatOnly},
