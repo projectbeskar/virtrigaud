@@ -43,9 +43,9 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/fake"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
-	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust/trusttest"
 	clusteredref "github.com/projectbeskar/virtrigaud/internal/clustered"
