@@ -46,9 +46,22 @@ package controller
 //
 // The grant is signed in one place only (sendRetire). Its answer must name
 // the grant sent; APPLIED, or ALREADY_APPLIED with the operation RETIRED,
-// closes the attempt; NOT_APPLICABLE (the host holds a record now) asks
-// again; a stale session asks the host again from its next answer; a
-// quarantine holds the host and the VM; any other refusal asks again.
+// closes the attempt once the host ledger covers the answer's position (the
+// tombstone's commit is at or below it), so a store rolled back below the
+// tombstone fails its next attestation instead of letting a late delivery
+// run; NOT_APPLICABLE (the host holds a record now) asks again; a stale
+// session asks the host again from its next answer; a quarantine holds the
+// host and the VM; a refusal that asking again does not change (op_known,
+// enrolment_not_active, trace_scan_unavailable) holds the attempt; any other
+// refusal asks again.
+//
+// A manager that stops between the agent's answer and the ledger raise
+// leaves the attempt in flight. The next poll reads the tombstone through a
+// signed RETIRED answer for the current enrolment, a definite answer whose
+// position the manager persists in the host's store record before the
+// attempt closes: a store later rolled back below that position fails the
+// continuity check of every answer it signs, so the tombstone is covered by
+// the persisted position instead of the ledger.
 //
 // A re-send and a retirement never both follow one answer: a marker whose
 // receipt counts as ledgered is re-sent with expect_known (the agent then
@@ -400,6 +413,15 @@ func (r *VirtualMachineReconciler) closeRetired(ctx context.Context, vm *infravi
 // verified NO_RECORD of poll, without a grant, when the closure's
 // preconditions hold (see the file comment); done is false otherwise, and
 // the attempt is held as every predecessor attempt is.
+//
+// It needs no ledger raise, unlike a retirement, because nothing is
+// committed on the host: an agent signs NO_RECORD for an enrolment only
+// while its store holds that enrolment's records (UNKNOWN_TO_AGENT
+// otherwise); a frozen enrolment never admits an operation again (every
+// grant naming it is refused, as the host certificate binds the agent to
+// its new enrolment); and a record of it whose acceptance the ledger
+// covered cannot be lost without failing an attestation. The NO_RECORD's
+// position is persisted before the decision, as for every definite answer.
 func (r *VirtualMachineReconciler) frozenClosure(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, p contracts.PreparedOperation, poll opPoll) (d attemptDecision, done bool) {
 	rec, err := r.HostAnswers.Ledger.LoadBound(ctx, ia.providerCR, a.HostID, poll.v.Position.StoreID)
