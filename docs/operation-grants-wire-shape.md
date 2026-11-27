@@ -552,7 +552,10 @@ and `Host.status.agentLedger` and `Host.status.agentLastStore` (see
 
 ### Agent attestation (development builds)
 
-A development-build agent reports agent API version 6 and grant versions `[2]`. It is
+A development-build agent reports agent API version 6, grant versions `[2]` and host
+ledger version 2 (version 2 adds the store's attestation record to `HostLedgerState`;
+the agent API version is unchanged because the field is additive and versioned by
+`HostLedgerState.version`). It is
 not wired to any manager: the current manager signs only grant version 1, so it signs
 nothing for such an agent, and the agent refuses every operation until it is attested
 and runs none until a ledger mark covers its acceptance. A release-build agent reports
@@ -568,7 +571,9 @@ with attestation but without receipts, ledger marks or the ledger gate.
   the clock floor commit and recovery wait for the first attestation. The only
   exception is an enrolment change (a fresh store, or a certificate that names a new
   enrolment): without it the agent could sign no answer, so it is committed before the
-  attestation; recovery still waits.
+  attestation; recovery still waits. The first attestation a store ever receives
+  commits too, after its position passed the checks (see the attestation record
+  below).
 - **`Challenge`.** Request rules: no unknown field or enum value, `target_host_id` is
   the agent's host, a 16-byte `answer_nonce`, purpose `ATTEST` or `REATTEST`; anything
   else is `InvalidArgument`. `ATTEST` is issued only while the agent awaits its first
@@ -595,7 +600,10 @@ with attestation but without receipts, ledger marks or the ledger gate.
   held checkpoint (`ledger_unverifiable`). When it passes, the challenge nonce becomes
   the attestation session (`APPLIED`, `session_replaced` on a re-attestation) and the
   mark becomes the ledger position (the higher of the two on a re-attestation). The
-  session and mark live in memory only. Every outcome is a signed `AuthorityAnswer`
+  session and mark live in memory only. Before the first attestation a store ever
+  receives is applied, the store commits its attestation record (below); when that
+  commit fails, the outcome is `QUARANTINED` (a failed commit quarantines the store
+  `io_error`) or `REFUSED` `store_busy`, and no session exists. Every outcome is a signed `AuthorityAnswer`
   whose context names the session after the grant and whose `grant_digest` is
   SHA-256(be32(len(body)) ‖ body ‖ signature) of the delivered grant.
   `RetireIfUnknown` is `Unimplemented`.
@@ -661,6 +669,31 @@ with attestation but without receipts, ledger marks or the ledger gate.
   enrolled and how many enrolments were activated in it since, in the activation
   transaction itself. A store enrolled before this record existed reports none and
   never gets one inferred.
+- **Attestation record.** The first attestation a store ever receives commits, in
+  its own chain transaction and before the attestation is applied, a record that the
+  store has been attested: the ledger position's sequence number, the enrolment
+  active then, and the sequence number of that transaction (one above the store's
+  position at the attestation, so above the attested position). The checks are
+  repeated in that transaction. A store that has not established continuity yet (an
+  enrolled store restarted before its first attestation ever) first commits what
+  must precede any other commit (continuity, the clock floor, the enrolment from the
+  certificate). Exactly one such commit happens in a store's life; re-attestations
+  and attestations after a restart commit nothing, and the record is never cleared
+  or rewritten. `HostLedgerState` version 2 reports it in every ledger state
+  (`ChallengeAnswer.ledger`, and `HostAnswer.ledger` for a request with
+  `ledger_version` ≥ 2): `store_ever_attested` (11), `store_first_attested_seq`
+  (12), `store_first_attested_enrolment_id` (13), `store_attested_record_seq` (14),
+  all unset at version 1, so `false` means "never attested" only at version 2 or
+  higher. The manager-side decoder (`hostidentity.StoreAttestationOf`) refuses a
+  state that sets them at version 1, sets facts without the flag, or sets the flag
+  without a first position, with a record sequence number not above it, or with an
+  enrolment that is neither empty nor 16 bytes; the agent applies the same rules
+  before signing. Erasing the record needs a rollback of the store below that
+  transaction: the anchor log quarantines a store file restored alone
+  (`rolled_back`), and a manager ledger at or above `store_attested_record_seq`
+  catches a joint restore of the store and its anchor log. A store attested by an
+  agent from before the record reports `false` until its next attestation. No
+  manager reads the record yet.
 - **Retention.** No checkpoint prunes a chain entry at or above the ledger mark, so
   the head at every position since the mark stays on the store; a ledger mark raises
   the floor with the mark.

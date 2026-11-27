@@ -57,6 +57,22 @@ message StoreMeta {
   // transaction of a store whose origin_enrolment_id is set. Zero for a
   // store that was enrolled before the field existed.
   uint32 enrolment_activations = 6;
+  // ever_attested is true once the store has been attested against a host
+  // ledger: written in the transaction that records the store's first
+  // attestation, before that attestation is reported applied, and never
+  // cleared or rewritten after. False for a store never attested, including
+  // one attested before the field existed (it is never inferred).
+  bool ever_attested = 7;
+  // first_attested_seq is the ledger position sequence number of the store's
+  // first attestation (at least 1); 0 while ever_attested is false.
+  uint64 first_attested_seq = 8;
+  // first_attested_enrolment_id is the 16-byte active enrolment of the store
+  // when it was first attested; empty while ever_attested is false or when no
+  // enrolment was active.
+  bytes first_attested_enrolment_id = 9;
+  // attested_record_seq is the chain sequence number of the transaction that
+  // wrote ever_attested; 0 while ever_attested is false.
+  uint64 attested_record_seq = 10;
 }
 
 // Quarantine records why the store lost its persistence guarantee.

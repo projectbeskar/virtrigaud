@@ -330,6 +330,16 @@ const (
 	// operation whose record is ACCEPTED, in the session the store held when
 	// it decided.
 	ReceiptOnlyAccepted Name = "receipt-only-accepted"
+	// AttestRecordFirst: a store's first attestation commits the store's
+	// attestation record before it creates the attestation session, and
+	// creates none when that commit fails.
+	AttestRecordFirst Name = "attest-record-first"
+	// AttestRecordNeverRewritten: a store's attestation record, once
+	// committed, is never rewritten by a later attestation.
+	AttestRecordNeverRewritten Name = "attest-record-never-rewritten"
+	// AttestRecordReported: every host ledger state of version 2 or higher
+	// reports the store's attestation record.
+	AttestRecordReported Name = "attest-record-reported"
 )
 
 // All lists every guard, in a fixed order.
@@ -354,5 +364,6 @@ func All() []Name {
 		ChallengeSingleUse, ChallengePurpose, ChallengeExpiry, MutationsAfterAttestation, NoCommitBeforeAttest,
 		LedgerGate, AwaitRequest, LedgerBehindCount, LedgerBehindBytes, LedgerMarkSession, LedgerMarkStoreMatch,
 		LedgerMarkNotAhead, LedgerMarkHeadCompare, ExpectKnownRefused, ReceiptOnlyAccepted,
+		AttestRecordFirst, AttestRecordNeverRewritten, AttestRecordReported,
 	}
 }

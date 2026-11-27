@@ -56,7 +56,7 @@ func TestLedgerVersion_GetHostInfo(t *testing.T) {
 		require.NotNil(t, with.GetLedger())
 		assert.Equal(t, v, with.GetContext().GetLedgerVersionEcho())
 		assert.Equal(t, v, with.GetLedger().GetRequestedVersion())
-		assert.Equal(t, answer.LedgerVersion, with.GetLedger().GetVersion())
+		assert.Equal(t, min(v, answer.LedgerVersion), with.GetLedger().GetVersion())
 		assert.Equal(t, providerv1.LedgerSessionState_LEDGER_SESSION_STATE_AWAITING_ATTESTATION, with.GetLedger().GetState())
 		assert.Empty(t, with.GetContext().GetAttestationId())
 

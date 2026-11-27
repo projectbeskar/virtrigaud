@@ -151,7 +151,7 @@ func TestChallengeAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(a.GetChallengeNonce(), nonce) || a.GetValidForSeconds() != 300 || a.GetNotIssuedReason() != "" ||
-		a.GetLedger().GetVersion() != 1 || !bytes.Equal(a.GetLedger().GetStoreOriginEnrolmentId(), p.Record.EnrolmentID) ||
+		a.GetLedger().GetVersion() != 2 || !bytes.Equal(a.GetLedger().GetStoreOriginEnrolmentId(), p.Record.EnrolmentID) ||
 		a.GetLedger().GetStoreEnrolmentCount() != 1 || a.GetContext().GetLedgerVersionEcho() != 0 {
 		t.Fatalf("challenge answer %v", a)
 	}
@@ -379,7 +379,7 @@ func TestSign_LedgerFieldRules(t *testing.T) {
 }
 
 func TestVersions(t *testing.T) {
-	if answer.AgentAPIVersion != 6 || answer.GrantVersion != 2 || answer.LedgerVersion != 1 {
+	if answer.AgentAPIVersion != 6 || answer.GrantVersion != 2 || answer.LedgerVersion != 2 {
 		t.Fatalf("api %d, grant %d, ledger %d", answer.AgentAPIVersion, answer.GrantVersion, answer.LedgerVersion)
 	}
 }

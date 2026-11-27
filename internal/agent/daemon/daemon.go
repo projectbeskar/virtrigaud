@@ -47,7 +47,11 @@ limitations under the License.
 //     attested: when the store's active enrolment is not the one the host
 //     certificate carries, continuity is established, the clock floor
 //     committed and the store enrolled (step 6) before the attestation; no
-//     operation step runs and recovery still waits for it. An attestation
+//     operation step runs and recovery still waits for it. The first
+//     attestation a store ever receives commits too, once its ledger
+//     position passed the checks: the store's attestation record, preceded,
+//     when continuity is not established yet, by step 6 up to recovery (see
+//     attestation.Attest). An attestation
 //     that quarantines the store ends the start-up as a quarantine. A
 //     release build does not take part in the ledger protocol and runs
 //     steps 6 to 8 at once.
@@ -315,11 +319,18 @@ type attestation struct {
 	st      *opstore.Store
 	decided chan struct{}
 	once    sync.Once
+	// prepare carries a request to the start-up goroutine to run prepare
+	// (continuity, the clock floor and the enrolment from the certificate),
+	// which answers on the request's channel whether the store can commit.
+	prepare chan chan bool
+	// stopped is closed when the start-up goroutine no longer serves
+	// prepare requests.
+	stopped chan struct{}
 }
 
 // newAttestation returns the attestation of st.
 func newAttestation(st *opstore.Store) *attestation {
-	return &attestation{st: st, decided: make(chan struct{})}
+	return &attestation{st: st, decided: make(chan struct{}), prepare: make(chan chan bool), stopped: make(chan struct{})}
 }
 
 // Attestation implements server.Authority.
@@ -328,12 +339,47 @@ func (a *attestation) Attestation() (opstore.Attestation, bool) { return a.st.At
 // Attest implements server.Authority: opstore.Store.Attest, and the first
 // attestation applied or a quarantine it recorded ends the wait of the
 // start-up.
+//
+// The first attestation of a store that records none must commit the
+// store's attestation record before it is applied. When the store has not
+// established continuity yet (an enrolled store restarted before its first
+// attestation ever), opstore.Store.Attest checked the ledger position,
+// changed nothing and returned opstore.ErrContinuityPending: the start-up
+// goroutine then runs prepare (the commits that precede any other: the
+// continuity, the clock floor, the enrolment), and the attestation is
+// applied again. When prepare fails, the attestation fails and no session
+// exists.
 func (a *attestation) Attest(ctx context.Context, r opstore.AttestRequest) (opstore.AttestResult, error) {
 	res, err := a.st.Attest(ctx, r)
+	if errors.Is(err, opstore.ErrContinuityPending) && a.runPrepare(ctx) {
+		res, err = a.st.Attest(ctx, r)
+	}
 	if err == nil && (res.First || res.Quarantined != "") {
 		a.once.Do(func() { close(a.decided) })
 	}
 	return res, err
+}
+
+// runPrepare asks the start-up goroutine to run prepare and reports whether
+// the store can commit. It reports false when ctx ends or the start-up
+// goroutine stopped first.
+func (a *attestation) runPrepare(ctx context.Context) bool {
+	reply := make(chan bool, 1)
+	select {
+	case a.prepare <- reply:
+	case <-ctx.Done():
+		return false
+	case <-a.stopped:
+		return false
+	}
+	select {
+	case ok := <-reply:
+		return ok
+	case <-ctx.Done():
+		return false
+	case <-a.stopped:
+		return false
+	}
 }
 
 // LedgerMark implements server.Authority: opstore.Store.LedgerMark.
@@ -825,6 +871,13 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 	}
 	ticker := time.NewTicker(d.o.ObserveEvery)
 	defer ticker.Stop()
+	// A first attestation of a store that records none asks this goroutine
+	// to prepare the store (see attestation.Attest); nil in a release build.
+	var prepareReq chan chan bool
+	if agent.auth != nil {
+		prepareReq = agent.auth.prepare
+		defer close(agent.auth.stopped)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -837,6 +890,9 @@ func (d *daemon) run(ctx context.Context, reload <-chan struct{}) error {
 			d.log.Error(fmt.Errorf("%v", r), "an operation run panicked; the agent stops so that recovery resolves it")
 			drain()
 			return fmt.Errorf("%w: %v", ErrRunPanicked, r)
+		case reply := <-prepareReq:
+			d.log.Info("the store records no attestation; establishing continuity before the attestation record is committed")
+			reply <- d.prepare(ctx, st, agent.floor.Load())
 		case <-attested:
 			attested = nil
 			d.log.Info("attested by the manager; establishing continuity and recovering interrupted operations")

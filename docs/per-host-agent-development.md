@@ -136,7 +136,7 @@ the host's URI identity and, under the same trust domain,
 | 2 | The store opens with full fsync and checks its schema. | A store written for a newer agent refuses the start, naming the schema version it needs. |
 | 3 | Local continuity checks: chain, anchor log, store marker, quarantine record. | The store is quarantined: reads still answer, every mutation is refused. |
 | 4 | The clock floor record is read from the store and raised in memory from the host's own clocks. Nothing is written. | A missing floor for an enrolled store, or an unreadable one, quarantines the store (`inconsistent_store`); clocks the floor cannot use refuse the start. |
-| 5 | The server starts serving, unattested. Nothing is committed before step 6. A development build then awaits its first attestation by the manager's host ledger (`HostAuthority` `Challenge` and `Attest`, see [Host ledger attestation](#host-ledger-attestation)): it sends `READY=1` with `STATUS=awaiting attestation by the manager; operations are refused until then`, refuses every mutation `UNATTESTED` (cause `awaiting_attestation`), and runs steps 6 to 8 only after the first attestation. The only commits before it are those of an enrolment change (step 6 for a store whose active enrolment is not the certificate's), without which no answer could be signed; recovery still waits. A release build goes on at once. | An attestation that quarantines the store ends the start-up as a quarantine. |
+| 5 | The server starts serving, unattested. Nothing is committed before step 6. A development build then awaits its first attestation by the manager's host ledger (`HostAuthority` `Challenge` and `Attest`, see [Host ledger attestation](#host-ledger-attestation)): it sends `READY=1` with `STATUS=awaiting attestation by the manager; operations are refused until then`, refuses every mutation `UNATTESTED` (cause `awaiting_attestation`), and runs steps 6 to 8 only after the first attestation. The only commits before it are those of an enrolment change (step 6 for a store whose active enrolment is not the certificate's), without which no answer could be signed; recovery still waits. The first attestation a store ever receives also commits, once its ledger position has passed the checks: the store's attestation record (see [Host ledger attestation](#host-ledger-attestation)) and, when the store has not established continuity yet, steps 6 up to recovery before it. A release build goes on at once. | An attestation that quarantines the store ends the start-up as a quarantine. |
 | 6 | Continuity is established. The clock floor is committed as the first write. The store's active enrolment is brought to the one the host certificate carries: in a development build a store that was never enrolled is enrolled, and a store with another (or no) active enrolment is re-enrolled with the [freeze](#re-enrolment-freeze) (see [Enrolment](#enrolment)); a release build does neither. | A floor that cannot be committed quarantines the store (`io_error`). |
 | 7 | Recovery of interrupted operations. A development build starts a runner for every operation that recovery left runnable, so that no operation stays running without one. | |
 | 8 | systemd is notified `READY=1`; the agent's trust state is READY. A development build now runs signed operations. | |
@@ -445,6 +445,24 @@ in [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#agent-attes
 - The store records its origin enrolment (the first one it was enrolled under) and
   how many enrolments were activated in it, in the activation itself; a store
   enrolled before this record existed reports none.
+- The store records that it has been attested. The first attestation a store ever
+  receives, once its position passed the checks, commits the store's attestation
+  record in its own chain transaction before the attestation is applied: the
+  ledger position's sequence number, the enrolment active then and the sequence
+  number of that transaction. When the commit fails, the attestation fails and no
+  session exists. When the store has not established continuity yet (an enrolled
+  store restarted before its first attestation ever), the agent first runs the
+  start-up steps that precede any other commit (continuity, the clock floor, the
+  enrolment from the certificate) and then commits the record; recovery still waits
+  for the attestation to be applied. Later attestations, re-attestations and
+  attestations after a restart commit nothing. The record is never cleared or
+  rewritten, survives restarts, and is reported in every host ledger state of
+  version 2 (`store_ever_attested` and fields 12 to 14). A store rolled back below
+  the record's transaction is quarantined `rolled_back` at open by the anchor log;
+  a joint restore of the store and its anchor log is not detectable on the host,
+  but is by a manager whose ledger is at or above the record's sequence number
+  (the attestation then fails `ledger_ahead` or `ledger_mismatch`). A store attested
+  by an agent from before this record reports `false` until its next attestation.
 - Operation grants must be grant version 2; version 1 is refused.
 - Every operation accepted while attested is answered with a host-signed receipt
   (in the `CreateResponse` or `TaskResponse`) naming the operation, the store, the
