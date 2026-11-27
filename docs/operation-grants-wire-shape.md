@@ -483,16 +483,18 @@ records every operation a host's agent accepted, from a host-signed receipt, bef
 the agent starts it, and attests the agent's operation store against that record after
 each agent start.
 
-**Partly implemented, development builds only, not wired to the manager.** The
+**Implemented in development builds only, except retire-if-unknown.** The
 development-build agent implements attestation, receipts and ledger marks (see
-[Agent attestation](#agent-attestation-development-builds) below); retire-if-unknown is
-not implemented by anyone yet. The manager sends no
-`ledger_version`, signs no grant at version 2, calls no `HostAuthority` method and
-ignores `operation_receipt`; its host answer verifier still refuses an answer that
-sets a ledger field of `AnswerContext`, `OperationAnswer` or `HostAnswer`, or carries
-one of the three ledger body types, and the grant verifier refuses a version 1
-`GrantBody` that sets field 32, 33 or 34. The comments in the `.proto` files are the
-normative description of every field.
+[Agent attestation](#agent-attestation-development-builds) below), and a
+development-build manager with host ledger keys drives them (see
+[Manager driver](#manager-driver-development-builds) below); retire-if-unknown is not
+implemented by anyone yet. A manager without host ledger keys, and every release
+build, behaves as before: it sends no `ledger_version`, signs no grant at version 2,
+calls no `HostAuthority` method, ignores `operation_receipt`, and its host answer
+verifier refuses an answer to a request without a `ledger_version` that sets a ledger
+field of `AnswerContext`, `OperationAnswer` or `HostAnswer`. The grant verifier refuses
+a version 1 `GrantBody` that sets field 32, 33 or 34. The comments in the `.proto`
+files are the normative description of every field.
 
 Fields added to existing messages:
 
@@ -525,10 +527,12 @@ New messages and enums, in
 | `AuthorityOutcome` | enum | `APPLIED`, `ALREADY_APPLIED`, `NOT_APPLICABLE`, `REFUSED`, `QUARANTINED` (values 0–5, 0 is `UNSPECIFIED`). |
 | `AuthorityAnswer` | message | A host's answer to an authority grant (fields 1–8). |
 
-Reserved `body_type` values (outside the closed set above; a verifier refuses them):
-`provider.v1.OperationReceipt` (only in `operation_receipt`),
-`provider.v1.ChallengeAnswer` (only in `ChallengeResponse.host_answer`) and
-`provider.v1.AuthorityAnswer` (only in `AuthorityResponse.host_answer`).
+Ledger `body_type` values: `provider.v1.ChallengeAnswer` (only in
+`ChallengeResponse.host_answer`) and `provider.v1.AuthorityAnswer` (only in
+`AuthorityResponse.host_answer`) are verified as answers to the request that asked for
+them, and only then; `provider.v1.OperationReceipt` (only in `operation_receipt`) is
+never an answer to a request (it carries no nonce) and is verified only as a receipt,
+against the attempt and the grant of the call it came back from.
 
 A new service, `HostAuthority`, in its own file
 [`authority.proto`](../proto/provider/v1/authority.proto): `Challenge`
@@ -547,21 +551,22 @@ The Kubernetes API reserves the matching status fields, all optional: the `Accep
 phase and the `receipt` and `ledgerGeneration` fields of
 `VirtualMachine.status.operationAttempts[]` (see
 [Attempt markers](operation-grants-manager.md#attempt-markers-statusoperationattempts)),
-not populated yet, and the display mirrors `Host.status.agentLedger` and
-`Host.status.agentLastStore` (see [Host fields](host-agent-enrolment.md#host-fields)),
-which development builds write. The manager's durable ledger state is described in
-[Host ledger state](host-agent-enrolment.md#host-ledger-state); the manager does not
-yet drive it or sign grant version 2.
+which a development-build manager with a host ledger writes, and the display mirrors
+`Host.status.agentLedger` and `Host.status.agentLastStore` (see
+[Host fields](host-agent-enrolment.md#host-fields)), which development builds write.
+The manager's durable ledger state is described in
+[Host ledger state](host-agent-enrolment.md#host-ledger-state).
 
 ### Agent attestation (development builds)
 
 A development-build agent reports agent API version 6, grant versions `[2]` and host
 ledger version 2 (version 2 adds the store's attestation record to `HostLedgerState`;
 the agent API version is unchanged because the field is additive and versioned by
-`HostLedgerState.version`). It is
-not wired to any manager: the current manager signs only grant version 1, so it signs
-nothing for such an agent, and the agent refuses every operation until it is attested
-and runs none until a ledger mark covers its acceptance. A release-build agent reports
+`HostLedgerState.version`). Only a development-build manager with host ledger keys
+signs for it (see [Manager driver](#manager-driver-development-builds)); any other
+manager signs only grant version 1, so it signs nothing for such an agent. The agent
+refuses every operation until it is attested and runs none until a ledger mark covers
+its acceptance. A release-build agent reports
 the same versions, serves no `HostAuthority` method, runs no operation, and reports
 itself awaiting attestation in every ledger state. Agent API version 5 was the agent
 with attestation but without receipts, ledger marks or the ledger gate.
@@ -695,11 +700,93 @@ with attestation but without receipts, ledger marks or the ledger gate.
   transaction: the anchor log quarantines a store file restored alone
   (`rolled_back`), and a manager ledger at or above `store_attested_record_seq`
   catches a joint restore of the store and its anchor log. A store attested by an
-  agent from before the record reports `false` until its next attestation. No
-  manager reads the record yet.
+  agent from before the record reports `false` until its next attestation. A
+  development-build manager starts a host ledger only for a store whose record is
+  reported and says it was never attested; a state of version 1 (an agent that does
+  not report the record) is treated as unknown, never as "never attested", and holds
+  the host until the agent reports it.
 - **Retention.** No checkpoint prunes a chain entry at or above the ledger mark, so
   the head at every position since the mark stays on the store; a ledger mark raises
   the floor with the mark.
+
+### Manager driver (development builds)
+
+A development-build manager started with host ledger keys drives the protocol for
+every host whose last verified host answer came from an agent of API version 6 or
+later. Nothing changes for other hosts, for a manager without host ledger keys, or for
+a release build.
+
+- **Ledger version.** Its `GetHostInfo` and `TaskStatus` requests to such a host carry
+  `ledger_version` 2. The answer must echo it in `AnswerContext.ledger_version_echo`
+  (a request stripped or altered in transit is "no answer"), a host answer must carry
+  `HostAnswer.ledger`, and every ledger field must follow the rules the agent applies
+  before signing. `ChallengeAnswer` and `AuthorityAnswer` are verified against the
+  purpose, grant kind and grant digest of the request that asked for them.
+- **Starting a ledger.** A host ledger is started only from ledger evidence: a value
+  only the answer verifier builds, from a verified host answer with its ledger state
+  (or a challenge answer). It carries the store, the request nonce, the Provider,
+  host and enrolment the answer was bound to, and when it verified. The ledger accepts
+  only the latest evidence it observed for the host, of the store being started and
+  the host's current enrolment, younger than the host answer lifetime; evidence of
+  another store, of an earlier request or of another enrolment is refused before
+  anything is read or written. Before such a request the manager persists the host's
+  latest verified store position, so the continuity position the request names is the
+  one a ledger may start from once the host confirms it.
+- **Attestation.** An agent awaiting attestation is asked for an `ATTEST` challenge;
+  the verified challenge's nonce is begun as a pending session in the ledger, and an
+  attestation grant is signed only from the ledger record that write returned, after
+  the ledger object is read again and found unchanged: no ledger object for the store,
+  no attestation grant. An agent attested in a session the ledger does not hold (a
+  delayed attestation, an agent restart, a restored ledger) is asked for a `REATTEST`
+  challenge at most once a minute; the ledger's current session stays current until
+  the new one is adopted. Any verified, nonce-bound answer (host, operation, challenge
+  or authority answer, never a receipt) that names a pending session adopts it. A
+  challenge the agent does not issue is asked again later; an agent that reports its
+  store quarantined holds the host.
+- **Grant version 2.** Such a host gets operation grants at version 2 only, and only
+  while the manager saw its last verified host answer `READY` in the ledger's adopted
+  session of the store that answer named, with nothing holding the host; otherwise
+  nothing is sent to it. Version 1 is never signed for an agent that implements version
+  2. Older agents keep version 1, as before.
+- **Receipts.** A receipt in the reply to a version 2 send is verified against the
+  host's trust, the attempt's authenticated intent (op_id, kind, attempt, VM, binding,
+  intent digest) and the digest of the grant of that very call, then against the
+  ledger: its store must be the ledger's and its session the ledger's adopted one. A
+  verified receipt moves the attempt to `Accepted` with the receipt recorded on the
+  marker, bound to the attempt by a tag under the intent key, raises the ledger, and
+  then raises the agent's ledger mark. An operation answer that shows the operation
+  accepted with its acceptance position, in the adopted session, counts as its receipt
+  (a lost reply). A receipt that does not verify is "no receipt": the attempt stays
+  `Sent`, and the next raise from a host answer covers the operation.
+- **Ledger marks.** A ledger mark grant is signed only from the record of the
+  manager's own last successful write of the store's ledger, while nobody wrote it
+  since, in an adopted session. The ledger is raised from the agent's verified chain
+  position at most once every 30 seconds per host, and the mark follows it whenever
+  the agent's mark is behind. The store's attestation record the agent signs
+  (`store_attested_record_seq`) is in the agent's chain above the position its first
+  attestation named, so it reaches the manager's ledger only with the first raise
+  after that attestation.
+- **Re-sends.** A re-send of an attempt whose recorded receipt counts as ledgered sets
+  `expect_known`, so an agent that holds no record of the operation refuses it instead
+  of running it as new. A receipt counts as ledgered when its session is the ledger's
+  current or a pending one and its position is at or below the ledger's, or its session
+  is an earlier one and its position is at or below where that session was replaced,
+  or its session or store is one the ledger does not know (the cautious direction); a
+  receipt whose tag fails, or of an attempt not continuous with the ledger, counts too.
+- **Intent version 2.** An attempt prepared for such a host records, in its
+  operation-intent Secret, the ledger store and generation it was prepared under, and
+  its tag covers them under a second intent message version. Continuity with the
+  current ledger is decided on those authenticated values only (store, generation, and
+  the attempt's enrolment among the generation's enrolments), never on a marker field
+  or a timestamp; an intent of the first version counts as generation 0 and is never
+  continuous.
+- **Traffic.** Attestation, heartbeat raises and their marks draw from one token bucket
+  (50 per second, burst 100), receipt raises and their marks from another (200 per
+  second, burst 400), so neither can starve the other.
+- **Upgrade pre-flight.** A stopping manager persists every host's latest verified
+  store position (bounded to 10 seconds), so the next manager starts each host ledger
+  from a fresher position and the agent's first attestation needs a checkpoint less
+  often.
 
 ## Compatibility
 

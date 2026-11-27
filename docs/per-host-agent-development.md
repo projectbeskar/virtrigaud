@@ -423,10 +423,22 @@ reproduces the published test vector.
 
 ## Host ledger attestation
 
-Development builds only, and not wired to any manager yet: no manager attests an
-agent, so a development-build agent started against the current manager stays
-awaiting attestation and runs no operation (its VMs keep running). The wire rules are
-in [`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#agent-attestation-development-builds).
+Development builds only. A development-build manager started with host ledger keys
+(`--dev-host-ledger-key-dir`) attests the agent through the clustered Cloud Hypervisor
+Provider's host authority relay, signs its operations at grant version 2 once it is
+attested, and raises its ledger mark over every operation it accepted (see
+[Manager driver](operation-grants-wire-shape.md#manager-driver-development-builds)).
+Against any other manager a development-build agent stays awaiting attestation and runs
+no operation (its VMs keep running). The wire rules are in
+[`operation-grants-wire-shape.md`](operation-grants-wire-shape.md#agent-attestation-development-builds).
+
+Order an upgrade as Providers, then agents, then the manager. Just before replacing the
+manager, let the old one stop gracefully: a manager with host ledger keys persists every
+host's latest verified store position when it stops, so the new manager starts each
+host ledger from a fresh position. A store attested by an agent from before the
+store's attestation record reports it as never attested only from its next
+attestation on; until the agent reports the record the manager starts no ledger for
+it and holds the host.
 
 - After every start the agent awaits an attestation: a `Challenge` (purpose `ATTEST`)
   gives a single-use nonce valid for 300 seconds, and an `Attest` with a
