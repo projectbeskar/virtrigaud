@@ -165,6 +165,8 @@ func decideRetire(e retireEvidence) (retireVerdict, string) {
 		return retireAskAgain, "the attempt is not in flight"
 	case a.Receipt != nil && !e.receiptBound:
 		return retireHoldReceipt, "the recorded receipt does not verify"
+	case !e.frozen && (len(e.prepared.RequestBytes) == 0 || len(e.prepared.DigestSalt) == 0):
+		return retireAskAgain, "the attempt's intent does not carry its request (its digest cannot be named)"
 	case op == nil || !v.Ready() || op.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_NO_RECORD:
 		return retireAskAgain, "no verified NO_RECORD from a READY agent"
 	case !bytes.Equal(op.GetOpId(), e.prepared.Identity.OpID) || !bytes.Equal(op.GetOpEnrolmentId(), e.prepared.Identity.EnrolmentID):
@@ -251,7 +253,8 @@ var errNotRetirable = errors.New("the attempt is not continuous with an Attested
 func (h *HostAnswers) sendRetire(ctx context.Context, auth contracts.HostAuthorityCaller, rec *HostLedgerRecord,
 	p contracts.PreparedOperation, session [16]byte) (contracts.AuthorityRead, error) {
 	if h.Ledger == nil || rec == nil || rec.Archived || rec.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested ||
-		rec.AttestationID != session || session == ([16]byte{}) || !ledgerContinuous(p, rec) {
+		rec.AttestationID != session || session == ([16]byte{}) || !ledgerContinuous(p, rec) || len(p.RequestBytes) == 0 ||
+		len(p.DigestSalt) == 0 {
 		return contracts.AuthorityRead{}, errNotRetirable
 	}
 	wire, ok := wireKinds[p.Kind]
@@ -297,10 +300,11 @@ func (r *VirtualMachineReconciler) retireAnswer(ctx context.Context, vm *infravi
 		if va.Position.StoreID != hr.snapshot.StoreID || va.Position.Seq < hr.snapshot.Seq {
 			return decided(r.noSignedAnswer(ctx, vm, a, "the host's answer to its retirement is behind its store's known position"))
 		}
-		if _, err := h.Ledger.Raise(ctx, ia.providerCR, a.HostID, va.Position.StoreID, []HostLedgerRaise{{Session: session,
-			Position: HostLedgerPosition{Seq: va.Position.Seq, Head: va.Position.Head}}}); err != nil {
-			logger.Info("The host's ledger was not raised over the retirement; it is asked again", "error", err.Error())
-			return decided(r.noSignedAnswer(ctx, vm, a, "the host's ledger was not raised over its retirement"))
+		raised, err := h.Ledger.Raise(ctx, ia.providerCR, a.HostID, va.Position.StoreID, []HostLedgerRaise{{Session: session,
+			Position: HostLedgerPosition{Seq: va.Position.Seq, Head: va.Position.Head}}})
+		if err != nil || raised == nil || raised.AttestationID != session || raised.Position.Seq < va.Position.Seq {
+			logger.Info("The host's ledger does not cover the retirement; it is asked again", "error", errString(err))
+			return decided(r.noSignedAnswer(ctx, vm, a, "the host's ledger does not cover its retirement yet"))
 		}
 		return r.closeRetired(ctx, vm, ia, a, read.SignedRead, va, retiredNeverReceived, "retired by the host it was never delivered to")
 	case providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE:

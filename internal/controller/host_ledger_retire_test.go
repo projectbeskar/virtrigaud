@@ -42,8 +42,9 @@ var (
 // retireFixture is evidence on which every retirement precondition holds.
 func retireFixture() retireEvidence {
 	return retireEvidence{
-		attempt:  &infravirtrigaudiov1beta1.OperationAttempt{Phase: infravirtrigaudiov1beta1.OperationAttemptPhaseSent},
-		prepared: contracts.PreparedOperation{Identity: contracts.OperationAttemptIdentity{OpID: retireOp, EnrolmentID: retireEnrolment}, LedgerStoreID: retireStore[:], LedgerGeneration: 7},
+		attempt: &infravirtrigaudiov1beta1.OperationAttempt{Phase: infravirtrigaudiov1beta1.OperationAttemptPhaseSent},
+		prepared: contracts.PreparedOperation{Identity: contracts.OperationAttemptIdentity{OpID: retireOp, EnrolmentID: retireEnrolment},
+			LedgerStoreID: retireStore[:], LedgerGeneration: 7, RequestBytes: []byte("request"), DigestSalt: bytes.Repeat([]byte{5}, 32)},
 		answer: hostidentity.VerifiedAnswer{
 			Context: &providerv1.AnswerContext{AgentState: providerv1.AgentState_AGENT_STATE_READY, EnrolmentId: retireEnrolment,
 				AttestationId: retireSession[:]},
@@ -83,12 +84,13 @@ func TestDecideRetire_EveryPrecondition(t *testing.T) {
 		edit func(e *retireEvidence)
 		want retireVerdict
 	}{
-		"attempt terminal":      {func(e *retireEvidence) { e.attempt.Phase = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal }, retireAskAgain},
-		"no attempt":            {func(e *retireEvidence) { e.attempt = nil }, retireAskAgain},
-		"receipt tag fails":     {func(e *retireEvidence) { e.attempt.Receipt = receiptAt(retireSession, 200) }, retireHoldReceipt},
-		"receipt ledgered":      {func(e *retireEvidence) { e.attempt.Receipt, e.receiptBound = receiptAt(retireSession, 90), true }, retireResend},
-		"older session receipt": {func(e *retireEvidence) { e.attempt.Receipt, e.receiptBound = receiptAt([16]byte{9}, 1), true }, retireResend},
-		"fenced receipt below":  {func(e *retireEvidence) { e.attempt.Receipt, e.receiptBound = receiptAt([16]byte{0x01}, 40), true }, retireResend},
+		"attempt terminal":       {func(e *retireEvidence) { e.attempt.Phase = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal }, retireAskAgain},
+		"no attempt":             {func(e *retireEvidence) { e.attempt = nil }, retireAskAgain},
+		"intent without request": {func(e *retireEvidence) { e.prepared.RequestBytes = nil }, retireAskAgain},
+		"receipt tag fails":      {func(e *retireEvidence) { e.attempt.Receipt = receiptAt(retireSession, 200) }, retireHoldReceipt},
+		"receipt ledgered":       {func(e *retireEvidence) { e.attempt.Receipt, e.receiptBound = receiptAt(retireSession, 90), true }, retireResend},
+		"older session receipt":  {func(e *retireEvidence) { e.attempt.Receipt, e.receiptBound = receiptAt([16]byte{9}, 1), true }, retireResend},
+		"fenced receipt below":   {func(e *retireEvidence) { e.attempt.Receipt, e.receiptBound = receiptAt([16]byte{0x01}, 40), true }, retireResend},
 		"agent not READY": {func(e *retireEvidence) {
 			e.answer.Context.AgentState = providerv1.AgentState_AGENT_STATE_UNATTESTED
 		}, retireAskAgain},
@@ -187,6 +189,7 @@ func TestSendRetire_OnlyContinuous(t *testing.T) {
 		"another session":        func(_ *retireEvidence, s *[16]byte) { *s = [16]byte{7} },
 		"no session":             func(e *retireEvidence, s *[16]byte) { *s, e.ledger.AttestationID = [16]byte{}, [16]byte{} },
 		"kind without wire form": func(e *retireEvidence, _ *[16]byte) { e.prepared.Kind = "Nope" },
+		"no request bytes":       func(e *retireEvidence, _ *[16]byte) { e.prepared.RequestBytes = nil },
 	}
 	for name, edit := range cases {
 		t.Run(name, func(t *testing.T) {
