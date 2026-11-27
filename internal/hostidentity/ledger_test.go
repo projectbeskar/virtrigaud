@@ -107,6 +107,78 @@ func TestVerifyAnswer_LedgerHostAnswerRules(t *testing.T) {
 	}
 }
 
+// A store the host ledger protocol quarantined names its own reason only in
+// an answer to a ledger-aware request: there it verifies (so the manager
+// reaches its quarantine hold), anywhere else it is refused.
+func TestVerifyAnswer_LedgerQuarantineReason(t *testing.T) {
+	f := newAnswerFixture(t)
+	for _, reason := range hostidentity.LedgerQuarantineReasons {
+		t.Run(reason, func(t *testing.T) {
+			a := f.ledgerHostAnswer()
+			a.Context.AgentState, a.Context.StateReason, a.Context.AttestationId = providerv1.AgentState_AGENT_STATE_QUARANTINED, reason, nil
+			a.Ledger.State, a.Ledger.AttestationId, a.Ledger.Mark = providerv1.LedgerSessionState_LEDGER_SESSION_STATE_AWAITING_ATTESTATION, nil, nil
+			if _, err := hostidentity.VerifyAnswer(f.signBody(t, a), f.ledgerExp(hostidentity.BodyTypeHostAnswer)); err != nil {
+				t.Fatalf("a ledger-aware answer with %s: %v", reason, err)
+			}
+			c := f.ctx()
+			c.AgentState, c.StateReason = providerv1.AgentState_AGENT_STATE_QUARANTINED, reason
+			if _, err := hostidentity.VerifyAnswer(f.signBody(t, &providerv1.AuthorityAnswer{Context: c,
+				GrantKind: int32(providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN), GrantDigest: bytes.Repeat([]byte{4}, 32),
+				Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_QUARANTINED}), retireExp(f)); err != nil {
+				t.Fatalf("an authority answer with %s: %v", reason, err)
+			}
+			h := f.hostAnswer()
+			h.Context.AgentState, h.Context.StateReason = providerv1.AgentState_AGENT_STATE_QUARANTINED, reason
+			if _, err := hostidentity.VerifyAnswer(f.signBody(t, h), f.exp(hostidentity.BodyTypeHostAnswer)); !errors.Is(err, hostidentity.ErrAnswer) {
+				t.Fatalf("an answer to a request that did not ask carries %s: %v", reason, err)
+			}
+		})
+	}
+}
+
+func retireExp(f *answerFixture) hostidentity.AnswerExpectation {
+	exp := f.exp(hostidentity.BodyTypeAuthorityAnswer)
+	exp.GrantKind, exp.GrantDigest = providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN, bytes.Repeat([]byte{4}, 32)
+	return exp
+}
+
+// A retirement answer names the operation and its state; an applied one
+// says RETIRED.
+func TestVerifyAnswer_RetireAnswer(t *testing.T) {
+	f := newAnswerFixture(t)
+	op := bytes.Repeat([]byte{7}, 16)
+	mk := func() *providerv1.AuthorityAnswer {
+		c := f.ctx()
+		c.AttestationId = testSession
+		return &providerv1.AuthorityAnswer{Context: c, GrantKind: int32(providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN),
+			GrantDigest: bytes.Repeat([]byte{4}, 32), Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, OpId: op,
+			OpState: providerv1.OperationRecordState_OPERATION_RECORD_STATE_RETIRED}
+	}
+	if _, err := hostidentity.VerifyAnswer(f.signBody(t, mk()), retireExp(f)); err != nil {
+		t.Fatalf("VerifyAnswer = %v", err)
+	}
+	cases := map[string]func(a *providerv1.AuthorityAnswer){
+		"applied, not retired": func(a *providerv1.AuthorityAnswer) {
+			a.OpState = providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED
+		},
+		"applied, no op":  func(a *providerv1.AuthorityAnswer) { a.OpId = nil },
+		"short op":        func(a *providerv1.AuthorityAnswer) { a.OpId = []byte{1} },
+		"mark in retire":  func(a *providerv1.AuthorityAnswer) { a.Mark = &providerv1.LedgerPosition{StoreId: testStore, Seq: 1, Head: testHead} },
+		"not applicable, no state": func(a *providerv1.AuthorityAnswer) {
+			a.Outcome, a.OpState = providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE, 0
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			a := mk()
+			edit(a)
+			if _, err := hostidentity.VerifyAnswer(f.signBody(t, a), retireExp(f)); !errors.Is(err, hostidentity.ErrAnswer) {
+				t.Fatalf("VerifyAnswer = %v, want ErrAnswer", err)
+			}
+		})
+	}
+}
+
 func TestVerifyAnswer_LedgerOperationAnswer(t *testing.T) {
 	f := newAnswerFixture(t)
 	a := f.opAnswer()

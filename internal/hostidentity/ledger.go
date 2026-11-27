@@ -252,11 +252,26 @@ func checkAuthorityAnswer(a *providerv1.AuthorityAnswer, exp AnswerExpectation, 
 		return refuse("an operation in an authority answer that is not a retirement")
 	case kind == providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN && a.GetMark() != nil:
 		return refuse("a mark in a retirement answer")
+	case kind == providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN && len(a.GetOpId()) != 0 && len(a.GetOpId()) != IDLen:
+		return refuse("the retirement answer's op_id is not %d bytes", IDLen)
+	case kind == providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN && retireApplied(a.GetOutcome()) &&
+		(len(a.GetOpId()) != IDLen || a.GetOpState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_RETIRED):
+		return refuse("an applied retirement answer names no operation, or a state other than RETIRED")
+	case kind == providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN &&
+		a.GetOutcome() == providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE &&
+		(len(a.GetOpId()) != IDLen || a.GetOpState() == providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNSPECIFIED):
+		return refuse("a retirement answer that is not applicable names no operation or no state")
 	}
 	if a.GetMark() != nil {
 		return checkLedgerPosition(a.GetMark(), pos)
 	}
 	return nil
+}
+
+// retireApplied reports whether o is an outcome by which a retirement grant
+// took effect (APPLIED, or ALREADY_APPLIED by an earlier delivery).
+func retireApplied(o providerv1.AuthorityOutcome) bool {
+	return o == providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED || o == providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_ALREADY_APPLIED
 }
 
 // ReceiptExpectation is what the manager expects of one operation receipt:

@@ -60,12 +60,19 @@ const (
 	// position and no matching checkpoint, so the position cannot be checked
 	// against its chain.
 	LostLedgerUnverifiable LostReason = "ledger_unverifiable"
+	// LostUnknownOpTrace: a retire-if-unknown found, among the objects the
+	// host's executor owns, a trace of an operation the store has no record
+	// of: the store lost a record whose operation left an effect.
+	LostUnknownOpTrace LostReason = "unknown_op_trace"
 )
 
-// LedgerReasons are the lost reasons an attestation against the manager's
-// ledger records. They reach a manager only in answers to requests that ask
-// for the ledger protocol; any other answer reports them as LostRolledBack.
-var LedgerReasons = []LostReason{LostLedgerStoreMismatch, LostLedgerAhead, LostLedgerMismatch, LostLedgerUnverifiable}
+// LedgerReasons are the lost reasons the host ledger protocol records (an
+// attestation against the manager's ledger, a ledger mark, or a
+// retire-if-unknown that found a trace of an unknown operation). They reach
+// a manager only in answers to requests that ask for the ledger protocol;
+// any other answer reports them as LostRolledBack.
+var LedgerReasons = []LostReason{LostLedgerStoreMismatch, LostLedgerAhead, LostLedgerMismatch, LostLedgerUnverifiable,
+	LostUnknownOpTrace}
 
 // IsLedgerReason reports whether r is one of LedgerReasons.
 func IsLedgerReason(r LostReason) bool {
@@ -92,6 +99,8 @@ var reasonCodes = map[LostReason]uint16{
 	LostLedgerAhead:         9,
 	LostLedgerMismatch:      10,
 	LostLedgerUnverifiable:  11,
+	// Code 12: a retire-if-unknown found a trace of an unknown operation.
+	LostUnknownOpTrace: 12,
 }
 
 // code returns the reason's anchor-record code (0 for none).

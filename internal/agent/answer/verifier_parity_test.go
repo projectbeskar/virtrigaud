@@ -20,6 +20,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity"
 )
 
@@ -34,6 +35,21 @@ func TestQuarantineReasonsMatchVerifier(t *testing.T) {
 	for _, r := range lostReasons {
 		if !slices.Contains(hostidentity.QuarantineReasons, string(r)) {
 			t.Fatalf("the verifier refuses quarantine reason %q", r)
+		}
+	}
+}
+
+// TestLedgerQuarantineReasonsMatchVerifier: every ledger loss reason the
+// agent may sign to a ledger-aware request is one the manager's verifier
+// accepts there, and conversely, so a host the ledger protocol quarantined
+// reaches the manager's quarantine hold instead of reading as "no answer".
+func TestLedgerQuarantineReasonsMatchVerifier(t *testing.T) {
+	if len(journal.LedgerReasons) != len(hostidentity.LedgerQuarantineReasons) {
+		t.Fatalf("agent reasons %v, verifier reasons %v", journal.LedgerReasons, hostidentity.LedgerQuarantineReasons)
+	}
+	for _, r := range journal.LedgerReasons {
+		if !slices.Contains(hostidentity.LedgerQuarantineReasons, string(r)) {
+			t.Fatalf("the verifier refuses ledger quarantine reason %q", r)
 		}
 	}
 }
