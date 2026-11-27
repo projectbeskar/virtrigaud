@@ -925,7 +925,8 @@ spec:
                         LedgerGeneration is, for display only, the generation of the host's
                         ledger the attempt was prepared under; the value the operator acts on
                         is the one covered by the attempt's authenticated intent, never this
-                        field. Reserved for development builds: not populated yet.
+                        field. Written only by development-build managers with a host
+                        ledger.
                       format: int64
                       minimum: 1
                       type: integer
@@ -964,9 +965,9 @@ spec:
                       description: |-
                         Receipt is the host agent's receipt for the attempt: where in its
                         operation store the agent accepted it. A mirror of a signed receipt
-                        the operator verified, bound to the attempt by ReceiptTag. Reserved
-                        for development builds: not populated yet, and never read to decide
-                        anything.
+                        the operator verified, bound to the attempt by ReceiptTag. Written
+                        only by development-build managers with a host ledger; it can only
+                        make a re-send of the attempt more cautious, never let one through.
                       properties:
                         attestationID:
                           description: |-

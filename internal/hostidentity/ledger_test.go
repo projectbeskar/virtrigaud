@@ -147,10 +147,14 @@ func TestVerifyAnswer_ChallengeAnswer(t *testing.T) {
 		t.Fatal("challenge answer not decoded")
 	}
 	cases := map[string]func(a *providerv1.ChallengeAnswer){
-		"other purpose":     func(a *providerv1.ChallengeAnswer) { a.Purpose = providerv1.ChallengePurpose_CHALLENGE_PURPOSE_REATTEST },
-		"nonce and reason":  func(a *providerv1.ChallengeAnswer) { a.NotIssuedReason = "quarantined" },
-		"neither":           func(a *providerv1.ChallengeAnswer) { a.ChallengeNonce, a.ValidForSeconds = nil, 0 },
-		"unknown reason":    func(a *providerv1.ChallengeAnswer) { a.ChallengeNonce, a.ValidForSeconds, a.NotIssuedReason = nil, 0, "whatever" },
+		"other purpose": func(a *providerv1.ChallengeAnswer) {
+			a.Purpose = providerv1.ChallengePurpose_CHALLENGE_PURPOSE_REATTEST
+		},
+		"nonce and reason": func(a *providerv1.ChallengeAnswer) { a.NotIssuedReason = "quarantined" },
+		"neither":          func(a *providerv1.ChallengeAnswer) { a.ChallengeNonce, a.ValidForSeconds = nil, 0 },
+		"unknown reason": func(a *providerv1.ChallengeAnswer) {
+			a.ChallengeNonce, a.ValidForSeconds, a.NotIssuedReason = nil, 0, "whatever"
+		},
 		"validity too long": func(a *providerv1.ChallengeAnswer) { a.ValidForSeconds = 301 },
 		"no ledger":         func(a *providerv1.ChallengeAnswer) { a.Ledger = nil },
 		"echo":              func(a *providerv1.ChallengeAnswer) { a.Context.LedgerVersionEcho = 2 },
