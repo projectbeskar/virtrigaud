@@ -675,7 +675,8 @@ const (
 // manager. The authoritative ledger is kept elsewhere by the manager; this
 // mirror carries only a store id prefix and counters, never the full store
 // id, a chain head or a session id, and is never read to decide anything.
-// Reserved for development builds: not populated yet.
+// Development builds only: written, at most every 30 seconds, by a manager
+// with host ledger keys once it holds a ledger for the host's store.
 type HostAgentLedgerStatus struct {
 	// StoreIDPrefix is the first 8 lowercase hexadecimal characters of the
 	// store id, for telling stores apart.
@@ -717,8 +718,8 @@ type HostAgentLedgerStatus struct {
 // HostAgentLastStoreStatus mirrors, for display, the last position of a
 // host's agent operation store that the manager verified in a signed answer.
 // It carries only a store id prefix and counters, never the full store id
-// or a chain head, and is never read to decide anything. Reserved for
-// development builds: not populated yet.
+// or a chain head, and is never read to decide anything. Development builds
+// only: written at most every 30 seconds after a verified heartbeat answer.
 type HostAgentLastStoreStatus struct {
 	// StoreIDPrefix is the first 8 lowercase hexadecimal characters of the
 	// store id.
@@ -810,15 +811,16 @@ type HostStatus struct {
 
 	// AgentLedger is a display mirror of the manager's ledger of the host's
 	// agent operation store, for operators. An output only: nothing reads it
-	// back to decide. Reserved for development builds: not populated yet.
+	// back to decide. Development builds only, with host ledger keys; not
+	// set until the manager holds a ledger for the host's store.
 	// +optional
 	AgentLedger *HostAgentLedgerStatus `json:"agentLedger,omitempty"`
 
 	// AgentLastStore is a display mirror of the last store position the
 	// manager verified in a signed answer of the host's agent, for
 	// operators. An output only: nothing reads it back to decide; the
-	// manager keeps the authoritative position in its pins Secret. Reserved
-	// for development builds: not populated yet.
+	// manager keeps the authoritative position in its pins Secret.
+	// Development builds only.
 	// +optional
 	AgentLastStore *HostAgentLastStoreStatus `json:"agentLastStore,omitempty"`
 
