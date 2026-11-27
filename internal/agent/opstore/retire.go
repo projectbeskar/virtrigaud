@@ -148,7 +148,7 @@ func (s *Store) RetireIfUnknown(ctx context.Context, r RetireRequest) (RetireRes
 	s.retirePoint(retirePointLocking)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.retireAllowed(r); err != nil {
+	if err := s.retireAllowed(r); err != nil && !guard.Off(guard.RetireRecheckLocked) {
 		return RetireResult{}, fmt.Errorf("retire: %w", err)
 	}
 	return s.retireLocked(ctx, r)

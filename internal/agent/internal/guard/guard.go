@@ -361,6 +361,9 @@ const (
 	// RetireAttemptMark: a retire-if-unknown raises the attempt mark of the
 	// operation's VM and kind, so attempts keep increasing.
 	RetireAttemptMark Name = "retire-attempt-mark"
+	// RetireRecheckLocked: a retire-if-unknown checks the session and the
+	// store's readiness again under the store lock, after its trace scan.
+	RetireRecheckLocked Name = "retire-recheck-locked"
 )
 
 // All lists every guard, in a fixed order.
@@ -387,5 +390,6 @@ func All() []Name {
 		LedgerMarkNotAhead, LedgerMarkHeadCompare, ExpectKnownRefused, ReceiptOnlyAccepted,
 		AttestRecordFirst, AttestRecordNeverRewritten, AttestRecordReported,
 		RetireTraceScan, RetireRecordLookup, RetireWitnessCheck, RetireSession, RetireEnrolmentActive, RetireAttemptMark,
+		RetireRecheckLocked,
 	}
 }

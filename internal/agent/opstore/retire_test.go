@@ -466,3 +466,26 @@ func TestRetire_KnownOperationIsNotScanned(t *testing.T) {
 		t.Fatalf("replayed retirements scanned again (%d scans)", n)
 	}
 }
+
+// The session is checked again under the store lock: a re-attestation
+// between the scan and the lock makes the retirement stale, and nothing is
+// retired.
+func TestRetire_SessionRecheckedUnderTheLock(t *testing.T) {
+	h, c := gateHarness(t, nil)
+	r := reqP(h, "vm-1", rid(), kCreate, 1)
+	opstore.SetRetireHook(h.s, func(point string) {
+		if point != "locking" {
+			return
+		}
+		res, err := h.s.Attest(t.Context(), opstore.AttestRequest{Session: session(), Ledger: h.s.Position(), Reattest: true})
+		if err != nil || res.Quarantined != "" {
+			t.Errorf("re-attest: %+v %v", res, err)
+		}
+	})
+	if _, err := retire(t, h, c, r); !errors.Is(err, opstore.ErrStaleAttestation) {
+		t.Fatalf("a session replaced before the lock: %v, want ErrStaleAttestation", err)
+	}
+	if h.tombstoned(r) {
+		t.Fatal("a stale retirement committed a tombstone")
+	}
+}
