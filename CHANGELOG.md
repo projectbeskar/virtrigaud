@@ -95,6 +95,31 @@ An independent security review found two high-severity gaps: the tag key was rea
 - [ ] Documentation only
 - Development builds only, and still changes nothing the manager signs. The ledger index format in `store.json` changed (per-store counters), and the `IdentityInUse` reason was replaced by `EnrolmentRefused` and `AgentIdentityDuplicated`; neither was ever in a release. With host ledger keys, the manager now also needs `--dev-host-ledger-key-secret`.
 
+## [2026-11-27 02:30] - The per-host agent records durably that its store was attested and reports it in the signed ledger state (development builds only, not wired to the manager)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/agent/journal/journalpb/journal.proto`, `internal/agent/journal/tx.go`: The store meta has an attestation record: `ever_attested`, the first attestation's ledger sequence number, the enrolment active then, and the chain sequence number of the transaction that wrote it. `Tx.RecordFirstAttestation` writes it once and never clears or rewrites it. A later call writes nothing, so it commits nothing. `Tx.StoreAttestation` reads it.
+- `internal/agent/opstore/attest.go`, `internal/agent/opstore/hostview.go`: The first attestation a store ever receives commits the record before the session exists. The ledger checks are repeated in the same transaction. If the commit fails, the attestation fails and no session is created. A store whose journal has not established continuity returns `ErrContinuityPending` and changes nothing. Re-attestations and attestations after a restart commit nothing. The host view reports the record.
+- `internal/agent/daemon/daemon.go`: On `ErrContinuityPending`, the start-up goroutine prepares the store (continuity, clock floor, enrolment from the certificate) and the attestation is applied again. If preparing fails, the attestation fails.
+- `proto/provider/v1/host_answer.proto`: `HostLedgerState` has `store_ever_attested` (11), `store_first_attested_seq` (12), `store_first_attested_enrolment_id` (13) and `store_attested_record_seq` (14). They are additive and are set exactly when the state's version is 2 or higher.
+- `internal/hostidentity/ledger_attested.go`: `StoreAttestationOf` decodes the record from a verified `HostLedgerState` and checks its field rules. The manager makes no decision on it yet.
+- `internal/agent/internal/guard/guard.go`: Three mutation guards (`attest-record-first`, `attest-record-never-rewritten`, `attest-record-reported`), each killed by a test.
+
+### Changed
+- `internal/agent/answer/answer.go`, `internal/agent/answer/ledger.go`: The agent reports host ledger version 2 and puts the record in every ledger state of version 2 (`ChallengeAnswer.ledger`, and `HostAnswer.ledger` when asked for version 2 or higher). It refuses to sign a state that breaks the decoder's rules. The agent API version stays 6.
+- `docs/operation-grants-wire-shape.md`, `docs/per-host-agent-development.md`: The attestation record, the extra commit at a store's first attestation, and ledger version 2.
+
+### Why
+A manager must be able to tell, from host-signed evidence that someone who can write a Kubernetes Secret cannot erase, whether a store was ever attested against a host ledger. Without this, a store whose manager-side ledger was deleted looks the same as one that never had a ledger. Before, the attestation session lived only in memory, so nothing showed this.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+- Development builds only. Additive on the wire: old managers ignore the new fields, and a version 1 ledger state is unchanged.
+
 ## [2026-11-27 01:00] - The manager keeps a tagged host ledger per agent store, with its index, holds and status mirror (development builds only, not yet driven)
 **Author:** @wrkode (William Rizzo)
 

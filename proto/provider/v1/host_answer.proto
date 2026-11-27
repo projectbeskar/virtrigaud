@@ -703,6 +703,34 @@ message HostLedgerState {
   // parked_request_budget_bytes is the agent's budget for
   // parked_request_bytes; above it new operations are refused.
   uint64 parked_request_budget_bytes = 10;
+
+  // Fields 11 to 14 are the store's attestation record: version 2 content,
+  // set by an agent exactly when version is at least 2 and left unset at
+  // version 1, so a verifier reads store_ever_attested false as "never
+  // attested" only in a state of version 2 or higher. The agent commits the
+  // record to its operation store, in its own chain transaction, before it
+  // reports the store's first attestation applied, and never clears or
+  // rewrites it; a store rolled back below that transaction is detected by
+  // the agent's anchor log and by a ledger at or above
+  // store_attested_record_seq. A store attested before the record existed
+  // reports false until its next attestation (it is never inferred).
+  // Additive.
+
+  // store_ever_attested is true when the host's operation store has ever
+  // been attested against a host ledger.
+  bool store_ever_attested = 11;
+  // store_first_attested_seq is the ledger position sequence number of the
+  // store's first attestation (at least 1); 0 when store_ever_attested is
+  // false.
+  uint64 store_first_attested_seq = 12;
+  // store_first_attested_enrolment_id is the 16-byte enrolment that was
+  // active in the store at its first attestation; empty when
+  // store_ever_attested is false or no enrolment was active.
+  bytes store_first_attested_enrolment_id = 13;
+  // store_attested_record_seq is the chain sequence number of the store
+  // transaction that committed the record (above
+  // store_first_attested_seq); 0 when store_ever_attested is false.
+  uint64 store_attested_record_seq = 14;
 }
 
 // OperationReceipt is a host's signed receipt for one operation it accepted,

@@ -123,8 +123,11 @@ const (
 	// the host ledger protocol's.
 	GrantVersion = grantverify.LedgerGrantVersion
 	// LedgerVersion is the highest host ledger protocol version the agent
-	// implements (HostLedgerState.version).
-	LedgerVersion uint32 = 1
+	// implements (HostLedgerState.version). Version 2 adds the store's
+	// attestation record (fields 11 to 14,
+	// hostidentity.StoreAttestedLedgerVersion), set in every state of
+	// version 2 or higher.
+	LedgerVersion = hostidentity.StoreAttestedLedgerVersion
 )
 
 // ErrNoAnswer is returned when no answer may be made: the request carried no
