@@ -538,6 +538,8 @@ type hostAnswerState struct {
 	// hostSession is the attestation session the last verified host answer
 	// named (zero: none, or the request asked for no ledger state).
 	hostSession [16]byte
+	// provider is the Provider the host was last read for (a copy).
+	provider *infravirtrigaudiov1beta1.Provider
 }
 
 // HostAnswers is the manager's shared state of signed host answers, used by
@@ -633,6 +635,9 @@ func (h *HostAnswers) state(ctx context.Context, provider *infravirtrigaudiov1be
 	if s == nil {
 		s = &hostAnswerState{}
 		h.hosts[k] = s
+	}
+	if s.provider == nil || s.provider.ResourceVersion != provider.ResourceVersion {
+		s.provider = provider.DeepCopy()
 	}
 	if !s.loaded {
 		st, err := h.Trust.LoadStoreState(ctx, provider, hostID)

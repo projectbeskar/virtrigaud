@@ -376,7 +376,7 @@ func main() {
 		os.Exit(1)
 	}
 	if hostLedgerKeys != nil {
-		setupLog.Info("Host ledger keys loaded; nothing signed uses the host ledger yet", "currentKeyID", hostLedgerKeys.CurrentKeyID(),
+		setupLog.Info("Host ledger keys loaded; hosts whose agents speak the host ledger protocol are attested and signed for at grant version 2", "currentKeyID", hostLedgerKeys.CurrentKeyID(),
 			"previousKeyID", hostLedgerKeys.PreviousKeyID())
 	}
 	hostInventoryPolicy, err := controller.ParseHostInventoryPolicy(hostInventoryFlags)
@@ -615,11 +615,21 @@ func main() {
 	hostAnswers := controller.NewHostAnswers(mgr.GetClient(), mgr.GetAPIReader(), hostEnrolment, installID)
 	if hostAnswers != nil {
 		hostAnswers.Inventory = hostInventoryPolicy
-		// The host ledger library (development builds only, with host
-		// ledger keys): its status mirror only; nothing signs from it yet.
+		// The host ledger (development builds only, with host ledger keys):
+		// the attestation driver, grant version 2 for attested hosts,
+		// receipts and ledger marks, and the status mirror.
 		hostLedger := controller.NewHostLedger(mgr.GetClient(), mgr.GetAPIReader(), hostAnswers.Trust, hostLedgerKeys,
 			hostEnrolment, mgr.GetEventRecorderFor("host-ledger"))
 		hostAnswers.AttachLedger(hostLedger)
+		// The upgrade pre-flight: a stopping manager persists the hosts'
+		// latest verified store positions, which its successor starts
+		// their ledgers from.
+		if r := controller.PreflightRunnable(hostAnswers); r != nil {
+			if err := mgr.Add(r); err != nil {
+				setupLog.Error(err, "unable to add the host ledger upgrade pre-flight")
+				os.Exit(1)
+			}
+		}
 		// With a previous tag key, re-tag every ledger object and index
 		// under the current one (leader only), so the previous key can be
 		// removed once the sweep reports none left.
