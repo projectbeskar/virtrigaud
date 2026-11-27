@@ -90,7 +90,7 @@ const (
 	operationBucketBurst = 400
 )
 
-// LedgerReasonAgentQuarantined: the host's agent reports its store
+// LedgerReasonAgentQuarantined is the hold reason while the host's agent reports its store
 // quarantined (an attestation or ledger mark it refused); nothing is signed
 // for the host.
 const LedgerReasonAgentQuarantined = "agent_quarantined"

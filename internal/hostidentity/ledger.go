@@ -446,7 +446,7 @@ func (e LedgerEvidence) BodyType() string { return e.bodyType }
 // Nonce is the request nonce of the answer e came from (a copy).
 func (e LedgerEvidence) Nonce() []byte { return bytes.Clone(e.nonce) }
 
-// ProviderUID, HostID and EnrolmentID are what the answer was bound to.
+// ProviderUID is the Provider the answer was bound to.
 func (e LedgerEvidence) ProviderUID() string { return e.providerUID }
 
 // HostID is the host the answer named.
