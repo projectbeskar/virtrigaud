@@ -46,6 +46,10 @@ func TestNoneRefusesEverything(t *testing.T) {
 		if ok, err := e.Goal(ctx, op, executor.Step{Name: "x", Irreversible: true}); ok || err == nil {
 			t.Errorf("Goal(%v) = %v, %v", kind, ok, err)
 		}
+		// A trace scan never says "no trace": nothing is retired on it.
+		if _, err := e.Traces(ctx, op); err == nil {
+			t.Errorf("Traces(%v) succeeded", kind)
+		}
 	}
 	if err := e.StopAll(ctx); err != nil {
 		t.Fatal(err)
