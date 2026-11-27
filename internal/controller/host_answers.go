@@ -556,9 +556,13 @@ type HostAnswers struct {
 	Inventory *HostInventoryPolicy
 
 	// Ledger is the host ledger of a manager with host ledger keys (nil:
-	// none); set it with AttachLedger. Nothing signed reads it yet; the
+	// none); set it with AttachLedger. The attestation driver runs on it
+	// (host_ledger_driver.go), grant version 2 is signed from it, and the
 	// heartbeat mirrors it into Host.status.agentLedger.
 	Ledger *HostLedger
+	// AttestRetryInterval is the least time between two attestation
+	// challenges of one host awaiting attestation (zero: 2 seconds).
+	AttestRetryInterval time.Duration
 
 	mu    sync.Mutex
 	hosts map[string]*hostAnswerState
@@ -1090,6 +1094,16 @@ type hostRefresh struct {
 // starts or extends the host's inventory backoff.
 func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, reader contracts.HostAnswerReader,
 	hostID string) (hostRefresh, error) {
+	ledgerVersion := h.ledgerAsk(provider, hostID)
+	if ledgerVersion > 0 && !h.ledgerOf(provider, hostID).ready {
+		// The position this request names for continuity is the persisted
+		// one, so that a host ledger can be started from it once the host
+		// confirms it.
+		if err := h.persistPosition(ctx, provider, hostID); err != nil {
+			log.FromContext(ctx).Info("Cannot persist the host's store position before a ledger answer", "host", hostID,
+				"error", err.Error())
+		}
+	}
 	hr, err := h.begin(ctx, provider, hostID)
 	if err != nil {
 		if errors.Is(err, errHostRegressed) {
@@ -1100,7 +1114,7 @@ func (h *HostAnswers) refreshHost(ctx context.Context, provider *infravirtrigaud
 	hr.inventoryVersion = h.inventoryAsk(provider, hostID)
 	hr.renewalVersion = h.renewalAsk(provider, hostID)
 	hr.storeCapacityVersion = hostidentity.StoreCapacityVersion
-	hr.ledgerVersion = h.ledgerAsk(provider, hostID)
+	hr.ledgerVersion = ledgerVersion
 	out := hostRefresh{asked: hr.inventoryVersion, inventoryBackoff: hr.inventoryVersion == 0}
 	info, read, rerr := reader.HostAnswer(ctx, contracts.HostAnswerQuery{HostID: hostID, ContinuitySeq: hr.snapshot.ContinuitySeq(),
 		InventoryVersion: hr.inventoryVersion, RenewalVersion: hr.renewalVersion, StoreCapacityVersion: hr.storeCapacityVersion,

@@ -90,7 +90,7 @@ func (r *VirtualMachineReconciler) grantEnrolment(ctx context.Context, vm *infra
 			fmt.Sprintf("no operation-identity enrolment is configured for host %s; nothing is sent", host), operationHoldRecheckInterval), false
 	}
 	_, err = r.HostAnswers.grantReady(ia.providerCR, host, hr.trust.Enrolment.EnrolmentID)
-	if errors.Is(err, errLedgerNotAttested) && ia.reader != nil {
+	if err != nil && ia.reader != nil && r.HostAnswers.ledgerAsk(ia.providerCR, host) > 0 {
 		// A host the host ledger drives is attested on demand (the Host
 		// heartbeat drives it too), then asked again.
 		r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
@@ -178,8 +178,9 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 		logger.Info("Cannot ask the host about the attempt", "host", host, "error", err.Error())
 		return opPoll{verdict: answerNone}
 	}
+	hr.ledgerVersion = r.HostAnswers.ledgerAsk(ia.providerCR, host)
 	_, read, rerr := ia.reader.OperationAnswer(ctx, contracts.OperationAnswerQuery{OpID: p.Identity.OpID,
-		OpEnrolmentID: p.Identity.EnrolmentID, HostID: host, ContinuitySeq: hr.snapshot.ContinuitySeq()})
+		OpEnrolmentID: p.Identity.EnrolmentID, HostID: host, ContinuitySeq: hr.snapshot.ContinuitySeq(), LedgerVersion: hr.ledgerVersion})
 	if rerr != nil && read.Answer == nil {
 		logger.Info("The host was not asked about the attempt, or did not answer", "host", host, "error", providerFailureDetail(rerr))
 		return opPoll{verdict: answerNone, read: read}
@@ -207,6 +208,18 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 	}
 	if verdict == answerVerified && v.Ready() && showsRecord(v.Operation.GetState()) {
 		r.HostAnswers.setRecordAnchored(ia.providerCR, host, opIDHex, true)
+	}
+	if verdict == answerVerified && hr.ledgerVersion > 0 {
+		// An answer showing the operation accepted, with its acceptance
+		// position, in the ledger's session is as good as its receipt (a
+		// reply that was lost): the ledger and the mark are raised over it.
+		r.HostAnswers.ledgerAccepted(ctx, ia.providerCR, ia.reader, host, v)
+		// An agent that is not attested in the ledger's adopted session (it
+		// restarted) is attested again before anything it answers moves the
+		// attempt.
+		if !r.HostAnswers.inLedgerSession(ia.providerCR, host, v) {
+			r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
+		}
 	}
 	return opPoll{verdict: verdict, v: v, read: read}
 }

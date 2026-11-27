@@ -45,7 +45,7 @@ const markTimeout = 10 * time.Second
 // operation then stays parked until a later mark (settle marks again).
 func (t *Target) markAccepted(host string, receipt *providerv1.SignedBlob) {
 	h, ok := t.byName[host]
-	if !ok {
+	if !ok || t.managerLedger {
 		return
 	}
 	if err := t.mark(h, receipt); err != nil {

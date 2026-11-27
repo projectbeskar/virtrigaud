@@ -59,6 +59,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/operation"
 	"github.com/projectbeskar/virtrigaud/internal/operation/grantverify"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // receiptMessage is the message a marker receipt's tag covers: the
@@ -234,6 +235,23 @@ func (r *VirtualMachineReconciler) signedSend(ctx context.Context, vm *infravirt
 		p.ExpectKnown = r.expectKnown(ctx, vm, ia, a, *p)
 	}
 	return ia.sender.SendOperation(ctx, *p)
+}
+
+// ledgerAccepted raises the host's ledger and mark over an operation a
+// verified operation answer v shows accepted, with its acceptance position,
+// in the ledger's adopted session (an answer equivalent to the operation's
+// receipt).
+func (h *HostAnswers) ledgerAccepted(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, reader contracts.HostAnswerReader,
+	hostID string, v hostidentity.VerifiedAnswer) {
+	op := v.Operation
+	session, ok := sessionOf(v.Context)
+	if h.Ledger == nil || op == nil || !ok || op.GetAcceptedSeq() == 0 || len(op.GetAcceptedHead()) != 32 ||
+		op.GetState() != providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED {
+		return
+	}
+	vr := hostidentity.VerifiedReceipt{StoreID: v.Position.StoreID, Seq: op.GetAcceptedSeq(), AttestationID: session}
+	copy(vr.Head[:], op.GetAcceptedHead())
+	h.ledgerReceipt(ctx, provider, reader, hostID, vr)
 }
 
 // ledgerReceipt raises the host's ledger to a verified receipt and then the

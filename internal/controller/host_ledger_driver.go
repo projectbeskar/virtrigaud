@@ -170,6 +170,15 @@ type hostLedgerState struct {
 	generation uint64
 	attestAt   time.Time
 	reattestAt time.Time
+	driveAt    time.Time
+}
+
+// inLedgerSession reports whether the verified answer v names the session
+// the driver saw the host attested in.
+func (h *HostAnswers) inLedgerSession(provider *infravirtrigaudiov1beta1.Provider, hostID string, v hostidentity.VerifiedAnswer) bool {
+	st := h.ledgerOf(provider, hostID)
+	s, ok := sessionOf(v.Context)
+	return ok && st.ready && st.session == s && v.Ready()
 }
 
 // ledgerAsk returns the ledger version a host answer request of the host
@@ -277,7 +286,7 @@ func (h *HostAnswers) driveLedger(ctx context.Context, provider *infravirtrigaud
 	}
 	switch ev.SessionState() {
 	case providerv1.LedgerSessionState_LEDGER_SESSION_STATE_AWAITING_ATTESTATION:
-		if auth != nil && h.paced(provider, hostID, attestRetryInterval, func(st *hostLedgerState) *time.Time { return &st.attestAt }) {
+		if auth != nil && h.paced(provider, hostID, h.attestRetry(), func(st *hostLedgerState) *time.Time { return &st.attestAt }) {
 			h.attest(ctx, provider, auth, hostID, hr.trust, rec, providerv1.ChallengePurpose_CHALLENGE_PURPOSE_ATTEST)
 		}
 	case providerv1.LedgerSessionState_LEDGER_SESSION_STATE_ATTESTED:
@@ -559,7 +568,7 @@ func (h *HostAnswers) sendVersion(provider *infravirtrigaudiov1beta1.Provider, h
 // no-op without a host ledger or for a host the ledger does not drive.
 func (h *HostAnswers) DriveHostLedger(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, reader contracts.HostAnswerReader,
 	hostID string) {
-	if h.Ledger == nil {
+	if h.Ledger == nil || !h.paced(provider, hostID, h.attestRetry(), func(st *hostLedgerState) *time.Time { return &st.driveAt }) {
 		return
 	}
 	for range 2 {
@@ -575,4 +584,13 @@ func (h *HostAnswers) DriveHostLedger(ctx context.Context, provider *infravirtri
 func (h *HostAnswers) LedgerStamp(provider *infravirtrigaudiov1beta1.Provider, hostID string) (store [16]byte, generation uint64, ok bool) {
 	st := h.ledgerOf(provider, hostID)
 	return st.store, st.generation, st.ready && st.generation > 0
+}
+
+// attestRetry is the least time between two attestation challenges (and
+// on-demand drives) of one host for an agent awaiting attestation.
+func (h *HostAnswers) attestRetry() time.Duration {
+	if h.AttestRetryInterval > 0 {
+		return h.AttestRetryInterval
+	}
+	return attestRetryInterval
 }

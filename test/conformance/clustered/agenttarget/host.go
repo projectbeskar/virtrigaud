@@ -77,6 +77,9 @@ type Host struct {
 	// attest attests the agent once it awaits its attestation, as the
 	// manager will (Target.attestHost).
 	attest func(*Host) error
+	// managerAttests reports that the manager under test attests the agent:
+	// a start ends once the agent awaits its attestation.
+	managerAttests bool
 }
 
 // FakeDir is the host's fake executor directory.
@@ -227,6 +230,18 @@ func (h *Host) Start(extraEnv ...string) error {
 							h.appendLog("attestation by the target failed: " + err.Error())
 						}
 					}()
+				}
+				if h.managerAttests {
+					// The manager under test attests the agent: it is
+					// started once it awaits that attestation.
+					h.mu.Lock()
+					h.state = providerv1.AgentState_AGENT_STATE_UNATTESTED
+					h.mu.Unlock()
+					go func() {
+						for range lines { //nolint:revive // drain the agent's output
+						}
+					}()
+					return nil
 				}
 			case lineStarted:
 				h.mu.Lock()
