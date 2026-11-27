@@ -30,6 +30,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,6 +115,22 @@ func (x *testExec) Inspect(_ context.Context, op executor.Operation, st executor
 		return executor.EvidencePresent, nil
 	}
 	return executor.EvidenceAbsent, nil
+}
+
+// Traces implements executor.TraceScanner: an effect of op is an operation
+// trace; for a Create, a VM of op's UID is a placement trace.
+func (x *testExec) Traces(_ context.Context, op executor.Operation) (executor.Trace, error) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	var t executor.Trace
+	prefix := hex.EncodeToString(op.OpID) + "/"
+	for k, n := range x.effects {
+		if n > 0 && strings.HasPrefix(k, prefix) {
+			t.Op = true
+		}
+	}
+	t.Placement = op.Kind == providerv1.OperationKind_OPERATION_KIND_CREATE && x.vms[op.VMUID]
+	return t, nil
 }
 
 func (x *testExec) Goal(_ context.Context, op executor.Operation, _ executor.Step) (bool, error) {

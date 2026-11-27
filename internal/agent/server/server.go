@@ -337,6 +337,9 @@ type Authority interface {
 	Attest(ctx context.Context, r opstore.AttestRequest) (opstore.AttestResult, error)
 	// LedgerMark applies a verified ledger mark (opstore.Store.LedgerMark).
 	LedgerMark(ctx context.Context, r opstore.LedgerMarkRequest) (opstore.LedgerMarkResult, error)
+	// RetireIfUnknown applies a verified retire-if-unknown
+	// (opstore.Store.RetireIfUnknown).
+	RetireIfUnknown(ctx context.Context, r opstore.RetireRequest) (opstore.RetireResult, error)
 	// Backlog is what the ledger gate holds back (opstore.Store.Backlog).
 	Backlog() opstore.LedgerBacklog
 }

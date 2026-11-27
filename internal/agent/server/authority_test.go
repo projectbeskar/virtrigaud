@@ -75,6 +75,10 @@ func (a *authProxy) LedgerMark(ctx context.Context, r opstore.LedgerMarkRequest)
 	return a.store().LedgerMark(ctx, r)
 }
 
+func (a *authProxy) RetireIfUnknown(ctx context.Context, r opstore.RetireRequest) (opstore.RetireResult, error) {
+	return a.store().RetireIfUnknown(ctx, r)
+}
+
 func (a *authProxy) Backlog() opstore.LedgerBacklog {
 	if st := a.store(); st != nil {
 		return st.Backlog()
@@ -431,8 +435,8 @@ func TestAuthority_RequestRules(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 	_, err = e.ha.LedgerMark(ctx(t), &providerv1.LedgerMarkRequest{TargetHostId: trusttest.HostName, AnswerNonce: nonce(3)[:8]})
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
-	_, err = e.ha.RetireIfUnknown(ctx(t), &providerv1.RetireIfUnknownRequest{TargetHostId: trusttest.HostName, AnswerNonce: nonce(4)})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "RetireIfUnknown is not implemented yet")
+	_, err = e.ha.RetireIfUnknown(ctx(t), &providerv1.RetireIfUnknownRequest{TargetHostId: "host-b", AnswerNonce: nonce(4)})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 	// A caller that is not the enrolled Provider is refused before the
 	// service.
 	other := providerv1.NewHostAuthorityClient(e.dial(otherProvider(e.env), 0))
