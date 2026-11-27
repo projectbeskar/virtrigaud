@@ -161,9 +161,11 @@ func TestVerifyAnswer_RetireAnswer(t *testing.T) {
 		"applied, not retired": func(a *providerv1.AuthorityAnswer) {
 			a.OpState = providerv1.OperationRecordState_OPERATION_RECORD_STATE_COMPLETED
 		},
-		"applied, no op":  func(a *providerv1.AuthorityAnswer) { a.OpId = nil },
-		"short op":        func(a *providerv1.AuthorityAnswer) { a.OpId = []byte{1} },
-		"mark in retire":  func(a *providerv1.AuthorityAnswer) { a.Mark = &providerv1.LedgerPosition{StoreId: testStore, Seq: 1, Head: testHead} },
+		"applied, no op": func(a *providerv1.AuthorityAnswer) { a.OpId = nil },
+		"short op":       func(a *providerv1.AuthorityAnswer) { a.OpId = []byte{1} },
+		"mark in retire": func(a *providerv1.AuthorityAnswer) {
+			a.Mark = &providerv1.LedgerPosition{StoreId: testStore, Seq: 1, Head: testHead}
+		},
 		"not applicable, no state": func(a *providerv1.AuthorityAnswer) {
 			a.Outcome, a.OpState = providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE, 0
 		},
