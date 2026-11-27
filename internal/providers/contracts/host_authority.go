@@ -76,6 +76,23 @@ type LedgerMarkOrder struct {
 	Ledger LedgerPosition
 }
 
+// RetireOrder is what a retire-if-unknown grant names: the identity of the
+// operation, from the attempt's authenticated intent, and the attestation
+// session of the host's signed answer that it holds no record of it. The
+// caller builds it only once every retirement precondition held.
+type RetireOrder struct {
+	// Identity is the operation's identity (Provider, host, enrolment,
+	// epoch, VM, binding, op_id, attempt and mint epoch).
+	Identity OperationAttemptIdentity
+	// Kind is the operation's kind.
+	Kind providerv1.OperationKind
+	// IntentDigest is the salted intent digest of the operation's exact
+	// request bytes (32 bytes).
+	IntentDigest []byte
+	// AttestationID is the session the retirement is for.
+	AttestationID []byte
+}
+
 // AuthorityRead is the result of one host authority call: the signed read
 // (nonce and relayed answer) and, for a call that carried a grant, the
 // grant's digest the answer must name.
@@ -87,8 +104,9 @@ type AuthorityRead struct {
 
 // HostAuthorityCaller is an optional capability of a Provider client: the
 // host authority service of the host ledger protocol (development builds).
-// Each call draws a fresh nonce; an attestation or ledger mark grant is
-// minted by the client's signer over exactly what the order names. A
+// Each call draws a fresh nonce; an attestation, ledger mark or
+// retire-if-unknown grant is minted by the client's signer over exactly
+// what the order names. A
 // release build, or a client with no signer, refuses and sends nothing.
 type HostAuthorityCaller interface {
 	// Challenge asks the host for an attestation challenge.
@@ -97,4 +115,6 @@ type HostAuthorityCaller interface {
 	Attest(ctx context.Context, o AttestOrder) (AuthorityRead, error)
 	// LedgerMark delivers a ledger mark grant.
 	LedgerMark(ctx context.Context, o LedgerMarkOrder) (AuthorityRead, error)
+	// RetireIfUnknown delivers a retire-if-unknown grant.
+	RetireIfUnknown(ctx context.Context, o RetireOrder) (AuthorityRead, error)
 }

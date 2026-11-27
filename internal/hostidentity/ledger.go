@@ -68,13 +68,17 @@ const (
 	AuthorityReasonChallengeUnknown = "challenge_unknown"
 	// AuthorityReasonChallengeExpired: the grant names an expired challenge.
 	AuthorityReasonChallengeExpired = "challenge_expired"
-	// AuthorityReasonStaleAttestation: a ledger mark named another session.
+	// AuthorityReasonStaleAttestation: a ledger mark or a retirement named
+	// another session.
 	AuthorityReasonStaleAttestation = "stale_attestation"
+	// AuthorityReasonOpTraceFound: a retirement found a trace of the
+	// operation that no record explains; the agent quarantined its store.
+	AuthorityReasonOpTraceFound = "op_trace_found"
 )
 
 // authorityReasons is the closed set of AuthorityAnswer.outcome_reason.
 var authorityReasons = []string{"grant_invalid", AuthorityReasonStaleAttestation, AuthorityReasonChallengeUnknown,
-	AuthorityReasonChallengeExpired, "not_attested", "already_attested", "session_replaced", "op_known", "op_trace_found",
+	AuthorityReasonChallengeExpired, "not_attested", "already_attested", "session_replaced", "op_known", AuthorityReasonOpTraceFound,
 	"enrolment_not_active", "ledger_mismatch", "ledger_ahead", "ledger_unverifiable", "ledger_store_mismatch", "store_busy"}
 
 // authorityGrantKinds is the closed set of AuthorityAnswer.grant_kind.

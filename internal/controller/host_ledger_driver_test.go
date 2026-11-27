@@ -46,7 +46,7 @@ import (
 
 // countingAuthority is a HostAuthorityCaller that records the grants it was
 // asked to deliver and delivers none.
-type countingAuthority struct{ attests, marks int }
+type countingAuthority struct{ attests, marks, retires int }
 
 func (c *countingAuthority) Challenge(context.Context, contracts.ChallengeQuery) (contracts.AuthorityRead, error) {
 	return contracts.AuthorityRead{}, errors.New("not reached")
@@ -59,6 +59,11 @@ func (c *countingAuthority) Attest(context.Context, contracts.AttestOrder) (cont
 
 func (c *countingAuthority) LedgerMark(context.Context, contracts.LedgerMarkOrder) (contracts.AuthorityRead, error) {
 	c.marks++
+	return contracts.AuthorityRead{}, nil
+}
+
+func (c *countingAuthority) RetireIfUnknown(context.Context, contracts.RetireOrder) (contracts.AuthorityRead, error) {
+	c.retires++
 	return contracts.AuthorityRead{}, nil
 }
 
@@ -135,13 +140,14 @@ func TestSendLedgerMark_OnlyFromOwnWrite(t *testing.T) {
 }
 
 // The grant sites of the host ledger: the controllers ask for an
-// attestation grant only in sendAttest and for a ledger mark grant only in
-// sendLedgerMark, build their orders only there, and a ledger record gets a
-// resourceVersion (the mark of an existing, verified ledger object) only in
-// verifySecret.
+// attestation grant only in sendAttest, for a ledger mark grant only in
+// sendLedgerMark and for a retire-if-unknown grant only in sendRetire,
+// build their orders only there, and a ledger record gets a resourceVersion
+// (the mark of an existing, verified ledger object) only in verifySecret.
 func TestLedgerGrantSites(t *testing.T) {
 	allowed := map[string]string{"Attest": "sendAttest", "LedgerMark": "sendLedgerMark", "AttestOrder": "sendAttest",
-		"LedgerMarkOrder": "sendLedgerMark", "resourceVersion": "verifySecret"}
+		"LedgerMarkOrder": "sendLedgerMark", "RetireIfUnknown": "sendRetire", "RetireOrder": "sendRetire",
+		"resourceVersion": "verifySecret"}
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	for _, f := range files {
@@ -161,11 +167,13 @@ func TestLedgerGrantSites(t *testing.T) {
 				name := ""
 				switch x := n.(type) {
 				case *ast.CallExpr:
-					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Attest" || sel.Sel.Name == "LedgerMark") {
+					if sel, ok := x.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Attest" || sel.Sel.Name == "LedgerMark" ||
+						sel.Sel.Name == "RetireIfUnknown") {
 						name = sel.Sel.Name
 					}
 				case *ast.CompositeLit:
-					if sel, ok := x.Type.(*ast.SelectorExpr); ok && (sel.Sel.Name == "AttestOrder" || sel.Sel.Name == "LedgerMarkOrder") {
+					if sel, ok := x.Type.(*ast.SelectorExpr); ok && (sel.Sel.Name == "AttestOrder" || sel.Sel.Name == "LedgerMarkOrder" ||
+						sel.Sel.Name == "RetireOrder") {
 						name = sel.Sel.Name
 					}
 				case *ast.AssignStmt:

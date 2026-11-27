@@ -131,3 +131,36 @@ func (c *Client) LedgerMark(ctx context.Context, o contracts.LedgerMarkOrder) (c
 	read.Answer = answerFromField(resp.GetHostAnswer())
 	return read, nil
 }
+
+// RetireIfUnknown implements contracts.HostAuthorityCaller: it mints a
+// retire-if-unknown grant over exactly what o names and delivers it.
+func (c *Client) RetireIfUnknown(ctx context.Context, o contracts.RetireOrder) (contracts.AuthorityRead, error) {
+	ha, err := c.authorityClient("retire-if-unknown")
+	if err != nil {
+		return contracts.AuthorityRead{}, err
+	}
+	nonce, err := drawAnswerNonce()
+	if err != nil {
+		return contracts.AuthorityRead{}, err
+	}
+	id := o.Identity
+	grant, err := operation.MintRetireGrant(ctx, c.opSigner, operation.RetireMintRequest{
+		Identity: operation.Identity{ProviderUID: id.ProviderUID, HostID: id.HostID, EnrolmentID: id.EnrolmentID,
+			Epoch: operation.Epoch{Counter: id.Epoch.Counter, Holder: id.Epoch.Holder}, VMUID: id.VMUID, BindingID: id.BindingID,
+			OpID: id.OpID, Kind: o.Kind, Attempt: id.Attempt,
+			MintEpoch: operation.Epoch{Counter: id.MintEpoch.Counter, Holder: id.MintEpoch.Holder}},
+		IntentDigest: o.IntentDigest, AttestationID: o.AttestationID, IssuedAt: time.Now()})
+	if err != nil {
+		return contracts.AuthorityRead{}, fmt.Errorf("retire-if-unknown: %w", err)
+	}
+	read := contracts.AuthorityRead{SignedRead: contracts.SignedRead{Nonce: nonce}, GrantDigest: grantverify.GrantDigest(grant)}
+	ctx, cancel := context.WithTimeout(ctx, authorityCallTimeout)
+	defer cancel()
+	resp, err := ha.RetireIfUnknown(ctx, &providerv1.RetireIfUnknownRequest{TargetHostId: id.HostID, AnswerNonce: nonce, Grant: grant})
+	if err != nil {
+		read.Answer = answerFromStatus(err)
+		return read, c.mapGRPCError("retireIfUnknown", err)
+	}
+	read.Answer = answerFromField(resp.GetHostAnswer())
+	return read, nil
+}
