@@ -138,7 +138,10 @@ VIRTRIGAUD_PROTOCOL_MODEL_SEED=42 \
 ```
 
 `VIRTRIGAUD_PROTOCOL_MODEL_NO_START_CHECK=1` turns invariant 2 off, to see whether the
-other invariants alone notice a broken gate.
+other invariants alone notice a broken gate. `VIRTRIGAUD_PROTOCOL_MODEL_LIST_FLAGGED=1`
+has two effects. In a many-seed run it logs the first seeds of each flagged class. With
+a single seed it prints the run's trace even when the run passes, so that a flagged
+case can be triaged.
 
 ### Mutation
 
