@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-28 03:00] - Host ledger: whole-protocol evidence and three liveness fixes (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/host_ledger_model_dev_test.go`: `TestHostLedgerProtocolModel` is a seeded, deterministic model test of the whole protocol. It runs the real agent store and the real manager ledger library over a fake API server, across at least two manager processes per run. The events are: deliveries, attestations and re-attestations, delayed and lost grants, heartbeat raises and ledger marks, agent restarts and store rollbacks, etcd restores, leader changes with two writers, downgrade windows, first contact, archive, rebind, re-enrolment, retire-if-unknown and the frozen-enrolment closure. After every step it checks five invariants: retired means no effect, nothing starts before the ledger covers it, at most one effect per operation, nothing is signed for an unattested or unbound host, and no permanent wedge. It runs 1000 seeds by default; `VIRTRIGAUD_PROTOCOL_MODEL_SEEDS` sets the count.
+- `internal/controller/host_ledger_restart_agent_test.go`: Agent tests against real agent processes. An etcd restore alone recovers by re-attestation, with no agent restart and exactly one effect. A ledger mark lost across a manager restart is sent again.
+- `internal/controller/host_ledger_scale_test.go`: A simulation of 10,000 hosts over the real token buckets. Heartbeat raises never starve receipt raises or attestation, and every host gets a heartbeat raise within about five minutes.
+- `internal/controller/host_ledger_bench_test.go`: Benchmarks of the API writes and reads per receipt raise, per receipt raise in a batch, per heartbeat raise, per ledger mark and per uncached read.
+- `internal/controller/host_ledger_envtest_test.go`: Envtest specs. A delayed attestation is adopted. An unproven re-attestation keeps the working session. Two managers' sessions both stay pending. A restarted manager writes the ledger again.
+- `hack/agent-mutation.sh`: Every mutation round also runs the protocol model. Removing the ledger gate fails it at once.
+- `docs/host-ledger-verification.md`: What the model checks, what in it is real and what is modelled, and how to run it with a million seeds.
+
+### Fixed
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger_ops.go`: A session change written by another manager process, such as a new leader while the old one still runs, no longer holds the host persistently. Before, it was written into the ledger index and the pins Secret, so every later manager stayed held until the host was re-enrolled. It now holds the host for that read only. A lower position or write counter, and a rewrite under the same counter, are still persistent.
+- `internal/controller/host_ledger_ops.go`, `internal/controller/host_ledger_driver.go`: `HostLedger.Reassert` writes the ledger again, unchanged. The driver calls it when the agent's mark is behind and the manager has no write of its own of the ledger as it is now. A restarted manager or a new leader can therefore send a lost ledger mark again. Before, the mark was never re-sent and the accepted operation stayed parked until some other write moved the ledger.
+- `internal/controller/host_ledger_writes.go`: The per-host heartbeat raise interval is the longer of 30 seconds and the number of hosts divided by the heartbeat rate. Before, a fixed interval overflowed the heartbeat share at scale, and some hosts got no heartbeat raise at all.
+- `docs/operation-grants-wire-shape.md`, `docs/host-agent-enrolment.md`, `docs/README.md`: Updated for the three fixes and the new page.
+
+### Why
+The host ledger needed evidence that its safety and liveness claims hold across manager restarts, leader changes, etcd restores and agent rollbacks together. Building that evidence found the three liveness defects fixed here. None of them broke safety.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-27 23:30] - Host ledger: retire-if-unknown and the frozen enrolment closure (development builds only)
 **Author:** @wrkode (William Rizzo)
 

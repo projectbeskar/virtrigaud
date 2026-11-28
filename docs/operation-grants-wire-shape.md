@@ -820,8 +820,12 @@ a release build.
 - **Ledger marks.** A ledger mark grant is signed only from the record of the
   manager's own last successful write of the store's ledger, while nobody wrote it
   since, in an adopted session. The ledger is raised from the agent's verified chain
-  position at most once every 30 seconds per host, and the mark follows it whenever
-  the agent's mark is behind. The store's attestation record the agent signs
+  position at most once every 30 seconds per host (longer with many hosts, see
+  Traffic), and the mark follows it whenever the agent's mark is behind. A manager
+  whose last write is not the ledger as it is now (after a restart, or when another
+  manager wrote it) writes the ledger again, unchanged, and signs the mark from that
+  write, so a mark lost in transit is sent again even when the ledger does not move.
+  The store's attestation record the agent signs
   (`store_attested_record_seq`) is in the agent's chain above the position its first
   attestation named, so it reaches the manager's ledger only with the first raise
   after that attestation.
@@ -902,7 +906,10 @@ a release build.
 - **Traffic.** Attestation (20 per second, burst 40), heartbeat raises and their marks
   (50 per second, burst 100) and receipt raises and their marks (200 per second, burst
   400) draw from separate token buckets, so none can starve another. The per-host
-  heartbeat throttle is checked before a heartbeat token is taken.
+  heartbeat throttle is checked before a heartbeat token is taken. Its interval is 30
+  seconds, or the number of hosts the manager raises divided by the heartbeat rate
+  when that is longer (200 seconds at 10,000 hosts), so every host gets its turn.
+  See [Host ledger: how it is verified](host-ledger-verification.md).
 - **Upgrade pre-flight.** A stopping manager that held the leader lease persists every
   host's latest verified store position (bounded to 10 seconds), so the next manager
   starts each host ledger from a fresher position and the agent's first attestation
