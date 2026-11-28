@@ -1322,7 +1322,13 @@ func (w *pmWorld) sendAttempt(m *pmMgr, at *pmAttempt) {
 		return
 	}
 	if r.d.Refusal == opstore.RefusalExpectKnownUnknown {
+		// The marker holds a receipt that counts as ledgered and the store
+		// has no record of the operation (a store rolled back below it, or
+		// a ledger restored below it): it may have run, so it is held as
+		// outcome unknown, never retired nor run as new.
 		w.stat("expect-known-refused")
+		w.close(at, "OutcomeUnknown", "expect_known_unknown")
+		return
 	}
 	switch {
 	case r.d.Outcome == opstore.OutcomeRefused && r.d.Refusal.DefiniteNotPerformed():
