@@ -964,12 +964,21 @@ func (l *HostLedger) LoadBound(ctx context.Context, provider *infravirtrigaudiov
 }
 
 // heartbeatDue reports whether a heartbeat-only raise of the host would be
-// taken now (the last one is at least ledgerHeartbeatRaiseInterval ago).
+// taken now (the last one is at least heartbeatInterval ago).
 func (l *HostLedger) heartbeatDue(provider *infravirtrigaudiov1beta1.Provider, hostID string) bool {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	at := l.heartbeatAt[hostAnswerKey(provider, hostID)]
-	l.mu.Unlock()
-	return at.IsZero() || l.now().Sub(at) >= ledgerHeartbeatRaiseInterval
+	return at.IsZero() || l.now().Sub(at) >= l.heartbeatIntervalLocked()
+}
+
+// heartbeatIntervalLocked is the least time between two heartbeat-only
+// raises of one host: ledgerHeartbeatRaiseInterval, or longer once the
+// hosts this process raises would want more than the heartbeat bucket's
+// rate (one raise per host per hosts/rate seconds), so every host gets its
+// turn instead of a random share of an overflowing bucket. l.mu is held.
+func (l *HostLedger) heartbeatIntervalLocked() time.Duration {
+	return max(ledgerHeartbeatRaiseInterval, time.Duration(len(l.heartbeatAt))*time.Second/heartbeatBucketRate)
 }
 
 // indexChange is a change of a ledger index: store counters to raise (0

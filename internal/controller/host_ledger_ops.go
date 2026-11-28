@@ -729,9 +729,9 @@ func (l *HostLedger) Raise(ctx context.Context, provider *infravirtrigaudiov1bet
 	}
 	if heartbeatOnly {
 		l.mu.Lock()
-		at := l.heartbeatAt[lh.key]
+		at, interval := l.heartbeatAt[lh.key], l.heartbeatIntervalLocked()
 		l.mu.Unlock()
-		if !at.IsZero() && l.now().Sub(at) < ledgerHeartbeatRaiseInterval {
+		if !at.IsZero() && l.now().Sub(at) < interval {
 			return l.LoadBound(ctx, provider, hostID, store)
 		}
 	}
