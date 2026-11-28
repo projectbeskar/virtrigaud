@@ -193,6 +193,31 @@ func BenchmarkHostLedgerMarkReassert(b *testing.B) {
 	}
 }
 
+// BenchmarkHostLedgerSendGate: the host ledger's part of one operation
+// send at grant version 2 (signedSend before the grant is minted): the
+// in-memory version and readiness gate (sendVersion) and the uncached
+// re-read of the ledger (ledgerStillReady).
+func BenchmarkHostLedgerSendGate(b *testing.B) {
+	bl := newBenchLedger(b)
+	provider, ctx := ledgerTestProvider(), context.Background()
+	rec, err := bl.l.LoadBound(ctx, provider, "h", bl.store)
+	if err != nil {
+		b.Fatal(err)
+	}
+	h := &HostAnswers{Ledger: bl.l, Now: func() time.Time { return bl.now },
+		hosts: map[string]*hostAnswerState{hostAnswerKey(provider, "h"): {hostAPIVersion: ledgerAgentAPIVersion,
+			hostGrantVersions: []uint32{2}, hostSession: bl.session, hostAnswerStore: bl.store}}}
+	h.updateLedger(provider, "h", func(s *hostLedgerState) {
+		s.ready, s.session, s.store, s.generation = true, bl.session, bl.store, rec.Generation
+	})
+	bl.run(b, func(int) error {
+		if v, ok := h.sendVersion(provider, "h"); !ok || v != 2 {
+			return errors.New("not ready for grant version 2")
+		}
+		return h.ledgerStillReady(ctx, provider, "h")
+	})
+}
+
 // BenchmarkHostLedgerLoadBound: one uncached, verified, bound read.
 func BenchmarkHostLedgerLoadBound(b *testing.B) {
 	bl := newBenchLedger(b)
