@@ -387,6 +387,11 @@ func (a *attestation) LedgerMark(ctx context.Context, r opstore.LedgerMarkReques
 	return a.st.LedgerMark(ctx, r)
 }
 
+// RetireIfUnknown implements server.Authority: opstore.Store.RetireIfUnknown.
+func (a *attestation) RetireIfUnknown(ctx context.Context, r opstore.RetireRequest) (opstore.RetireResult, error) {
+	return a.st.RetireIfUnknown(ctx, r)
+}
+
 // Backlog implements server.Authority: opstore.Store.Backlog.
 func (a *attestation) Backlog() opstore.LedgerBacklog { return a.st.Backlog() }
 

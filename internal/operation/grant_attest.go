@@ -178,3 +178,71 @@ func MintLedgerMarkGrant(ctx context.Context, s Signer, r LedgerMarkMintRequest)
 	}
 	return signGrantBody(ctx, s, body, what)
 }
+
+// RetireMintRequest is the input of MintRetireGrant.
+type RetireMintRequest struct {
+	// Identity is the identity of the operation retired, from the attempt's
+	// authenticated intent: its Provider, host, enrolment, epoch, VM,
+	// binding, op_id, kind, attempt and mint epoch.
+	Identity Identity
+	// IntentDigest is the salted intent digest of the operation's exact
+	// request bytes (32 bytes), as its operation grants named it. The salt
+	// itself is never in a retirement grant.
+	IntentDigest []byte
+	// AttestationID is the 16-byte attestation session the retirement is
+	// for (the session of the host's signed answer that it holds no record
+	// of the operation).
+	AttestationID []byte
+	// IssuedAt is the manager's clock at signing.
+	IssuedAt time.Time
+	// Lifetime is the grant's validity from IssuedAt; 0 means
+	// DefaultGrantLifetime. It may not exceed MaxGrantLifetime.
+	Lifetime time.Duration
+}
+
+// MintRetireGrant builds a GRANT_KIND_RETIRE_IF_UNKNOWN GrantBody at
+// LedgerGrantVersion for r (fields 1-8, 10-15, 17, 30, 31 and 34; every
+// other field unset), checks it with grantverify.CheckRetireBody,
+// serialises it once and has s sign those exact bytes. A nil signer is
+// refused with ErrNoSigner.
+func MintRetireGrant(ctx context.Context, s Signer, r RetireMintRequest) (*providerv1.OperationGrant, error) {
+	const what = "mint retirement grant"
+	if isNilSigner(s) {
+		return nil, fmt.Errorf("%s: %w", what, ErrNoSigner)
+	}
+	lifetime := r.Lifetime
+	if lifetime == 0 {
+		lifetime = DefaultGrantLifetime
+	}
+	if lifetime < 0 || lifetime > MaxGrantLifetime {
+		return nil, fmt.Errorf("%s: lifetime %s is outside (0, %s]", what, lifetime, MaxGrantLifetime)
+	}
+	if r.IssuedAt.IsZero() {
+		return nil, fmt.Errorf("%s: issued_at is not set", what)
+	}
+	id := r.Identity
+	body := &providerv1.GrantBody{
+		GrantVersion:        LedgerGrantVersion,
+		GrantKind:           providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN,
+		InstallId:           append([]byte(nil), s.InstallID()...),
+		ProviderUid:         id.ProviderUID,
+		HostId:              id.HostID,
+		EnrolmentId:         append([]byte(nil), id.EnrolmentID...),
+		AuthorityGeneration: s.AuthorityGeneration(),
+		Epoch:               id.Epoch.toProto(),
+		VmUid:               id.VMUID,
+		BindingId:           append([]byte(nil), id.BindingID...),
+		OpId:                append([]byte(nil), id.OpID...),
+		Kind:                id.Kind,
+		Attempt:             id.Attempt,
+		IntentDigest:        append([]byte(nil), r.IntentDigest...),
+		MintEpoch:           id.MintEpoch.toProto(),
+		AttestationId:       append([]byte(nil), r.AttestationID...),
+		IssuedAt:            timestamppb.New(r.IssuedAt),
+		NotAfter:            timestamppb.New(r.IssuedAt.Add(lifetime)),
+	}
+	if refusal := grantverify.CheckRetireBody(body); refusal != nil {
+		return nil, fmt.Errorf("%s: %w", what, refusal)
+	}
+	return signGrantBody(ctx, s, body, what)
+}

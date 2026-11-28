@@ -409,13 +409,28 @@ bytes) is read:
 | `COMPLETED` | `Succeeded` |
 | `FAILED_CLEAN` | `FailedClean` (not performed; a new attempt after the backoff) |
 | `RETIRED` under the host's current enrolment | `Retired` (not performed) |
-| `RETIRED` or `NO_RECORD` under an earlier enrolment | held as `OperationOutcomeUnknown`; never re-sent |
+| `RETIRED` or `NO_RECORD` under an earlier enrolment | held as `OperationOutcomeUnknown`; never re-sent (a development-build manager with a host ledger closes a `NO_RECORD` under a frozen enrolment `Retired`, see below) |
 | `FAILED_DIRTY` | `FailedDirty`, held |
 | `OUTCOME_UNKNOWN` | held as `OperationOutcomeUnknown` |
-| `NO_RECORD` under the current enrolment | the same `op_id` is re-sent under a fresh grant, then asked about again |
+| `NO_RECORD` under the current enrolment | the same `op_id` is re-sent under a fresh grant, then asked about again (a development-build manager with a host ledger retires it instead when the attempt is one its ledger retires, see below) |
 | `UNKNOWN_TO_AGENT` | held as `OperationUnknownToAgent` |
 | an agent state other than `READY` | nothing is concluded (`QUARANTINED` holds) |
 | no verified answer (stripped, replayed, foreign, about another operation) | `Ready=False/OperationAnswerUnverified`; asked again |
+
+**Host ledger (development builds).** For a host whose ledger a development-build
+manager with host ledger keys drives, only answers from the ledger's adopted session
+count, and a `NO_RECORD` can close an attempt `Retired` (see
+[Manager driver](operation-grants-wire-shape.md#manager-driver-development-builds)):
+
+| The host signs, in the ledger's adopted session | Result |
+|---|---|
+| `NO_RECORD` under the current enrolment, no ledgered receipt, the attempt continuous with the ledger | a retire-if-unknown grant; on `APPLIED` the attempt closes `Retired` (`never_received`) and a new attempt follows after the backoff |
+| `NO_RECORD` under the current enrolment, the receipt counts as ledgered | re-sent with `expect_known`; never retired |
+| `NO_RECORD` under the current enrolment, the attempt not continuous with the ledger | never retired; re-sent as above |
+| `NO_RECORD` under a frozen earlier enrolment, no ledgered receipt, the attempt continuous with the ledger (the earlier enrolment among the generation's) | `Retired` (`unknown_to_frozen_enrolment`), without a grant |
+| `NO_RECORD` with a recorded receipt whose tag does not verify | held as `OperationStateLost` |
+| a store quarantined on a retirement (a trace or witness of an unknown operation) | the host and the VM held as `OperationOutcomeUnknown` |
+| any answer about an attempt prepared under a store a new store replaced | held as `OperationOutcomeUnknown` (`store_lost`) |
 
 The answer to a send, success or refusal, never decides an attempt, whatever its reason:
 a refusal of a mutating call carries no signed answer, and a grant or Provider refusal is
@@ -771,8 +786,9 @@ Providers that require operation identity. The policy was checked with
 server, which also denied the annotation to a user outside the group and allowed it to one
 inside it and its removal.
 
-"Operator" means: there is no retire, cancel or resolve path yet, so the controller cannot
-learn what happened on the host. Check the host by hand, then release the VirtualMachine
+"Operator" means: there is no cancel or resolve path yet (and retire-if-unknown exists
+only in development builds with a host ledger, for an operation the host never received),
+so the controller cannot learn what happened on the host. Check the host by hand, then release the VirtualMachine
 with `virtrigaud.io/orphan-on-delete=true` (leave whatever is on the host) or
 `virtrigaud.io/force-delete=true` (the controller stops waiting; remove anything left by
 hand) and delete it. Do not remove or edit `status.operationAttempts` to retry: that is
@@ -783,14 +799,15 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
 
 ## Known limits
 
-- No release, retire-if-unknown or cancel grants. Attestation and ledger mark grants,
+- No release or cancel grants. Attestation, ledger mark and retire-if-unknown grants,
   receipts and the `Accepted` phase exist only in development builds with host ledger
   keys (see
   [Manager driver](operation-grants-wire-shape.md#manager-driver-development-builds)).
 - For a Provider that requires operation identity, only signed host answers decide; a
   Create the host refused and never recorded stays in flight (its host keeps answering
   `NO_RECORD` and refusing the re-send), so its VM is released only by orphan-on-delete or
-  force-delete until a later version can retire an operation the host never recorded.
+  force-delete; only a development-build manager with a host ledger retires an operation
+  the host never recorded.
 - Attempt markers carry no record of whether their outcome was signed: a `Terminal`
   outcome written before signed answers existed (development clusters only) is read as it
   is where no fresh signed answer is asked for (an unbound VM, or a VM whose Provider is
@@ -805,7 +822,8 @@ until the next attempt is sent, and `OperationInProgress` while an attempt is in
   open under a predecessor whose records the host discarded early (an unsigned relay
   cannot be trusted) is answered `UNKNOWN_TO_AGENT` and held.
 - An attempt under a predecessor enrolment is never concluded by the manager: the host's
-  `NO_RECORD` or `RETIRED` about it is not taken as never performed. Such an attempt
+  `NO_RECORD` or `RETIRED` about it is not taken as never performed (except the frozen
+  enrolment closure of a development-build manager with a host ledger, above). Such an attempt
   (including one held as `OperationHostRekeyed`) keeps its VM held and its predecessor
   unconfirmed, and so counts towards the bound of 8 re-keys, until an operator settles the
   VM with `virtrigaud.io/orphan-on-delete` and a delete, or with `virtrigaud.io/force-delete`

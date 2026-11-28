@@ -400,7 +400,7 @@ and a client may not send keepalive pings more often than every 15 seconds
 | Method | Answer |
 |--------|--------|
 | `provider.v1.Provider/GetHostInfo` | `HostInfo` with `id` (the Host name) and `health` (`READY` once the agent is ready). With `answer_nonce`, a signed `HostAnswer` in `host_answer`; with `inventory_version` of at least 1 as well, that answer carries the host inventory (see [Host inventory](#host-inventory)); with `renewal_version` of at least 1, a development build puts its pending renewal request in it (see [Certificate renewal](#certificate-renewal)). `host_id` naming another host, a nonce that is not 16 bytes, or `continuity_seq`, `inventory_version` or `renewal_version` without a nonce: `InvalidArgument`. |
-| `provider.v1.HostAuthority/Challenge`, `Attest`, `LedgerMark` | Development builds: attestation against the manager's host ledger and ledger marks (see [Host ledger attestation](#host-ledger-attestation)). `RetireIfUnknown`: `Unimplemented`. Release builds: every method `Unimplemented`. |
+| `provider.v1.HostAuthority/Challenge`, `Attest`, `LedgerMark`, `RetireIfUnknown` | Development builds: attestation against the manager's host ledger, ledger marks and the retirement of operations the store never received (see [Host ledger attestation](#host-ledger-attestation)). Release builds: every method `Unimplemented`. |
 | `agent.v1.AgentService/Hello` | A signed `HostAnswer`. The nonce (16 bytes) and `caller_api_version` (at least 1) are required. |
 | `agent.v1.AgentService/AgentStatus` | A signed `HostAnswer`. The nonce is required. A freeze confirmation it carries is applied first, and the outcome for each confirmed id is returned in `freeze_results` (see [Freeze confirmation](#freeze-confirmation)). |
 | `agent.v1.AgentService/InstallRenewedCertificate` | Development builds: stages a renewed certificate (`activate` false) or puts the staged one in use (`activate` true), and answers with a signed `HostAnswer` (see [Certificate renewal](#certificate-renewal)). The nonce and a certificate are required. Release builds: `Unimplemented`. |
@@ -494,6 +494,23 @@ it and holds the host.
   `RESOURCE_EXHAUSTED` `LEDGER_BEHIND` (definitely not performed). A grant with
   `expect_known` for an op_id the store knows nothing of is refused
   `UNKNOWN_TO_AGENT`.
+- A `RetireIfUnknown` grant (a manager-signed retirement naming an operation's
+  identity and the current session) retires an operation the store never received:
+  the store commits a `RETIRED` tombstone with reason `never_received` and raises the
+  attempt mark of the operation's VM and kind, so a later delivery of the op_id is
+  answered `RETIRED` and never runs. It first scans what the executor owns for a trace
+  of the operation, without the store lock (the fake executor's intent and effect
+  logs and effect files, and for a Create its VM file of that placement); a trace no
+  record explains quarantines the store `unknown_op_trace`. An executor that cannot
+  scan (the release `none` executor) retires nothing (`trace_scan_unavailable`). An
+  operation the store already knows is not scanned for, and each Provider may ask for
+  at most 2 retirements a second (burst 10), checked before any work. Then, under the store lock and
+  in one transaction, a record or tombstone of the op_id makes the retirement not
+  applicable (or `op_known` with other identity fields), and a witness file or a VM
+  record naming the operation busy without its record quarantines the store
+  `inconsistent_store`. A retirement for another session, another enrolment or an
+  agent that is not ready is refused and changes nothing. The exact rules are in
+  [the wire shape](operation-grants-wire-shape.md#agent-attestation-development-builds).
 
 ## Operations
 

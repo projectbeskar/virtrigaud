@@ -304,6 +304,14 @@ type Options struct {
 	ReceiptsPerSecond float64
 	// ReceiptBurst is the burst of the per-identity receipt limit.
 	ReceiptBurst int
+	// RetiresPerSecond and RetireBurst limit the retire-if-unknown calls
+	// one Provider identity may make, checked before the grant is verified
+	// or the executor scanned: a call above the limit is refused
+	// RESOURCE_EXHAUSTED and decides nothing. Zero fields take
+	// DefaultRetiresPerSecond and DefaultRetireBurst.
+	RetiresPerSecond float64
+	// RetireBurst is the burst of the per-identity retirement limit.
+	RetireBurst int
 	// Operations is the agent's operation path. Nil refuses every mutating
 	// method once the agent is ready (Unimplemented): a release build never
 	// sets it.
@@ -337,6 +345,9 @@ type Authority interface {
 	Attest(ctx context.Context, r opstore.AttestRequest) (opstore.AttestResult, error)
 	// LedgerMark applies a verified ledger mark (opstore.Store.LedgerMark).
 	LedgerMark(ctx context.Context, r opstore.LedgerMarkRequest) (opstore.LedgerMarkResult, error)
+	// RetireIfUnknown applies a verified retire-if-unknown
+	// (opstore.Store.RetireIfUnknown).
+	RetireIfUnknown(ctx context.Context, r opstore.RetireRequest) (opstore.RetireResult, error)
 	// Backlog is what the ledger gate holds back (opstore.Store.Backlog).
 	Backlog() opstore.LedgerBacklog
 }
@@ -393,6 +404,13 @@ const (
 	// DefaultReceiptBurst is the burst of operation receipts for one
 	// identity.
 	DefaultReceiptBurst = 40
+	// DefaultRetiresPerSecond is the sustained retire-if-unknown calls per
+	// second for one Provider identity: a manager asks for one per lost
+	// operation, and a replayed grant must not keep the executor scanning.
+	DefaultRetiresPerSecond = 2.0
+	// DefaultRetireBurst is the burst of retire-if-unknown calls for one
+	// identity.
+	DefaultRetireBurst = 10
 )
 
 // Server is the agent's gRPC server.
@@ -404,6 +422,7 @@ type Server struct {
 	answers   *sourceLimiter
 	hellos    *sourceLimiter
 	receipts  *sourceLimiter
+	retires   *sourceLimiter
 	noAnswer  logGate
 	limited   logGate
 	refusedPr logGate
@@ -449,6 +468,13 @@ func New(opts Options) (*Server, error) {
 		opts.ReceiptBurst = DefaultReceiptBurst
 	}
 	s.receipts = newSourceLimiter(opts.ReceiptsPerSecond, opts.ReceiptBurst)
+	if opts.RetiresPerSecond <= 0 {
+		opts.RetiresPerSecond = DefaultRetiresPerSecond
+	}
+	if opts.RetireBurst <= 0 {
+		opts.RetireBurst = DefaultRetireBurst
+	}
+	s.retires = newSourceLimiter(opts.RetiresPerSecond, opts.RetireBurst)
 	s.limited = logGate{every: refusalLogEvery}
 	s.refusedPr = logGate{every: refusalLogEvery}
 	s.opts = opts

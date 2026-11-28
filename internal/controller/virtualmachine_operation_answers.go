@@ -109,6 +109,9 @@ type opPoll struct {
 	verdict answerVerdict
 	v       hostidentity.VerifiedAnswer
 	read    contracts.SignedRead
+	// ledger is true for an answer from a host the host ledger drives,
+	// read in the ledger's adopted session (or from a quarantined agent).
+	ledger bool
 }
 
 // state is the answer's operation state.
@@ -199,7 +202,11 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 		// persisted too (one write per attempt): a later NO_RECORD from a
 		// store rolled back to before that record then fails continuity.
 		firstRecord := showsRecord(v.Operation.GetState()) && !r.HostAnswers.recordIsAnchored(ia.providerCR, host, opIDHex)
-		return definiteOpState(v.Operation.GetState()) || noRecord || firstRecord
+		// On a host the ledger drives, any NO_RECORD may decide the attempt
+		// (a retirement, or the closure of a frozen enrolment's attempt).
+		ledgerNoRecord := hr.ledgerVersion > 0 &&
+			v.Operation.GetState() == providerv1.OperationRecordState_OPERATION_RECORD_STATE_NO_RECORD
+		return definiteOpState(v.Operation.GetState()) || noRecord || firstRecord || ledgerNoRecord
 	}
 	v, verdict := r.HostAnswers.finish(ctx, ia.providerCR, host, hr, hostidentity.BodyTypeOperationAnswer, read, definite)
 	if verdict == answerVerified && !bindsTo(v.Operation, p) {
@@ -208,6 +215,13 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 	}
 	if verdict == answerVerified && v.Ready() && showsRecord(v.Operation.GetState()) {
 		r.HostAnswers.setRecordAnchored(ia.providerCR, host, opIDHex, true)
+	}
+	if verdict == answerVerified && hr.ledgerVersion > 0 && v.Context.GetAgentState() == providerv1.AgentState_AGENT_STATE_QUARANTINED {
+		// A host the ledger drives whose agent signs that its store is
+		// quarantined: the host is held, and the attempt reaches the
+		// quarantine hold with the agent's reason.
+		r.HostAnswers.holdQuarantined(ctx, ia.providerCR, host, v.Position.StoreID)
+		return opPoll{verdict: verdict, v: v, read: read, ledger: true}
 	}
 	if verdict == answerVerified && hr.ledgerVersion > 0 && !r.HostAnswers.inLedgerSession(ia.providerCR, host, v) {
 		// A host the host ledger drives answers definitely only from the
@@ -219,7 +233,7 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 		r.HostAnswers.DriveHostLedger(ctx, ia.providerCR, ia.reader, host)
 		return opPoll{verdict: answerNone, read: read}
 	}
-	return opPoll{verdict: verdict, v: v, read: read}
+	return opPoll{verdict: verdict, v: v, read: read, ledger: verdict == answerVerified && hr.ledgerVersion > 0}
 }
 
 // driveSigned moves the attempt a (its verified intent prepared) on its
@@ -229,6 +243,9 @@ func (r *VirtualMachineReconciler) pollSigned(ctx context.Context, vm *infravirt
 func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, ia identityAttempt,
 	a *infravirtrigaudiov1beta1.OperationAttempt, prepared contracts.PreparedOperation, predecessor, sent bool) (attemptStep, ctrl.Result, error) {
 	ref := refOf(prepared)
+	if d, done := r.storeLost(ctx, vm, ia, a, prepared); done {
+		return d.step, d.res, d.err
+	}
 	poll := r.pollSigned(ctx, vm, ia, ref)
 	isDelete := a.Kind == infravirtrigaudiov1beta1.OperationAttemptKindDelete
 	switch poll.verdict {
@@ -302,10 +319,23 @@ func (r *VirtualMachineReconciler) driveSigned(ctx context.Context, vm *infravir
 			}
 		}
 		if pre {
+			if poll.ledger {
+				if d, done := r.frozenClosure(ctx, vm, ia, a, prepared, poll); done {
+					return d.step, d.res, d.err
+				}
+			}
 			return r.holdPredecessor(ctx, vm, a, "NO_RECORD")
 		}
 		if sent {
 			return r.noSignedAnswer(ctx, vm, a, "the host has no record of it after it was delivered; it is delivered again later")
+		}
+		if poll.ledger {
+			// A host the ledger drives retires an operation it holds no
+			// record of, when the attempt is one the ledger retires; it is
+			// then never re-sent.
+			if d, done := r.retireUnknown(ctx, vm, ia, a, prepared, poll); done {
+				return d.step, d.res, d.err
+			}
 		}
 		// The host signed that it has no record under its current
 		// enrolment: a delivery may be lost, so the same op_id is
@@ -407,7 +437,12 @@ func (r *VirtualMachineReconciler) authenticatedHostDeleted(ctx context.Context,
 	}
 	ref := contracts.VMRef{ID: vm.Status.ID, HostID: id.HostID, Owner: vmOwnerIdentity(vm)}
 	ref.Owner.UID = id.VMUID
-	_, read, rerr := ia.reader.VMAnswer(ctx, contracts.VMAnswerQuery{VM: ref, BindingID: id.BindingID, ContinuitySeq: hr.snapshot.ContinuitySeq()})
+	// A host the ledger drives answers with its attestation session, and
+	// its answer counts only from the ledger's adopted session (see
+	// ledgerVMAnswer).
+	hr.ledgerVersion = r.HostAnswers.ledgerAsk(ia.providerCR, id.HostID)
+	_, read, rerr := ia.reader.VMAnswer(ctx, contracts.VMAnswerQuery{VM: ref, BindingID: id.BindingID, ContinuitySeq: hr.snapshot.ContinuitySeq(),
+		LedgerVersion: hr.ledgerVersion})
 	if rerr != nil && read.Answer == nil {
 		return false, false, read, v
 	}
@@ -416,10 +451,23 @@ func (r *VirtualMachineReconciler) authenticatedHostDeleted(ctx context.Context,
 			bytes.Equal(v.VM.GetBindingId(), id.BindingID)
 	}
 	v, verdict := r.HostAnswers.finish(ctx, ia.providerCR, id.HostID, hr, hostidentity.BodyTypeVMAnswer, read, bound)
-	if verdict != answerVerified || !bound(v) {
+	if verdict != answerVerified || !bound(v) || !r.ledgerVMAnswer(ia, id.HostID, hr, v) {
 		return false, false, read, v
 	}
 	return true, bytes.Equal(v.VM.GetDeleteOpId(), id.OpID), read, v
+}
+
+// ledgerVMAnswer reports whether a verified VM answer v of a read begun
+// with hr may decide anything: always for a host the host ledger does not
+// drive; for one it drives, only from a READY agent in the ledger's adopted
+// session, as every operation answer. A placement the host signs DELETED is
+// read from its VM tombstone, which no rollback can create (a store rolled
+// back loses tombstones, never gains one), so the session rule costs only
+// liveness here (a Delete waits for the agent's attestation to be adopted);
+// it is applied anyway, so that nothing a host the ledger drives answers
+// counts outside the session the ledger adopted.
+func (r *VirtualMachineReconciler) ledgerVMAnswer(ia identityAttempt, host string, hr hostRead, v hostidentity.VerifiedAnswer) bool {
+	return hr.ledgerVersion == 0 || r.HostAnswers.inLedgerSession(ia.providerCR, host, v)
 }
 
 // deleteByVMAnswer settles the Delete attempt a when its host signs that the

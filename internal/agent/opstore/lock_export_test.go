@@ -22,7 +22,21 @@ import (
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/agent/journal"
+	pb "github.com/projectbeskar/virtrigaud/internal/agent/journal/journalpb"
 )
+
+// SetRetireHook sets the hook RetireIfUnknown calls at its interleaving
+// points, "scanned" and "locking" (test only).
+func SetRetireHook(s *Store, f func(point string)) { s.retireHook = f }
+
+// PutBusyVM writes a VM record that names op of enrolment busy, without the
+// operation's record: a store that lost the record (test only).
+func PutBusyVM(ctx context.Context, s *Store, vmUID string, binding, enrolment, op []byte) error {
+	_, err := s.j.Update(ctx, func(tx *journal.Tx) error {
+		return put(tx, bucketVMs, []byte(vmUID), &pb.VMRecord{VmUid: vmUID, BindingId: binding, BusyOpId: op, BusyEnrolmentId: enrolment})
+	})
+	return err
+}
 
 // HoldLock takes the store lock, for a test of a caller that must not block
 // on it.

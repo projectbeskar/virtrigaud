@@ -86,6 +86,11 @@ var releaseSites = map[releaseSite]int{
 	// (deleteByVMAnswer). No send answer, refusal or task status closes one.
 	{"virtualmachine_operation_answers.go", "closeSigned", "closeAttempt"}:      1, // signed operation state
 	{"virtualmachine_operation_answers.go", "deleteByVMAnswer", "closeAttempt"}: 1, // signed DELETED of the placement
+	// Host ledger (development builds): a host-signed retirement answer of
+	// the attempt's op_id in the ledger's adopted session, covered by the
+	// ledger, or a signed NO_RECORD under a frozen enrolment continuous with
+	// the ledger (host_ledger_retire.go, every precondition in decideRetire).
+	{"host_ledger_retire.go", "closeRetired", "closeAttempt"}: 1, // signed retirement or frozen-enrolment NO_RECORD
 
 	// Operation identity: finalizer releases.
 	{"virtualmachine_operation_identity.go", "identityDelete", "removeFinalizer"}:     1, // nothing created: no Create, or its not-performed outcome signed again
@@ -130,7 +135,7 @@ var releaseSites = map[releaseSite]int{
 }
 
 // releaseSiteTotal is the number of calls releaseSites enumerates.
-const releaseSiteTotal = 38
+const releaseSiteTotal = 39
 
 // lastArgName returns the identifier or selector name of the last argument
 // of call, or "" when it is neither.

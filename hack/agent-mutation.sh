@@ -19,6 +19,15 @@
 #
 # The reference-model test runs with VIRTRIGAUD_MODEL_RUNS (default here 3000)
 # so that one round stays short.
+#
+# The manager has guards of its own (internal/controller/mutation_guard.go,
+# the checks of a retire-if-unknown); each is switched off the same way and
+# must make a manager test fail. They run on ./internal/controller as a
+# development build (the host ledger exists only there), filtered to the
+# retirement tests that cover them.
+#
+# MUTATION_GUARDS, when set, limits a run to the guards it names
+# (space-separated, agent or manager); the default is every guard.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,9 +52,31 @@ run_tests() {
 }
 export VIRTRIGAUD_MODEL_RUNS="${VIRTRIGAUD_MODEL_RUNS:-3000}"
 
+# The manager's guards and the tests that cover them.
+MANAGER_PKG="./internal/controller"
+MANAGER_TAGS="virtrigaud_dev,virtrigaud_mutation"
+MANAGER_RUN='^(TestAgentIdentity_Retire.*|TestMutationGuardsListed)$'
+
+# run_manager_tests runs the manager's retirement tests.
+run_manager_tests() {
+	go test -count=1 -tags "${MANAGER_TAGS}" -run "${MANAGER_RUN}" "${MANAGER_PKG}"
+}
+
+# selected reports whether guard $1 is in MUTATION_GUARDS (or that is unset).
+selected() {
+	[ -z "${MUTATION_GUARDS:-}" ] && return 0
+	case " ${MUTATION_GUARDS} " in *" $1 "*) return 0 ;; esac
+	return 1
+}
+
 guards="$(sed -n 's/^[[:space:]]*[A-Za-z]* Name = "\([a-z-]*\)"$/\1/p' internal/agent/internal/guard/guard.go)"
 if [ -z "${guards}" ]; then
 	echo "agent-mutation: no guards found" >&2
+	exit 1
+fi
+manager_guards="$(sed -n 's/^[[:space:]]*[A-Za-z]* mutationGuard = "\([a-z-]*\)"$/\1/p' internal/controller/mutation_guard.go)"
+if [ -z "${manager_guards}" ]; then
+	echo "agent-mutation: no manager guards found" >&2
 	exit 1
 fi
 
@@ -62,10 +93,25 @@ if ! VIRTRIGAUD_MUTATION="" run_tests >/dev/null; then
 	echo "agent-mutation: the tests fail with no guard off" >&2
 	exit 1
 fi
+if ! VIRTRIGAUD_MUTATION="" run_manager_tests >/dev/null; then
+	echo "agent-mutation: the manager tests fail with no guard off" >&2
+	exit 1
+fi
 
 survivors=()
 total=0
+for g in ${manager_guards}; do
+	selected "${g}" || continue
+	total=$((total + 1))
+	if VIRTRIGAUD_MUTATION="${g}" run_manager_tests >/dev/null 2>&1; then
+		echo "SURVIVED  ${g} (manager)"
+		survivors+=("${g}")
+	else
+		echo "killed    ${g} (manager)"
+	fi
+done
 for g in ${guards}; do
+	selected "${g}" || continue
 	total=$((total + 1))
 	if VIRTRIGAUD_MUTATION="${g}" run_tests >/dev/null 2>&1; then
 		echo "SURVIVED  ${g}"

@@ -70,16 +70,33 @@ const (
 	// ReasonSessionReplaced: an applied re-attestation replaced the
 	// session.
 	ReasonSessionReplaced = "session_replaced"
-	// ReasonStoreBusy: the store could not be read; nothing changed.
+	// ReasonStoreBusy: the store could not be read or written now (also a
+	// failed trace scan, or a full store for a retirement); nothing changed,
+	// and a later call may pass.
 	ReasonStoreBusy = "store_busy"
-	// ReasonStaleAttestation: a ledger mark named another attestation
-	// session than the agent's current one; nothing changed.
+	// ReasonStaleAttestation: a ledger mark or a retirement named another
+	// attestation session than the agent's current one; nothing changed.
 	ReasonStaleAttestation = "stale_attestation"
+	// ReasonOpKnown: a retirement named an op_id the store holds a record
+	// or tombstone of with other identity fields; nothing changed.
+	ReasonOpKnown = "op_known"
+	// ReasonOpTraceFound: a retirement found a trace of the operation that
+	// no record explains; the store is quarantined (unknown_op_trace).
+	ReasonOpTraceFound = "op_trace_found"
+	// ReasonEnrolmentNotActive: a retirement named an enrolment that is
+	// not the store's active one; nothing changed.
+	ReasonEnrolmentNotActive = "enrolment_not_active"
+	// ReasonTraceScanUnavailable: the agent's executor has no trace scanner
+	// (it can never scan its objects for a trace of an operation), so it
+	// retires nothing; asking again does not change that. A scan that
+	// failed is ReasonStoreBusy.
+	ReasonTraceScanUnavailable = "trace_scan_unavailable"
 )
 
 // outcomeReasons is the closed set of outcome_reason values this agent signs.
 var outcomeReasons = []string{ReasonGrantInvalid, ReasonChallengeUnknown, ReasonChallengeExpired, ReasonNotAttested,
-	ReasonAlreadyAttested, ReasonSessionReplaced, ReasonStoreBusy, ReasonStaleAttestation, string(journal.LostLedgerStoreMismatch),
+	ReasonAlreadyAttested, ReasonSessionReplaced, ReasonStoreBusy, ReasonStaleAttestation, ReasonOpKnown, ReasonOpTraceFound,
+	ReasonEnrolmentNotActive, ReasonTraceScanUnavailable, string(journal.LostLedgerStoreMismatch),
 	string(journal.LostLedgerAhead), string(journal.LostLedgerMismatch), string(journal.LostLedgerUnverifiable)}
 
 // ledgerAware reports whether h answers a request of the host ledger
@@ -210,6 +227,13 @@ type Authority struct {
 	// Reason qualifies the outcome (Reason* constants or a ledger loss
 	// reason); empty when there is nothing to add.
 	Reason string
+	// OpID is, for a retirement whose grant verified, the op_id it named
+	// (16 bytes); nil otherwise.
+	OpID []byte
+	// OpState is, for a retirement, the operation's state after the grant
+	// (RETIRED when it was retired; the record's state when it was not
+	// applicable); unspecified otherwise.
+	OpState providerv1.OperationRecordState
 }
 
 // authorityKinds is the closed set of grant kinds an authority answer names.
@@ -238,6 +262,17 @@ func AuthorityAnswer(a Authority) (*providerv1.AuthorityAnswer, error) {
 		return nil, fmt.Errorf("%w: outcome reason %q is not in the closed set", ErrSign, a.Reason)
 	case len(a.GrantDigest) != 0 && len(a.GrantDigest) != grantverify.DigestLen:
 		return nil, fmt.Errorf("%w: grant digest of %d bytes", ErrSign, len(a.GrantDigest))
+	case a.GrantKind != providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN &&
+		(len(a.OpID) != 0 || a.OpState != providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNSPECIFIED):
+		return nil, fmt.Errorf("%w: an operation in an authority answer that is not a retirement", ErrSign)
+	case len(a.OpID) != 0 && len(a.OpID) != idLen:
+		return nil, fmt.Errorf("%w: op_id of %d bytes", ErrSign, len(a.OpID))
+	case retireTookEffect(a.Outcome) && a.GrantKind == providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN &&
+		(len(a.OpID) == 0 || a.OpState != providerv1.OperationRecordState_OPERATION_RECORD_STATE_RETIRED):
+		return nil, fmt.Errorf("%w: an applied retirement names no operation or a state other than RETIRED", ErrSign)
+	case a.Outcome == providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE &&
+		(len(a.OpID) == 0 || a.OpState == providerv1.OperationRecordState_OPERATION_RECORD_STATE_UNSPECIFIED):
+		return nil, fmt.Errorf("%w: a retirement that is not applicable names no operation or no state", ErrSign)
 	}
 	out := &providerv1.AuthorityAnswer{
 		Context:       ctx,
@@ -245,11 +280,19 @@ func AuthorityAnswer(a Authority) (*providerv1.AuthorityAnswer, error) {
 		GrantDigest:   bytes.Clone(a.GrantDigest),
 		Outcome:       a.Outcome,
 		OutcomeReason: a.Reason,
+		OpId:          bytes.Clone(a.OpID),
+		OpState:       a.OpState,
 	}
 	if attested(h) && a.GrantKind != providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN {
 		out.Mark = ledgerPosition(h.Attestation.Mark)
 	}
 	return out, nil
+}
+
+// retireTookEffect reports whether o is an outcome by which a retirement
+// took effect (APPLIED, or ALREADY_APPLIED by an earlier delivery).
+func retireTookEffect(o providerv1.AuthorityOutcome) bool {
+	return o == providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED || o == providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_ALREADY_APPLIED
 }
 
 // errLedgerField refuses an answer that sets a host ledger field where it

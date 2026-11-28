@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -63,10 +64,48 @@ type testExec struct {
 	block   chan struct{} // when set, Run waits on it (deadline tests)
 	started chan struct{} // when set, Run sends on it before waiting on block
 	payload map[string][]byte
+	// placements are VMs the world holds, by placementKey (Traces).
+	placements map[string]bool
+	// traceHook, when set, is called by Traces before it reads the world.
+	traceHook func()
+	// traceErr, when set, fails Traces.
+	traceErr error
+	// traceCalls counts the Traces calls.
+	traceCalls int
 }
 
 func newTestExec() *testExec {
-	return &testExec{runs: map[string]int{}, present: map[string]bool{}, fail: map[string]error{}, payload: map[string][]byte{}}
+	return &testExec{runs: map[string]int{}, present: map[string]bool{}, fail: map[string]error{}, payload: map[string][]byte{},
+		placements: map[string]bool{}}
+}
+
+// placementKey names a VM placement of the world.
+func placementKey(vm string, binding []byte) string { return fmt.Sprintf("%s/%x", vm, binding) }
+
+// Traces implements executor.TraceScanner: an effect of op is an operation
+// trace; for a Create, a placement the world holds is a placement trace.
+func (e *testExec) Traces(_ context.Context, op executor.Operation) (executor.Trace, error) {
+	e.mu.Lock()
+	hook, err := e.traceHook, e.traceErr
+	e.traceCalls++
+	e.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if err != nil {
+		return executor.Trace{}, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var t executor.Trace
+	prefix := fmt.Sprintf("%x/", op.OpID)
+	for k := range e.present {
+		if strings.HasPrefix(k, prefix) {
+			t.Op = true
+		}
+	}
+	t.Placement = op.Kind == kCreate && e.placements[placementKey(op.VMUID, op.BindingID)]
+	return t, nil
 }
 
 func effKey(opID []byte, step string) string { return fmt.Sprintf("%x/%s", opID, step) }

@@ -231,12 +231,31 @@ func TestAuthorityAnswer(t *testing.T) {
 	if err != nil || a.GetMark() != nil || len(a.GetGrantDigest()) != 0 {
 		t.Fatalf("refusal: %v %v", a, err)
 	}
+	// A retirement names the operation and its state, and no mark.
+	op := bytes.Repeat([]byte{0x0F}, 16)
+	retired := providerv1.OperationRecordState_OPERATION_RECORD_STATE_RETIRED
+	a, err = answer.AuthorityAnswer(answer.Authority{Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN,
+		GrantDigest: digest, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, OpID: op, OpState: retired})
+	if err != nil || a.GetMark() != nil || !bytes.Equal(a.GetOpId(), op) || a.GetOpState() != retired {
+		t.Fatalf("retirement: %v %v", a, err)
+	}
+	if _, err := answer.Sign(p.HostKey, leafDER(t, p), a); err != nil {
+		t.Fatal(err)
+	}
+	rk := providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN
 	for name, c := range map[string]answer.Authority{
-		"operation kind":  {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_OPERATION, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED},
-		"no outcome":      {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST},
-		"unknown outcome": {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST, Outcome: 99},
-		"reason":          {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, Reason: "rolled_back"},
-		"short digest":    {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, GrantDigest: digest[:8]},
+		"op in attest":             {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, OpID: op},
+		"short op":                 {Host: h, GrantKind: rk, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, OpID: op[:3]},
+		"applied, not retired":     {Host: h, GrantKind: rk, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, OpID: op, OpState: providerv1.OperationRecordState_OPERATION_RECORD_STATE_ACCEPTED},
+		"applied, no op":           {Host: h, GrantKind: rk, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_ALREADY_APPLIED, OpState: retired},
+		"not applicable, no state": {Host: h, GrantKind: rk, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE, OpID: op},
+		"not applicable, no op":    {Host: h, GrantKind: rk, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE, OpState: retired},
+		"ledger reason as an op":   {Host: h, GrantKind: rk, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, Reason: "unknown_op_trace"},
+		"operation kind":           {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_OPERATION, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED},
+		"no outcome":               {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST},
+		"unknown outcome":          {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST, Outcome: 99},
+		"reason":                   {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, Reason: "rolled_back"},
+		"short digest":             {Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_ATTEST, Outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, GrantDigest: digest[:8]},
 	} {
 		if _, err := answer.AuthorityAnswer(c); !errors.Is(err, answer.ErrSign) {
 			t.Fatalf("%s: %v, want ErrSign", name, err)

@@ -43,6 +43,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/projectbeskar/virtrigaud/internal/agent/config"
 	"github.com/projectbeskar/virtrigaud/internal/agent/executor/fake"
 	"github.com/projectbeskar/virtrigaud/internal/agent/server"
 	"github.com/projectbeskar/virtrigaud/internal/agent/trust"
@@ -117,6 +118,11 @@ type Target struct {
 	scripts map[string]fake.Script
 	// seeded maps host/name of a seeded VM to its owner UID.
 	seeded map[string]string
+	// installID, keys and hostURIs are what a re-enrolment of a host
+	// (ReenrolHost) issues its new certificate for.
+	installID []byte
+	keys      map[string]*ecdsa.PrivateKey
+	hostURIs  map[string]string
 }
 
 var (
@@ -164,7 +170,7 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		hostCA: hostidentitytest.NewConstrainedCA(ft, trusttest.TrustDomain), placements: clustered.NewPlacements(), deadline: cfg.StepDeadline,
 		apiVersion: cfg.ProviderAPIVersion, inv: hostsecret.Inventory{SchemaVersion: hostsecret.SchemaVersion},
 		proxies: map[string]*proxy{}, tasks: map[string][]string{}, scripts: map[string]fake.Script{}, seeded: map[string]string{},
-		managerLedger: cfg.ManagerLedger}
+		managerLedger: cfg.ManagerLedger, installID: installID, keys: map[string]*ecdsa.PrivateKey{}, hostURIs: map[string]string{}}
 	providerCA := hostidentitytest.NewCA(ft)
 	clientTLS, err := tg.providerTLS(ft, providerCA)
 	if err != nil {
@@ -187,6 +193,7 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		}
 		rec := hostidentity.Record{EnrolmentID: enrolment, ProviderUID: trusttest.ProviderUID, InstallID: installID, Mode: hostidentity.ModeIdentity}
 		key := hostidentitytest.NewKey(ft)
+		tg.keys[name], tg.hostURIs[name] = key, hostURI
 		csr := hostidentitytest.NewCSR(ft, key, hostidentitytest.CSROptions{URIs: hostidentity.RequestURIs(hostURI, rec)})
 		certPEM := tg.hostCA.Issue(ft, csr, hostidentitytest.IssueOptions{})
 		h, err := newHost(filepath.Join(t.TempDir(), name), name, hostURI, enrolment, certPEM, key, trustFiles,
@@ -239,6 +246,42 @@ func New(t clustered.T, cfg Config) (*Target, error) {
 		_ = p.Close()
 	})
 	return tg, nil
+}
+
+// ReenrolHost re-enrols host in place, as a development agent does when its
+// certificate names a new enrolment: its agent is stopped, its certificate
+// replaced by one (same key) for a new enrolment starting at startEpoch
+// (above every epoch the store started), and it is started again. The
+// agent freezes the previous enrolment's open operations and keeps their
+// records. It returns the new enrolment id.
+func (t *Target) ReenrolHost(host string, startEpoch uint64) ([]byte, error) {
+	h := t.byName[host]
+	if h == nil {
+		return nil, fmt.Errorf("no host %q", host)
+	}
+	enrolment, err := operation.NewRandomID()
+	if err != nil {
+		return nil, err
+	}
+	ft := fatalT{t.t}
+	rec := hostidentity.Record{EnrolmentID: enrolment, ProviderUID: trusttest.ProviderUID, InstallID: t.installID,
+		Mode: hostidentity.ModeIdentity, StartEpoch: startEpoch}
+	csr := hostidentitytest.NewCSR(ft, t.keys[host], hostidentitytest.CSROptions{URIs: hostidentity.RequestURIs(t.hostURIs[host], rec)})
+	certPEM := t.hostCA.Issue(ft, csr, hostidentitytest.IssueOptions{})
+	if err := h.Stop(); err != nil {
+		return nil, err
+	}
+	if _, err := h.Wait(30 * time.Second); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(h.StateDir(), config.PKIDirName, trust.FileHostCert), certPEM, 0o600); err != nil {
+		return nil, err
+	}
+	h.Enrolment = enrolment
+	if err := h.Start(); err != nil {
+		return nil, err
+	}
+	return enrolment, nil
 }
 
 // front puts a proxy in front of h's agent and adds the host to the

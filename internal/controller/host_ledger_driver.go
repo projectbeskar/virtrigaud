@@ -285,7 +285,11 @@ func (h *HostAnswers) driveLedger(ctx context.Context, provider *infravirtrigaud
 		res, err = l.Initialise(ctx, provider, hostID, HostLedgerInit{StoreID: store, Evidence: ev})
 		rec = res.Record
 		if err == nil && len(res.Archived) > 0 {
-			logger.Info("A new store replaced the host's earlier stores; their attempts stay as they are", "archived", len(res.Archived))
+			// The open attempts prepared under an archived store are held as
+			// outcome unknown (store_lost) when they are next reconciled
+			// (storeLost): their authenticated intents name the store.
+			logger.Info("A new store replaced the host's earlier stores; their open attempts are held as outcome unknown",
+				"archived", len(res.Archived), "reason", outcomeStoreLost)
 		}
 	case errors.Is(err, ErrHostLedgerNotBound):
 		// The ledger serves an earlier Host object of this name or machine:

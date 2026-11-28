@@ -46,8 +46,14 @@ func TestNoneRefusesEverything(t *testing.T) {
 		if ok, err := e.Goal(ctx, op, executor.Step{Name: "x", Irreversible: true}); ok || err == nil {
 			t.Errorf("Goal(%v) = %v, %v", kind, ok, err)
 		}
+
 	}
 	if err := e.StopAll(ctx); err != nil {
 		t.Fatal(err)
+	}
+	// It has no trace scanner: it can never say "no trace", so nothing is
+	// ever retired on it.
+	if _, ok := any(e).(executor.TraceScanner); ok {
+		t.Fatal("the none executor claims a trace scanner")
 	}
 }

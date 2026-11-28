@@ -36,8 +36,7 @@ import (
 )
 
 // authorityService serves provider.v1.HostAuthority for this host
-// (development builds): Challenge, Attest and LedgerMark. RetireIfUnknown is
-// Unimplemented: it is not implemented yet.
+// (development builds): Challenge, Attest, LedgerMark and RetireIfUnknown.
 //
 // Every request is on the strict path: a field or an enum value the agent
 // does not know, a target that is not this host, or an answer_nonce that is
@@ -316,4 +315,149 @@ func (s *Server) ledgerMark(ctx context.Context, req *providerv1.LedgerMarkReque
 		return providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_ALREADY_APPLIED, ""
 	}
 	return providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, ""
+}
+
+// RetireIfUnknown applies a retire-if-unknown grant, in this order:
+//
+//  1. the request rules (strict path, this host, a 16-byte answer_nonce),
+//     then the per-Provider retirement limit (RESOURCE_EXHAUSTED above it,
+//     before any verification or scan);
+//  2. the grant verifies at grant version 2 as a retirement grant for this
+//     host, Provider, installation and the certificate's enrolment, at the
+//     clock floor (else REFUSED grant_invalid);
+//  3. a quarantined store is QUARANTINED, unchanged; an agent that is not
+//     READY, or awaits its first attestation, is REFUSED not_attested;
+//  4. the store applies it (opstore.Store.RetireIfUnknown): another session
+//     is REFUSED stale_attestation, another enrolment REFUSED
+//     enrolment_not_active (neither changes anything); the trace scan runs
+//     first, without the store lock, and a trace no record explains
+//     quarantines the store and is REFUSED op_trace_found; then, under the
+//     store lock, a known operation is NOT_APPLICABLE with its state (with
+//     other identity fields REFUSED op_known), a witness or a busy VM of an
+//     operation with no record QUARANTINES the store (inconsistent_store),
+//     and otherwise the RETIRED tombstone (never_received) is committed and
+//     the answer is APPLIED with state RETIRED (ALREADY_APPLIED for a
+//     retirement already committed). A store whose executor has no trace
+//     scanner is REFUSED trace_scan_unavailable; a scan that failed, a full
+//     store or a store that cannot be read is REFUSED store_busy: nothing
+//     is retired.
+//
+// The answer echoes the grant's op_id once the grant verified.
+func (a *authorityService) RetireIfUnknown(ctx context.Context, req *providerv1.RetireIfUnknownRequest) (*providerv1.AuthorityResponse, error) {
+	s := a.s
+	if err := s.checkAuthorityRequest(req, req.GetTargetHostId(), req.GetAnswerNonce()); err != nil {
+		return nil, err
+	}
+	// The per-Provider retirement limit comes before anything costly (the
+	// grant's verification, the store reads and the executor's trace scan):
+	// a retirement grant can be replayed within its session and lifetime.
+	if id := peerIdentity(ctx); id == "" || !s.retires.allow(id, s.opts.Now()) {
+		return nil, status.Error(codes.ResourceExhausted, "above this Provider's retire-if-unknown rate; nothing was decided")
+	}
+	d := s.retire(ctx, req)
+	digest := decodedGrantDigest(req.GetGrant())
+	blob := s.signAnswer(ctx, req.GetAnswerNonce(), 0, func(h answer.Host) (proto.Message, error) {
+		view, err := s.opts.Agent.HostView(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		h.View = view
+		return answer.AuthorityAnswer(answer.Authority{Host: h, GrantKind: providerv1.GrantKind_GRANT_KIND_RETIRE_IF_UNKNOWN,
+			GrantDigest: digest, Outcome: d.outcome, Reason: d.reason, OpID: d.opID, OpState: d.state})
+	})
+	s.opts.Log.Info("retire-if-unknown", "outcome", d.outcome.String(), "reason", d.reason)
+	return &providerv1.AuthorityResponse{HostAnswer: blob}, nil
+}
+
+// retireDecision is what the agent decided on one retirement grant.
+type retireDecision struct {
+	outcome providerv1.AuthorityOutcome
+	reason  string
+	// opID is the grant's op_id once the grant verified.
+	opID []byte
+	// state is the operation's state after the grant, when known.
+	state providerv1.OperationRecordState
+}
+
+// retire decides on one retirement grant (RetireIfUnknown steps 2 to 4).
+func (s *Server) retire(ctx context.Context, req *providerv1.RetireIfUnknownRequest) retireDecision {
+	refused := func(reason string) retireDecision {
+		return retireDecision{outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, reason: reason}
+	}
+	v, err := s.verifier()
+	if err != nil {
+		return refused(answer.ReasonGrantInvalid)
+	}
+	clock, _ := s.grantClock()
+	got, err := v.VerifyAuthority(providerv1.HostAuthority_RetireIfUnknown_FullMethodName, req, clock)
+	if err != nil {
+		if r, ok := grantverify.AsRefusal(err); ok {
+			s.opts.Log.Info("retirement grant refused", "rule", string(r.Rule))
+		}
+		return refused(answer.ReasonGrantInvalid)
+	}
+	b := got.Body
+	d := s.retireVerified(ctx, b)
+	d.opID = bytes.Clone(b.GetOpId())
+	return d
+}
+
+// retireVerified applies the verified retirement grant body b.
+func (s *Server) retireVerified(ctx context.Context, b *providerv1.GrantBody) retireDecision {
+	refused := func(reason string) retireDecision {
+		return retireDecision{outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_REFUSED, reason: reason}
+	}
+	quarantined := retireDecision{outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_QUARANTINED}
+	switch state, _ := s.opts.Agent.TrustState(); state {
+	case providerv1.AgentState_AGENT_STATE_QUARANTINED:
+		return quarantined
+	case providerv1.AgentState_AGENT_STATE_READY:
+	default:
+		return refused(answer.ReasonNotAttested)
+	}
+	if _, ok := s.opts.Authority.Attestation(); !ok {
+		return refused(answer.ReasonNotAttested)
+	}
+	res, err := s.opts.Authority.RetireIfUnknown(ctx, opstore.RetireRequest{Session: bytes.Clone(b.GetAttestationId()),
+		Op: opstore.Request{ProviderUID: b.GetProviderUid(), EnrolmentID: b.GetEnrolmentId(), OpID: b.GetOpId(), VMUID: b.GetVmUid(),
+			BindingID: b.GetBindingId(), Kind: b.GetKind(), Attempt: b.GetAttempt(), IntentDigest: b.GetIntentDigest(),
+			MintEpoch: opstore.Epoch{Counter: b.GetMintEpoch().GetCounter(), Holder: b.GetMintEpoch().GetHolder()}}})
+	switch {
+	case errors.Is(err, journal.ErrLost):
+		return quarantined
+	case errors.Is(err, opstore.ErrStaleAttestation):
+		return refused(answer.ReasonStaleAttestation)
+	case errors.Is(err, opstore.ErrAttestState):
+		return refused(answer.ReasonNotAttested)
+	case errors.Is(err, opstore.ErrEnrolmentNotActive):
+		return refused(answer.ReasonEnrolmentNotActive)
+	case errors.Is(err, opstore.ErrNoTraceScanner):
+		s.opts.Log.Info("a retirement was refused: the executor cannot scan for traces")
+		return refused(answer.ReasonTraceScanUnavailable)
+	case errors.Is(err, opstore.ErrTraceScanFailed):
+		s.logNoAnswer(err, "a retirement's trace scan failed")
+		return refused(answer.ReasonStoreBusy)
+	case err != nil:
+		s.logNoAnswer(err, "the retirement could not be decided")
+		return refused(answer.ReasonStoreBusy)
+	}
+	state := answer.RecordState(opstore.OpAnswerView{Found: true, Op: opstore.OpView{State: res.State}})
+	switch res.Outcome {
+	case opstore.RetireApplied:
+		return retireDecision{outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_APPLIED, state: state}
+	case opstore.RetireAlreadyApplied:
+		return retireDecision{outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_ALREADY_APPLIED, state: state}
+	case opstore.RetireNotApplicable:
+		return retireDecision{outcome: providerv1.AuthorityOutcome_AUTHORITY_OUTCOME_NOT_APPLICABLE, state: state}
+	case opstore.RetireOpKnown:
+		return refused(answer.ReasonOpKnown)
+	case opstore.RetireTraceFound:
+		s.opts.Log.Error(nil, "a retirement found a trace of an unknown operation and quarantined the store",
+			"reason", string(res.Quarantined))
+		return refused(answer.ReasonOpTraceFound)
+	case opstore.RetireQuarantined:
+		s.opts.Log.Error(nil, "a retirement found evidence of a lost record and quarantined the store", "reason", string(res.Quarantined))
+		return quarantined
+	}
+	return refused(answer.ReasonStoreBusy)
 }

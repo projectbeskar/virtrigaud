@@ -111,6 +111,16 @@ var QuarantineReasons = []string{
 	"journal_corrupt", "rolled_back", "inconsistent_store", "anchor_missing", "anchor_corrupt", "journal_missing", "io_error",
 }
 
+// LedgerQuarantineReasons are the state reasons of an agent store the host
+// ledger protocol quarantined (an attestation or a ledger mark that did not
+// match its chain, or a retire-if-unknown that found a trace of an unknown
+// operation). An answer may carry one only to a request that asked for the
+// ledger protocol (a ledger version of at least 1, or a host authority
+// request); an agent reports rolled_back to any other.
+var LedgerQuarantineReasons = []string{
+	"ledger_store_mismatch", "ledger_ahead", "ledger_mismatch", "ledger_unverifiable", "unknown_op_trace",
+}
+
 // ErrAnswer is wrapped by every error VerifyAnswer returns. A caller treats
 // any of them as "no answer": never negative, never positive.
 var ErrAnswer = errors.New("host answer refused")
@@ -376,7 +386,7 @@ func VerifyAnswer(blob *providerv1.SignedBlob, exp AnswerExpectation) (VerifiedA
 	if err != nil {
 		return VerifiedAnswer{}, err
 	}
-	pos, err := checkContext(out.Context)
+	pos, err := checkContext(out.Context, ledgerAware)
 	if err != nil {
 		return VerifiedAnswer{}, err
 	}
@@ -614,9 +624,13 @@ var reasonRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 var answerUIDRE = regexp.MustCompile(`^[0-9a-z-]{1,128}$`)
 
 // checkContext checks the field rules of an answer context and decodes its
-// chain position.
-func checkContext(c *providerv1.AnswerContext) (ChainPosition, error) {
+// chain position. ledgerAware admits the ledger quarantine reasons
+// (LedgerQuarantineReasons) for an answer to a request of the host ledger
+// protocol.
+func checkContext(c *providerv1.AnswerContext, ledgerAware bool) (ChainPosition, error) {
 	var pos ChainPosition
+	quarantineReason := c.GetStateReason() != "" && (slices.Contains(QuarantineReasons, c.GetStateReason()) ||
+		(ledgerAware && slices.Contains(LedgerQuarantineReasons, c.GetStateReason())))
 	switch {
 	case c == nil:
 		return pos, refuse("the answer has no context")
@@ -632,8 +646,7 @@ func checkContext(c *providerv1.AnswerContext) (ChainPosition, error) {
 		return pos, refuse("the agent state is unspecified")
 	case c.GetStateReason() != "" && !reasonRE.MatchString(c.GetStateReason()):
 		return pos, refuse("the state reason is malformed")
-	case (c.GetAgentState() == providerv1.AgentState_AGENT_STATE_QUARANTINED) !=
-		(c.GetStateReason() != "" && slices.Contains(QuarantineReasons, c.GetStateReason())):
+	case (c.GetAgentState() == providerv1.AgentState_AGENT_STATE_QUARANTINED) != quarantineReason:
 		return pos, refuse("the state reason does not match the agent state")
 	}
 	raw := c.GetChainPosition()

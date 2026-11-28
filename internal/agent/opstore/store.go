@@ -219,6 +219,10 @@ type Store struct {
 	// without it (Attestation).
 	attestation atomic.Pointer[Attestation]
 	running     map[string]bool
+	// retireHook, when set, is called by RetireIfUnknown at its named
+	// points (tests only: a deterministic interleaving of a retirement
+	// with a delivery).
+	retireHook func(point string)
 
 	// parkMu guards what the ledger gate holds back: parked maps each
 	// parked operation to its request bytes (nil when it holds none),
