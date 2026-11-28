@@ -242,3 +242,33 @@ func TestAgentIdentity_SendRereadsTheLedger(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, e.createOps(t), "nothing was sent")
 }
+
+// The send-time re-read refuses on the ledger's own state, not only on a
+// foreign writer's hold: a readiness the driver has just cleared is never
+// overridden by a ledger that still reads Attested, and a ledger this very
+// process moved to Pending (an attestation begun) refuses the send with no
+// hold involved.
+func TestAgentIdentity_SendRefusedOnOwnPendingLedger(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	ha := e.r.HostAnswers
+	require.NoError(t, ha.ledgerStillReady(ctx, e.provider, agentHost))
+	st := ha.ledgerOf(e.provider, agentHost)
+
+	ha.updateLedger(e.provider, agentHost, func(s *hostLedgerState) { s.ready = false })
+	require.ErrorIs(t, ha.ledgerStillReady(ctx, e.provider, agentHost), errLedgerNotAttested, "the driver cleared its readiness")
+	ha.updateLedger(e.provider, agentHost, func(s *hostLedgerState) { s.ready = true })
+	require.NoError(t, ha.ledgerStillReady(ctx, e.provider, agentHost))
+
+	rec, err := e.ledger.Load(ctx, e.provider, agentHost, st.store)
+	require.NoError(t, err)
+	begun, err := e.ledger.BeginSession(ctx, e.provider, agentHost, st.store, [16]byte{0x0d}, LedgerSessionAttest, rec.Position)
+	require.NoError(t, err)
+	require.Equal(t, infravirtrigaudiov1beta1.HostAgentLedgerAttestationPending, begun.AttestationState)
+	require.ErrorIs(t, ha.ledgerStillReady(ctx, e.provider, agentHost), errLedgerNotAttested, "the ledger is Pending")
+	assert.Empty(t, e.ledger.HeldReason(e.provider, agentHost), "no hold: the ledger's own state refused the send")
+	assert.False(t, ha.ledgerOf(e.provider, agentHost).ready, "the readiness is dropped")
+	_, err = e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	assert.Zero(t, e.createOps(t), "nothing was sent")
+}
