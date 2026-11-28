@@ -794,7 +794,11 @@ a release build.
   while the manager saw its last verified host answer `READY` in the ledger's adopted
   session of the store that answer named, with nothing holding the host; otherwise
   nothing is sent to it. That readiness is decided by a fresh read of the bound,
-  unarchived ledger, never by whether a raise was taken or throttled. For such a host,
+  unarchived ledger, never by whether a raise was taken or throttled. Just before an
+  operation grant is signed, the ledger is read again. It must still be bound, Attested
+  in the same session and of the same generation, with nothing holding the host;
+  otherwise nothing is sent. Between two heartbeats, another manager process, a
+  restore or a Host replacement may have changed the ledger. For such a host,
   an operation answer from any session other than the adopted one is no answer: the
   agent is attested again first. Version 1 is never signed for an agent that implements version
   2. Older agents keep version 1, as before.
@@ -825,6 +829,7 @@ a release build.
   whose last write is not the ledger as it is now (after a restart, or when another
   manager wrote it) writes the ledger again, unchanged, and signs the mark from that
   write, so a mark lost in transit is sent again even when the ledger does not move.
+  The token of that mark is taken before the ledger is written again, and covers both.
   The store's attestation record the agent signs
   (`store_attested_record_seq`) is in the agent's chain above the position its first
   attestation named, so it reaches the manager's ledger only with the first raise
@@ -903,12 +908,14 @@ a release build.
   the attempt's enrolment among the generation's enrolments), never on a marker field
   or a timestamp; an intent of the first version counts as generation 0 and is never
   continuous.
-- **Traffic.** Attestation (20 per second, burst 40), heartbeat raises and their marks
-  (50 per second, burst 100) and receipt raises and their marks (200 per second, burst
-  400) draw from separate token buckets, so none can starve another. The per-host
-  heartbeat throttle is checked before a heartbeat token is taken. Its interval is 30
-  seconds, or the number of hosts the manager raises divided by the heartbeat rate
-  when that is longer (200 seconds at 10,000 hosts), so every host gets its turn.
+- **Traffic.** Four token buckets keep each kind of traffic from starving another:
+  attestation (20 per second, burst 40), heartbeat raises (50 per second, burst 100),
+  the marks of agents whose mark is behind the ledger (50 per second, burst 100), and
+  receipt raises with their marks (200 per second, burst 400). The per-host heartbeat
+  throttle is checked before a heartbeat token is taken. Its interval is 30 seconds,
+  or longer when the hosts the manager raised recently, divided by the heartbeat
+  rate, give more (200 seconds at 10,000 hosts). Every host thus gets its turn. A host
+  not raised for four intervals is forgotten by the throttle.
   See [Host ledger: how it is verified](host-ledger-verification.md).
 - **Upgrade pre-flight.** A stopping manager that held the leader lease persists every
   host's latest verified store position (bounded to 10 seconds), so the next manager

@@ -77,21 +77,43 @@ none.
 ### The invariants
 
 1. **Retired means no effect.** An attempt the manager ever closed `Retired` never
-   has an effect. A run that injects both an etcd restore and a rollback of the
-   agent's store with its anchor is outside the protocol's claim. Such runs are
-   counted and reported, never failed.
+   has an effect. The protocol does not claim this when the agent's store (with its
+   anchor) and etcd are both rolled back, so a violation is exempted, counted and
+   reported only when the run's own record shows exactly that happened, in one of
+   two ways:
+   - the record was lost: the operation was accepted and ran, then a rollback of the
+     agent's store with its anchor, to a snapshot below the acceptance, dropped its
+     record, and an etcd restore before the retirement lowered the store's ledger
+     below the acceptance;
+   - the tombstone was lost: after the retirement, a rollback of the agent's store
+     with its anchor, to a snapshot below the position the ledger was raised to over
+     the retirement, dropped the tombstone, and an etcd restore lowered the ledger
+     below that position; the operation ran only after both.
+
+   Every other violation fails the run.
 2. **Nothing starts before the ledger covers it.** When a step runs, the agent is
    attested and its ledger mark covers the operation's acceptance. The mark must also
-   be a ledger position the API server acknowledged.
-3. **At most one effect per operation.** Runs that roll the agent's store back with
-   its anchor are exempt (counted and reported).
-4. **Nothing is signed for an unattested or unbound host.** Every attestation, ledger
-   mark, retirement and operation grant names a session and a ledger position of an
-   acknowledged ledger object. That object was bound to the Host object, not archived,
-   and Attested in that session; an attestation names a pending session instead.
+   be a position that an attestation or ledger mark was signed with; each of those is
+   checked under invariant 4 when it is signed.
+3. **At most one effect per operation.** A repeated effect is exempted, counted and
+   reported only when, between the two effects, the agent's store was rolled back
+   with its anchor to a snapshot taken before the earlier one. Any other repeat fails
+   the run.
+4. **Nothing is signed for an unattested or unbound host.** At every attestation,
+   ledger mark, retirement and operation grant, the model reads the store's current
+   ledger object from the API server, as it is at that moment. The object must:
+   - exist, not be archived, and be bound to the current Host object;
+   - hold the grant's session: pending for an attestation, and Attested and current
+     for the others.
+
+   An attestation or mark must name a position at or below the object's position,
+   with the same head at the same sequence number. A retirement must be for the
+   object's store and generation.
 5. **No permanent wedge.** Once the adversary stops, every run reaches a quiescent
    state. In that state every attempt is closed, or the host is held for a documented
-   reason (see [Holds](host-agent-enrolment.md#holds)). A run that injected no fault
+   reason (see [Holds](host-agent-enrolment.md#holds)). The host counts as held when
+   its agent's store is lost, or when the last drive of the final round meets a
+   documented hold; a hold met earlier and cleared since does not count. A run that injected no fault
    able to hold a host for good must end with the ledger Attested in the agent's
    session and every attempt closed. The faults that can are a rollback of the
    agent's store, a restore while the manager runs, a partial restore, a restore
@@ -121,9 +143,12 @@ other invariants alone notice a broken gate.
 ### Mutation
 
 `hack/agent-mutation.sh` runs the model in every round, besides the agent and manager
-tests. Each round switches off one safety guard. Switching off the ledger gate in
-`Store.Execute` (guard `ledger-gate`) fails the model on its first runs (invariant 2).
-It also fails the agent's ledger gate unit tests.
+tests. Each round switches off one safety guard. A model failure counts as noticing
+the guard's removal only when it names a violated safety invariant (1 to 4). A harness
+error or a liveness failure is reported and not counted. The model must pass with no
+guard off. Switching off the ledger gate in `Store.Execute` (guard `ledger-gate`) fails
+the model on its first runs (invariant 2). It also fails the agent's ledger gate unit
+tests.
 
 ## Other evidence
 
@@ -136,7 +161,9 @@ It also fails the agent's ledger gate unit tests.
   - a frozen enrolment is closed;
   - a replaced Host is rebound;
   - an etcd restore alone recovers by re-attestation, with exactly one effect;
-  - a ledger mark lost across a manager restart is sent again.
+  - a ledger mark lost across a manager restart is sent again;
+  - an operation grant is not sent when another manager changed the ledger since the
+    last heartbeat.
 - **Envtest specs** (`Host ledger (envtest)`) run the ledger library against a real
   API server. They cover:
   - every write and every hold;
@@ -144,13 +171,18 @@ It also fails the agent's ledger gate unit tests.
   - regression and partial-restore detection;
   - resourceVersion conflicts;
   - two managers' sessions both pending;
+  - another writer's write counter recorded at once, so that a later replay is refused
+    after a restart;
+  - the rate limit on the Warning event for another writer's session change;
   - a delayed attestation adopted;
   - an unproven re-attestation that keeps the working session;
   - each rebind condition.
 - **Scale.** `TestLedgerBuckets_TenThousandHosts` simulates 10,000 hosts over the real
-  token buckets and the real per-host heartbeat throttle. Heartbeat raises never take
-  a token from receipt raises or attestation, and every host gets a heartbeat raise
-  within about five minutes.
+  token buckets and the real per-host heartbeat throttle, including the ledger mark
+  that follows each heartbeat raise. Heartbeat raises and marks never take a token
+  from receipt raises or attestation. In 15 simulated minutes, the longest any host
+  waited for a heartbeat raise was 5 minutes 1 second, and every mark followed its
+  raise at once.
 - **Write cost.** Run `go test -run '^$' -bench BenchmarkHostLedger ./internal/controller`.
   It reports the time and the API calls (ledger writes and reads, pins writes) per
   receipt raise, per receipt raise in a batch of 64, per heartbeat raise, per ledger
