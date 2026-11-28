@@ -423,8 +423,11 @@ type pmWorld struct {
 	acceptEv    map[string][]pmAcceptEv
 	effectSteps map[string][]int
 	retireStep  map[string]int
-	rollbacks   []pmRollbackEv
-	restores    []pmRestoreEv
+	// tombSeq is the position the ledger was raised to over a retirement
+	// (at or above its tombstone's commit).
+	tombSeq   map[string]uint64
+	rollbacks []pmRollbackEv
+	restores  []pmRestoreEv
 
 	// reply is the reply of the last message delivered at once.
 	reply   any
@@ -667,7 +670,7 @@ func newPMWorld(seed uint64, steps int, dir string) *pmWorld {
 		now: pmBase, retired: map[string]bool{}, lastAnswer: map[string]time.Time{},
 		faults: map[pmFault]bool{}, enabled: map[pmFault]bool{}, effects: map[string]int{}, present: map[string]bool{},
 		accSeq: map[string]uint64{}, signedPos: map[string]bool{}, stats: map[string]int{}, acceptEv: map[string][]pmAcceptEv{},
-		effectSteps: map[string][]int{}, retireStep: map[string]int{}}
+		effectSteps: map[string][]int{}, retireStep: map[string]int{}, tombSeq: map[string]uint64{}}
 	// Each run enables a few faults; about a third enable none, so that
 	// strict liveness is checked on many runs.
 	if !w.chance(3) {
@@ -1541,6 +1544,7 @@ func (w *pmWorld) poll(m *pmMgr, at *pmAttempt) {
 		if err := m.ha.coverRetirement(w.ctx, w.provider, pmHostID, st.session, w.verifiedOpAnswer(at, v, st).Position); err != nil {
 			return
 		}
+		w.tombSeq[at.key()] = v.Host.Position.Seq
 		w.close(at, "Retired", retiredNeverReceived)
 	case v.Found && (v.Op.State == opstore.StateRetired || v.Op.State == opstore.StateOutcomeUnknown ||
 		v.Op.State == opstore.StateFailedDirty || v.Op.State == opstore.StateFailedClean):
@@ -1615,6 +1619,7 @@ func (w *pmWorld) retire(m *pmMgr, at *pmAttempt, v opstore.OpAnswerView, st pmA
 		w.log("  retirement not covered: %v", err)
 		return
 	}
+	w.tombSeq[at.key()] = pos.Seq
 	w.close(at, "Retired", retiredNeverReceived)
 }
 
@@ -1989,7 +1994,7 @@ func (w *pmWorld) checkSafety() {
 		n := w.effects[k]
 		if w.retired[k] && n > 0 {
 			if w.explainedRetired(k) {
-				w.flag("retired-with-effect (its record dropped by an agent store+anchor rollback, and the ledger lowered below its acceptance by an etcd restore, before the retirement)")
+				w.flag("retired-with-effect (its record or its tombstone dropped by an agent store+anchor rollback, and the ledger lowered below it by an etcd restore)")
 			} else {
 				w.fail("op %s was closed Retired and had %d effects", k[:8], n)
 			}
@@ -2005,14 +2010,35 @@ func (w *pmWorld) checkSafety() {
 }
 
 // explainedRetired reports whether op k's effect under a retirement is
-// explained: it was accepted, ran, then an agent store+anchor rollback to
-// a snapshot below its acceptance dropped its record, and an etcd restore
-// before the retirement lowered the store's ledger below its acceptance
-// (so the rolled-back store passed its attestation).
+// explained by an etcd restore and an agent store+anchor rollback together,
+// in one of the two ways they defeat it:
+//
+//   - the record was lost: the op was accepted and ran, an agent
+//     store+anchor rollback to a snapshot below its acceptance then dropped
+//     its record, and an etcd restore before the retirement lowered the
+//     store's ledger below its acceptance (so the rolled-back store passed
+//     its attestation);
+//   - the tombstone was lost: after the retirement, an agent store+anchor
+//     rollback to a snapshot below the retirement's covered position
+//     dropped the tombstone, an etcd restore lowered the ledger below that
+//     position (so the store passed its attestation), and the op ran only
+//     after both.
 func (w *pmWorld) explainedRetired(k string) bool {
 	rs, ok := w.retireStep[k]
 	if !ok {
 		return false
+	}
+	if ts, ok := w.tombSeq[k]; ok {
+		for _, rb := range w.rollbacks {
+			if rb.step <= rs || rb.snapSeq >= ts {
+				continue
+			}
+			for _, re := range w.restores {
+				if re.step > rs && re.ledgerSeq < ts && !w.effectBetween(k, 0, max(rb.step, re.step)) {
+					return true
+				}
+			}
+		}
 	}
 	for _, a := range w.acceptEv[k] {
 		for _, rb := range w.rollbacks {
