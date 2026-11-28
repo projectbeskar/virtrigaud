@@ -345,6 +345,18 @@ func (h *HostAnswers) inSession(ctx context.Context, provider *infravirtrigaudio
 		rec = got
 	}
 	if markSeq, _ := ev.Mark(); markSeq < rec.Position.Seq && auth != nil {
+		// A mark is signed only from this process's own write of the ledger
+		// as it is now. A restarted manager or a new leader has none while
+		// the ledger does not move, so a mark lost before it took effect
+		// would never be sent again: the ledger is written again, unchanged.
+		if own := l.ownRecord(rec.StoreID); own == nil || own.WriteCounter != rec.WriteCounter {
+			got, err := l.Reassert(ctx, provider, hostID, rec.StoreID, rec.AttestationID)
+			if err != nil {
+				logger.Info("The host's ledger was not written again for its ledger mark", "error", err.Error())
+				return
+			}
+			rec = got
+		}
 		if err := h.markHost(ctx, provider, auth, hostID, t, rec, trafficHeartbeat); err != nil {
 			logger.Info("The host's ledger mark was not raised", "error", err.Error())
 		}

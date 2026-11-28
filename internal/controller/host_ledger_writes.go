@@ -604,8 +604,8 @@ func (l *HostLedger) readRecord(ctx context.Context, lh *ledgerHost, store [16]b
 		return nil, l.hold(ctx, lh, LedgerReasonTampered, prefix, false,
 			"the ledger serves this Host but the Host's ledger index does not name it", nil)
 	}
-	if reason, detail := l.checkGuard(rec); reason != "" {
-		return nil, l.hold(ctx, lh, reason, prefix, true, detail, nil)
+	if err := l.guardHold(ctx, lh, rec); err != nil {
+		return nil, err
 	}
 	return obj, nil
 }
@@ -644,30 +644,51 @@ func (l *HostLedger) verifySecret(_ context.Context, sec *corev1.Secret, store [
 }
 
 // checkGuard checks a verified record against what this process last wrote
-// or verified of it: a lower position or write counter is a regression; a
-// change of the sessions this process did not write, or a rewrite under
-// the same write counter, is tampering. It returns the hold reason and
-// detail, or "".
-func (l *HostLedger) checkGuard(rec *HostLedgerRecord) (reason, detail string) {
+// or verified of it: a lower position or write counter is a regression and
+// a rewrite under the same write counter is tampering, both persistent. A
+// change of the sessions in a later write this process did not make is
+// reported as tampering too, but not persistently: another manager process
+// makes exactly such a write during a leader change (its session begun in
+// the ledger beside this process's, or adopted), and the tag shows the
+// writer holds the ledger tag key. It returns the hold reason and detail,
+// or "", and whether the hold is persistent.
+func (l *HostLedger) checkGuard(rec *HostLedgerRecord) (reason, detail string, persistent bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	g := l.guards[rec.StoreID]
 	if g == nil {
-		return "", ""
+		return "", "", false
 	}
 	pending := pendingIDs(rec)
 	sessionsChanged := rec.AttestationID != g.attestation || !slices.Equal(pending, g.pending)
 	switch {
 	case rec.Position.Seq < g.seq:
-		return LedgerReasonRegressed, "the ledger position is below one this manager wrote or verified"
+		return LedgerReasonRegressed, "the ledger position is below one this manager wrote or verified", true
 	case rec.WriteCounter < g.counter:
-		return LedgerReasonRegressed, "the ledger's write counter is below one this manager wrote or verified"
+		return LedgerReasonRegressed, "the ledger's write counter is below one this manager wrote or verified", true
 	case rec.WriteCounter == g.counter && (sessionsChanged || rec.Position.Seq != g.seq):
-		return LedgerReasonTampered, "the ledger changed without its write counter"
+		return LedgerReasonTampered, "the ledger changed without its write counter", true
 	case rec.WriteCounter > g.counter && sessionsChanged:
-		return LedgerReasonTampered, "the ledger's attestation sessions changed in a write this manager did not make"
+		return LedgerReasonTampered, "the ledger's attestation sessions changed in a write this manager did not make " +
+			"(another manager, for example during a leader change); held for this read only", false
 	}
-	return "", ""
+	return "", "", false
+}
+
+// guardHold applies checkGuard to rec, read for the Host lh, and returns the
+// hold error, or nil. A hold that is not persistent (another writer changed
+// the sessions) holds this call only: the record becomes this process's
+// guard, so the next read goes on from it, and the sessions it holds are
+// adopted only on the agent's own nonce-bound proof, as ever.
+func (l *HostLedger) guardHold(ctx context.Context, lh *ledgerHost, rec *HostLedgerRecord) error {
+	reason, detail, persistent := l.checkGuard(rec)
+	if reason == "" {
+		return nil
+	}
+	if !persistent {
+		l.remember(nil, rec, false)
+	}
+	return l.hold(ctx, lh, reason, rec.StorePrefix(), persistent, detail, nil)
 }
 
 // pendingIDs returns the ids of a record's pending sessions.

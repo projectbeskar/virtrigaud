@@ -940,11 +940,49 @@ var _ = Describe("Host ledger (envtest)", func() {
 			e2 := enrol(h2)
 			store2, s2 := random16(), random16()
 			attested(ledger, h2, store2, s2, e2)
+			// Another manager process (a new leader while this one still
+			// runs) begins a session: this process holds the host for that
+			// read only and goes on from the new ledger; nothing is
+			// persisted, so neither process is wedged.
 			other := newLedger(keys)
 			_, err = other.BeginSession(ctx, provider, h2.Name, store2, random16(), LedgerSessionReattest, HostLedgerPosition{Seq: 2050})
 			Expect(err).NotTo(HaveOccurred())
 			_, err = ledger.Load(ctx, provider, h2.Name, store2)
-			expectHold(err, LedgerReasonTampered, true)
+			expectHold(err, LedgerReasonTampered, false)
+			Expect(storeState(h2).RegressedReason).To(BeEmpty(), "a concurrent writer's session is never a persistent hold")
+			_, err = ledger.BeginSession(ctx, provider, h2.Name, store2, random16(), LedgerSessionReattest, HostLedgerPosition{Seq: 2050})
+			Expect(err).NotTo(HaveOccurred(), "this process goes on from the other's write")
+			r, err := other.Load(ctx, provider, h2.Name, store2)
+			expectHold(err, LedgerReasonTampered, false)
+			Expect(r).To(BeNil())
+			r, err = other.Load(ctx, provider, h2.Name, store2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.PendingSessions).To(HaveLen(2), "both writers' sessions are pending; the agent's proof adopts one")
+		})
+
+		It("lets a restarted manager write the ledger again, unchanged, to sign a ledger mark from its own write", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			before := ledgerOf(store)
+			restarted := newLedger(keys)
+			_, err := restarted.Load(ctx, provider, h.Name, store)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(restarted.ownRecord(store)).To(BeNil(), "a read is not an own write")
+			got, err := restarted.Reassert(ctx, provider, h.Name, store, s)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got.WriteCounter).To(Equal(before.WriteCounter + 1))
+			Expect(got.Position).To(Equal(before.Position))
+			Expect(got.Checkpoint).To(Equal(before.Checkpoint))
+			Expect(got.AttestationID).To(Equal(before.AttestationID))
+			Expect(got.Generation).To(Equal(before.Generation))
+			Expect(got.GenerationEnrolments).To(Equal(before.GenerationEnrolments))
+			own := restarted.ownRecord(store)
+			Expect(own).NotTo(BeNil())
+			Expect(own.WriteCounter).To(Equal(got.WriteCounter))
+			_, err = restarted.Reassert(ctx, provider, h.Name, store, random16())
+			Expect(err).To(MatchError(ErrHostLedgerNotAttested), "only in the adopted session")
 		})
 	})
 
@@ -1075,9 +1113,13 @@ var _ = Describe("Host ledger (envtest)", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ledgerOf(store).GenerationEnrolments).To(ContainElement(e2))
 			// The first manager did not write those session changes: it
-			// refuses the ledger from now on.
+			// holds the host for that read only (another manager wrote
+			// them), and goes on from the new ledger.
 			_, err = ledger.Load(ctx, provider, h2.Name, store)
-			expectHold(err, LedgerReasonTampered, true)
+			expectHold(err, LedgerReasonTampered, false)
+			r, err = ledger.Load(ctx, provider, h2.Name, store)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.AttestationID).To(Equal(s2))
 		})
 
 		It("moves a ledger whose Host was deleted, after the quiet period", func() {

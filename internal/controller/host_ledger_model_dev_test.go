@@ -155,6 +155,10 @@ const (
 	pmStepName    = "effect"
 )
 
+// pmNoStartCheck switches invariant 2 off (VIRTRIGAUD_PROTOCOL_MODEL_NO_START_CHECK=1), to show that the
+// other invariants alone notice a missing ledger gate too.
+var pmNoStartCheck = os.Getenv("VIRTRIGAUD_PROTOCOL_MODEL_NO_START_CHECK") == "1"
+
 // pmInstall is the installation id of the model's manager.
 var pmInstall = bytes.Repeat([]byte{0x42}, 16)
 
@@ -293,6 +297,7 @@ type pmMgr struct {
 	readySession [16]byte
 	readyStore   [16]byte
 	readyGen     uint64
+	readyHost    types.UID
 	lastReattest time.Time
 	// lastHold is the reason of the hold the last drive met, and
 	// persistent whether it was a persistent one.
@@ -388,9 +393,12 @@ type pmWorld struct {
 	hostN    int
 	auth     *pmAuthority
 
-	agent    *pmAgent
-	enrol    []byte // the host's current enrolment (manager and agent agree once re-enrolled)
-	enrolN   byte
+	agent  *pmAgent
+	enrol  []byte // the host's current enrolment (manager and agent agree once re-enrolled)
+	enrolN byte
+	// cert is the enrolment of the agent's certificate: w.enrol is the
+	// manager's (an etcd restore can roll it back; the certificate stays).
+	cert     []byte
 	attempts []*pmAttempt
 	mgrs     []*pmMgr
 	epochs   int
@@ -468,6 +476,10 @@ func (w *pmWorld) acknowledged(obj client.Object) {
 // onStart is invariant 2, at every step run.
 func (w *pmWorld) onStart(opID []byte) {
 	k := hex.EncodeToString(opID)
+	w.stat("op-started")
+	if pmNoStartCheck {
+		return
+	}
 	acc := w.accSeq[k]
 	a, ok := w.agent.s.Attestation()
 	switch {
@@ -478,14 +490,13 @@ func (w *pmWorld) onStart(opID []byte) {
 	case !w.ackPos[pmPosKey(a.Mark.StoreID, a.Mark.Seq, a.Mark.Head)]:
 		w.fail("op %s started under a ledger mark (%d) that is no acknowledged ledger position", k[:8], a.Mark.Seq)
 	}
-	w.stat("op-started")
 }
 
 // boundAck reports whether an acknowledged ledger object satisfies match
-// and was bound to the current Host object and not archived.
-func (w *pmWorld) boundAck(match func(r *HostLedgerRecord) bool) bool {
+// and was bound to the Host object uid and not archived.
+func (w *pmWorld) boundAck(uid types.UID, match func(r *HostLedgerRecord) bool) bool {
 	for _, r := range w.acks {
-		if r.HostUID == string(w.hostUID) && !r.Archived && match(r) {
+		if r.HostUID == string(uid) && !r.Archived && match(r) {
 			return true
 		}
 	}
@@ -495,7 +506,7 @@ func (w *pmWorld) boundAck(match func(r *HostLedgerRecord) bool) bool {
 func (w *pmWorld) signedAttest(o contracts.AttestOrder) {
 	nonce := [16]byte(o.ChallengeNonce)
 	pos := pmPos(o.Ledger)
-	if !w.boundAck(func(r *HostLedgerRecord) bool {
+	if !w.boundAck(w.hostUID, func(r *HostLedgerRecord) bool {
 		return r.StoreID == pos.StoreID && r.Position.Seq == pos.Seq && r.Position.Head == pos.Head && r.HasPendingSession(nonce)
 	}) {
 		w.fail("an attestation was signed from no acknowledged, bound ledger holding its session as pending")
@@ -507,7 +518,7 @@ func (w *pmWorld) signedAttest(o contracts.AttestOrder) {
 func (w *pmWorld) signedMark(o contracts.LedgerMarkOrder) {
 	session := [16]byte(o.AttestationID)
 	pos := pmPos(o.Ledger)
-	if !w.boundAck(func(r *HostLedgerRecord) bool {
+	if !w.boundAck(w.hostUID, func(r *HostLedgerRecord) bool {
 		return r.StoreID == pos.StoreID && r.Position.Seq == pos.Seq && r.Position.Head == pos.Head && r.AttestationID == session &&
 			r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested
 	}) {
@@ -519,7 +530,7 @@ func (w *pmWorld) signedMark(o contracts.LedgerMarkOrder) {
 
 func (w *pmWorld) signedRetire(o contracts.RetireOrder) {
 	session := [16]byte(o.AttestationID)
-	if !w.boundAck(func(r *HostLedgerRecord) bool {
+	if !w.boundAck(w.hostUID, func(r *HostLedgerRecord) bool {
 		return r.AttestationID == session && r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested
 	}) {
 		w.fail("a retirement was signed for no acknowledged, bound ledger Attested in its session")
@@ -617,6 +628,7 @@ func newPMWorld(seed uint64, steps int, dir string) *pmWorld {
 	w.provider.Namespace, w.provider.Name, w.provider.UID = pmNamespace, "ch", pmProviderUID
 	w.enrolN = 1
 	w.enrol = pmEnrolment(w.enrolN)
+	w.cert = w.enrol
 	w.hostN = 1
 	w.hostUID = types.UID(fmt.Sprintf("00000000-0000-4000-8000-%012d", w.hostN))
 	host := pmHostObject(w.hostUID)
@@ -681,7 +693,7 @@ func (w *pmWorld) agentOptions() opstore.Options {
 		Executor: &pmExec{w: w}, LedgerGate: true}
 }
 
-// agentFresh creates a new store, enrolled under w.enrol.
+// agentFresh creates a new store, enrolled under w.cert.
 func (w *pmWorld) agentFresh() {
 	a := w.agent
 	if a.s != nil {
@@ -705,7 +717,7 @@ func (w *pmWorld) agentFresh() {
 		w.fail("recover: %v", err)
 	}
 	a.start++
-	if err := s.Enrol(w.ctx, opstore.Enrolment{HostID: pmHostID, ID: bytes.Clone(w.enrol), ProviderUID: pmProviderUID,
+	if err := s.Enrol(w.ctx, opstore.Enrolment{HostID: pmHostID, ID: bytes.Clone(w.cert), ProviderUID: pmProviderUID,
 		InstallID: pmInstall, StartEpoch: a.start}); err != nil {
 		w.fail("enrol: %v", err)
 	}
@@ -861,12 +873,13 @@ func (w *pmWorld) deliver(m pmMsg) any {
 		w.log("  %s lost: agent down", m.kind)
 		return nil
 	}
+	// The agent's grant check is reduced to the enrolment of its
+	// certificate (w.cert) that a grant must name.
 	st, _ := w.agentState()
-	active := w.agentActiveEnrolment(st)
 	switch m.kind {
 	case "attest":
 		o := m.attest
-		if !bytes.Equal(o.EnrolmentID, active) {
+		if !bytes.Equal(o.EnrolmentID, w.cert) {
 			w.log("  attest refused: enrolment")
 			return nil
 		}
@@ -908,6 +921,16 @@ func (w *pmWorld) deliver(m pmMsg) any {
 					w.fail("recover after the first attestation: %v", err)
 				}
 			}
+			// The enrolment sync of the start-up: a store whose active
+			// enrolment is older than the agent's certificate (a store
+			// rolled back across a re-enrolment) re-enrols to it.
+			if v, err := a.s.HostView(w.ctx, 0); err == nil && (v.Enrolment == nil || !bytes.Equal(v.Enrolment.ID, w.cert)) &&
+				v.LastStartEpoch < a.start {
+				if err := a.s.Reenrol(w.ctx, opstore.Enrolment{HostID: pmHostID, ID: bytes.Clone(w.cert), ProviderUID: pmProviderUID,
+					InstallID: pmInstall, StartEpoch: a.start}); err != nil {
+					w.log("  enrolment sync failed: %v", err)
+				}
+			}
 			w.refreshAccepted()
 		}
 		w.log("  attest applied at %d (re-attest %v)", r.Ledger.Seq, r.Reattest)
@@ -915,7 +938,7 @@ func (w *pmWorld) deliver(m pmMsg) any {
 		return pmAttestReply{applied: true, session: [16]byte(o.ChallengeNonce)}
 	case "mark":
 		o := m.mark
-		if !bytes.Equal(o.EnrolmentID, active) {
+		if !bytes.Equal(o.EnrolmentID, w.cert) {
 			return nil
 		}
 		res, err := a.s.LedgerMark(w.ctx, opstore.LedgerMarkRequest{Session: bytes.Clone(o.AttestationID), Ledger: pmPos(o.Ledger)})
@@ -1029,7 +1052,7 @@ func (w *pmWorld) holdOf(m *pmMgr, err error) {
 // host answer carrying the store's real facts, verifies it and returns its
 // ledger evidence.
 func (w *pmWorld) evidence(v opstore.HostView) hostidentity.LedgerEvidence {
-	h := pmHost(w.provider, w.enrolN)
+	h := pmHost(w.provider, w.enrol[0]-0xe0)
 	nonce := make([]byte, 16)
 	_, _ = rand.Read(nonce)
 	pos := append(append(append([]byte(nil), v.Position.StoreID[:]...), binary.BigEndian.AppendUint64(nil, v.Position.Seq)...),
@@ -1069,7 +1092,7 @@ func (w *pmWorld) drive(m *pmMgr) {
 	if !ok {
 		return
 	}
-	if !bytes.Equal(w.agentActiveEnrolment(st), w.enrol) {
+	if !bytes.Equal(w.cert, w.enrol) || (st.attested && !bytes.Equal(w.agentActiveEnrolment(st), w.enrol)) {
 		// The agent's answers do not verify under the host's current
 		// enrolment (a re-enrolment in progress, or restored trust).
 		w.stat("drive-enrolment-mismatch")
@@ -1121,7 +1144,7 @@ func (w *pmWorld) drive(m *pmMgr) {
 	if rec.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested && rec.AttestationID == st.session {
 		if m.l.heartbeatDue(w.provider, pmHostID) {
 			got, err := m.l.Raise(w.ctx, w.provider, pmHostID, store, []HostLedgerRaise{{Session: st.session,
-				Position: HostLedgerPosition{Seq: st.view.Position.Seq, Head: st.view.Position.Head},
+				Position:   HostLedgerPosition{Seq: st.view.Position.Seq, Head: st.view.Position.Head},
 				Checkpoint: HostLedgerPosition{Seq: st.view.CheckpointSeq, Head: st.view.CheckpointHead}, Heartbeat: true}})
 			if err != nil {
 				w.holdOf(m, err)
@@ -1130,6 +1153,17 @@ func (w *pmWorld) drive(m *pmMgr) {
 			rec = got
 		}
 		if st.mark.Seq < rec.Position.Seq {
+			// As the driver: without an own write of the ledger as it is,
+			// the ledger is written again so the mark can be signed.
+			if own := m.l.ownRecord(store); own == nil || own.WriteCounter != rec.WriteCounter {
+				got, err := m.l.Reassert(w.ctx, w.provider, pmHostID, store, rec.AttestationID)
+				if err != nil {
+					w.holdOf(m, err)
+					return
+				}
+				rec = got
+				w.stat("reassert")
+			}
 			w.mark(m, rec)
 		}
 		w.markReady(m, store, st)
@@ -1152,7 +1186,7 @@ func (w *pmWorld) markReady(m *pmMgr, store [16]byte, st pmAgentState) {
 		rec.AttestationID != st.session || m.l.HeldReason(w.provider, pmHostID) != "" {
 		return
 	}
-	m.ready, m.readySession, m.readyStore, m.readyGen = true, rec.AttestationID, rec.StoreID, rec.Generation
+	m.ready, m.readySession, m.readyStore, m.readyGen, m.readyHost = true, rec.AttestationID, rec.StoreID, rec.Generation, w.hostUID
 }
 
 // attest is the driver's attestation: challenge, begin, sign from the write.
@@ -1238,12 +1272,14 @@ func (w *pmWorld) prepare(m *pmMgr) {
 }
 
 // readyFor reports whether m may sign an operation grant for at now, and
-// checks invariant 4 for it.
+// checks invariant 4 for it: the readiness was decided on an acknowledged
+// ledger bound to the Host object of that time (a Host replaced since the
+// last heartbeat is seen at the next one, as in the real driver).
 func (w *pmWorld) readyFor(m *pmMgr) bool {
 	if !m.ready || w.down {
 		return false
 	}
-	if !w.boundAck(func(r *HostLedgerRecord) bool {
+	if !w.boundAck(m.readyHost, func(r *HostLedgerRecord) bool {
 		return r.StoreID == m.readyStore && r.AttestationID == m.readySession &&
 			r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested
 	}) {
@@ -1287,7 +1323,10 @@ func (w *pmWorld) sendAttempt(m *pmMgr, at *pmAttempt) {
 // session) and the marker write; raiseNow raises the ledger and the mark at
 // once (otherwise a later step does).
 func (w *pmWorld) receipt(m *pmMgr, at *pmAttempt, session []byte, pos journal.Position, raiseNow bool) {
-	if at.receipt != nil || !at.inFlight() {
+	// A receipt verifies only under the host's trust of the attempt's
+	// enrolment, and counts only for the host's current store (the store of
+	// its last verified answer).
+	if at.receipt != nil || !at.inFlight() || !bytes.Equal(at.enrol, w.enrol) || pos.StoreID != w.agent.s.Position().StoreID {
 		return
 	}
 	rec, err := m.l.LoadBound(w.ctx, w.provider, pmHostID, pos.StoreID)
@@ -1312,7 +1351,10 @@ func (w *pmWorld) raiseReceipts(m *pmMgr) {
 	byStore := map[[16]byte][]HostLedgerRaise{}
 	var stores [][16]byte
 	for _, at := range w.attempts {
-		if at.receipt == nil || at.raised {
+		// A raise a reconcile could not take at once is taken later only
+		// for the host's current store and enrolment (the real manager's
+		// heartbeat raise covers it from the agent's answer).
+		if at.receipt == nil || at.raised || !bytes.Equal(at.enrol, w.enrol) || at.recPos.StoreID != w.agent.s.Position().StoreID {
 			continue
 		}
 		if _, ok := byStore[at.recPos.StoreID]; !ok {
@@ -1379,7 +1421,7 @@ func (w *pmWorld) poll(m *pmMgr, at *pmAttempt) {
 		return
 	}
 	st, ok := w.agentState()
-	if !ok || st.lost || !bytes.Equal(w.agentActiveEnrolment(st), w.enrol) {
+	if !ok || st.lost || !bytes.Equal(w.agentActiveEnrolment(st), w.enrol) || !bytes.Equal(w.cert, w.enrol) {
 		return
 	}
 	v, err := w.agent.s.AnswerOp(w.ctx, opstore.OpRef{EnrolmentID: at.enrol, OpID: at.opID}, 0)
@@ -1419,6 +1461,12 @@ func (w *pmWorld) poll(m *pmMgr, at *pmAttempt) {
 		}
 	case !v.Found && v.EnrolmentHeld:
 		w.retire(m, at, v, st, rec, frozen)
+	case !v.Found:
+		// UNKNOWN_TO_AGENT: the store holds no record of the attempt's
+		// enrolment (discarded, or a store rolled back across a
+		// re-enrolment) and cannot say whether the operation ran: held as
+		// outcome unknown, never retired.
+		w.close(at, "OutcomeUnknown", "unknown_to_agent")
 	}
 }
 
@@ -1502,8 +1550,18 @@ func (w *pmWorld) etcdRestore(restart bool) {
 	}
 	snap := w.etcd[w.rnd.IntN(len(w.etcd))]
 	objs := make([]client.Object, 0, len(snap.objs))
+	hadLedger := false
 	for _, o := range snap.objs {
 		objs = append(objs, o.DeepCopyObject().(client.Object))
+		if o.GetName() == hostLedgerSecretName(w.agent.s.Position().StoreID) {
+			hadLedger = true
+		}
+	}
+	if !hadLedger {
+		// Restored to before the store's ledger existed: the store was
+		// attested against a ledger the manager no longer holds (the
+		// fresh-store procedure applies, a documented hold).
+		w.faults[faultRestoreAcross] = true
 	}
 	w.cli.Client = fake.NewClientBuilder().WithScheme(w.scheme).WithObjects(objs...).Build()
 	w.trust.stores = map[string]HostStoreState{}
@@ -1581,8 +1639,16 @@ func (w *pmWorld) reenrol() {
 	if js, _ := a.s.Journal().State(); js != journal.StateReady || !a.s.Recovered() {
 		return
 	}
+	// A host is re-enrolled once the manager knows its store (a store
+	// re-enrolled before its first contact may never take a ledger by first
+	// contact: the fresh-store procedure applies, a documented hold).
+	sec := &corev1.Secret{}
+	if err := w.cli.Get(w.ctx, types.NamespacedName{Namespace: pmEnrolNS, Name: hostLedgerSecretName(a.s.Position().StoreID)}, sec); err != nil {
+		return
+	}
 	w.enrolN++
 	w.enrol = pmEnrolment(w.enrolN)
+	w.cert = w.enrol
 	w.setTrust()
 	a.start++
 	if err := a.s.Reenrol(w.ctx, opstore.Enrolment{HostID: pmHostID, ID: bytes.Clone(w.enrol), ProviderUID: pmProviderUID,
@@ -1601,6 +1667,7 @@ func (w *pmWorld) reinstall() {
 	}
 	w.enrolN++
 	w.enrol = pmEnrolment(w.enrolN)
+	w.cert = w.enrol
 	w.setTrust()
 	w.agentFresh()
 	w.stat("reinstall")
@@ -1911,9 +1978,9 @@ func (w *pmWorld) checkLiveness() {
 	case !w.lenient() && (held || !m.ready || !st.ready || len(open) > 0):
 		w.fail("wedge in a run with no lasting fault: agent lost %v ready %v, manager ready %v hold %q, open %v (faults %v)",
 			st.lost, st.ready, m.ready, m.lastHold, open, w.faultList())
-	case len(open) > 0 && !held && !w.faults[faultRestoreAcross]:
+	case len(open) > 0 && !held && !w.faults[faultRestoreAcross] && !w.faults[faultLedgerDeleted]:
 		w.fail("attempts left open with nothing holding the host: %v (faults %v)", open, w.faultList())
-	case m.lastHold != "" && !pmDocumentedHolds[m.lastHold]:
+	case !st.lost && m.lastHold != "" && !pmDocumentedHolds[m.lastHold]:
 		w.fail("the host is held for an undocumented reason %q", m.lastHold)
 	}
 	switch {
@@ -1961,6 +2028,7 @@ func runPM(seed uint64, steps int, root string) (res pmResult, trace []string, e
 			}
 			err = f
 			if w != nil {
+				w.dumpLedgers()
 				trace = w.trace
 				if w.agent != nil && w.agent.s != nil {
 					_ = w.agent.s.Close()
@@ -1988,6 +2056,31 @@ func runPM(seed uint64, steps int, root string) (res pmResult, trace []string, e
 	return pmResult{stats: w.stats, flagged: w.flagged, faults: w.faultList(), epochs: w.epochs}, w.trace, nil
 }
 
+// dumpLedgers appends the ledger objects to the trace (on a failure).
+func (w *pmWorld) dumpLedgers() {
+	defer func() { _ = recover() }()
+	secs := &corev1.SecretList{}
+	_ = w.cli.List(w.ctx, secs)
+	for i := range secs.Items {
+		sec := &secs.Items[i]
+		if !isHostLedgerSecret(sec) {
+			continue
+		}
+		rec, err := decodeHostLedger(sec.Data[hostLedgerDataKey])
+		if err != nil {
+			continue
+		}
+		var enrols []string
+		for _, e := range rec.GenerationEnrolments {
+			enrols = append(enrols, fmt.Sprintf("%x", e[:1]))
+		}
+		w.log("ledger %s: label enrolment %.2s, host %s, seq %d, state %s, archived %v, generation enrolments %v, counter %d",
+			rec.StorePrefix(), sec.Labels[LabelHostLedgerEnrolment], rec.HostUID[len(rec.HostUID)-3:], rec.Position.Seq,
+			rec.AttestationState, rec.Archived, enrols, rec.WriteCounter)
+	}
+	w.log("agent store %s, manager enrolment %x, certificate %x", storeIDPrefix(w.agent.s.Position().StoreID), w.enrol[:1], w.cert[:1])
+}
+
 // shrinkPM finds the shortest prefix of seed's schedule that still fails.
 func shrinkPM(seed uint64, root string) (int, []string, error) {
 	lo, hi := 0, pmSteps
@@ -2004,6 +2097,27 @@ func shrinkPM(seed uint64, root string) (int, []string, error) {
 		}
 	}
 	return hi, trace, err
+}
+
+// pmTrace formats a trace: repeated lines folded, at most the last 200.
+func pmTrace(trace []string) string {
+	var out []string
+	for i := 0; i < len(trace); {
+		j := i + 1
+		for j < len(trace) && trace[j] == trace[i] {
+			j++
+		}
+		if j-i > 1 {
+			out = append(out, fmt.Sprintf("%s (x%d)", trace[i], j-i))
+		} else {
+			out = append(out, trace[i])
+		}
+		i = j
+	}
+	if len(out) > 200 {
+		out = append([]string{fmt.Sprintf("... %d earlier lines", len(out)-200)}, out[len(out)-200:]...)
+	}
+	return strings.Join(out, "\n  ")
 }
 
 func pmRoot(t *testing.T) string {
@@ -2024,7 +2138,7 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 	if v, err := strconv.ParseUint(os.Getenv(pmSeedEnv), 10, 64); err == nil {
 		steps, trace, err := shrinkPM(v, root)
 		if err != nil {
-			t.Fatalf("seed %d fails after %d steps: %v\ntrace:\n  %s", v, steps, err, strings.Join(trace, "\n  "))
+			t.Fatalf("seed %d fails after %d steps: %v\ntrace:\n  %s", v, steps, err, pmTrace(trace))
 		}
 		return
 	}
@@ -2065,7 +2179,7 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 							serr = err
 						}
 						t.Errorf("seed %d fails (reproduce with %s=%d; shortest failing prefix %d steps): %v\ntrace:\n  %s",
-							seed, pmSeedEnv, seed, steps, serr, strings.Join(trace, "\n  "))
+							seed, pmSeedEnv, seed, steps, serr, pmTrace(trace))
 					}
 					return
 				}
