@@ -67,26 +67,34 @@ package controller
 // The invariants, checked after every step (effects are counted in the
 // executor, which no rollback undoes):
 //
-//  1. an attempt the manager ever closed Retired never has an effect. The
-//     only runs exempt are those that inject both an etcd restore and a
-//     rollback of the agent's store together with its anchor: they are
-//     counted and reported, never failed;
+//  1. an attempt the manager ever closed Retired never has an effect. A
+//     violation is exempted only when the run's record explains it: the
+//     op was accepted and ran, an agent store+anchor rollback to a snapshot
+//     below its acceptance then dropped its record, and an etcd restore
+//     before the retirement lowered the store's ledger below its
+//     acceptance (counted and reported, never failed); every other
+//     violation fails;
 //  2. no operation starts before the ledger covers it: when a step runs,
 //     the agent is attested, its ledger mark covers the operation's
-//     acceptance, and the mark is a ledger position the API server
-//     acknowledged;
-//  3. at most one effect per op_id, except in runs that roll the agent's
-//     store back together with its anchor (counted and reported);
-//  4. nothing is signed for an unattested or unbound host: every
-//     attestation, ledger mark, retirement and operation grant names a ledger
-//     position and session of an acknowledged ledger object that was bound
-//     to the current Host object, not archived and (except for an
-//     attestation, which names a pending session) Attested in that session;
+//     acceptance, and the mark is a position an attestation or ledger mark
+//     was signed with (each checked under invariant 4 when signed);
+//  3. at most one effect per op_id. A repeated effect is exempted only when
+//     an agent store+anchor rollback to a snapshot taken before the earlier
+//     effect happened between the two (counted and reported);
+//  4. nothing is signed for an unattested or unbound host: at every
+//     attestation, ledger mark, retirement and operation grant, the store's
+//     current ledger object, read from the API server then, exists, is not
+//     archived, is bound to the current Host object and holds the grant's
+//     session (pending for an attestation, Attested and current for the
+//     others); an attestation or mark names a position at or below the
+//     object's position (the same head at the same sequence number), and a
+//     retirement is for the object's store and generation;
 //  5. no permanent wedge: once the adversary stops, every run reaches a
 //     quiescent state in which every attempt is closed or the host is held
-//     for a documented reason; a run that injected none of the faults that
-//     can hold a host for good must end with the ledger Attested in the
-//     agent's session and every attempt closed.
+//     for a documented reason (the agent's store lost, or a documented hold
+//     met by the last drive of the final round); a run that injected none
+//     of the faults that can hold a host for good must end with the ledger
+//     Attested in the agent's session and every attempt closed.
 //
 // Seeds: VIRTRIGAUD_PROTOCOL_MODEL_SEEDS (default 1000, 200 with -short); one
 // seed: VIRTRIGAUD_PROTOCOL_MODEL_SEED. A failure prints the seed, the
@@ -205,6 +213,7 @@ func (e *pmExec) Run(_ context.Context, op executor.Operation, _ executor.Step) 
 	e.w.onStart(op.OpID)
 	k := hex.EncodeToString(op.OpID)
 	e.w.effects[k]++
+	e.w.effectSteps[k] = append(e.w.effectSteps[k], e.w.stepNo)
 	e.w.present[k] = true
 	return nil
 }
@@ -240,9 +249,10 @@ type pmAgent struct {
 }
 
 type pmAgentSnap struct {
-	db  []byte
-	mem map[string][]byte
-	seq uint64
+	db   []byte
+	mem  map[string][]byte
+	seq  uint64
+	step int
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +313,8 @@ type pmMgr struct {
 	// persistent whether it was a persistent one.
 	lastHold   string
 	persistent bool
+	// probeHold is the hold the last drive of a quiescent round met.
+	probeHold string
 }
 
 // pmMsg is a message on the wire, delivered later or lost.
@@ -337,27 +349,9 @@ func (a *pmAuthority) RetireIfUnknown(_ context.Context, o contracts.RetireOrder
 	return contracts.AuthorityRead{}, nil
 }
 
-// pmClient is the API server: the fake client (swapped by a restore), with
-// every acknowledged ledger object recorded.
+// pmClient is the API server: the fake client, swapped by a restore.
 type pmClient struct {
 	client.Client
-	w *pmWorld
-}
-
-func (c *pmClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
-	if err := c.Client.Create(ctx, obj, opts...); err != nil {
-		return err
-	}
-	c.w.acknowledged(obj)
-	return nil
-}
-
-func (c *pmClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	if err := c.Client.Update(ctx, obj, opts...); err != nil {
-		return err
-	}
-	c.w.acknowledged(obj)
-	return nil
 }
 
 // pmEtcd is an etcd snapshot.
@@ -414,8 +408,23 @@ type pmWorld struct {
 	effects map[string]int
 	present map[string]bool
 	accSeq  map[string]uint64
-	acks    []*HostLedgerRecord
-	ackPos  map[string]bool
+	// signedPos are the ledger positions an attestation or ledger mark was
+	// signed with (each checked against the durable ledger object then).
+	signedPos map[string]bool
+	// retireStore and retireGen are the ledger stamp of the attempt a
+	// retirement is being signed for.
+	retireStore [16]byte
+	retireGen   uint64
+
+	// The causal record the safety exemptions are decided on: the step of
+	// every accept (with its position), effect and retirement of each op,
+	// and of every agent store+anchor rollback and etcd restore.
+	stepNo      int
+	acceptEv    map[string][]pmAcceptEv
+	effectSteps map[string][]int
+	retireStep  map[string]int
+	rollbacks   []pmRollbackEv
+	restores    []pmRestoreEv
 
 	// reply is the reply of the last message delivered at once.
 	reply   any
@@ -458,18 +467,71 @@ func pmPosKey(store [16]byte, seq uint64, head [32]byte) string {
 	return fmt.Sprintf("%x/%d/%x", store[:4], seq, head[:6])
 }
 
-// acknowledged records a ledger object the API server acknowledged.
-func (w *pmWorld) acknowledged(obj client.Object) {
-	sec, ok := obj.(*corev1.Secret)
-	if !ok || !isHostLedgerSecret(sec) {
-		return
+// pmAcceptEv is one accept of an op: the step and the accepted position.
+type pmAcceptEv struct {
+	step int
+	seq  uint64
+}
+
+// pmRollbackEv is a rollback of the agent's store with its anchor: its
+// step, and the position and step of the snapshot it restored.
+type pmRollbackEv struct {
+	step, snapStep int
+	snapSeq        uint64
+}
+
+// pmRestoreEv is an etcd restore: its step, and the position of the agent
+// store's ledger object right after it (0: none).
+type pmRestoreEv struct {
+	step      int
+	store     [16]byte
+	ledgerSeq uint64
+}
+
+// durable reads the current ledger object of store from the API server
+// (nil when there is none).
+func (w *pmWorld) durable(store [16]byte) *HostLedgerRecord {
+	sec := &corev1.Secret{}
+	if err := w.cli.Get(w.ctx, types.NamespacedName{Namespace: pmEnrolNS, Name: hostLedgerSecretName(store)}, sec); err != nil {
+		return nil
 	}
 	rec, err := decodeHostLedger(sec.Data[hostLedgerDataKey])
 	if err != nil {
-		w.fail("an acknowledged ledger object does not decode: %v", err)
+		w.fail("a ledger object does not decode: %v", err)
 	}
-	w.acks = append(w.acks, rec)
-	w.ackPos[pmPosKey(rec.StoreID, rec.Position.Seq, rec.Position.Head)] = true
+	return rec
+}
+
+// checkDurable is invariant 4: what is signed agrees with the current
+// durable ledger object of store, which exists, is not archived, is bound
+// to the Host object uid and satisfies ok.
+func (w *pmWorld) checkDurable(what string, store [16]byte, uid types.UID, ok func(r *HostLedgerRecord) string) {
+	r := w.durable(store)
+	switch {
+	case r == nil:
+		w.fail("%s signed with no ledger object of its store", what)
+	case r.Archived:
+		w.fail("%s signed from an archived ledger", what)
+	case r.HostUID != string(uid):
+		w.fail("%s signed for a ledger not bound to the current Host object", what)
+	}
+	if why := ok(r); why != "" {
+		w.fail("%s signed against the durable ledger: %s", what, why)
+	}
+}
+
+// notAbove reports why position pos is not at or below the ledger's
+// position (the same head at the same sequence number), or "".
+func notAbove(r *HostLedgerRecord, pos journal.Position) string {
+	switch {
+	case pos.StoreID != r.StoreID:
+		return "another store"
+	case pos.Seq > r.Position.Seq:
+		return fmt.Sprintf("position %d above the ledger's %d", pos.Seq, r.Position.Seq)
+	case pos.Seq == r.Position.Seq && pos.Head != r.Position.Head:
+		return "another head at the ledger's position"
+	}
+	return ""
 }
 
 // onStart is invariant 2, at every step run.
@@ -486,30 +548,21 @@ func (w *pmWorld) onStart(opID []byte) {
 		w.fail("op %s started while the agent was not attested", k[:8])
 	case acc == 0 || acc > a.Mark.Seq:
 		w.fail("op %s started before the ledger covered it: accepted at %d, mark %d", k[:8], acc, a.Mark.Seq)
-	case !w.ackPos[pmPosKey(a.Mark.StoreID, a.Mark.Seq, a.Mark.Head)]:
-		w.fail("op %s started under a ledger mark (%d) that is no acknowledged ledger position", k[:8], a.Mark.Seq)
+	case !w.signedPos[pmPosKey(a.Mark.StoreID, a.Mark.Seq, a.Mark.Head)]:
+		w.fail("op %s started under a ledger mark (%d) no attestation or ledger mark was signed with", k[:8], a.Mark.Seq)
 	}
-}
-
-// boundAck reports whether an acknowledged ledger object satisfies match
-// and was bound to the Host object uid and not archived.
-func (w *pmWorld) boundAck(uid types.UID, match func(r *HostLedgerRecord) bool) bool {
-	for _, r := range w.acks {
-		if r.HostUID == string(uid) && !r.Archived && match(r) {
-			return true
-		}
-	}
-	return false
 }
 
 func (w *pmWorld) signedAttest(o contracts.AttestOrder) {
 	nonce := [16]byte(o.ChallengeNonce)
 	pos := pmPos(o.Ledger)
-	if !w.boundAck(w.hostUID, func(r *HostLedgerRecord) bool {
-		return r.StoreID == pos.StoreID && r.Position.Seq == pos.Seq && r.Position.Head == pos.Head && r.HasPendingSession(nonce)
-	}) {
-		w.fail("an attestation was signed from no acknowledged, bound ledger holding its session as pending")
-	}
+	w.checkDurable("an attestation", pos.StoreID, w.hostUID, func(r *HostLedgerRecord) string {
+		if !r.HasPendingSession(nonce) {
+			return "its session is not pending"
+		}
+		return notAbove(r, pos)
+	})
+	w.signedPos[pmPosKey(pos.StoreID, pos.Seq, pos.Head)] = true
 	w.stat("signed-attest")
 	w.send(pmMsg{kind: "attest", attest: o})
 }
@@ -517,23 +570,28 @@ func (w *pmWorld) signedAttest(o contracts.AttestOrder) {
 func (w *pmWorld) signedMark(o contracts.LedgerMarkOrder) {
 	session := [16]byte(o.AttestationID)
 	pos := pmPos(o.Ledger)
-	if !w.boundAck(w.hostUID, func(r *HostLedgerRecord) bool {
-		return r.StoreID == pos.StoreID && r.Position.Seq == pos.Seq && r.Position.Head == pos.Head && r.AttestationID == session &&
-			r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested
-	}) {
-		w.fail("a ledger mark was signed from no acknowledged, bound ledger Attested in its session")
-	}
+	w.checkDurable("a ledger mark", pos.StoreID, w.hostUID, func(r *HostLedgerRecord) string {
+		if r.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested || r.AttestationID != session {
+			return "not Attested in its session"
+		}
+		return notAbove(r, pos)
+	})
+	w.signedPos[pmPosKey(pos.StoreID, pos.Seq, pos.Head)] = true
 	w.stat("signed-mark")
 	w.send(pmMsg{kind: "mark", mark: o})
 }
 
 func (w *pmWorld) signedRetire(o contracts.RetireOrder) {
 	session := [16]byte(o.AttestationID)
-	if !w.boundAck(w.hostUID, func(r *HostLedgerRecord) bool {
-		return r.AttestationID == session && r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested
-	}) {
-		w.fail("a retirement was signed for no acknowledged, bound ledger Attested in its session")
-	}
+	w.checkDurable("a retirement", w.retireStore, w.hostUID, func(r *HostLedgerRecord) string {
+		switch {
+		case r.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested || r.AttestationID != session:
+			return "not Attested in its session"
+		case r.StoreID != w.retireStore || r.Generation != w.retireGen:
+			return "not the store and generation the attempt was prepared under"
+		}
+		return ""
+	})
 	w.stat("signed-retire")
 	w.send(pmMsg{kind: "retire", retire: o})
 }
@@ -608,7 +666,8 @@ func newPMWorld(seed uint64, steps int, dir string) *pmWorld {
 	w := &pmWorld{seed: seed, rnd: mrand.New(mrand.NewPCG(seed, 0x9e3779b97f4a7c15)), ctx: context.Background(), steps: steps,
 		now: pmBase, retired: map[string]bool{}, lastAnswer: map[string]time.Time{},
 		faults: map[pmFault]bool{}, enabled: map[pmFault]bool{}, effects: map[string]int{}, present: map[string]bool{},
-		accSeq: map[string]uint64{}, ackPos: map[string]bool{}, stats: map[string]int{}}
+		accSeq: map[string]uint64{}, signedPos: map[string]bool{}, stats: map[string]int{}, acceptEv: map[string][]pmAcceptEv{},
+		effectSteps: map[string][]int{}, retireStep: map[string]int{}}
 	// Each run enables a few faults; about a third enable none, so that
 	// strict liveness is checked on many runs.
 	if !w.chance(3) {
@@ -631,7 +690,7 @@ func newPMWorld(seed uint64, steps int, dir string) *pmWorld {
 	w.hostN = 1
 	w.hostUID = types.UID(fmt.Sprintf("00000000-0000-4000-8000-%012d", w.hostN))
 	host := pmHostObject(w.hostUID)
-	w.cli = &pmClient{Client: fake.NewClientBuilder().WithScheme(w.scheme).WithObjects(host).Build(), w: w}
+	w.cli = &pmClient{Client: fake.NewClientBuilder().WithScheme(w.scheme).WithObjects(host).Build()}
 	w.trust = &staticTrust{trusts: map[string]HostTrust{}, stores: map[string]HostStoreState{}}
 	w.setTrust()
 	keys, err := NewHostLedgerKeys(bytes.Repeat([]byte{0x11}, 32), nil, bytes.Repeat([]byte{0x22}, 32))
@@ -764,7 +823,7 @@ func (w *pmWorld) agentSnapshot() {
 	if err != nil {
 		return
 	}
-	a.snaps = append(a.snaps, pmAgentSnap{db: db, mem: a.mem.Snapshot(), seq: a.s.Position().Seq})
+	a.snaps = append(a.snaps, pmAgentSnap{db: db, mem: a.mem.Snapshot(), seq: a.s.Position().Seq, step: w.stepNo})
 	if len(a.snaps) > 3 {
 		a.snaps = a.snaps[1:]
 	}
@@ -787,6 +846,7 @@ func (w *pmWorld) agentRollback(withAnchor bool) {
 	if withAnchor {
 		a.mem.Restore(snap.mem)
 		w.faults[faultAgentRollback] = true
+		w.rollbacks = append(w.rollbacks, pmRollbackEv{step: w.stepNo, snapStep: snap.step, snapSeq: snap.seq})
 	} else {
 		w.faults[faultStoreOnlyRollback] = true
 	}
@@ -999,6 +1059,10 @@ func (w *pmWorld) deliverOp(r opstore.Request, st pmAgentState) any {
 		if d.Op.AcceptedSeq != 0 {
 			w.accSeq[hex.EncodeToString(r.OpID)] = d.Op.AcceptedSeq
 		}
+	}
+	if d.Outcome == opstore.OutcomeAccepted {
+		k := hex.EncodeToString(r.OpID)
+		w.acceptEv[k] = append(w.acceptEv[k], pmAcceptEv{step: w.stepNo, seq: d.Op.AcceptedSeq})
 	}
 	if d.Outcome == opstore.OutcomeKnown && d.Op.State == opstore.StateAccepted {
 		a.s.DepositRequest(ref, r.RequestBytes)
@@ -1281,20 +1345,28 @@ func (w *pmWorld) prepare(m *pmMgr) {
 	w.log("  m%d prepared attempt %d (op %x)", m.epoch, n, at.opID[:4])
 }
 
-// readyFor reports whether m may sign an operation grant for at now, and
-// checks invariant 4 for it: the readiness was decided on an acknowledged
-// ledger bound to the Host object of that time (a Host replaced since the
-// last heartbeat is seen at the next one, as in the real driver).
+// readyFor reports whether m may sign an operation grant now, and checks
+// invariant 4 for it against the durable ledger object of the store m is
+// ready in: bound to the current Host object, not archived, Attested in
+// the ready session.
 func (w *pmWorld) readyFor(m *pmMgr) bool {
 	if !m.ready || w.down {
 		return false
 	}
-	if !w.boundAck(m.readyHost, func(r *HostLedgerRecord) bool {
-		return r.StoreID == m.readyStore && r.AttestationID == m.readySession &&
-			r.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested
-	}) {
-		w.fail("an operation grant would be signed for no acknowledged, bound ledger Attested in the ready session")
+	// As signedSend: the ledger is read again just before the grant.
+	rec, err := m.l.LoadBound(w.ctx, w.provider, pmHostID, m.readyStore)
+	if err != nil || rec.Archived || rec.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested ||
+		rec.AttestationID != m.readySession || rec.Generation != m.readyGen || m.l.HeldReason(w.provider, pmHostID) != "" {
+		m.ready = false
+		w.stat("send-refused-ledger-changed")
+		return false
 	}
+	w.checkDurable("an operation grant", m.readyStore, w.hostUID, func(r *HostLedgerRecord) string {
+		if r.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested || r.AttestationID != m.readySession {
+			return "not Attested in the ready session"
+		}
+		return ""
+	})
 	return true
 }
 
@@ -1403,6 +1475,9 @@ func (w *pmWorld) close(at *pmAttempt, outcome, reason string) {
 	at.phase = infravirtrigaudiov1beta1.OperationAttemptPhaseTerminal
 	if outcome == "Retired" {
 		w.retired[at.key()] = true
+		if _, ok := w.retireStep[at.key()]; !ok {
+			w.retireStep[at.key()] = w.stepNo
+		}
 	}
 	w.stat("closed-" + outcome + "-" + reason)
 	w.log("  attempt %d closed %s (%s)", at.n, outcome, reason)
@@ -1520,6 +1595,7 @@ func (w *pmWorld) retire(m *pmMgr, at *pmAttempt, v opstore.OpAnswerView, st pmA
 		w.stat("retire-with-unledgered-receipt")
 	}
 	w.reply = nil
+	w.retireStore, w.retireGen = at.store, at.gen
 	if _, err := m.ha.sendRetire(w.ctx, w.auth, rec, w.prepared(at), st.session); err != nil {
 		w.fail("sendRetire refused an attempt decideRetire allowed: %v", err)
 	}
@@ -1621,6 +1697,12 @@ func (w *pmWorld) etcdRestore(restart bool) {
 	for _, at := range snap.attempts {
 		w.attempts = append(w.attempts, at.clone())
 	}
+	store := w.agent.s.Position().StoreID
+	ev := pmRestoreEv{step: w.stepNo, store: store}
+	if r := w.durable(store); r != nil {
+		ev.ledgerSeq = r.Position.Seq
+	}
+	w.restores = append(w.restores, ev)
 	if restart {
 		w.faults[faultEtcdRestore] = true
 		for _, m := range w.alive() {
@@ -1893,31 +1975,88 @@ func (w *pmWorld) step(i, forcedEpoch int) {
 	}
 }
 
-// checkSafety checks invariants 1 and 3 on the ground truth.
+// checkSafety checks invariants 1 and 3 on the ground truth. A violation
+// is exempted only when the record of the run explains it by the faults
+// outside the protocol's claim (explainedRetired, explainedDuplicate);
+// every other one fails the run.
 func (w *pmWorld) checkSafety() {
-	wr2 := w.faults[faultAgentRollback] && (w.faults[faultEtcdRestore] || w.faults[faultEtcdRestoreNoRestart] || w.faults[faultRestoreAcross])
-	for _, at := range w.attempts {
-		k := at.key()
-		if w.retired[k] && w.effects[k] > 0 {
-			if wr2 {
-				w.flag("retired-with-effect (etcd restore and agent store+anchor rollback both injected)")
-				continue
+	keys := make([]string, 0, len(w.effects))
+	for k := range w.effects {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		n := w.effects[k]
+		if w.retired[k] && n > 0 {
+			if w.explainedRetired(k) {
+				w.flag("retired-with-effect (its record dropped by an agent store+anchor rollback, and the ledger lowered below its acceptance by an etcd restore, before the retirement)")
+			} else {
+				w.fail("op %s was closed Retired and had %d effects", k[:8], n)
 			}
-			w.fail("attempt %d (op %s) was closed Retired and had %d effects", at.n, k[:8], w.effects[k])
 		}
-		if w.effects[k] > 1 {
-			if w.faults[faultAgentRollback] {
-				w.flag("duplicate-effect (agent store+anchor rollback injected)")
-				continue
+		if n > 1 {
+			if w.explainedDuplicate(k) {
+				w.flag("duplicate-effect (an agent store+anchor rollback to a snapshot taken before the earlier effect, between the effects)")
+			} else {
+				w.fail("op %s had %d effects", k[:8], n)
 			}
-			w.fail("op %s had %d effects", k[:8], w.effects[k])
 		}
 	}
-	for k := range w.retired {
-		if w.effects[k] > 0 && !wr2 {
-			w.fail("op %s was closed Retired and had %d effects", k[:8], w.effects[k])
+}
+
+// explainedRetired reports whether op k's effect under a retirement is
+// explained: it was accepted, ran, then an agent store+anchor rollback to
+// a snapshot below its acceptance dropped its record, and an etcd restore
+// before the retirement lowered the store's ledger below its acceptance
+// (so the rolled-back store passed its attestation).
+func (w *pmWorld) explainedRetired(k string) bool {
+	rs, ok := w.retireStep[k]
+	if !ok {
+		return false
+	}
+	for _, a := range w.acceptEv[k] {
+		for _, rb := range w.rollbacks {
+			if rb.step <= a.step || rb.snapSeq >= a.seq || rb.step > rs || !w.effectBetween(k, a.step, rb.step) {
+				continue
+			}
+			for _, re := range w.restores {
+				if re.step < rs && re.ledgerSeq < a.seq {
+					return true
+				}
+			}
 		}
 	}
+	return false
+}
+
+// effectBetween reports whether op k had an effect at a step in [from, to).
+func (w *pmWorld) effectBetween(k string, from, to int) bool {
+	for _, e := range w.effectSteps[k] {
+		if e >= from && e < to {
+			return true
+		}
+	}
+	return false
+}
+
+// explainedDuplicate reports whether every repeated effect of op k is
+// explained: between each two consecutive effects an agent store+anchor
+// rollback restored a snapshot taken before the earlier one.
+func (w *pmWorld) explainedDuplicate(k string) bool {
+	es := w.effectSteps[k]
+	for i := 1; i < len(es); i++ {
+		found := false
+		for _, rb := range w.rollbacks {
+			if rb.step > es[i-1] && rb.step <= es[i] && rb.snapStep <= es[i-1] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return len(es) > 1
 }
 
 func (w *pmWorld) flag(what string) {
@@ -1964,6 +2103,7 @@ func (w *pmWorld) quiesce() {
 	}
 	m := w.alive()[0]
 	for round := 0; round < pmQuiesceRounds; round++ {
+		w.stepNo++
 		m.lastHold, m.persistent = "", false
 		w.now = w.now.Add(61 * time.Second)
 		w.agentTick()
@@ -1981,6 +2121,14 @@ func (w *pmWorld) quiesce() {
 			}
 		}
 		w.agentTick()
+		// The probe: one more drive, past every pacing interval, on its
+		// own. A transient hold counts as holding the host only when this
+		// last drive meets it again (a hold met earlier in the round, and
+		// cleared since, hides nothing).
+		w.now = w.now.Add(61 * time.Second)
+		m.lastHold, m.persistent = "", false
+		w.drive(m)
+		m.probeHold = m.lastHold
 		w.checkSafety()
 		if w.settled(m) {
 			w.stats["quiesce-rounds"] += round + 1
@@ -2000,7 +2148,7 @@ func (w *pmWorld) settled(m *pmMgr) bool {
 	if !ok {
 		return false
 	}
-	return st.lost || (m.lastHold != "" && m.persistent) || (m.ready && st.ready)
+	return st.lost || (m.probeHold != "" && m.persistent) || (m.ready && st.ready)
 }
 
 // checkLiveness is invariant 5.
@@ -2013,21 +2161,23 @@ func (w *pmWorld) checkLiveness() {
 			open = append(open, fmt.Sprintf("attempt %d (%s)", at.n, at.phase))
 		}
 	}
-	held := st.lost || m.lastHold != ""
+	// Held: the agent's store is lost, or the last drive of the final
+	// round met a hold (persistent, or transient and met again then).
+	held := st.lost || m.probeHold != ""
 	switch {
 	case !w.lenient() && (held || !m.ready || !st.ready || len(open) > 0):
 		w.fail("wedge in a run with no lasting fault: agent lost %v ready %v, manager ready %v hold %q, open %v (faults %v)",
-			st.lost, st.ready, m.ready, m.lastHold, open, w.faultList())
+			st.lost, st.ready, m.ready, m.probeHold, open, w.faultList())
 	case len(open) > 0 && !held && !w.faults[faultRestoreAcross] && !w.faults[faultLedgerDeleted]:
 		w.fail("attempts left open with nothing holding the host: %v (faults %v)", open, w.faultList())
-	case !st.lost && m.lastHold != "" && !pmDocumentedHolds[m.lastHold]:
-		w.fail("the host is held for an undocumented reason %q", m.lastHold)
+	case !st.lost && m.probeHold != "" && !pmDocumentedHolds[m.probeHold]:
+		w.fail("the host is held for an undocumented reason %q", m.probeHold)
 	}
 	switch {
 	case st.lost:
 		w.stat("end-agent-quarantined")
-	case m.lastHold != "":
-		w.stat("end-held-" + m.lastHold)
+	case m.probeHold != "":
+		w.stat("end-held-" + m.probeHold)
 	case len(open) > 0:
 		w.stat("end-open-after-restore-across-enrolment")
 	default:
@@ -2086,6 +2236,7 @@ func runPM(seed uint64, steps int, root string) (res pmResult, trace []string, e
 	}
 	forced := 1 + w.rnd.IntN(max(steps-1, 1))
 	for i := 0; i < steps; i++ {
+		w.stepNo = i + 1
 		w.step(i, forced)
 		w.checkSafety()
 	}

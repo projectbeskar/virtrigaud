@@ -49,6 +49,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -272,11 +273,38 @@ func (r *VirtualMachineReconciler) signedSend(ctx context.Context, vm *infravirt
 	if !ok {
 		return contracts.OperationAnswer{}, errLedgerNotAttested
 	}
+	if version == grantverify.LedgerGrantVersion {
+		if err := r.HostAnswers.ledgerStillReady(ctx, ia.providerCR, a.HostID); err != nil {
+			return contracts.OperationAnswer{}, err
+		}
+	}
 	p.GrantVersion, p.ExpectKnown = version, false
 	if version == grantverify.LedgerGrantVersion && !first {
 		p.ExpectKnown = r.expectKnown(ctx, vm, ia, a, *p)
 	}
 	return ia.sender.SendOperation(ctx, *p)
+}
+
+// ledgerStillReady re-reads, uncached, the ledger the driver found the host
+// ready in, just before an operation grant is signed at grant version 2:
+// it must still be bound to the Host object the host id names, not
+// archived, Attested in the same session and of the same generation, and
+// nothing may hold the host. The driver's readiness lasts until its next
+// heartbeat; between the two another manager process, a restore or a Host
+// replacement may have changed the ledger (errLedgerNotAttested then, and
+// nothing is sent).
+func (h *HostAnswers) ledgerStillReady(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string) error {
+	st := h.ledgerOf(provider, hostID)
+	rec, err := h.Ledger.LoadBound(ctx, provider, hostID, st.store)
+	if err == nil && !rec.Archived && rec.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested &&
+		rec.AttestationID == st.session && rec.Generation == st.generation && h.Ledger.HeldReason(provider, hostID) == "" {
+		return nil
+	}
+	h.updateLedger(provider, hostID, func(s *hostLedgerState) { s.ready = false })
+	if err != nil {
+		return fmt.Errorf("%w: %w", errLedgerNotAttested, err)
+	}
+	return errLedgerNotAttested
 }
 
 // ledgerReceipt raises the host's ledger to a verified receipt and then the

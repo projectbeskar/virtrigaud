@@ -220,3 +220,25 @@ func sessionIDs(h []HostLedgerFencedSession) [][16]byte {
 	}
 	return out
 }
+
+// An operation grant is signed only while the ledger the driver found the
+// host ready in is still, read again just before, bound, Attested in the
+// same session and of the same generation: another manager process that
+// begins an attestation between two heartbeats (the ledger becomes
+// Pending) stops the send, and nothing reaches the agent.
+func TestAgentIdentity_SendRereadsTheLedger(t *testing.T) {
+	e := newAgentEnv(t)
+	ctx := context.Background()
+	require.NoError(t, e.r.HostAnswers.ledgerStillReady(ctx, e.provider, agentHost))
+	store := e.r.HostAnswers.ledgerOf(e.provider, agentHost).store
+	rec, err := e.ledger.Load(ctx, e.provider, agentHost, store)
+	require.NoError(t, err)
+	other := NewHostLedger(e.ledger.Client, e.ledger.APIReader, e.ledger.Trust, e.ledger.Keys, e.ledger.Config, nil)
+	_, err = other.BeginSession(ctx, e.provider, agentHost, store, [16]byte{0x0c}, LedgerSessionAttest, rec.Position)
+	require.NoError(t, err)
+	require.ErrorIs(t, e.r.HostAnswers.ledgerStillReady(ctx, e.provider, agentHost), errLedgerNotAttested)
+	assert.False(t, e.r.HostAnswers.ledgerOf(e.provider, agentHost).ready, "the readiness is dropped")
+	_, err = e.r.Reconcile(ctx, e.req)
+	require.NoError(t, err)
+	assert.Zero(t, e.createOps(t), "nothing was sent")
+}
