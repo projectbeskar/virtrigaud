@@ -34,6 +34,10 @@ package controller
 //     current session (receipts and answers), in batches.
 //   - Adopt: a pending session is made current once a nonce-bound signed
 //     answer proves the agent holds it.
+//   - Reassert: the ledger, unchanged, is written again by this process, so
+//     a ledger mark can be signed from its own write when the agent's mark
+//     is behind and this process has not written the ledger since it last
+//     changed (a restarted manager or a new leader, a lost mark).
 //
 // Every session-changing write, and every raise from receipts, records the
 // ledger's write counter in the host's tagged ledger index before it
@@ -438,12 +442,12 @@ func (l *HostLedger) relatedLedgers(ctx context.Context, lh *ledgerHost, store [
 			}
 			return err
 		}
-		if reason, detail := l.checkGuard(rec); reason != "" {
-			return l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, nil)
-		}
 		if e, ok := idx.entry(rec.StoreID); ok && rec.WriteCounter < e.Counter {
 			return l.hold(ctx, lh, LedgerReasonRegressed, rec.StorePrefix(), true,
 				"a related ledger's write counter is below the highest the manager recorded", nil)
+		}
+		if err := l.guardHold(ctx, lh, rec); err != nil {
+			return err
 		}
 		out = append(out, relatedLedger{rec: rec, sec: sec, enrolmentLabel: sec.Labels[LabelHostLedgerEnrolment]})
 		return nil
@@ -508,8 +512,8 @@ func (l *HostLedger) archive(ctx context.Context, lh *ledgerHost, store, success
 			}
 			return nil, err
 		}
-		if reason, detail := l.checkGuard(rec); reason != "" {
-			return nil, l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, nil)
+		if err := l.guardHold(ctx, lh, rec); err != nil {
+			return nil, err
 		}
 		if rec.Archived {
 			return rec, nil
@@ -725,9 +729,9 @@ func (l *HostLedger) Raise(ctx context.Context, provider *infravirtrigaudiov1bet
 	}
 	if heartbeatOnly {
 		l.mu.Lock()
-		at := l.heartbeatAt[lh.key]
+		at, interval := l.heartbeatAt[lh.key], l.heartbeatIntervalLocked()
 		l.mu.Unlock()
-		if !at.IsZero() && l.now().Sub(at) < ledgerHeartbeatRaiseInterval {
+		if !at.IsZero() && l.now().Sub(at) < interval {
 			return l.LoadBound(ctx, provider, hostID, store)
 		}
 	}
@@ -827,6 +831,39 @@ func (l *HostLedger) Adopt(ctx context.Context, provider *infravirtrigaudiov1bet
 		r.AttestationID, r.AttestationState, r.PendingSessions = session, infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested, nil
 		return true, nil
 	})
+	if err != nil {
+		return rec, err
+	}
+	l.clearHold(lh)
+	return rec, nil
+}
+
+// Reassert writes the ledger of store again, unchanged but for its write
+// counter, time and tag, so that this process holds the record of its own
+// write of the ledger as it is now: a ledger mark is only ever signed from
+// such a record (sendLedgerMark). The driver calls it when the agent's mark
+// is behind the ledger and this process has no own write of the current
+// ledger, which is the case after a manager restart or a leader change
+// when the ledger does not move (a mark lost in transit is otherwise never
+// sent again). The ledger must be bound to the Host, not archived, and
+// Attested in session; nothing else changes, and the write counter is
+// recorded in the index at most as often as a heartbeat raise's.
+func (l *HostLedger) Reassert(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string, store,
+	session [16]byte) (*HostLedgerRecord, error) {
+	lh, err := l.resolve(ctx, provider, hostID)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := l.update(ctx, lh, store, updateOptions{enrolment: lh.enrolment, lazyIndex: true},
+		func(r *HostLedgerRecord, _ *ledgerObject) (bool, error) {
+			if err := requireBound(lh, r); err != nil {
+				return false, err
+			}
+			if r.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested || r.AttestationID != session {
+				return false, fmt.Errorf("store %s: %w", r.StorePrefix(), ErrHostLedgerNotAttested)
+			}
+			return true, nil
+		})
 	if err != nil {
 		return rec, err
 	}

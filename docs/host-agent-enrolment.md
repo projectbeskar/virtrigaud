@@ -1005,7 +1005,7 @@ it. The reasons:
 
 | Reason | Meaning | Ends |
 |---|---|---|
-| `LedgerTampered` | A ledger object or the index fails its tag or form or names an unknown tag key; the index is missing or does not name a ledger that serves the Host; an indexed store lost its object or its labels; or a ledger's sessions changed in a write this manager did not make while it ran. | The object is fixed; a change seen while running, and an index that disappeared after it was seen, are persistent (below). |
+| `LedgerTampered` | A ledger object or the index fails its tag or form or names an unknown tag key; the index is missing or does not name a ledger that serves the Host; an indexed store lost its object or its labels; a ledger rewritten under the same write counter; or a ledger's sessions changed in a later write this manager did not make while it ran. | The object is fixed. A rewrite under the same counter, and an index that disappeared after it was seen, are persistent (below). A session change in a later write holds the host for that read only: another manager makes exactly such a write during a leader change. The manager goes on from the new ledger and records the write counter it observed in the index at once, so an older copy replayed later is refused even after a restart. Its Warning event is emitted at most once per host every five minutes, and `virtrigaud_manager_host_ledger_foreign_session_changes_total` counts these changes. |
 | `LedgerRegressed` | A ledger went back: a lower position or write counter than this manager wrote, a write counter below the index's (an older copy restored), or the ledger object this manager held is gone. | Persistent. |
 | `ledger_missing` | The store has no ledger object and may not get one: the index names it (its object was lost); the agent signs that the store was attested (persistent); the agent does not report whether it was (re-evaluated on every attempt); or no evidence allows first contact. | The fresh-store procedure: take the VMs off the host, reinstall the agent's state and re-key the Host, which gives a first contact. A lost ledger is never restarted from an operator's word. |
 | `ledger_unconfirmed` | The host has not confirmed the last position the ledger would start from. | A confirming answer. |
@@ -1021,6 +1021,12 @@ Secret (condition `AgentStoreRegressed`), and, for a fork or a store mismatch,
 into the tagged ledger object too, so clearing the pins Secret's hold does not
 lift it. A ledger object found regressed or changed behind the manager's back
 is left untouched, as evidence.
+A read of a host's ledger can write that Host's pins Secret. Every read
+path does this, including the re-read just before an operation is sent.
+It happens when the read finds the sessions changed by another manager:
+the ledger index then records the write counter it observed. The write
+changes only the index. It is skipped when the index already holds that
+counter, and its retries on a write conflict are bounded.
 A persistent hold that cannot be written is returned as an error with the
 hold, and the manager keeps holding the host in memory; it is never lifted by
 a later call. The `AgentLedgerHeld` condition returns to `False`/`NotHeld`

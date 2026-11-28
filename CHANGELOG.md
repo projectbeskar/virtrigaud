@@ -5,6 +5,57 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-11-28 03:00] - Host ledger: whole-protocol evidence and four liveness and safety-margin fixes (development builds only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/host_ledger_model_dev_test.go`: `TestHostLedgerProtocolModel` is a seeded, deterministic model test of the whole protocol. It runs the real agent store and the real manager ledger library over a fake API server, across at least two manager processes per run. The events are: deliveries, attestations and re-attestations, delayed and lost grants, heartbeat raises and ledger marks, agent restarts and store rollbacks, etcd restores, leader changes with two writers, downgrade windows, first contact, archive, rebind, re-enrolment, retire-if-unknown and the frozen-enrolment closure. After every step it checks five invariants. The fifth is no permanent wedge; the other four are:
+  - retired means no effect. A violation is exempted only when the run's record shows the operation's record or tombstone was dropped by a rollback of the agent's store with its anchor, and the ledger was lowered below it by an etcd restore;
+  - nothing starts before the ledger covers it, under a mark that was signed;
+  - at most one effect per operation. A repeat is exempted only when the agent's store was rolled back, with its anchor, between the effects to a snapshot taken before the first one;
+  - nothing is signed for an unattested or unbound host, checked against the store's current ledger object read from the API server at each signing.
+
+  It runs 1000 seeds by default; `VIRTRIGAUD_PROTOCOL_MODEL_SEEDS` sets the count.
+- `internal/controller/host_ledger_restart_agent_test.go`: Agent tests against real agent processes. An etcd restore alone recovers by re-attestation, with no agent restart and exactly one effect. A ledger mark lost across a manager restart is sent again. An operation grant is not sent when another manager changed the ledger since the last heartbeat.
+- `internal/controller/host_ledger_scale_test.go`: A simulation of 10,000 hosts over the real token buckets, including the mark that follows each heartbeat raise. Heartbeat raises and marks never starve receipt raises or attestation. In 15 simulated minutes, the longest any host waited for a heartbeat raise was 5 minutes 1 second, and every mark followed its raise at once.
+- `internal/controller/host_ledger_bench_test.go`: Benchmarks of the API writes and reads per receipt raise, per receipt raise in a batch, per heartbeat raise, per ledger mark and per uncached read. Also tests that the mark token is taken before the ledger is written again, and that the heartbeat throttle forgets quiet hosts.
+- `internal/controller/host_ledger_envtest_test.go`: Envtest specs:
+  - a delayed attestation is adopted;
+  - an unproven re-attestation keeps the working session;
+  - two managers' sessions both stay pending;
+  - a restarted manager writes the ledger again;
+  - a session change with a lower write counter or position stays persistent;
+  - another writer's counter is recorded at once, so a later replay is refused after a restart;
+  - the Warning event for another writer's session change is rate-limited.
+- `internal/obs/metrics/metrics.go`: `virtrigaud_manager_host_ledger_foreign_session_changes_total` counts the reads that found a ledger's sessions changed by another writer.
+- `hack/agent-mutation.sh`: Every mutation round also runs the protocol model. A model failure counts as a kill only when it names a violated safety invariant. Removing the ledger gate fails it at once.
+- `docs/host-ledger-verification.md`: What the model checks, what in it is real and what is modelled, and how to run it with a million seeds.
+
+### Fixed
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger_ops.go`: A session change written by another manager process no longer holds the host persistently. That happens, for example, when a new leader writes while the old one still runs. Before, the change was written into the ledger index and the pins Secret, so every later manager stayed held until the host was re-enrolled. Now:
+  - it holds the host for that read only;
+  - the write counter observed is recorded in the ledger index at once;
+  - its Warning event is emitted at most once per host every five minutes.
+- `internal/controller/host_ledger_ops.go`, `internal/controller/host_ledger_driver.go`: `HostLedger.Reassert` writes the ledger again, unchanged. The driver calls it when the agent's mark is behind and the manager has no write of its own of the ledger as it is now, after taking the mark's token. A restarted manager or a new leader can therefore send a lost ledger mark again. Before, the mark was never re-sent and the accepted operation stayed parked until some other write moved the ledger.
+- `internal/controller/host_ledger_receipts.go`: The ledger is read again just before an operation grant is signed at grant version 2. It must still be bound, Attested in the same session and of the same generation; otherwise nothing is sent. Before, the driver's readiness was used until the next heartbeat, even after another manager process, a restore or a Host replacement had changed the ledger.
+- `internal/controller/host_ledger_writes.go`, `internal/controller/host_ledger_driver.go`: Heartbeat raises no longer leave some hosts behind at scale. Before, a fixed 30-second interval overflowed the heartbeat share, and some hosts got no heartbeat raise at all. Now:
+  - the per-host interval is the longer of 30 seconds and the number of recently raised hosts divided by the heartbeat rate;
+  - hosts not raised for four intervals are forgotten;
+  - the marks of agents whose mark is behind draw from a share of their own (50 a second).
+- `docs/operation-grants-wire-shape.md`, `docs/host-agent-enrolment.md`, `docs/README.md`: Updated for these fixes and the new page.
+
+### Security
+- A manager that finds a ledger's attestation sessions changed by a write it did not make now holds the host for that read only, not persistently. Such a write is validly tagged, so it came from a holder of the ledger tag key, normally another manager process. A lower position or write counter, a rewrite under the same counter, a missing ledger or index, and a tag that fails all still hold the host persistently. Residual: a principal that holds the ledger tag key can change the sessions and cause one transient hold per change. Sessions are still adopted only on the agent's nonce-bound proof, so this costs liveness only, as before.
+
+### Why
+The host ledger needed evidence that its safety and liveness claims hold across manager restarts, leader changes, etcd restores and agent rollbacks together. Building that evidence found the defects fixed here. None of them broke safety.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-11-27 23:30] - Host ledger: retire-if-unknown and the frozen enrolment closure (development builds only)
 **Author:** @wrkode (William Rizzo)
 

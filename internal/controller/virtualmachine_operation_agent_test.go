@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,6 +217,8 @@ type agentEnv struct {
 	enrol    []byte
 	req      ctrl.Request
 	host     *agenttarget.Host
+	// auth is the lying front of the host authority relay.
+	auth *lyingAuthority
 }
 
 // agentTLS is a server and client TLS configuration for 127.0.0.1.
@@ -245,10 +248,14 @@ func agentTLS(t *testing.T) (*tls.Config, *tls.Config) {
 }
 
 // lyingAuthority forwards the host authority service of the Target's
-// Provider unchanged.
+// Provider, unchanged unless dropMarks is set.
 type lyingAuthority struct {
 	providerv1.UnimplementedHostAuthorityServer
 	inner providerv1.HostAuthorityClient
+	// dropMarks loses every ledger mark before it reaches the agent.
+	dropMarks atomic.Bool
+	// marks counts the ledger marks the agent applied.
+	marks atomic.Int32
 }
 
 func (l *lyingAuthority) Challenge(ctx context.Context, req *providerv1.ChallengeRequest) (*providerv1.ChallengeResponse, error) {
@@ -260,7 +267,14 @@ func (l *lyingAuthority) Attest(ctx context.Context, req *providerv1.AttestReque
 }
 
 func (l *lyingAuthority) LedgerMark(ctx context.Context, req *providerv1.LedgerMarkRequest) (*providerv1.AuthorityResponse, error) {
-	return l.inner.LedgerMark(ctx, req)
+	if l.dropMarks.Load() {
+		return nil, status.Error(codes.Unavailable, "the ledger mark was lost")
+	}
+	resp, err := l.inner.LedgerMark(ctx, req)
+	if err == nil {
+		l.marks.Add(1)
+	}
+	return resp, err
 }
 
 func (l *lyingAuthority) RetireIfUnknown(ctx context.Context, req *providerv1.RetireIfUnknownRequest) (*providerv1.AuthorityResponse, error) {
@@ -306,7 +320,8 @@ func newAgentEnvWith(t *testing.T, managerLedger bool) *agentEnv {
 	require.NoError(t, err)
 	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)))
 	providerv1.RegisterProviderServer(srv, lie)
-	providerv1.RegisterHostAuthorityServer(srv, &lyingAuthority{inner: providerv1.NewHostAuthorityClient(providerConn)})
+	auth := &lyingAuthority{inner: providerv1.NewHostAuthorityClient(providerConn)}
+	providerv1.RegisterHostAuthorityServer(srv, auth)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	ctx := context.Background()
@@ -374,7 +389,7 @@ func newAgentEnvWith(t *testing.T, managerLedger bool) *agentEnv {
 		require.Equal(t, infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested, rec.AttestationState)
 	}
 	env := &agentEnv{tg: tg, lie: lie, r: r, req: ctrl.Request{NamespacedName: client.ObjectKeyFromObject(vm)}, host: h,
-		provider: providerCR, cli: cli, trust: trustSrc, enrol: cfg.Enrolments[agentHost]}
+		provider: providerCR, cli: cli, trust: trustSrc, enrol: cfg.Enrolments[agentHost], auth: auth}
 	env.ledger = r.HostAnswers.Ledger
 	return env
 }

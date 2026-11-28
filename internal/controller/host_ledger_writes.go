@@ -63,6 +63,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 )
 
 // Reasons a host ledger holds a host. They are Event messages' and the
@@ -260,6 +261,12 @@ type HostLedger struct {
 	// own is, per store, the record of this process's last successful
 	// write of the store's ledger (what a ledger mark is signed from).
 	own map[[16]byte]*HostLedgerRecord
+	// heartbeatPrunedAt is when the heartbeat throttle last forgot hosts
+	// not raised for a while.
+	heartbeatPrunedAt time.Time
+	// foreignEventAt is, per host, when the last Warning event for a ledger
+	// whose sessions another writer changed was emitted.
+	foreignEventAt map[string]time.Time
 }
 
 // NewHostLedger returns the host ledger library of a manager with host
@@ -604,8 +611,8 @@ func (l *HostLedger) readRecord(ctx context.Context, lh *ledgerHost, store [16]b
 		return nil, l.hold(ctx, lh, LedgerReasonTampered, prefix, false,
 			"the ledger serves this Host but the Host's ledger index does not name it", nil)
 	}
-	if reason, detail := l.checkGuard(rec); reason != "" {
-		return nil, l.hold(ctx, lh, reason, prefix, true, detail, nil)
+	if err := l.guardHold(ctx, lh, rec); err != nil {
+		return nil, err
 	}
 	return obj, nil
 }
@@ -644,30 +651,97 @@ func (l *HostLedger) verifySecret(_ context.Context, sec *corev1.Secret, store [
 }
 
 // checkGuard checks a verified record against what this process last wrote
-// or verified of it: a lower position or write counter is a regression; a
-// change of the sessions this process did not write, or a rewrite under
-// the same write counter, is tampering. It returns the hold reason and
-// detail, or "".
-func (l *HostLedger) checkGuard(rec *HostLedgerRecord) (reason, detail string) {
+// or verified of it: a lower position or write counter is a regression and
+// a rewrite under the same write counter is tampering, both persistent. A
+// change of the sessions in a later write this process did not make is
+// reported as tampering too, but not persistently: another manager process
+// makes exactly such a write during a leader change (its session begun in
+// the ledger beside this process's, or adopted), and the tag shows the
+// writer holds the ledger tag key. It returns the hold reason and detail,
+// or "", and whether the hold is persistent.
+func (l *HostLedger) checkGuard(rec *HostLedgerRecord) (reason, detail string, persistent bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	g := l.guards[rec.StoreID]
 	if g == nil {
-		return "", ""
+		return "", "", false
 	}
 	pending := pendingIDs(rec)
 	sessionsChanged := rec.AttestationID != g.attestation || !slices.Equal(pending, g.pending)
 	switch {
 	case rec.Position.Seq < g.seq:
-		return LedgerReasonRegressed, "the ledger position is below one this manager wrote or verified"
+		return LedgerReasonRegressed, "the ledger position is below one this manager wrote or verified", true
 	case rec.WriteCounter < g.counter:
-		return LedgerReasonRegressed, "the ledger's write counter is below one this manager wrote or verified"
+		return LedgerReasonRegressed, "the ledger's write counter is below one this manager wrote or verified", true
 	case rec.WriteCounter == g.counter && (sessionsChanged || rec.Position.Seq != g.seq):
-		return LedgerReasonTampered, "the ledger changed without its write counter"
+		return LedgerReasonTampered, "the ledger changed without its write counter", true
 	case rec.WriteCounter > g.counter && sessionsChanged:
-		return LedgerReasonTampered, "the ledger's attestation sessions changed in a write this manager did not make"
+		return LedgerReasonTampered, "the ledger's attestation sessions changed in a write this manager did not make " +
+			"(another manager, for example during a leader change); held for this read only", false
 	}
-	return "", ""
+	return "", "", false
+}
+
+// guardHold applies checkGuard to rec, read for the Host lh, and returns the
+// hold error, or nil. A hold that is not persistent (another writer changed
+// the sessions) holds this call only: the record becomes this process's
+// guard, so the next read goes on from it, and the sessions it holds are
+// adopted only on the agent's own nonce-bound proof, as ever. Its write
+// counter, the highest this process observed, is recorded in the Host's
+// ledger index at once (the other writer may have recorded it only lazily),
+// so an older copy replayed later is refused by the index's counter even
+// after this process restarts. Its Warning event is emitted at most once
+// per host every foreignSessionEventInterval.
+func (l *HostLedger) guardHold(ctx context.Context, lh *ledgerHost, rec *HostLedgerRecord) error {
+	reason, detail, persistent := l.checkGuard(rec)
+	if reason == "" {
+		return nil
+	}
+	if persistent {
+		return l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, nil)
+	}
+	l.remember(nil, rec, false)
+	metrics.IncHostLedgerForeignSessionChange()
+	herr := l.transientHold(ctx, lh, reason, rec.StorePrefix(), detail)
+	if rec.HostUID == lh.uid() && !rec.Archived {
+		if err := l.recordCounter(ctx, lh, rec, nil, false); err != nil {
+			return errors.Join(herr, err)
+		}
+	}
+	return herr
+}
+
+// foreignSessionEventInterval is the least time between two Warning events
+// of one host for a ledger whose sessions another writer changed.
+const foreignSessionEventInterval = 5 * time.Minute
+
+// transientHold holds lh for reason in memory, for this call (a later call
+// that succeeds clears it), and emits its Warning event at most once per
+// host every foreignSessionEventInterval.
+func (l *HostLedger) transientHold(ctx context.Context, lh *ledgerHost, reason, storePrefix, detail string) error {
+	now := l.now()
+	l.mu.Lock()
+	if l.holds == nil {
+		l.holds = map[string]hostLedgerHold{}
+	}
+	if prev := l.holds[lh.key]; !prev.persistent {
+		l.holds[lh.key] = hostLedgerHold{reason: reason, enrolment: bytes.Clone(lh.enrolment)}
+	}
+	if l.foreignEventAt == nil {
+		l.foreignEventAt = map[string]time.Time{}
+	}
+	emit := now.Sub(l.foreignEventAt[lh.key]) >= foreignSessionEventInterval
+	if emit {
+		l.foreignEventAt[lh.key] = now
+	}
+	l.mu.Unlock()
+	log.FromContext(ctx).Info("The host's ledger holds the host for this read; nothing is signed from it", "host", lh.hostID,
+		"reason", reason, "store", storePrefix, "detail", detail)
+	if emit && l.Recorder != nil {
+		l.Recorder.Event(lh.host, corev1.EventTypeWarning, eventReasonLedgerHeld,
+			fmt.Sprintf("the host is held by its ledger (%s) for store %s: %s", reason, storePrefix, detail))
+	}
+	return &HostLedgerHoldError{Reason: reason, StorePrefix: storePrefix, Detail: detail}
 }
 
 // pendingIDs returns the ids of a record's pending sessions.
@@ -943,13 +1017,39 @@ func (l *HostLedger) LoadBound(ctx context.Context, provider *infravirtrigaudiov
 }
 
 // heartbeatDue reports whether a heartbeat-only raise of the host would be
-// taken now (the last one is at least ledgerHeartbeatRaiseInterval ago).
+// taken now (the last one is at least heartbeatInterval ago).
 func (l *HostLedger) heartbeatDue(provider *infravirtrigaudiov1beta1.Provider, hostID string) bool {
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	at := l.heartbeatAt[hostAnswerKey(provider, hostID)]
-	l.mu.Unlock()
-	return at.IsZero() || l.now().Sub(at) >= ledgerHeartbeatRaiseInterval
+	return at.IsZero() || l.now().Sub(at) >= l.heartbeatIntervalLocked()
 }
+
+// heartbeatIntervalLocked is the least time between two heartbeat-only
+// raises of one host: ledgerHeartbeatRaiseInterval, or longer once the
+// hosts this process raises would want more than the heartbeat bucket's
+// rate (one raise per host per hosts/rate seconds; the marks that follow
+// have a bucket of their own), so every host gets its turn instead of a random share of an overflowing bucket.
+// Hosts not raised for heartbeatPruneIntervals intervals (deleted, or
+// raised by another manager) are forgotten, at most once an interval, so
+// they neither lengthen the interval nor hold memory. l.mu is held.
+func (l *HostLedger) heartbeatIntervalLocked() time.Duration {
+	interval := max(ledgerHeartbeatRaiseInterval, time.Duration(len(l.heartbeatAt))*time.Second/heartbeatBucketRate)
+	now := l.now()
+	if now.Sub(l.heartbeatPrunedAt) >= interval {
+		l.heartbeatPrunedAt = now
+		for k, at := range l.heartbeatAt {
+			if now.Sub(at) > heartbeatPruneIntervals*interval {
+				delete(l.heartbeatAt, k)
+			}
+		}
+	}
+	return interval
+}
+
+// heartbeatPruneIntervals is after how many heartbeat intervals without a
+// raise a host is forgotten by the heartbeat throttle.
+const heartbeatPruneIntervals = 4
 
 // indexChange is a change of a ledger index: store counters to raise (0
 // reserves a store not yet named), a generation to raise the high-water
