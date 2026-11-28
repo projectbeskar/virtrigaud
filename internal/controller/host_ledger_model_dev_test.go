@@ -1497,6 +1497,11 @@ func (w *pmWorld) retire(m *pmMgr, at *pmAttempt, v opstore.OpAnswerView, st pmA
 		receiptBound: true, prepared: w.prepared(at), answer: va, ledger: rec, frozen: frozen})
 	if verdict != retireAllowed {
 		w.stat("retire-verdict-" + strings.ReplaceAll(why, " ", "_"))
+		if verdict == retireResend && !frozen {
+			// The re-send rules apply (with expect_known when the receipt
+			// counts as ledgered).
+			w.sendAttempt(m, at)
+		}
 		return
 	}
 	if frozen {
