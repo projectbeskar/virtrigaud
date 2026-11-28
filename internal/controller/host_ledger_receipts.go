@@ -287,14 +287,19 @@ func (r *VirtualMachineReconciler) signedSend(ctx context.Context, vm *infravirt
 
 // ledgerStillReady re-reads, uncached, the ledger the driver found the host
 // ready in, just before an operation grant is signed at grant version 2:
-// it must still be bound to the Host object the host id names, not
-// archived, Attested in the same session and of the same generation, and
-// nothing may hold the host. The driver's readiness lasts until its next
+// the driver must still hold the host ready (a driver that has just
+// cleared its readiness is never overridden by a ledger that still reads
+// Attested), and the ledger must still be bound to the Host object the host
+// id names, not archived, Attested in the same session and of the same
+// generation, with nothing holding the host. The driver's readiness lasts until its next
 // heartbeat; between the two another manager process, a restore or a Host
 // replacement may have changed the ledger (errLedgerNotAttested then, and
 // nothing is sent).
 func (h *HostAnswers) ledgerStillReady(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, hostID string) error {
 	st := h.ledgerOf(provider, hostID)
+	if !st.ready {
+		return errLedgerNotAttested
+	}
 	rec, err := h.Ledger.LoadBound(ctx, provider, hostID, st.store)
 	if err == nil && !rec.Archived && rec.AttestationState == infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested &&
 		rec.AttestationID == st.session && rec.Generation == st.generation && h.Ledger.HeldReason(provider, hostID) == "" {

@@ -1165,6 +1165,7 @@ func (w *pmWorld) evidence(v opstore.HostView) hostidentity.LedgerEvidence {
 // drive is one heartbeat of the attestation driver of manager m.
 func (w *pmWorld) drive(m *pmMgr) {
 	m.ready = false
+	m.ha.updateLedger(w.provider, pmHostID, func(s *hostLedgerState) { s.ready = false })
 	st, ok := w.agentState()
 	if !ok {
 		return
@@ -1265,6 +1266,10 @@ func (w *pmWorld) markReady(m *pmMgr, store [16]byte, st pmAgentState) {
 		return
 	}
 	m.ready, m.readySession, m.readyStore, m.readyGen, m.readyHost = true, rec.AttestationID, rec.StoreID, rec.Generation, w.hostUID
+	// The driver's readiness, as the real markReady records it.
+	m.ha.updateLedger(w.provider, pmHostID, func(s *hostLedgerState) {
+		s.ready, s.session, s.store, s.generation = true, rec.AttestationID, rec.StoreID, rec.Generation
+	})
 	m.lastHold, m.persistent = "", false
 }
 
@@ -1358,10 +1363,9 @@ func (w *pmWorld) readyFor(m *pmMgr) bool {
 	if !m.ready || w.down {
 		return false
 	}
-	// As signedSend: the ledger is read again just before the grant.
-	rec, err := m.l.LoadBound(w.ctx, w.provider, pmHostID, m.readyStore)
-	if err != nil || rec.Archived || rec.AttestationState != infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested ||
-		rec.AttestationID != m.readySession || rec.Generation != m.readyGen || m.l.HeldReason(w.provider, pmHostID) != "" {
+	// signedSend's own check: the ledger is read again just before the
+	// grant (the real ledgerStillReady).
+	if err := m.ha.ledgerStillReady(w.ctx, w.provider, pmHostID); err != nil {
 		m.ready = false
 		w.stat("send-refused-ledger-changed")
 		return false
