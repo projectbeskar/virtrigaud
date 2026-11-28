@@ -1733,7 +1733,7 @@ func (w *pmWorld) partialRestore() {
 				return
 			}
 			cur.Data = map[string][]byte{hostLedgerDataKey: bytes.Clone(sec.Data[hostLedgerDataKey])}
-			if err := w.cli.Client.Update(w.ctx, cur); err == nil {
+			if err := w.cli.Update(w.ctx, cur); err == nil {
 				w.faults[faultPartialRestore] = true
 				w.log("partial restore of the ledger object")
 			}
