@@ -81,16 +81,19 @@ const (
 )
 
 // Token bucket rates of the host ledger's API and agent traffic:
-// attestation (challenges and attestation grants), heartbeat raises and
-// their marks, and operation traffic (receipt raises and their marks) have a
-// bucket each, so none can starve another.
+// attestation (challenges and attestation grants), heartbeat raises, the
+// ledger marks of agents whose mark is behind (and the unchanged rewrite of
+// the ledger a mark may need), and operation traffic (receipt raises and
+// their marks) have a bucket each, so none can starve another.
 const (
-	attestBucketRate     = 20
-	attestBucketBurst    = 40
-	heartbeatBucketRate  = 50
-	heartbeatBucketBurst = 100
-	operationBucketRate  = 200
-	operationBucketBurst = 400
+	attestBucketRate        = 20
+	attestBucketBurst       = 40
+	heartbeatBucketRate     = 50
+	heartbeatBucketBurst    = 100
+	heartbeatMarkBucketRate = 50
+	heartbeatMarkBurst      = 100
+	operationBucketRate     = 200
+	operationBucketBurst    = 400
 )
 
 // LedgerReasonAgentQuarantined is the hold reason while the host's agent reports its store
@@ -140,10 +143,13 @@ type ledgerTraffic int
 const (
 	// trafficAttest: attestation challenges and attestation grants.
 	trafficAttest ledgerTraffic = iota
-	// trafficHeartbeat: heartbeat raises and their marks.
+	// trafficHeartbeat: heartbeat raises.
 	trafficHeartbeat
 	// trafficOperation: receipt raises and their marks.
 	trafficOperation
+	// trafficHeartbeatMark: the ledger marks of agents whose mark is behind
+	// the ledger, seen at a heartbeat.
+	trafficHeartbeatMark
 )
 
 // ledgerBuckets are the split token buckets of the host ledger.
@@ -151,6 +157,7 @@ type ledgerBuckets struct {
 	once      sync.Once
 	attest    tokenBucket
 	heartbeat tokenBucket
+	mark      tokenBucket
 	operation tokenBucket
 }
 
@@ -159,6 +166,7 @@ func (b *ledgerBuckets) allow(t ledgerTraffic, now time.Time) bool {
 	b.once.Do(func() {
 		b.attest.rate, b.attest.burst = attestBucketRate, attestBucketBurst
 		b.heartbeat.rate, b.heartbeat.burst = heartbeatBucketRate, heartbeatBucketBurst
+		b.mark.rate, b.mark.burst = heartbeatMarkBucketRate, heartbeatMarkBurst
 		b.operation.rate, b.operation.burst = operationBucketRate, operationBucketBurst
 	})
 	switch t {
@@ -166,6 +174,8 @@ func (b *ledgerBuckets) allow(t ledgerTraffic, now time.Time) bool {
 		return b.operation.allow(now)
 	case trafficHeartbeat:
 		return b.heartbeat.allow(now)
+	case trafficHeartbeatMark:
+		return b.mark.allow(now)
 	}
 	return b.attest.allow(now)
 }
@@ -345,19 +355,7 @@ func (h *HostAnswers) inSession(ctx context.Context, provider *infravirtrigaudio
 		rec = got
 	}
 	if markSeq, _ := ev.Mark(); markSeq < rec.Position.Seq && auth != nil {
-		// A mark is signed only from this process's own write of the ledger
-		// as it is now. A restarted manager or a new leader has none while
-		// the ledger does not move, so a mark lost before it took effect
-		// would never be sent again: the ledger is written again, unchanged.
-		if own := l.ownRecord(rec.StoreID); own == nil || own.WriteCounter != rec.WriteCounter {
-			got, err := l.Reassert(ctx, provider, hostID, rec.StoreID, rec.AttestationID)
-			if err != nil {
-				logger.Info("The host's ledger was not written again for its ledger mark", "error", err.Error())
-				return
-			}
-			rec = got
-		}
-		if err := h.markHost(ctx, provider, auth, hostID, t, rec, trafficHeartbeat); err != nil {
+		if err := h.markBehind(ctx, provider, auth, hostID, t, rec); err != nil {
 			logger.Info("The host's ledger mark was not raised", "error", err.Error())
 		}
 	}
@@ -514,6 +512,30 @@ func (h *HostAnswers) sendAttest(ctx context.Context, provider *infravirtrigaudi
 // ledger mark from.
 var errNotMarkable = errors.New("no ledger record of this manager's own write in an adopted session to mark from")
 
+// markBehind raises the mark of an agent whose mark is behind the ledger
+// rec (heartbeat mark traffic). The token is taken first, so a host the
+// bucket refuses writes nothing. A mark is signed only from this
+// process's own write of the ledger as it is now: a restarted manager or a
+// new leader has none while the ledger does not move (a mark lost before it
+// took effect would never be sent again), so the ledger is first written
+// again, unchanged (Reassert). The token taken covers that write and the
+// mark.
+func (h *HostAnswers) markBehind(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, auth contracts.HostAuthorityCaller,
+	hostID string, t HostTrust, rec *HostLedgerRecord) error {
+	if !h.buckets.allow(trafficHeartbeatMark, h.now()) {
+		return errLedgerBucket
+	}
+	l := h.Ledger
+	if own := l.ownRecord(rec.StoreID); own == nil || own.WriteCounter != rec.WriteCounter {
+		got, err := l.Reassert(ctx, provider, hostID, rec.StoreID, rec.AttestationID)
+		if err != nil {
+			return fmt.Errorf("the host's ledger was not written again for its ledger mark: %w", err)
+		}
+		rec = got
+	}
+	return h.markTaken(ctx, provider, auth, hostID, t, rec)
+}
+
 // markHost raises the host's ledger mark to the ledger rec (traffic t) and
 // verifies the answer.
 func (h *HostAnswers) markHost(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, auth contracts.HostAuthorityCaller,
@@ -521,6 +543,12 @@ func (h *HostAnswers) markHost(ctx context.Context, provider *infravirtrigaudiov
 	if !h.buckets.allow(traffic, h.now()) {
 		return errLedgerBucket
 	}
+	return h.markTaken(ctx, provider, auth, hostID, t, rec)
+}
+
+// markTaken is markHost once the traffic token is taken.
+func (h *HostAnswers) markTaken(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, auth contracts.HostAuthorityCaller,
+	hostID string, t HostTrust, rec *HostLedgerRecord) error {
 	ar, err := h.sendLedgerMark(ctx, provider, auth, hostID, t, rec)
 	if ar.Answer == nil {
 		if err == nil {

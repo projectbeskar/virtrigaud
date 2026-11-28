@@ -261,6 +261,9 @@ type HostLedger struct {
 	// own is, per store, the record of this process's last successful
 	// write of the store's ledger (what a ledger mark is signed from).
 	own map[[16]byte]*HostLedgerRecord
+	// heartbeatPrunedAt is when the heartbeat throttle last forgot hosts
+	// not raised for a while.
+	heartbeatPrunedAt time.Time
 	// foreignEventAt is, per host, when the last Warning event for a ledger
 	// whose sessions another writer changed was emitted.
 	foreignEventAt map[string]time.Time
@@ -1025,11 +1028,28 @@ func (l *HostLedger) heartbeatDue(provider *infravirtrigaudiov1beta1.Provider, h
 // heartbeatIntervalLocked is the least time between two heartbeat-only
 // raises of one host: ledgerHeartbeatRaiseInterval, or longer once the
 // hosts this process raises would want more than the heartbeat bucket's
-// rate (one raise per host per hosts/rate seconds), so every host gets its
-// turn instead of a random share of an overflowing bucket. l.mu is held.
+// rate (one raise per host per hosts/rate seconds; the marks that follow
+// have a bucket of their own), so every host gets its turn instead of a random share of an overflowing bucket.
+// Hosts not raised for heartbeatPruneIntervals intervals (deleted, or
+// raised by another manager) are forgotten, at most once an interval, so
+// they neither lengthen the interval nor hold memory. l.mu is held.
 func (l *HostLedger) heartbeatIntervalLocked() time.Duration {
-	return max(ledgerHeartbeatRaiseInterval, time.Duration(len(l.heartbeatAt))*time.Second/heartbeatBucketRate)
+	interval := max(ledgerHeartbeatRaiseInterval, time.Duration(len(l.heartbeatAt))*time.Second/heartbeatBucketRate)
+	now := l.now()
+	if now.Sub(l.heartbeatPrunedAt) >= interval {
+		l.heartbeatPrunedAt = now
+		for k, at := range l.heartbeatAt {
+			if now.Sub(at) > heartbeatPruneIntervals*interval {
+				delete(l.heartbeatAt, k)
+			}
+		}
+	}
+	return interval
 }
+
+// heartbeatPruneIntervals is after how many heartbeat intervals without a
+// raise a host is forgotten by the heartbeat throttle.
+const heartbeatPruneIntervals = 4
 
 // indexChange is a change of a ledger index: store counters to raise (0
 // reserves a store not yet named), a generation to raise the high-water

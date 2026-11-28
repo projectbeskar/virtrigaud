@@ -19,6 +19,8 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,7 +59,7 @@ type benchLedger struct {
 	updates atomic.Int64
 }
 
-func newBenchLedger(b *testing.B) *benchLedger {
+func newBenchLedger(b testing.TB) *benchLedger {
 	b.Helper()
 	s := k8sruntime.NewScheme()
 	_ = clientgoscheme.AddToScheme(s)
@@ -199,4 +201,69 @@ func BenchmarkHostLedgerLoadBound(b *testing.B) {
 		_, err := bl.l.LoadBound(ctx, provider, "h", bl.store)
 		return err
 	})
+}
+
+// A ledger mark of an agent whose mark is behind takes its token before the
+// ledger is written again: a manager whose mark bucket is empty writes
+// nothing and signs nothing; with a token, the one token covers the
+// rewrite and the mark.
+func TestMarkBehind_TokenBeforeRewrite(t *testing.T) {
+	bl := newBenchLedger(t)
+	provider, ctx := ledgerTestProvider(), context.Background()
+	restarted := &HostLedger{Client: bl.l.Client, APIReader: bl.l.APIReader, Trust: bl.l.Trust, Keys: bl.l.Keys, Config: bl.l.Config,
+		Now: bl.l.Now, ManagerVersion: bl.l.ManagerVersion}
+	h := &HostAnswers{Ledger: restarted, Now: func() time.Time { return bl.now }}
+	auth := &countingAuthority{}
+	rec, err := restarted.Load(ctx, provider, "h", bl.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for h.buckets.allow(trafficHeartbeatMark, bl.now) {
+	}
+	updates := bl.updates.Load()
+	if err := h.markBehind(ctx, provider, auth, "h", HostTrust{}, rec); !errors.Is(err, errLedgerBucket) {
+		t.Fatalf("markBehind with an empty bucket: %v", err)
+	}
+	if bl.updates.Load() != updates || auth.marks != 0 {
+		t.Fatalf("an empty bucket wrote %d times and signed %d marks", bl.updates.Load()-updates, auth.marks)
+	}
+	bl.now = bl.now.Add(time.Second / heartbeatMarkBucketRate) // one token
+	if err := h.markBehind(ctx, provider, auth, "h", HostTrust{}, rec); err != nil {
+		t.Fatalf("markBehind with a token: %v", err)
+	}
+	if bl.updates.Load() != updates+1 || auth.marks != 1 {
+		t.Fatalf("with a token: %d writes, %d marks; want 1 and 1", bl.updates.Load()-updates, auth.marks)
+	}
+	if h.buckets.allow(trafficHeartbeatMark, bl.now) {
+		t.Fatal("the rewrite and the mark took more than one token")
+	}
+}
+
+// The heartbeat throttle forgets hosts not raised for a few intervals, so a
+// deleted host neither lengthens the interval nor stays in memory.
+func TestHeartbeatThrottle_ForgetsQuietHosts(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	l := &HostLedger{Now: func() time.Time { return now }, heartbeatAt: map[string]time.Time{}}
+	for i := range 5000 {
+		l.heartbeatAt[fmt.Sprint("gone-", i)] = now
+	}
+	l.heartbeatAt["live"] = now
+	l.mu.Lock()
+	long := l.heartbeatIntervalLocked()
+	l.mu.Unlock()
+	if long != 5001*time.Second/heartbeatBucketRate {
+		t.Fatalf("interval %v with 5001 hosts", long)
+	}
+	for range 6 {
+		now = now.Add(long)
+		l.heartbeatAt["live"] = now
+		l.mu.Lock()
+		_ = l.heartbeatIntervalLocked()
+		l.mu.Unlock()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.heartbeatAt) != 1 || l.heartbeatIntervalLocked() != ledgerHeartbeatRaiseInterval {
+		t.Fatalf("%d hosts left, interval %v", len(l.heartbeatAt), l.heartbeatIntervalLocked())
+	}
 }

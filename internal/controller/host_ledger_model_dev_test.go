@@ -1229,18 +1229,16 @@ func (w *pmWorld) drive(m *pmMgr) {
 			rec = got
 		}
 		if st.mark.Seq < rec.Position.Seq {
-			// As the driver: without an own write of the ledger as it is,
-			// the ledger is written again so the mark can be signed.
+			// The driver's own step: the heartbeat token, then (without an
+			// own write of the ledger as it is) the ledger written again,
+			// then the mark signed from that write.
 			if own := m.l.ownRecord(store); own == nil || own.WriteCounter != rec.WriteCounter {
-				got, err := m.l.Reassert(w.ctx, w.provider, pmHostID, store, rec.AttestationID)
-				if err != nil {
-					w.holdOf(m, err)
-					return
-				}
-				rec = got
 				w.stat("reassert")
 			}
-			w.mark(m, rec)
+			if err := m.ha.markBehind(w.ctx, w.provider, w.auth, pmHostID, w.hostTrust(), rec); err != nil {
+				w.holdOf(m, err)
+				w.stat("mark-behind-not-sent")
+			}
 		}
 		w.markReady(m, store, st)
 		return

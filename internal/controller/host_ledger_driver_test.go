@@ -200,7 +200,7 @@ func TestLedgerGrantSites(t *testing.T) {
 // one exhausted never refuses another.
 func TestLedgerBuckets_Split(t *testing.T) {
 	now := time.Unix(1000, 0)
-	all := []ledgerTraffic{trafficAttest, trafficHeartbeat, trafficOperation}
+	all := []ledgerTraffic{trafficAttest, trafficHeartbeat, trafficHeartbeatMark, trafficOperation}
 	for _, drained := range all {
 		var b ledgerBuckets
 		for b.allow(drained, now) {

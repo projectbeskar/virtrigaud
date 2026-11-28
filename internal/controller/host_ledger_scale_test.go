@@ -32,9 +32,11 @@ import (
 // throttle, in virtual time, shows that this never takes a token from
 // receipt raises or from attestation: every receipt raise and every
 // attestation within their own rates is allowed, every second, while the
-// heartbeat share is used; and, because the per-host heartbeat interval
-// stretches with the number of hosts, every host gets a heartbeat raise
-// within a bounded time.
+// heartbeat share is used by the raises, and the ledger marks that follow
+// them draw from their own share (tried again at every heartbeat until
+// taken); and, because the per-host heartbeat interval stretches with the
+// number of hosts, every host gets a heartbeat raise, and its mark, within
+// a bounded time.
 func TestLedgerBuckets_TenThousandHosts(t *testing.T) {
 	const (
 		hosts          = 10000
@@ -51,13 +53,14 @@ func TestLedgerBuckets_TenThousandHosts(t *testing.T) {
 	ids := make([]string, hosts)
 	offset := make([]int, hosts)
 	lastRaise := make([]time.Time, hosts)
-	maxGap := time.Duration(0)
+	markPending := make([]bool, hosts)
+	maxGap, maxMarkDelay := time.Duration(0), time.Duration(0)
 	for i := range ids {
 		ids[i] = fmt.Sprintf("host-%05d", i)
 		offset[i] = rnd.IntN(int(hostHeartbeatInterval / time.Second)) // heartbeats are spread over the interval
 		lastRaise[i] = start
 	}
-	var heartbeatAsked, heartbeatTaken, receiptDenied, attestDenied int
+	var heartbeatAsked, heartbeatTaken, marksTaken, marksDeferred, receiptDenied, attestDenied int
 	for sec := 0; sec < int(simulated/time.Second); sec++ {
 		secStart := start.Add(time.Duration(sec) * time.Second)
 		// Receipt raises and attestations arrive spread over the second,
@@ -76,15 +79,29 @@ func TestLedgerBuckets_TenThousandHosts(t *testing.T) {
 			switch {
 			case e < len(hb):
 				i := hb[e]
-				if !l.heartbeatDue(provider, ids[i]) {
-					continue
+				if l.heartbeatDue(provider, ids[i]) {
+					heartbeatAsked++
+					if b.allow(trafficHeartbeat, at) {
+						heartbeatTaken++
+						l.mu.Lock()
+						l.heartbeatAt[hostAnswerKey(provider, ids[i])] = at
+						l.mu.Unlock()
+						maxGap = max(maxGap, at.Sub(lastRaise[i]))
+						lastRaise[i] = at
+						markPending[i] = true
+					}
 				}
-				heartbeatAsked++
-				if b.allow(trafficHeartbeat, at) {
-					heartbeatTaken++
-					l.heartbeatAt[hostAnswerKey(provider, ids[i])] = at
-					maxGap = max(maxGap, at.Sub(lastRaise[i]))
-					lastRaise[i] = at
+				// The agent's mark is behind the raised ledger: the driver's
+				// mark takes a heartbeat token too (markBehind), at this
+				// heartbeat or a later one.
+				if markPending[i] {
+					if b.allow(trafficHeartbeatMark, at) {
+						marksTaken++
+						markPending[i] = false
+						maxMarkDelay = max(maxMarkDelay, at.Sub(lastRaise[i]))
+					} else {
+						marksDeferred++
+					}
 				}
 			case e < len(hb)+receiptsPerSec:
 				if sec > 0 && !b.allow(trafficOperation, at) {
@@ -101,15 +118,20 @@ func TestLedgerBuckets_TenThousandHosts(t *testing.T) {
 	for i := range ids {
 		maxGap = max(maxGap, end.Sub(lastRaise[i]))
 	}
-	t.Logf("%d hosts, %v: heartbeat raises wanted %d, taken %d (%.0f/s); receipt raises denied %d; attestations denied %d; "+
-		"longest time a host waited for a heartbeat raise %v", hosts, simulated, heartbeatAsked, heartbeatTaken,
-		float64(heartbeatTaken)/simulated.Seconds(), receiptDenied, attestDenied, maxGap)
+	tokens := float64(heartbeatTaken) / simulated.Seconds()
+	t.Logf("%d hosts, %v: heartbeat raises wanted %d, taken %d; marks taken %d, deferred %d; heartbeat raises %.1f/s; "+
+		"receipt raises denied %d; attestations denied %d; longest time a host waited for a heartbeat raise %v, "+
+		"for the mark after it %v", hosts, simulated, heartbeatAsked, heartbeatTaken, marksTaken, marksDeferred, tokens,
+		receiptDenied, attestDenied, maxGap, maxMarkDelay)
 	assert.Zero(t, receiptDenied, "heartbeat raises never starve receipt raises")
 	assert.Zero(t, attestDenied, "heartbeat raises never starve attestation")
-	assert.Greater(t, heartbeatAsked, heartbeatTaken, "the heartbeat share is saturated in this simulation")
-	assert.Greater(t, float64(heartbeatTaken)/simulated.Seconds(), 0.8*heartbeatBucketRate, "heartbeat raises use most of their share")
+	assert.LessOrEqual(t, tokens, float64(heartbeatBucketRate)+1, "raises stay within the heartbeat share")
+	assert.Greater(t, tokens, 0.8*heartbeatBucketRate, "raises use most of the heartbeat share")
+	assert.LessOrEqual(t, float64(marksTaken)/simulated.Seconds(), float64(heartbeatMarkBucketRate)+1, "marks stay within their share")
 	// The per-host interval stretches to hosts/rate (200 s here), so a host
-	// waits at most that and a heartbeat or two (it was a random share of
-	// an overflowing bucket before: some hosts waited the whole run).
+	// waits at most that and a heartbeat or two for its raise (with a fixed
+	// interval it was a random share of an overflowing bucket: some hosts
+	// waited the whole run), and its mark follows within a heartbeat or two.
 	assert.Less(t, maxGap, 6*time.Minute, "every host gets a heartbeat raise within six minutes")
+	assert.Less(t, maxMarkDelay, 3*time.Minute, "and the mark after it within three")
 }
