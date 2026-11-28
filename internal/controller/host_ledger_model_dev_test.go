@@ -1496,10 +1496,16 @@ func (w *pmWorld) retire(m *pmMgr, at *pmAttempt, v opstore.OpAnswerView, st pmA
 		receiptBound: true, prepared: w.prepared(at), answer: va, ledger: rec, frozen: frozen})
 	if verdict != retireAllowed {
 		w.stat("retire-verdict-" + strings.ReplaceAll(why, " ", "_"))
-		if verdict == retireResend && !frozen {
+		switch {
+		case verdict == retireResend && !frozen:
 			// The re-send rules apply (with expect_known when the receipt
 			// counts as ledgered).
 			w.sendAttempt(m, at)
+		case verdict == retireResend && frozen:
+			// A predecessor's attempt the closure does not close (its
+			// receipt counts as ledgered, or it is not continuous with
+			// the ledger) is held, as every predecessor attempt is.
+			w.close(at, "OutcomeUnknown", "predecessor_held")
 		}
 		return
 	}
@@ -2199,15 +2205,21 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 		epochs  int
 		done    atomic.Int64
 		failed  atomic.Bool
+		// failures counts the failing seeds; a run goes on past a failure
+		// (the first is shrunk and traced, the next few named) and stops
+		// after pmMaxFailures.
+		failures atomic.Int64
 	)
+	const pmMaxFailures = 20
 	var wg sync.WaitGroup
 	for wk := 0; wk < workers; wk++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for seed := uint64(wk); seed < uint64(seeds) && !failed.Load(); seed += uint64(workers) {
+			for seed := uint64(wk); seed < uint64(seeds) && failures.Load() < pmMaxFailures; seed += uint64(workers) {
 				res, _, err := runPM(seed, pmSteps, root)
 				if err != nil {
+					failures.Add(1)
 					if failed.CompareAndSwap(false, true) {
 						steps, trace, serr := shrinkPM(seed, root)
 						if serr == nil {
@@ -2215,8 +2227,10 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 						}
 						t.Errorf("seed %d fails (reproduce with %s=%d; shortest failing prefix %d steps): %v\ntrace:\n  %s",
 							seed, pmSeedEnv, seed, steps, serr, pmTrace(trace))
+					} else {
+						t.Errorf("seed %d fails too: %v", seed, err)
 					}
-					return
+					continue
 				}
 				mu.Lock()
 				for k, v := range res.stats {
@@ -2237,9 +2251,6 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if failed.Load() {
-		return
-	}
 	keys := make([]string, 0, len(total))
 	for k := range total {
 		keys = append(keys, k)
@@ -2249,12 +2260,13 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 	for _, k := range keys {
 		fmt.Fprintf(&b, "\n  %s: %d", k, total[k])
 	}
+	t.Logf("%d failing seeds", failures.Load())
 	t.Logf("%d seeds in %v (%d workers), %d manager epochs in all; runs per injected fault %v; flagged runs (reported, not failed) %v; exercised:%s",
 		seeds, time.Since(start), workers, epochs, faults, flagged, b.String())
 	for _, must := range []string{"op-started", "attest-applied", "signed-mark", "signed-retire", "closed-Retired-" + retiredNeverReceived,
 		"adopt-host-answer", "two-writers", "downgrade", "rebind", "reenrol", "reinstall", "reattest-applied", "archived-earlier-store",
 		"closed-Retired-" + retiredUnknownToFrozenEnrolment, "end-recovered-after-etcd-restore", "reassert"} {
-		if total[must] == 0 && seeds >= pmDefaultSeeds {
+		if total[must] == 0 && seeds >= pmDefaultSeeds && !failed.Load() {
 			t.Errorf("no run exercised %s", must)
 		}
 	}
