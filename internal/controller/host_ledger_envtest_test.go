@@ -655,6 +655,49 @@ var _ = Describe("Host ledger (envtest)", func() {
 			Expect(err).To(MatchError(ErrHostLedgerNotAttested), "nothing is raised before the new session is adopted")
 		})
 
+		It("adopts a delayed attestation's session, and keeps the working session while a re-attestation is unproven", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store := random16()
+			firstContact(ledger, h, store, e)
+			// Two attestations begun; the first one's grant arrives late and
+			// is the one the agent applied: a host answer naming it adopts it.
+			c1, c2 := random16(), random16()
+			for _, c := range [][16]byte{c1, c2} {
+				_, err := ledger.BeginSession(ctx, provider, h.Name, store, c, LedgerSessionAttest, HostLedgerPosition{Seq: 3, Head: head(1)})
+				Expect(err).NotTo(HaveOccurred())
+			}
+			r, err := ledger.Adopt(ctx, provider, h.Name, store, c1, LedgerEvidenceHostAnswer)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.AttestationID).To(Equal(c1))
+			Expect(r.AttestationState).To(Equal(infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested))
+			Expect(r.PendingSessions).To(BeEmpty())
+			_, err = ledger.Adopt(ctx, provider, h.Name, store, c2, LedgerEvidenceHostAnswer)
+			Expect(err).To(MatchError(ErrHostLedgerSessionNotPending), "the other session is gone")
+
+			// A re-attestation whose grant is lost: the working session
+			// stays current and Attested, and its positions still raise.
+			c3 := random16()
+			r, err = ledger.BeginSession(ctx, provider, h.Name, store, c3, LedgerSessionReattest, HostLedgerPosition{Seq: 3, Head: head(1)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.AttestationID).To(Equal(c1))
+			Expect(r.AttestationState).To(Equal(infravirtrigaudiov1beta1.HostAgentLedgerAttestationAttested))
+			r, err = ledger.Raise(ctx, provider, h.Name, store, []HostLedgerRaise{{Session: c1, Position: HostLedgerPosition{Seq: 40, Head: head(4)}}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.Position.Seq).To(Equal(uint64(40)), "the old session keeps working until the new one is proven")
+			r, err = ledger.Raise(ctx, provider, h.Name, store, []HostLedgerRaise{{Session: c3, Position: HostLedgerPosition{Seq: 50, Head: head(5)}}})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.Position.Seq).To(Equal(uint64(40)), "a pending session's positions raise nothing")
+			// Nothing but nonce-bound answer evidence adopts (there is no
+			// evidence kind for an operation receipt).
+			_, err = ledger.Adopt(ctx, provider, h.Name, store, c3, HostLedgerAdoptEvidence(0))
+			Expect(err).To(MatchError(errHostLedgerInput))
+			r, err = ledger.Adopt(ctx, provider, h.Name, store, c3, LedgerEvidenceAuthorityAnswer)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r.AttestationID).To(Equal(c3))
+			Expect(r.SessionHistory).To(ContainElement(HostLedgerFencedSession{ID: c1, FencedAt: 40}), "fenced where it was replaced")
+		})
+
 		It("raises from heartbeat positions at most every 30 seconds and records the enrolment", func() {
 			h := newHost("h", "serial")
 			e := enrol(h)
