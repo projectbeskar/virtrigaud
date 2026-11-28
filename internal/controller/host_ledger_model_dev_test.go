@@ -1093,7 +1093,7 @@ func (w *pmWorld) evidence(v opstore.HostView) hostidentity.LedgerEvidence {
 
 // drive is one heartbeat of the attestation driver of manager m.
 func (w *pmWorld) drive(m *pmMgr) {
-	m.ready, m.lastHold, m.persistent = false, "", false
+	m.ready = false
 	st, ok := w.agentState()
 	if !ok {
 		return
@@ -1196,6 +1196,7 @@ func (w *pmWorld) markReady(m *pmMgr, store [16]byte, st pmAgentState) {
 		return
 	}
 	m.ready, m.readySession, m.readyStore, m.readyGen, m.readyHost = true, rec.AttestationID, rec.StoreID, rec.Generation, w.hostUID
+	m.lastHold, m.persistent = "", false
 }
 
 // attest is the driver's attestation: challenge, begin, sign from the write.
@@ -1963,6 +1964,7 @@ func (w *pmWorld) quiesce() {
 	}
 	m := w.alive()[0]
 	for round := 0; round < pmQuiesceRounds; round++ {
+		m.lastHold, m.persistent = "", false
 		w.now = w.now.Add(61 * time.Second)
 		w.agentTick()
 		w.drive(m)
