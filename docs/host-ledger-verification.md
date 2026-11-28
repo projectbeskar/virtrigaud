@@ -83,7 +83,7 @@ none.
    two ways:
    - the record was lost: the operation was accepted and ran, then a rollback of the
      agent's store with its anchor, to a snapshot below the acceptance, dropped its
-     record, and an etcd restore before the retirement lowered the store's ledger
+     record, and an etcd restore after it ran and before the retirement lowered the ledger
      below the acceptance;
    - the tombstone was lost: after the retirement, a rollback of the agent's store
      with its anchor, to a snapshot below the position the ledger was raised to over

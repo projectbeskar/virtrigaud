@@ -71,7 +71,7 @@ package controller
 //     violation is exempted only when the run's record explains it: the
 //     op was accepted and ran, an agent store+anchor rollback to a snapshot
 //     below its acceptance then dropped its record, and an etcd restore
-//     before the retirement lowered the store's ledger below its
+//     after it ran and before the retirement lowered the store's ledger below its
 //     acceptance (counted and reported, never failed); every other
 //     violation fails;
 //  2. no operation starts before the ledger covers it: when a step runs,
@@ -2017,7 +2017,7 @@ func (w *pmWorld) checkSafety() {
 //
 //   - the record was lost: the op was accepted and ran, an agent
 //     store+anchor rollback to a snapshot below its acceptance then dropped
-//     its record, and an etcd restore before the retirement lowered the
+//     its record, and an etcd restore after it ran and before the retirement lowered the
 //     store's ledger below its acceptance (so the rolled-back store passed
 //     its attestation);
 //   - the tombstone was lost: after the retirement, an agent store+anchor
@@ -2047,14 +2047,30 @@ func (w *pmWorld) explainedRetired(k string) bool {
 			if rb.step <= a.step || rb.snapSeq >= a.seq || rb.step > rs || !w.effectBetween(k, a.step, rb.step) {
 				continue
 			}
+			// The restore must come after the op's first effect of this
+			// accept (an earlier one, before the op existed, explains
+			// nothing) and before the retirement.
+			first := w.firstEffectFrom(k, a.step)
 			for _, re := range w.restores {
-				if re.step < rs && re.ledgerSeq < a.seq {
+				if re.step > first && re.step < rs && re.ledgerSeq < a.seq {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// firstEffectFrom returns the step of op k's first effect at or after step
+// from (effectBetween said there is one).
+func (w *pmWorld) firstEffectFrom(k string, from int) int {
+	first := -1
+	for _, e := range w.effectSteps[k] {
+		if e >= from && (first < 0 || e < first) {
+			first = e
+		}
+	}
+	return first
 }
 
 // effectBetween reports whether op k had an effect at a step in [from, to).
