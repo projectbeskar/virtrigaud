@@ -1021,6 +1021,12 @@ Secret (condition `AgentStoreRegressed`), and, for a fork or a store mismatch,
 into the tagged ledger object too, so clearing the pins Secret's hold does not
 lift it. A ledger object found regressed or changed behind the manager's back
 is left untouched, as evidence.
+A read of a host's ledger can write that Host's pins Secret. Every read
+path does this, including the re-read just before an operation is sent.
+It happens when the read finds the sessions changed by another manager:
+the ledger index then records the write counter it observed. The write
+changes only the index. It is skipped when the index already holds that
+counter, and its retries on a write conflict are bounded.
 A persistent hold that cannot be written is returned as an error with the
 hold, and the manager keeps holding the host in memory; it is never lifted by
 a later call. The `AgentLedgerHeld` condition returns to `False`/`NotHeld`

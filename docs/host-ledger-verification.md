@@ -189,7 +189,8 @@ tests.
 - **Write cost.** Run `go test -run '^$' -bench BenchmarkHostLedger ./internal/controller`.
   It reports the time and the API calls (ledger writes and reads, pins writes) per
   receipt raise, per receipt raise in a batch of 64, per heartbeat raise, per ledger
-  mark through a re-asserted ledger, and per uncached bound read.
+  mark through a re-asserted ledger, per version 2 send (the in-memory gate and the
+  ledger re-read before the grant), and per uncached bound read.
 
 ## Not covered here
 
