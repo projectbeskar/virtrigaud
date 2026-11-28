@@ -17,6 +17,11 @@
 # build (virtrigaud_dev), whose operation path (runners, the fake executor)
 # only a development build serves. A guard is killed when either fails.
 #
+# Each round also runs the whole-protocol model of the host ledger
+# (TestHostLedgerProtocolModel in internal/controller, a development build
+# that drives the real agent store): removing the ledger gate, for one,
+# fails it at once.
+#
 # The reference-model test runs with VIRTRIGAUD_MODEL_RUNS (default here 3000)
 # so that one round stays short.
 #
@@ -48,9 +53,17 @@ KNOWN_TEST='^TestMutationGuardIsKnown$'
 # when either fails.
 run_tests() {
 	go test -count=1 -tags "${TAGS}" -skip "${KNOWN_TEST}" ${PKGS} &&
-		go test -count=1 -tags "${DEV_TAGS}" -skip "${KNOWN_TEST}" ${PKGS}
+		go test -count=1 -tags "${DEV_TAGS}" -skip "${KNOWN_TEST}" ${PKGS} &&
+		go test -count=1 -tags "${DEV_TAGS}" -run "${PROTOCOL_MODEL_TEST}" ./internal/controller
 }
 export VIRTRIGAUD_MODEL_RUNS="${VIRTRIGAUD_MODEL_RUNS:-3000}"
+
+# The whole-protocol model of the host ledger (the real agent store and the
+# real manager ledger library, internal/controller) runs in every agent
+# round too, as a development build with VIRTRIGAUD_PROTOCOL_MODEL_SEEDS
+# (default here 300) seeds.
+PROTOCOL_MODEL_TEST='^TestHostLedgerProtocolModel$'
+export VIRTRIGAUD_PROTOCOL_MODEL_SEEDS="${VIRTRIGAUD_PROTOCOL_MODEL_SEEDS:-300}"
 
 # The manager's guards and the tests that cover them.
 MANAGER_PKG="./internal/controller"

@@ -88,7 +88,7 @@ package controller
 //     can hold a host for good must end with the ledger Attested in the
 //     agent's session and every attempt closed.
 //
-// Seeds: VIRTRIGAUD_PROTOCOL_MODEL_SEEDS (default 300, 60 with -short); one
+// Seeds: VIRTRIGAUD_PROTOCOL_MODEL_SEEDS (default 1000, 200 with -short); one
 // seed: VIRTRIGAUD_PROTOCOL_MODEL_SEED. A failure prints the seed, the
 // shortest failing prefix of its schedule and that prefix's trace.
 
@@ -137,8 +137,8 @@ const (
 	pmSeedsEnv     = "VIRTRIGAUD_PROTOCOL_MODEL_SEEDS"
 	pmSeedEnv      = "VIRTRIGAUD_PROTOCOL_MODEL_SEED"
 	pmWorkersEnv   = "VIRTRIGAUD_PROTOCOL_MODEL_WORKERS"
-	pmDefaultSeeds = 300
-	pmShortSeeds   = 60
+	pmDefaultSeeds = 1000
+	pmShortSeeds   = 200
 	// pmSteps is the number of random steps of a run before the adversary
 	// stops.
 	pmSteps = 90
@@ -935,6 +935,9 @@ func (w *pmWorld) deliver(m pmMsg) any {
 		}
 		w.log("  attest applied at %d (re-attest %v)", r.Ledger.Seq, r.Reattest)
 		w.stat("attest-applied")
+		if r.Reattest {
+			w.stat("reattest-applied")
+		}
 		return pmAttestReply{applied: true, session: [16]byte(o.ChallengeNonce)}
 	case "mark":
 		o := m.mark
@@ -1018,7 +1021,11 @@ func (w *pmWorld) execute(ref opstore.OpRef, payload []byte) {
 	case errors.Is(err, opstore.ErrAwaitingRequest):
 		w.stat("execute-awaiting-request")
 	default:
-		w.stat("execute-other")
+		msg := err.Error()
+		if i := strings.IndexAny(msg, ":0123456789"); i > 0 {
+			msg = msg[:i]
+		}
+		w.stat("execute-other-" + strings.ReplaceAll(strings.TrimSpace(msg), " ", "_"))
 	}
 }
 
@@ -1111,6 +1118,9 @@ func (w *pmWorld) drive(m *pmMgr) {
 		if err == nil {
 			w.log("  m%d initialised the ledger (%s), archived %d", m.epoch, res.Source, len(res.Archived))
 			w.stat("init-" + string(res.Source))
+			if len(res.Archived) > 0 {
+				w.stat("archived-earlier-store")
+			}
 		}
 	case errors.Is(err, ErrHostLedgerNotBound):
 		rec, err = m.l.Rebind(w.ctx, w.provider, pmHostID, store)
@@ -1311,6 +1321,9 @@ func (w *pmWorld) sendAttempt(m *pmMgr, at *pmAttempt) {
 	if r.refused {
 		return
 	}
+	if r.d.Refusal == opstore.RefusalExpectKnownUnknown {
+		w.stat("expect-known-refused")
+	}
 	switch {
 	case r.d.Outcome == opstore.OutcomeRefused && r.d.Refusal.DefiniteNotPerformed():
 		w.close(at, "NotPerformed", r.d.Refusal.String())
@@ -1483,6 +1496,11 @@ func (w *pmWorld) retire(m *pmMgr, at *pmAttempt, v opstore.OpAnswerView, st pmA
 	if frozen {
 		w.close(at, "Retired", retiredUnknownToFrozenEnrolment)
 		return
+	}
+	if at.receipt != nil {
+		// A receipt that does not count as ledgered (a fenced session's
+		// receipt above where its session was replaced).
+		w.stat("retire-with-unledgered-receipt")
 	}
 	w.reply = nil
 	if _, err := m.ha.sendRetire(w.ctx, w.auth, rec, w.prepared(at), st.session); err != nil {
@@ -1992,6 +2010,9 @@ func (w *pmWorld) checkLiveness() {
 		w.stat("end-open-after-restore-across-enrolment")
 	default:
 		w.stat("end-attested-all-closed")
+		if w.faults[faultEtcdRestore] && !w.lenient() {
+			w.stat("end-recovered-after-etcd-restore")
+		}
 	}
 }
 
@@ -2217,7 +2238,8 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 	t.Logf("%d seeds in %v (%d workers), %d manager epochs in all; runs per injected fault %v; flagged runs (reported, not failed) %v; exercised:%s",
 		seeds, time.Since(start), workers, epochs, faults, flagged, b.String())
 	for _, must := range []string{"op-started", "attest-applied", "signed-mark", "signed-retire", "closed-Retired-" + retiredNeverReceived,
-		"adopt-host-answer", "two-writers", "downgrade", "rebind", "reenrol", "reinstall"} {
+		"adopt-host-answer", "two-writers", "downgrade", "rebind", "reenrol", "reinstall", "reattest-applied", "archived-earlier-store",
+		"closed-Retired-" + retiredUnknownToFrozenEnrolment, "end-recovered-after-etcd-restore", "reassert"} {
 		if total[must] == 0 && seeds >= pmDefaultSeeds {
 			t.Errorf("no run exercised %s", must)
 		}
