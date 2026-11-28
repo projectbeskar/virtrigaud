@@ -106,8 +106,8 @@ and that prefix's trace.
 # Default: 1000 seeds (200 with -short), a few seconds on a workstation.
 go test -tags virtrigaud_dev -run '^TestHostLedgerProtocolModel$' ./internal/controller
 
-# The full run: one million seeds (about 40 minutes on 14 cores).
-VIRTRIGAUD_PROTOCOL_MODEL_SEEDS=1000000 VIRTRIGAUD_PROTOCOL_MODEL_WORKERS=14 \
+# The full run: one million seeds (about 30 minutes with 16 workers).
+VIRTRIGAUD_PROTOCOL_MODEL_SEEDS=1000000 VIRTRIGAUD_PROTOCOL_MODEL_WORKERS=16 \
   go test -tags virtrigaud_dev -timeout 0 -run '^TestHostLedgerProtocolModel$' ./internal/controller
 
 # One seed, with its trace on failure.
