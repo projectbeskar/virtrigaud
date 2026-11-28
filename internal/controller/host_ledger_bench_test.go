@@ -90,7 +90,7 @@ func newBenchLedger(b *testing.B) *benchLedger {
 	}
 	bl.l = &HostLedger{Client: cli, APIReader: cli, Trust: bl.trust, Keys: keys,
 		Config: &HostEnrolmentConfig{Namespace: "virtrigaud-enrolment", InstallID: bytes.Repeat([]byte{0x42}, 16)},
-		Now: func() time.Time { return bl.now }, ManagerVersion: func() string { return "v0.5.0" }}
+		Now:    func() time.Time { return bl.now }, ManagerVersion: func() string { return "v0.5.0" }}
 	ctx := context.Background()
 	ev := signedLedgerEvidence(b, provider, "h", enrol, nil, bl.now, testLedgerInit{StoreID: bl.store,
 		Position: HostLedgerPosition{Seq: 3, Head: [32]byte{3}}, Attestation: hostidentity.StoreAttestation{Reported: true},
