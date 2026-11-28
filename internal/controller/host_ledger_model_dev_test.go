@@ -307,12 +307,11 @@ type pmMgr struct {
 
 // pmMsg is a message on the wire, delivered later or lost.
 type pmMsg struct {
-	kind    string // attest, mark, retire, op
-	attest  contracts.AttestOrder
-	mark    contracts.LedgerMarkOrder
-	retire  contracts.RetireOrder
-	op      opstore.Request
-	purpose providerv1.ChallengePurpose
+	kind   string // attest, mark, retire, op
+	attest contracts.AttestOrder
+	mark   contracts.LedgerMarkOrder
+	retire contracts.RetireOrder
+	op     opstore.Request
 }
 
 // pmAuthority is the HostAuthorityCaller the real signing points deliver
@@ -1581,7 +1580,11 @@ func (w *pmWorld) etcdRestore(restart bool) {
 	objs := make([]client.Object, 0, len(snap.objs))
 	hadLedger := false
 	for _, o := range snap.objs {
-		objs = append(objs, o.DeepCopyObject().(client.Object))
+		c, ok := o.DeepCopyObject().(client.Object)
+		if !ok {
+			w.fail("a snapshot object is not a client object")
+		}
+		objs = append(objs, c)
 		if o.GetName() == hostLedgerSecretName(w.agent.s.Position().StoreID) {
 			hadLedger = true
 		}
