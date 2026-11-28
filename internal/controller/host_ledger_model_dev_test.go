@@ -167,6 +167,10 @@ const (
 // other invariants alone notice a missing ledger gate too.
 var pmNoStartCheck = os.Getenv("VIRTRIGAUD_PROTOCOL_MODEL_NO_START_CHECK") == "1"
 
+// pmListFlagged logs the first seeds of each flagged class
+// (VIRTRIGAUD_PROTOCOL_MODEL_LIST_FLAGGED=1), for triage.
+var pmListFlagged = os.Getenv("VIRTRIGAUD_PROTOCOL_MODEL_LIST_FLAGGED") == "1"
+
 // pmInstall is the installation id of the model's manager.
 var pmInstall = bytes.Repeat([]byte{0x42}, 16)
 
@@ -2358,6 +2362,10 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed %d fails after %d steps: %v\ntrace:\n  %s", v, steps, err, pmTrace(trace))
 		}
+		if pmListFlagged {
+			res, trace, _ := runPM(v, pmSteps, root)
+			t.Logf("seed %d passes; flagged %v; faults %v\ntrace:\n  %s", v, res.flagged, res.faults, pmTrace(trace))
+		}
 		return
 	}
 	seeds := pmDefaultSeeds
@@ -2415,6 +2423,9 @@ func TestHostLedgerProtocolModel(t *testing.T) {
 				}
 				for _, f := range res.flagged {
 					flagged[f]++
+					if pmListFlagged && flagged[f] <= 10 {
+						t.Logf("flagged seed %d: %s", seed, f)
+					}
 				}
 				for _, f := range res.faults {
 					faults[f]++
