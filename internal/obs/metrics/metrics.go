@@ -178,11 +178,28 @@ var (
 			Help: "Host ledger objects and indexes the last re-tag sweep left under a tag key other than the current one (development builds only); 0 means the previous host ledger key may be removed.",
 		},
 	)
+
+	// hostLedgerForeignSessions counts the reads at which the manager found
+	// a host ledger's attestation sessions changed in a later write it did
+	// not make (another manager process, for example during a leader
+	// change), held the host for that read and went on from the new ledger
+	// (development builds only).
+	hostLedgerForeignSessions = registerer.NewCounter(
+		prometheus.CounterOpts{
+			Name: "virtrigaud_manager_host_ledger_foreign_session_changes_total",
+			Help: "Reads at which the manager found a host ledger's attestation sessions changed in a later write it did not make, held the host for that read and went on from the new ledger (development builds only). Expected around a leader change; otherwise investigate.",
+		},
+	)
 )
 
 // SetHostLedgerRetagRemaining publishes the outcome of a host ledger re-tag
 // sweep on virtrigaud_manager_host_ledger_retag_remaining.
 func SetHostLedgerRetagRemaining(n int) { hostLedgerRetagRemaining.Set(float64(n)) }
+
+// IncHostLedgerForeignSessionChange counts one read that found a host
+// ledger's sessions changed by another writer, on
+// virtrigaud_manager_host_ledger_foreign_session_changes_total.
+func IncHostLedgerForeignSessionChange() { hostLedgerForeignSessions.Inc() }
 
 // CRD security-feature states (the "state" label of
 // virtrigaud_manager_vm_crd_security_features).

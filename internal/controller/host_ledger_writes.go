@@ -63,6 +63,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/hostidentity/certrequest"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 )
 
 // Reasons a host ledger holds a host. They are Event messages' and the
@@ -260,6 +261,9 @@ type HostLedger struct {
 	// own is, per store, the record of this process's last successful
 	// write of the store's ledger (what a ledger mark is signed from).
 	own map[[16]byte]*HostLedgerRecord
+	// foreignEventAt is, per host, when the last Warning event for a ledger
+	// whose sessions another writer changed was emitted.
+	foreignEventAt map[string]time.Time
 }
 
 // NewHostLedger returns the host ledger library of a manager with host
@@ -679,16 +683,62 @@ func (l *HostLedger) checkGuard(rec *HostLedgerRecord) (reason, detail string, p
 // hold error, or nil. A hold that is not persistent (another writer changed
 // the sessions) holds this call only: the record becomes this process's
 // guard, so the next read goes on from it, and the sessions it holds are
-// adopted only on the agent's own nonce-bound proof, as ever.
+// adopted only on the agent's own nonce-bound proof, as ever. Its write
+// counter, the highest this process observed, is recorded in the Host's
+// ledger index at once (the other writer may have recorded it only lazily),
+// so an older copy replayed later is refused by the index's counter even
+// after this process restarts. Its Warning event is emitted at most once
+// per host every foreignSessionEventInterval.
 func (l *HostLedger) guardHold(ctx context.Context, lh *ledgerHost, rec *HostLedgerRecord) error {
 	reason, detail, persistent := l.checkGuard(rec)
 	if reason == "" {
 		return nil
 	}
-	if !persistent {
-		l.remember(nil, rec, false)
+	if persistent {
+		return l.hold(ctx, lh, reason, rec.StorePrefix(), true, detail, nil)
 	}
-	return l.hold(ctx, lh, reason, rec.StorePrefix(), persistent, detail, nil)
+	l.remember(nil, rec, false)
+	metrics.IncHostLedgerForeignSessionChange()
+	herr := l.transientHold(ctx, lh, reason, rec.StorePrefix(), detail)
+	if rec.HostUID == lh.uid() && !rec.Archived {
+		if err := l.recordCounter(ctx, lh, rec, nil, false); err != nil {
+			return errors.Join(herr, err)
+		}
+	}
+	return herr
+}
+
+// foreignSessionEventInterval is the least time between two Warning events
+// of one host for a ledger whose sessions another writer changed.
+const foreignSessionEventInterval = 5 * time.Minute
+
+// transientHold holds lh for reason in memory, for this call (a later call
+// that succeeds clears it), and emits its Warning event at most once per
+// host every foreignSessionEventInterval.
+func (l *HostLedger) transientHold(ctx context.Context, lh *ledgerHost, reason, storePrefix, detail string) error {
+	now := l.now()
+	l.mu.Lock()
+	if l.holds == nil {
+		l.holds = map[string]hostLedgerHold{}
+	}
+	if prev := l.holds[lh.key]; !prev.persistent {
+		l.holds[lh.key] = hostLedgerHold{reason: reason, enrolment: bytes.Clone(lh.enrolment)}
+	}
+	if l.foreignEventAt == nil {
+		l.foreignEventAt = map[string]time.Time{}
+	}
+	emit := now.Sub(l.foreignEventAt[lh.key]) >= foreignSessionEventInterval
+	if emit {
+		l.foreignEventAt[lh.key] = now
+	}
+	l.mu.Unlock()
+	log.FromContext(ctx).Info("The host's ledger holds the host for this read; nothing is signed from it", "host", lh.hostID,
+		"reason", reason, "store", storePrefix, "detail", detail)
+	if emit && l.Recorder != nil {
+		l.Recorder.Event(lh.host, corev1.EventTypeWarning, eventReasonLedgerHeld,
+			fmt.Sprintf("the host is held by its ledger (%s) for store %s: %s", reason, storePrefix, detail))
+	}
+	return &HostLedgerHoldError{Reason: reason, StorePrefix: storePrefix, Detail: detail}
 }
 
 // pendingIDs returns the ids of a record's pending sessions.

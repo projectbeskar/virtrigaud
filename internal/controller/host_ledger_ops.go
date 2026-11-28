@@ -442,12 +442,12 @@ func (l *HostLedger) relatedLedgers(ctx context.Context, lh *ledgerHost, store [
 			}
 			return err
 		}
-		if err := l.guardHold(ctx, lh, rec); err != nil {
-			return err
-		}
 		if e, ok := idx.entry(rec.StoreID); ok && rec.WriteCounter < e.Counter {
 			return l.hold(ctx, lh, LedgerReasonRegressed, rec.StorePrefix(), true,
 				"a related ledger's write counter is below the highest the manager recorded", nil)
+		}
+		if err := l.guardHold(ctx, lh, rec); err != nil {
+			return err
 		}
 		out = append(out, relatedLedger{rec: rec, sec: sec, enrolmentLabel: sec.Labels[LabelHostLedgerEnrolment]})
 		return nil

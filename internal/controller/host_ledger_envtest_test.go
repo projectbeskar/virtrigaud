@@ -1003,6 +1003,92 @@ var _ = Describe("Host ledger (envtest)", func() {
 			Expect(r.PendingSessions).To(HaveLen(2), "both writers' sessions are pending; the agent's proof adopts one")
 		})
 
+		It("keeps a session change together with a lower write counter or position persistent", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			old := ledgerSecret(store).Data[hostLedgerDataKey]
+			other := newLedger(keys)
+			s2 := random16()
+			_, err := other.BeginSession(ctx, provider, h.Name, store, s2, LedgerSessionReattest, HostLedgerPosition{Seq: 2050, Head: head(1)})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = other.Adopt(ctx, provider, h.Name, store, s2, LedgerEvidenceHostAnswer)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = other.Raise(ctx, provider, h.Name, store, []HostLedgerRaise{{Session: s2, Position: HostLedgerPosition{Seq: 2100, Head: head(2)}}})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = ledger.Load(ctx, provider, h.Name, store)
+			expectHold(err, LedgerReasonTampered, false) // another writer: this read only
+			// The older object comes back: other sessions, a lower write
+			// counter and a lower position.
+			sec := ledgerSecret(store)
+			sec.Data[hostLedgerDataKey] = old
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+			_, err = ledger.Load(ctx, provider, h.Name, store)
+			expectHold(err, LedgerReasonRegressed, true)
+			Expect(storeState(h).RegressedReason).To(Equal(LedgerReasonRegressed))
+		})
+
+		It("emits the Warning event for another writer's session change at most once per host and interval", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			other := newLedger(keys)
+			change := func() {
+				GinkgoHelper()
+				_, err := other.BeginSession(ctx, provider, h.Name, store, random16(), LedgerSessionReattest, HostLedgerPosition{Seq: 2050, Head: head(1)})
+				Expect(err).NotTo(HaveOccurred())
+				_, err = ledger.Load(ctx, provider, h.Name, store)
+				expectHold(err, LedgerReasonTampered, false)
+			}
+			for sawEvent("") {
+			}
+			change()
+			Expect(sawEvent(LedgerReasonTampered)).To(BeTrue(), "the first one is reported")
+			change()
+			Expect(sawEvent(LedgerReasonTampered)).To(BeFalse(), "a repeat within the interval is not")
+			now = now.Add(foreignSessionEventInterval)
+			change()
+			Expect(sawEvent(LedgerReasonTampered)).To(BeTrue(), "reported again after the interval")
+		})
+
+		It("records the write counter it observed from another writer, so a replay is refused after a restart", func() {
+			h := newHost("h", "serial")
+			e := enrol(h)
+			store, s := random16(), random16()
+			attested(ledger, h, store, s, e)
+			other := newLedger(keys)
+			s2 := random16()
+			_, err := other.BeginSession(ctx, provider, h.Name, store, s2, LedgerSessionReattest, HostLedgerPosition{Seq: 2050, Head: head(1)})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = other.Adopt(ctx, provider, h.Name, store, s2, LedgerEvidenceHostAnswer)
+			Expect(err).NotTo(HaveOccurred())
+			replay := ledgerSecret(store).Data[hostLedgerDataKey]
+			// A heartbeat raise records its counter in the index only
+			// lazily: the index still names the adoption's counter.
+			r, err := other.Raise(ctx, provider, h.Name, store, []HostLedgerRaise{{Session: s2, Heartbeat: true,
+				Position: HostLedgerPosition{Seq: 2100, Head: head(2)}}})
+			Expect(err).NotTo(HaveOccurred())
+			x, _ := storeState(h).LedgerIndex.entry(store)
+			Expect(x.Counter).To(BeNumerically("<", r.WriteCounter), "the heartbeat raise's counter is not in the index yet")
+			// This process sees the other writer's sessions: held for that
+			// read, the guard goes on from the new ledger, and the counter
+			// it observed is recorded in the index at once.
+			_, err = ledger.Load(ctx, provider, h.Name, store)
+			expectHold(err, LedgerReasonTampered, false)
+			x, _ = storeState(h).LedgerIndex.entry(store)
+			Expect(x.Counter).To(Equal(r.WriteCounter))
+			// The other writer dies and the object of its adoption is
+			// replayed (the same sessions, a reused lower counter); after a
+			// restart of this manager the index refuses it.
+			sec := ledgerSecret(store)
+			sec.Data[hostLedgerDataKey] = replay
+			Expect(k8sClient.Update(ctx, sec)).To(Succeed())
+			_, err = newLedger(keys).Load(ctx, provider, h.Name, store)
+			expectHold(err, LedgerReasonRegressed, true)
+		})
+
 		It("lets a restarted manager write the ledger again, unchanged, to sign a ledger mark from its own write", func() {
 			h := newHost("h", "serial")
 			e := enrol(h)
