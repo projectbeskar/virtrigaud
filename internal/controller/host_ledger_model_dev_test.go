@@ -512,14 +512,14 @@ func (w *pmWorld) checkDurable(what string, store [16]byte, uid types.UID, ok fu
 	r := w.durable(store)
 	switch {
 	case r == nil:
-		w.fail("%s signed with no ledger object of its store", what)
+		w.fail("invariant 4 violated: %s signed with no ledger object of its store", what)
 	case r.Archived:
-		w.fail("%s signed from an archived ledger", what)
+		w.fail("invariant 4 violated: %s signed from an archived ledger", what)
 	case r.HostUID != string(uid):
-		w.fail("%s signed for a ledger not bound to the current Host object", what)
+		w.fail("invariant 4 violated: %s signed for a ledger not bound to the current Host object", what)
 	}
 	if why := ok(r); why != "" {
-		w.fail("%s signed against the durable ledger: %s", what, why)
+		w.fail("invariant 4 violated: %s signed against the durable ledger: %s", what, why)
 	}
 }
 
@@ -548,11 +548,11 @@ func (w *pmWorld) onStart(opID []byte) {
 	a, ok := w.agent.s.Attestation()
 	switch {
 	case !ok:
-		w.fail("op %s started while the agent was not attested", k[:8])
+		w.fail("invariant 2 violated: op %s started while the agent was not attested", k[:8])
 	case acc == 0 || acc > a.Mark.Seq:
-		w.fail("op %s started before the ledger covered it: accepted at %d, mark %d", k[:8], acc, a.Mark.Seq)
+		w.fail("invariant 2 violated: op %s started before the ledger covered it: accepted at %d, mark %d", k[:8], acc, a.Mark.Seq)
 	case !w.signedPos[pmPosKey(a.Mark.StoreID, a.Mark.Seq, a.Mark.Head)]:
-		w.fail("op %s started under a ledger mark (%d) no attestation or ledger mark was signed with", k[:8], a.Mark.Seq)
+		w.fail("invariant 2 violated: op %s started under a ledger mark (%d) no attestation or ledger mark was signed with", k[:8], a.Mark.Seq)
 	}
 }
 
@@ -1994,14 +1994,14 @@ func (w *pmWorld) checkSafety() {
 			if w.explainedRetired(k) {
 				w.flag("retired-with-effect (its record or its tombstone dropped by an agent store+anchor rollback, and the ledger lowered below it by an etcd restore)")
 			} else {
-				w.fail("op %s was closed Retired and had %d effects", k[:8], n)
+				w.fail("invariant 1 violated: op %s was closed Retired and had %d effects", k[:8], n)
 			}
 		}
 		if n > 1 {
 			if w.explainedDuplicate(k) {
 				w.flag("duplicate-effect (an agent store+anchor rollback to a snapshot taken before the earlier effect, between the effects)")
 			} else {
-				w.fail("op %s had %d effects", k[:8], n)
+				w.fail("invariant 3 violated: op %s had %d effects", k[:8], n)
 			}
 		}
 	}
@@ -2190,12 +2190,12 @@ func (w *pmWorld) checkLiveness() {
 	held := st.lost || m.probeHold != ""
 	switch {
 	case !w.lenient() && (held || !m.ready || !st.ready || len(open) > 0):
-		w.fail("wedge in a run with no lasting fault: agent lost %v ready %v, manager ready %v hold %q, open %v (faults %v)",
+		w.fail("invariant 5 violated: wedge in a run with no lasting fault: agent lost %v ready %v, manager ready %v hold %q, open %v (faults %v)",
 			st.lost, st.ready, m.ready, m.probeHold, open, w.faultList())
 	case len(open) > 0 && !held && !w.faults[faultRestoreAcross] && !w.faults[faultLedgerDeleted]:
-		w.fail("attempts left open with nothing holding the host: %v (faults %v)", open, w.faultList())
+		w.fail("invariant 5 violated: attempts left open with nothing holding the host: %v (faults %v)", open, w.faultList())
 	case !st.lost && m.probeHold != "" && !pmDocumentedHolds[m.probeHold]:
-		w.fail("the host is held for an undocumented reason %q", m.probeHold)
+		w.fail("invariant 5 violated: the host is held for an undocumented reason %q", m.probeHold)
 	}
 	switch {
 	case st.lost:

@@ -49,12 +49,13 @@ DEV_TAGS="virtrigaud_mutation,virtrigaud_dev"
 # missing from All() is an error rather than a mutant counted as killed.
 KNOWN_TEST='^TestMutationGuardIsKnown$'
 
-# run_tests runs the agent tests in both builds, without KNOWN_TEST; it fails
-# when either fails.
+# run_tests runs the agent tests in both builds, without KNOWN_TEST, and the
+# protocol model; it fails when either agent test run fails or the model
+# reports a safety invariant violated (run_model).
 run_tests() {
 	go test -count=1 -tags "${TAGS}" -skip "${KNOWN_TEST}" ${PKGS} &&
 		go test -count=1 -tags "${DEV_TAGS}" -skip "${KNOWN_TEST}" ${PKGS} &&
-		go test -count=1 -tags "${DEV_TAGS}" -run "${PROTOCOL_MODEL_TEST}" ./internal/controller
+		run_model
 }
 export VIRTRIGAUD_MODEL_RUNS="${VIRTRIGAUD_MODEL_RUNS:-3000}"
 
@@ -64,6 +65,27 @@ export VIRTRIGAUD_MODEL_RUNS="${VIRTRIGAUD_MODEL_RUNS:-3000}"
 # (default here 300) seeds.
 PROTOCOL_MODEL_TEST='^TestHostLedgerProtocolModel$'
 export VIRTRIGAUD_PROTOCOL_MODEL_SEEDS="${VIRTRIGAUD_PROTOCOL_MODEL_SEEDS:-300}"
+
+# run_model runs the protocol model. It fails only when the model reports
+# one of its safety invariants (1 to 4) violated: any other failure (a
+# harness error, a build failure, or the liveness invariant) is reported and
+# does not count as noticing the guard's removal.
+run_model() {
+	local out
+	out="$(mktemp)"
+	if go test -count=1 -tags "${DEV_TAGS}" -run "${PROTOCOL_MODEL_TEST}" ./internal/controller >"${out}" 2>&1; then
+		rm -f "${out}"
+		return 0
+	fi
+	if grep -q 'invariant [1-4] violated' "${out}"; then
+		rm -f "${out}"
+		return 1
+	fi
+	echo "agent-mutation: the protocol model failed without a safety invariant violated (not counted as a kill):" >&2
+	grep -m 3 -E 'fails|FAIL|panic' "${out}" >&2 || true
+	rm -f "${out}"
+	return 0
+}
 
 # The manager's guards and the tests that cover them.
 MANAGER_PKG="./internal/controller"
@@ -104,6 +126,10 @@ done
 echo "agent-mutation: baseline (no guard off)"
 if ! VIRTRIGAUD_MUTATION="" run_tests >/dev/null; then
 	echo "agent-mutation: the tests fail with no guard off" >&2
+	exit 1
+fi
+if ! VIRTRIGAUD_MUTATION="" go test -count=1 -tags "${DEV_TAGS}" -run "${PROTOCOL_MODEL_TEST}" ./internal/controller >/dev/null; then
+	echo "agent-mutation: the protocol model fails with no guard off" >&2
 	exit 1
 fi
 if ! VIRTRIGAUD_MUTATION="" run_manager_tests >/dev/null; then
